@@ -1,0 +1,86 @@
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.5; color: #202124; border-left: 4px solid #1a73e8; padding: 12px 16px; background-color: #f8f9fa; border-radius: 4px;">
+  <h1 style="color: #1a73e8; font-size: 18px; margin: 0 0 8px 0; font-weight: 600;">Gemini Cloud Assist investigation</h1>
+  <h2 style="color: #202124; font-size: 15px; margin: 0 0 6px 0; font-weight: 600;">Investigation findings</h2>
+  <p style="margin: 0 0 12px 0; font-style: italic; color: #5f6368;"><em>Automated analysis complete.</em></p>
+
+  <p style="margin: 4px 0;"><strong>Summary:</strong> {{ report.summary }}</p>
+  <p style="margin: 4px 0;"><strong>Impact:</strong> {{ report.impact }}</p>
+
+  {%- if report.probable_root_cause %}
+  <div style="background: #fef7e0; border-left: 4px solid #f9ab00; padding: 6px 10px; margin: 8px 0; border-radius: 3px;">
+    <div style="font-weight: 600; color: #b06000; font-size: 12px;">Probable Root Cause (Confidence: {{ (report.probable_root_cause.confidence * 100)|round|int }}%)</div>
+    <div style="color: #3c4043;">{{ report.probable_root_cause.text }}</div>
+  </div>
+  {%- endif %}
+
+  {%- if report.caveats %}
+  <div style="background: #fce8e6; border-left: 4px solid #d93025; padding: 6px 10px; margin: 8px 0; border-radius: 3px;">
+    <div style="font-weight: 600; color: #c5221f; font-size: 12px;">Investigation Caveats &amp; Telemetry Limitations</div>
+    <ul style="margin: 4px 0 0 0; padding-left: 18px; color: #3c4043;">
+      {%- for caveat in report.caveats %}
+      <li>{{ caveat }}</li>
+      {%- endfor %}
+    </ul>
+  </div>
+  {%- endif %}
+
+  {%- if report.recent_changes %}
+  <div style="margin: 8px 0;">
+    <h3 style="color: #202124; font-size: 13px; margin: 0 0 4px 0; font-weight: 600;">Recent Changes</h3>
+    <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+      <thead>
+        <tr style="background: #f1f3f4; text-align: left;">
+          <th style="padding: 3px 6px; border: 1px solid #dadce0; width: 30%;">Timestamp (UTC)</th>
+          <th style="padding: 3px 6px; border: 1px solid #dadce0;">Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        {%- for item in report.recent_changes %}
+        <tr>
+          <td style="padding: 3px 6px; border: 1px solid #dadce0; font-family: monospace;">{{ item.timestamp.isoformat() }}</td>
+          <td style="padding: 3px 6px; border: 1px solid #dadce0;">{{ item.description }}</td>
+        </tr>
+        {%- endfor %}
+      </tbody>
+    </table>
+  </div>
+  {%- endif %}
+
+  {%- if report.recommended_actions %}
+  <div style="margin: 8px 0;">
+    <h3 style="color: #202124; font-size: 13px; margin: 0 0 4px 0; font-weight: 600;">Recommended Actions</h3>
+    <ol style="margin: 0; padding-left: 18px; color: #3c4043;">
+      {%- for action in report.recommended_actions %}
+      <li>{{ action }}</li>
+      {%- endfor %}
+    </ol>
+  </div>
+  {%- endif %}
+
+  {%- if report.timeline %}
+  <div style="margin: 8px 0;">
+    <h3 style="color: #202124; font-size: 13px; margin: 0 0 4px 0; font-weight: 600;">Incident Timeline Highlights</h3>
+    <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+      <thead>
+        <tr style="background: #f1f3f4; text-align: left;">
+          <th style="padding: 3px 6px; border: 1px solid #dadce0; width: 30%;">Timestamp (UTC)</th>
+          <th style="padding: 3px 6px; border: 1px solid #dadce0;">Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        {%- for item in report.timeline %}
+        <tr>
+          <td style="padding: 3px 6px; border: 1px solid #dadce0; font-family: monospace;">{{ item.timestamp.isoformat() }}</td>
+          <td style="padding: 3px 6px; border: 1px solid #dadce0;">{{ item.description }}</td>
+        </tr>
+        {%- endfor %}
+      </tbody>
+    </table>
+  </div>
+  {%- endif %}
+
+  <div style="background: #e8f0fe; border-left: 4px solid #1a73e8; padding: 6px 10px; margin: 8px 0; border-radius: 3px;">
+    <div style="font-weight: 600; color: #1a73e8; font-size: 12px;">Full Investigation Report Attached</div>
+    <div style="color: #3c4043; font-size: 12px;">For complete telemetry traces, metric graphs, logs, and raw evidence, refer to the attached standalone HTML report.</div>
+  </div>
+</div>

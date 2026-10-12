@@ -1,0 +1,22 @@
+# Example Terraform variables for agent infrastructure
+# Prefix applied to all created resource names and labels (e.g. isa, acme)
+name_prefix                      = "isa"
+project_id                       = "your-project-id"
+region                           = "us-central1"
+environment                      = "production"
+image_tag                        = "latest"
+vertex_location                  = "global"
+repository_id                    = "sre-agent"
+queue_name                       = "investigations"
+service_name                     = "sre-agent"
+agent_service_account_id         = "agent-sa"
+tasks_invoker_service_account_id = "tasks-invoker-sa"
+cloud_run_timeout_seconds        = 900
+cloud_run_cpu                    = "2"
+cloud_run_memory                 = "2Gi"
+queue_max_attempts               = 2
+model_dispatcher                 = "gemini-3.8-flash"
+model_synthesizer                = "gemini-3.8-flash"
+model_specialist                 = "gemini-3.8-flash"
+allowed_callback_hosts           = "*.run.app"
+

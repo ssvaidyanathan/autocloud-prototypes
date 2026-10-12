@@ -1,0 +1,134 @@
+name: Incident SRE Agent CI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'incident-sre-agent/**'
+      - '.github/workflows/incident-sre-agent-ci.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'incident-sre-agent/**'
+      - '.github/workflows/incident-sre-agent-ci.yml'
+
+defaults:
+  run:
+    working-directory: incident-sre-agent
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  contracts-check:
+    name: Contracts Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify contract byte-level equality
+        run: bash scripts/check-contracts.sh
+
+  no-literals-check:
+    name: No Forbidden Literals Check
+    runs-on: ubuntu-latest
+    env:
+      FORBIDDEN_LITERALS: ${{ secrets.FORBIDDEN_LITERALS || vars.FORBIDDEN_LITERALS || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify zero forbidden literals and models (reads FORBIDDEN_LITERALS env var)
+        run: bash scripts/check-no-literal-projects.sh
+
+  de-overfit-check:
+    name: De-overfit & Anti-tamper Guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Verify zero demo overfit and AST guards
+        run: |
+          bash scripts/check-no-demo-overfit.sh
+          python3 scripts/check-no-rootcause-overrides.py
+          python3 scripts/check-no-demo-log-hints.py
+
+  lint-and-typecheck:
+    name: Lint & Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: |
+          uv venv .venv --python 3.12
+          source .venv/bin/activate
+          uv pip install -e "./bridge[dev]" -e "./agent[dev]" -e "./demo[dev]"
+      - name: Ruff check and format (bridge, agent, demo)
+        run: |
+          source .venv/bin/activate
+          ruff check bridge agent demo
+          ruff format --check bridge agent demo
+      - name: Mypy check (bridge, agent, demo)
+        run: |
+          source .venv/bin/activate
+          mypy bridge agent demo
+
+  test:
+    name: Unit & Component Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: |
+          uv venv .venv --python 3.12
+          source .venv/bin/activate
+          uv pip install -e "./bridge[dev]" -e "./agent[dev]" -e "./demo[dev]"
+      - name: Run Pytest (bridge, agent, demo)
+        run: |
+          source .venv/bin/activate
+          pytest bridge/tests agent/tests demo/tests
+
+  terraform-validate:
+    name: Terraform Format & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - name: Validate Terraform stacks (agent, bridge, demo)
+        run: |
+          for stack in agent/infra/terraform bridge/infra/terraform demo/infra/terraform; do
+            echo "Checking ${stack}..."
+            terraform -chdir="${stack}" fmt -check
+            terraform -chdir="${stack}" init -backend=false
+            terraform -chdir="${stack}" validate
+          done
+
+  gitleaks:
+    name: Secrets Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
