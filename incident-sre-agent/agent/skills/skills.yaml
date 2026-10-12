@@ -1,0 +1,26 @@
+# Mapping of agents/specialists to their assigned skills
+dispatcher:
+  - triage-playbook
+  - cloud-run-troubleshooting
+  - gke-troubleshooting
+  - cloud-sql-troubleshooting
+
+logs:
+  - cloud-logging-queries
+
+metrics:
+  - cloud-monitoring-metrics
+
+changes:
+  - change-correlation
+
+resources:
+  - cloud-run-troubleshooting
+  - gke-troubleshooting
+  - cloud-sql-troubleshooting
+
+synthesizer:
+  - report-style
+
+all:
+  - service-shop-api

@@ -1,0 +1,28 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG_NAME}'
+      - '-f'
+      - 'agent/Dockerfile'
+      - 'agent'
+    id: 'build-agent-image'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG_NAME}'
+    id: 'push-agent-image'
+
+substitutions:
+  _REGION: 'us-central1'
+  _REPOSITORY: 'sre-agent'
+  _IMAGE_NAME: 'sre-agent'
+  _TAG_NAME: 'latest'
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG_NAME}'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
