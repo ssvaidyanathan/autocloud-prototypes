@@ -52,7 +52,7 @@ The Incident SRE Agent relies on an asynchronous, multi-agent architecture integ
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
 ┌───────────────────────────────────▼────────────────────────────────────┐
-│ Layer 3: Per-Step Post-Deployment Verification (Phase 7 Steps)         │
+│ Layer 3: Per-Step Post-Deployment Verification (Deployment Steps)      │
 │  • Step-by-step verification commands for every deployed GCP component│
 │  • Automated validation via scripts/smoke-test.sh                      │
 └───────────────────────────────────┬────────────────────────────────────┘
@@ -215,7 +215,7 @@ For local multi-service testing, `docker-compose.yml` spins up the complete plat
 
 ### Layer 3: Per-Step Post-Deployment Verification Checks
 
-When deploying to Google Cloud Platform, execute the following verification commands after each step matching Phase 7 deployment procedures:
+When deploying to Google Cloud Platform, execute the following verification commands after each step matching standard deployment procedures:
 
 #### Step 1: Pre-Flight Tooling & Environment Verification
 ```bash

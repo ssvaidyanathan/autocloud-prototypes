@@ -6,7 +6,7 @@ The `sre-agent` is an automated, strictly read-only incident investigation servi
 
 ## Architecture & Workflow
 
-The agent operates through four logical lifecycle phases coordinated by `Dispatcher`:
+The agent operates through four logical lifecycle stages coordinated by `Dispatcher`:
 
 ```
 Incident Request

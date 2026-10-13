@@ -204,16 +204,23 @@ When `/investigate` is invoked, the Dispatcher initializes the investigation con
 3. **Specialist Selection**:
    - By default, all 4 specialists (`logs`, `metrics`, `changes`, `resources`) are dispatched in parallel. If the incident description explicitly indicates a pure metric alert or isolated deploy issue, the Dispatcher can focus specialist selection accordingly.
 
-### 3.5 Specialist Sub-Agents
+### 3.5 Specialist Sub-Agents & Execution Model
 
-Each specialist operates autonomously with domain-specific toolkits and system prompts:
+Each specialist operates as an independent ADK `LlmAgent` endowed with domain-specific toolkits and progressive skill loading:
 
-| Specialist | Target Telemetry | Tool Modules | Typical Queries / Responsibilities |
-|---|---|---|---|
-| **Logs Specialist** | Google Cloud Logging | `tools/logging.py` | Query `severity>=ERROR`, parse stack traces, count error frequency, extract HTTP 5xx log entries, identify first/last occurrence. |
-| **Metrics Specialist** | Google Cloud Monitoring | `tools/monitoring.py` | Fetch time-series for Cloud Run request latencies (p50, p95, p99), container CPU/memory utilization, instance auto-scaling counts. |
-| **Changes Specialist** | Cloud Audit Logs | `tools/changes.py` | Query `cloudaudit.googleapis.com` for service updates, new Cloud Run revisions, IAM policy modifications, and deployment rollout timestamps. |
-| **Resources Specialist** | Cloud Asset / Run API | `tools/resources.py` | Inspect service specifications, ingress settings, env vars (with automated secret redaction), scaling limits, and dependency URLs. |
+| Specialist | Target Telemetry | Tool Modules | Assigned Skills | Typical Queries / Responsibilities |
+|---|---|---|---|---|
+| **Logs Specialist** | Google Cloud Logging | `tools/logging.py` | `cloud-logging-queries`, `service-<name>` | Query `severity>=ERROR`, parse stack traces, count error frequency, extract HTTP 5xx log entries, identify first/last occurrence. |
+| **Metrics Specialist** | Google Cloud Monitoring | `tools/monitoring.py` | `cloud-monitoring-metrics`, `service-<name>` | Fetch time-series for Cloud Run request latencies (p50, p95, p99), container CPU/memory utilization, instance auto-scaling counts. |
+| **Changes Specialist** | Cloud Audit Logs | `tools/changes.py` | `change-correlation`, `service-<name>` | Query `cloudaudit.googleapis.com` for service updates, new Cloud Run revisions, IAM policy modifications, and deployment rollout timestamps. |
+| **Resources Specialist** | Cloud Asset / Run API | `tools/resources.py` | `cloud-run-troubleshooting`, `gke-troubleshooting`, `cloud-sql-troubleshooting`, `service-<name>` | Inspect service specifications, ingress settings, env vars (with automated secret redaction), scaling limits, and dependency URLs. |
+
+Key architectural execution characteristics:
+- **Skill-First Progressive Loading**: Each specialist loads its assigned skills first via ADK `SkillToolset` (`skill_first=True`) before executing diagnostic investigations.
+- **Concurrent Baseline Safety Net**: A deterministic baseline sweep runs concurrently with the agentic LLM drill-down via `asyncio.gather`, serving as a safety net that guarantees standard telemetry (CPU, memory, 5xx baseline comparison, revisions) is captured even if LLM reasoning degrades or times out.
+- **Configurable Execution Budgets**: Per-specialist turn and tool limits are enforced from configuration via `SPECIALIST_MAX_LLM_CALLS` (default: 8) and `SPECIALIST_MAX_TOOL_CALLS` (default: 5), alongside a per-agent wall-clock timeout.
+- **Structured Tool Arguments**: To prevent hallucinated or malicious query syntax, the LLM passes only typed, structured tool arguments (`service`, `severity`, `status_code_range`, `text_contains`, `lookback_minutes`); the tool modules internally construct and sanitize the underlying GCP query and filter strings.
+- **Verifiable Skill Tracking**: Callbacks record and report per-agent `skills_used` and the `skill_first` boolean flag in `Findings` and the final investigation result.
 
 ### 3.6 Reasoning, Review & Synthesis
 

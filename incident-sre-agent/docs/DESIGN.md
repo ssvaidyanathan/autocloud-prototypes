@@ -26,7 +26,7 @@ Scope: Target GCP project with application and infrastructure telemetry in Googl
 | **Health Check Probing** | Single `/health` endpoint across all services | Avoids Google Frontend (GFE) Cloud Run edge-proxy 404 interception of `/healthz`. |
 | **Ticketing Integration** | ServiceNow, Jira Cloud, and Generic HMAC adapters | ServiceNow HTML work notes (`[code]...[/code]`) and Jira ADF rich comments with standalone HTML report attachments. |
 | **Security & Read-Only** | Strict read-only IAM viewer roles; zero secret payload inspection | `agent-sa` restricted to viewer roles and `aiplatform.user`. Bridge holds Secret Manager access; inspection of secret payloads is strictly prohibited. |
-| **Skills Architecture** | Google GenAI ADK `SkillToolset` with de-overfit rules | Progressive disclosure of open Agent Skills (`SKILL.md`). De-overfit rules enforce generic reasoning without canned answers or scenario labels. |
+| **Skills Architecture** | Google GenAI ADK `SkillToolset` with progressive skill loading | Progressive disclosure of open Agent Skills (`SKILL.md`). Specialists load assigned skills first (`skill_first=True`) before executing read-only investigations. Concurrent baseline sweeps provide safety net fallbacks. |
 | **Demo Infrastructure** | Cloud Run microservices with real GCP OIDC ID tokens | `shop-api` fetches real Google ID tokens (`fetch_id_token`) to invoke private IAM-only `inventory-svc`. |
 | **Terraform Remote State** | GCS state backend bootstrapped via `scripts/bootstrap-tfstate.sh` | Dedicated state bucket (`<project>-<prefix>-tfstate`) with uniform access, public access prevention, and object versioning. |
 | **Deployment Region** | Compute in `us-central1`; Vertex AI in `global` | Cloud Run, Cloud Tasks, and Artifact Registry hosted in `us-central1`; Gemini 3.x models accessed via Vertex AI `global`. |
@@ -79,7 +79,7 @@ ServiceNow Flow (Incident created) ─────────┐           Jira
 5. **Agent Invocation**: Cloud Tasks calls `${name_prefix}-sre-agent` at `/investigate` using a Google-signed OIDC token minted for `tasks-invoker-sa`.
 6. **Multi-Agent Telemetry Reasoning**: The agent executes the ADK investigation pipeline within a 15-minute budget:
    - **Triage**: Inspects ticket text, identifies target services, and establishes the dynamic time window.
-   - **Parallel Specialists**: Queries Cloud Logging, Cloud Monitoring, Cloud Audit Logs, and Cloud Run/Compute/SQL resources concurrently.
+   - **Parallel Specialists**: Each specialist loads assigned domain skills first via `SkillToolset` and investigates using strictly structured tool arguments. A deterministic baseline sweep runs concurrently as a safety net. Per-specialist budgets (`SPECIALIST_MAX_LLM_CALLS`, `SPECIALIST_MAX_TOOL_CALLS`) are enforced, and per-agent `skills_used` and `skill_first` flags are tracked and reported in findings.
    - **Review**: Evaluates preliminary evidence and triggers at most 1 round of targeted follow-up queries.
    - **Synthesis**: Correlates multi-signal telemetry into the canonical `Report` contract with chronological timeline, grounded root cause hypothesis, and confidence scoring.
 7. **Callback Delivery & Deduplication**: The agent obtains an OIDC token matching the bridge callback URL and POSTs the result. The bridge verifies the token and caller identity (`agent-sa`), checks `CallbackDedupRegistry` to prevent redundant ticket updates upon retries, renders platform-native findings (HTML work notes in ServiceNow, ADF rich comments in Jira), and attaches the full standalone HTML report.
