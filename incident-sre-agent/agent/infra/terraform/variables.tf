@@ -116,3 +116,15 @@ variable "allowed_callback_hosts" {
   default     = "*.run.app"
 }
 
+variable "specialist_max_llm_calls" {
+  description = "Maximum LLM turns allowed per specialist during investigation"
+  type        = number
+  default     = 8
+}
+
+variable "specialist_max_tool_calls" {
+  description = "Maximum tool calls allowed per specialist during investigation"
+  type        = number
+  default     = 5
+}
+

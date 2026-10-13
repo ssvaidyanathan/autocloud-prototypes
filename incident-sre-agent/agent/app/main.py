@@ -1,6 +1,8 @@
 import logging
+import os
 import uuid
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, Query, Response, status
 from fastapi.responses import JSONResponse
@@ -13,10 +15,51 @@ from .dispatcher import Dispatcher
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Lifespan context manager enforcing production fail-fast startup checks."""
+    settings = get_settings()
+    app_env = os.getenv("APP_ENV", settings.app_env).strip().lower()
+    keys_added = []
+    if app_env != "local":
+        if settings.gcp_project:
+            for k, v in [
+                ("GOOGLE_GENAI_USE_VERTEXAI", "true"),
+                ("GOOGLE_GENAI_USE_ENTERPRISE", "true"),
+                ("GOOGLE_CLOUD_PROJECT", settings.gcp_project),
+                ("GOOGLE_CLOUD_LOCATION", settings.vertex_location),
+            ]:
+                if k not in os.environ:
+                    os.environ[k] = v
+                    keys_added.append(k)
+
+        try:
+            import google.genai
+
+            test_client = google.genai.Client()
+            if not getattr(test_client, "vertexai", False):
+                raise RuntimeError("google.genai.Client did not initialize in Vertex AI mode")
+        except Exception as exc:
+            for k in keys_added:
+                os.environ.pop(k, None)
+            raise RuntimeError(
+                "Production fail-fast: failed to initialize Vertex AI Gemini client "
+                f"at startup: {exc}"
+            ) from exc
+
+    try:
+        yield
+    finally:
+        for k in keys_added:
+            os.environ.pop(k, None)
+
+
 app = FastAPI(
     title="SRE Agent",
     description="Multi-agent SRE investigation service",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # Global or injectable dispatcher & callback client

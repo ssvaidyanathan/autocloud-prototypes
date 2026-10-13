@@ -1,7 +1,7 @@
 import os
 import urllib.parse
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .clients import (
     get_cloud_build_client,
@@ -57,32 +57,36 @@ def normalize_cloud_build_status(raw_status: Any) -> str:
     description="Query Cloud Audit Logs for admin activity, deploys, and config changes.",
 )
 def query_audit_logs(
-    project_id: str,
-    start_time: datetime,
-    end_time: datetime,
+    project_id: Optional[str] = None,
+    start_time: Optional[Union[datetime, str]] = None,
+    end_time: Optional[Union[datetime, str]] = None,
     service_name: Optional[str] = None,
     client: Any = None,
 ) -> List[Dict[str, Any]]:
     """Query Cloud Audit Logs activity for admin changes."""
+    from datetime import timedelta
+
+    from .common import normalize_datetime, validate_service
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+    if service_name:
+        validate_service(service_name)
+
+    end_time_dt = normalize_datetime(end_time) or datetime.now(timezone.utc)
+    start_time_dt = normalize_datetime(start_time) or (end_time_dt - timedelta(hours=1))
+
     if client is None:
-        client = get_logging_client(project_id)
+        client = get_logging_client(pinned_project)
 
     if client is None and not is_local_mode():
         raise RuntimeError("GCP Logging client unavailable in production environment")
 
-    start_iso = (
-        start_time.astimezone(timezone.utc).isoformat()
-        if start_time.tzinfo
-        else start_time.replace(tzinfo=timezone.utc).isoformat()
-    )
-    end_iso = (
-        end_time.astimezone(timezone.utc).isoformat()
-        if end_time.tzinfo
-        else end_time.replace(tzinfo=timezone.utc).isoformat()
-    )
+    start_iso = start_time_dt.isoformat()
+    end_iso = end_time_dt.isoformat()
 
     filter_parts = [
-        f'logName = "projects/{project_id}/logs/cloudaudit.googleapis.com%2Factivity"',
+        f'logName = "projects/{pinned_project}/logs/cloudaudit.googleapis.com%2Factivity"',
         f'timestamp >= "{start_iso}"',
         f'timestamp <= "{end_iso}"',
     ]
@@ -100,18 +104,17 @@ def query_audit_logs(
 
     final_filter = " AND ".join(filter_parts)
     encoded_filter = urllib.parse.quote(final_filter)
-    console_url = (
-        f"https://console.cloud.google.com/logs/query;query={encoded_filter};project={project_id}"
-    )
+    console_url = f"https://console.cloud.google.com/logs/query;query={encoded_filter};project={pinned_project}"
 
     results: List[Dict[str, Any]] = []
 
     if client is not None:
         raw_entries = client.list_entries(
-            resource_names=[f"projects/{project_id}"],
+            resource_names=[f"projects/{pinned_project}"],
             filter_=final_filter,
             page_size=50,
         )
+
         for idx, entry in enumerate(raw_entries):
             if idx >= 50:
                 break
@@ -263,13 +266,19 @@ def query_audit_logs(
     description="List recent revisions for a Cloud Run service with creation times and traffic.",
 )
 def list_cloud_run_revisions(
-    project_id: str,
-    service_name: str,
+    project_id: Optional[str] = None,
+    service_name: Optional[str] = None,
     region: Optional[str] = None,
     client: Any = None,
     services_client: Any = None,
 ) -> List[Dict[str, Any]]:
     """List recent Cloud Run revisions and active traffic allocations."""
+    from .common import validate_service
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+    resolved_service = validate_service(service_name) or "default"
+
     if not region:
         try:
             from agent.app.config import get_settings
@@ -279,8 +288,8 @@ def list_cloud_run_revisions(
             region = os.getenv("GCP_REGION", "")
 
     console_url = (
-        f"https://console.cloud.google.com/run/detail/{region}/{service_name}/revisions"
-        f"?project={project_id}"
+        f"https://console.cloud.google.com/run/detail/{region}/{resolved_service}/revisions"
+        f"?project={pinned_project}"
     )
 
     if client is None:
@@ -294,7 +303,7 @@ def list_cloud_run_revisions(
 
     traffic_map: Dict[str, int] = {}
     if services_client is not None:
-        service_path = f"projects/{project_id}/locations/{region}/services/{service_name}"
+        service_path = f"projects/{pinned_project}/locations/{region}/services/{resolved_service}"
         try:
             svc = services_client.get_service(name=service_path)
             traffic_list = getattr(svc, "traffic_statuses", None) or getattr(svc, "traffic", None)
@@ -323,10 +332,10 @@ def list_cloud_run_revisions(
     if client is not None:
         from .common import get_candidate_service_names
 
-        candidates = get_candidate_service_names(service_name)
+        candidates = get_candidate_service_names(resolved_service)
         raw_revisions: Any = []
         for cand in candidates:
-            parent = f"projects/{project_id}/locations/{region}/services/{cand}"
+            parent = f"projects/{pinned_project}/locations/{region}/services/{cand}"
             try:
                 raw_revisions = list(client.list_revisions(parent=parent))
                 if raw_revisions:
@@ -414,12 +423,15 @@ def list_cloud_run_revisions(
     description="List recent Cloud Build builds, status, start/finish times, and commit SHAs.",
 )
 def list_cloud_builds(
-    project_id: str,
+    project_id: Optional[str] = None,
     limit: int = 10,
     client: Any = None,
 ) -> List[Dict[str, Any]]:
     """List recent Cloud Build builds with commit info and console links."""
-    console_url = f"https://console.cloud.google.com/cloud-build/builds?project={project_id}"
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+    console_url = f"https://console.cloud.google.com/cloud-build/builds?project={pinned_project}"
 
     if client is None:
         client = get_cloud_build_client()
@@ -432,11 +444,13 @@ def list_cloud_builds(
     if client is not None:
         try:
             raw_builds = client.list_builds(
-                project_id=project_id,
+                project_id=pinned_project,
                 page_size=limit,
             )
         except (TypeError, ValueError):
-            raw_builds = client.list_builds(request={"project_id": project_id, "page_size": limit})
+            raw_builds = client.list_builds(
+                request={"project_id": pinned_project, "page_size": limit}
+            )
 
         for idx, b in enumerate(raw_builds):
             if idx >= limit:

@@ -21,6 +21,3 @@ resources:
 
 synthesizer:
   - report-style
-
-all:
-  - service-shop-api

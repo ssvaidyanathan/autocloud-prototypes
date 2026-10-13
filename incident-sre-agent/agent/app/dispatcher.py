@@ -157,15 +157,26 @@ class Dispatcher(BaseAgent):
         plan: InvestigationPlan,
         incident: Any,
     ) -> tuple[str, Findings, Optional[str]]:
-        """Run a single specialist in a thread pool with strict error containment."""
+        """Run a single specialist asynchronously with strict error containment."""
         try:
-            finding = await asyncio.to_thread(
-                specialist.investigate,
-                incident=incident,
-                start_time=plan.start_time,
-                end_time=plan.end_time,
-                plan=plan,
-            )
+            timeout_s = getattr(self.config, "specialist_timeout_seconds", 120.0)
+            if hasattr(specialist, "investigate_async"):
+                finding = await specialist.investigate_async(
+                    incident=incident,
+                    start_time=plan.start_time,
+                    end_time=plan.end_time,
+                    plan=plan,
+                    timeout_seconds=timeout_s,
+                )
+            else:
+                finding = await asyncio.to_thread(
+                    specialist.investigate,
+                    incident=incident,
+                    start_time=plan.start_time,
+                    end_time=plan.end_time,
+                    plan=plan,
+                    timeout_seconds=timeout_s,
+                )
             return name, finding, None
         except Exception as exc:
             logger.exception("Specialist %s raised unhandled exception", name)
@@ -176,6 +187,7 @@ class Dispatcher(BaseAgent):
                 queries_run=[],
                 confidence=0.0,
                 errors=[f"Unhandled error in {name}: {str(exc)}"],
+                fallback_used=True,
             )
             return name, fallback, str(exc)
 
@@ -195,17 +207,32 @@ class Dispatcher(BaseAgent):
         if not tasks:
             return {}, {}
 
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         findings: Dict[str, Findings] = {}
         specialist_errors: Dict[str, str] = {}
 
-        for name, finding, err in results:
-            findings[name] = finding
-            if err:
-                specialist_errors[name] = err
-            elif finding.errors:
-                specialist_errors[name] = "; ".join(finding.errors)
+        for idx, res in enumerate(results):
+            if isinstance(res, BaseException):
+                name = selected_names[idx]
+                err_str = str(res)
+                findings[name] = Findings(
+                    summary=f"Specialist failed: {err_str}",
+                    evidence=[],
+                    anomalies=[],
+                    queries_run=[],
+                    confidence=0.0,
+                    errors=[err_str],
+                    fallback_used=True,
+                )
+                specialist_errors[name] = err_str
+            else:
+                name, finding, err = res
+                findings[name] = finding
+                if err:
+                    specialist_errors[name] = err
+                elif finding.errors:
+                    specialist_errors[name] = "; ".join(finding.errors)
 
         return findings, specialist_errors
 

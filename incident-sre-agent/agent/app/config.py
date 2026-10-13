@@ -86,6 +86,8 @@ class AgentConfig(BaseSettings):
     max_review_rounds: int = 1
     specialist_query_limit: int = 5
     specialist_max_entries: int = 50
+    specialist_max_llm_calls: int = 8
+    specialist_max_tool_calls: int = 5
     max_tool_calls_per_specialist: int = 25
     default_lookback_minutes: int = 60
     max_query_window_hours: int = 24

@@ -1,7 +1,7 @@
 import math
 import urllib.parse
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .clients import (
     get_monitoring_alert_client,
@@ -96,13 +96,20 @@ def _expand_service_name_filter(filter_str: str) -> str:
 
 @readonly_tool(
     name="query_time_series",
-    description="Query Cloud Monitoring time series for metrics matching a filter.",
+    description=(
+        "Query Cloud Monitoring time series for metrics matching a filter. "
+        "Accepts structured parameters (service, status_code_range e.g. '5xx' "
+        "or '500-599', lookback_minutes) or raw filter_str."
+    ),
 )
 def query_time_series(
-    filter_str: str,
-    project_id: str,
-    start_time: datetime,
-    end_time: datetime,
+    filter_str: Optional[str] = None,
+    project_id: Optional[str] = None,
+    start_time: Optional[Union[datetime, str]] = None,
+    end_time: Optional[Union[datetime, str]] = None,
+    service: Optional[str] = None,
+    status_code_range: Optional[str] = None,
+    lookback_minutes: Optional[int] = None,
     alignment_period_seconds: int = 60,
     per_series_aligner: str = "ALIGN_RATE",
     cross_series_reducer: Optional[str] = "REDUCE_SUM",
@@ -110,11 +117,74 @@ def query_time_series(
     client: Any = None,
 ) -> Dict[str, Any]:
     """Query Cloud Monitoring metric time series with compact output and console deep link."""
+    from datetime import timedelta, timezone
+
+    from .common import (
+        build_cloud_monitoring_filter,
+        clamp_lookback_minutes,
+        normalize_datetime,
+        validate_raw_filter,
+    )
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+
+    start_time_dt = normalize_datetime(start_time)
+    end_time_dt = normalize_datetime(end_time)
+
+    # 1. Resolve filter
+    has_structured = any(
+        v is not None and (not isinstance(v, str) or v.strip() != "")
+        for v in (service, status_code_range)
+    )
+    if has_structured and filter_str and filter_str.strip():
+        raise ValueError(
+            "Conflicting filter specification: cannot provide both structured arguments "
+            f"(service={service!r}, status_code_range={status_code_range!r}) "
+            f"and raw filter_str ({filter_str.strip()!r}) to query_time_series."
+        )
+
+    if has_structured:
+        filter_str = build_cloud_monitoring_filter(
+            service=service,
+            status_code_range=status_code_range,
+        )
+    elif filter_str and filter_str.strip():
+        validated_filter = validate_raw_filter(filter_str)
+        filter_str = validated_filter or 'metric.type = "run.googleapis.com/request_count"'
+    else:
+        filter_str = 'metric.type = "run.googleapis.com/request_count"'
+
+    if "metric.type" not in filter_str:
+        filter_str = f'metric.type = "run.googleapis.com/request_count" AND {filter_str}'
+
+    # 2. Resolve timestamps
+    if lookback_minutes is not None:
+        clamped_lb = clamp_lookback_minutes(lookback_minutes)
+        if clamped_lb is not None:
+            now_utc = datetime.now(timezone.utc)
+            if not end_time_dt:
+                end_time_dt = now_utc
+            start_time_dt = end_time_dt - timedelta(minutes=clamped_lb)
+
+    if not end_time_dt:
+        end_time_dt = datetime.now(timezone.utc)
+    if not start_time_dt:
+        start_time_dt = end_time_dt - timedelta(minutes=15)
+
     effective_filter = _expand_service_name_filter(filter_str)
+
+    # Automatically adapt aligner for distribution metrics (e.g. request_latencies)
+    if "request_latencies" in effective_filter or "latenc" in effective_filter.lower():
+        if per_series_aligner == "ALIGN_RATE":
+            per_series_aligner = "ALIGN_PERCENTILE_95"
+        if cross_series_reducer == "REDUCE_SUM":
+            cross_series_reducer = "REDUCE_PERCENTILE_95"
+
     encoded_filter = urllib.parse.quote(effective_filter)
     console_url = (
         f"https://console.cloud.google.com/monitoring/metrics-explorer"
-        f"?project={project_id}&pageState={encoded_filter}"
+        f"?project={pinned_project}&pageState={encoded_filter}"
     )
 
     if client is None:
@@ -127,13 +197,14 @@ def query_time_series(
 
     if client is not None:
         request_payload: Dict[str, Any] = {
-            "name": f"projects/{project_id}",
+            "name": f"projects/{pinned_project}",
             "filter": effective_filter,
             "interval": {
-                "start_time": start_time,
-                "end_time": end_time,
+                "start_time": start_time_dt,
+                "end_time": end_time_dt,
             },
         }
+
         agg = _build_aggregation(
             alignment_period_seconds=alignment_period_seconds,
             per_series_aligner=per_series_aligner,
@@ -145,19 +216,31 @@ def query_time_series(
 
         try:
             raw_series = client.list_time_series(request=request_payload)
-        except (TypeError, ValueError, AttributeError):
-            try:
-                raw_series = client.list_time_series(
-                    name=f"projects/{project_id}",
-                    filter=filter_str,
-                    interval={
-                        "start_time": start_time,
-                        "end_time": end_time,
-                    },
+        except Exception as api_err:
+            if "ALIGN_RATE" in str(api_err) and "DISTRIBUTION" in str(api_err):
+                request_payload["aggregation"] = _build_aggregation(
                     alignment_period_seconds=alignment_period_seconds,
+                    per_series_aligner="ALIGN_PERCENTILE_95",
+                    cross_series_reducer="REDUCE_PERCENTILE_95",
+                    group_by_fields=group_by_fields,
                 )
-            except Exception:
-                raw_series = []
+                try:
+                    raw_series = client.list_time_series(request=request_payload)
+                except Exception:
+                    raw_series = []
+            else:
+                try:
+                    raw_series = client.list_time_series(
+                        name=f"projects/{pinned_project}",
+                        filter=effective_filter,
+                        interval={
+                            "start_time": start_time_dt,
+                            "end_time": end_time_dt,
+                        },
+                        alignment_period_seconds=alignment_period_seconds,
+                    )
+                except Exception:
+                    raw_series = []
 
         for ts in raw_series:
             metric_type = getattr(getattr(ts, "metric", None), "type", "unknown")
@@ -199,9 +282,9 @@ def query_time_series(
 
     return {
         "metric_filter": filter_str,
-        "project_id": project_id,
-        "start_time": start_time.isoformat(),
-        "end_time": end_time.isoformat(),
+        "project_id": pinned_project,
+        "start_time": start_time_dt.isoformat(),
+        "end_time": end_time_dt.isoformat(),
         "alignment_period_seconds": alignment_period_seconds,
         "total_points": len(points_data),
         "points": points_data[:100],  # compact truncated output
@@ -215,11 +298,11 @@ def query_time_series(
 )
 def compare_to_baseline(
     filter_str: str,
-    project_id: str,
-    current_start: datetime,
-    current_end: datetime,
-    baseline_start: datetime,
-    baseline_end: datetime,
+    project_id: Optional[str] = None,
+    current_start: Optional[Union[datetime, str]] = None,
+    current_end: Optional[Union[datetime, str]] = None,
+    baseline_start: Optional[Union[datetime, str]] = None,
+    baseline_end: Optional[Union[datetime, str]] = None,
     alignment_period_seconds: int = 60,
     per_series_aligner: str = "ALIGN_RATE",
     cross_series_reducer: Optional[str] = "REDUCE_SUM",
@@ -227,8 +310,21 @@ def compare_to_baseline(
     client: Any = None,
 ) -> Dict[str, Any]:
     """Compute baseline comparison in code for mean, p95, and percentage shifts."""
+    from datetime import timedelta, timezone
+
+    from .common import normalize_datetime
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
     console_url = (
-        f"https://console.cloud.google.com/monitoring/metrics-explorer?project={project_id}"
+        f"https://console.cloud.google.com/monitoring/metrics-explorer?project={pinned_project}"
+    )
+
+    current_end = normalize_datetime(current_end) or datetime.now(timezone.utc)
+    current_start = normalize_datetime(current_start) or (current_end - timedelta(minutes=15))
+    baseline_end = normalize_datetime(baseline_end) or current_start
+    baseline_start = normalize_datetime(baseline_start) or (
+        baseline_end - (current_end - current_start)
     )
 
     if client is None:
@@ -237,7 +333,18 @@ def compare_to_baseline(
     if client is None and not is_local_mode():
         raise RuntimeError("GCP Monitoring client unavailable in production environment")
 
+    if "metric.type" not in filter_str:
+        filter_str = f'metric.type = "run.googleapis.com/request_count" AND {filter_str}'
+
     effective_filter = _expand_service_name_filter(filter_str)
+
+    # Automatically adapt aligner for distribution metrics (e.g. request_latencies)
+    if "request_latencies" in effective_filter or "latenc" in effective_filter.lower():
+        if per_series_aligner == "ALIGN_RATE":
+            per_series_aligner = "ALIGN_PERCENTILE_95"
+        if cross_series_reducer == "REDUCE_SUM":
+            cross_series_reducer = "REDUCE_PERCENTILE_95"
+
     current_values: List[float] = []
     baseline_values: List[float] = []
 
@@ -250,7 +357,7 @@ def compare_to_baseline(
 
     if client is not None:
         req_current: Dict[str, Any] = {
-            "name": f"projects/{project_id}",
+            "name": f"projects/{pinned_project}",
             "filter": effective_filter,
             "interval": {"start_time": current_start, "end_time": current_end},
         }
@@ -259,19 +366,31 @@ def compare_to_baseline(
 
         try:
             raw_current = client.list_time_series(request=req_current)
-        except (TypeError, ValueError, AttributeError):
-            try:
-                raw_current = client.list_time_series(
-                    name=f"projects/{project_id}",
-                    filter=effective_filter,
-                    interval={"start_time": current_start, "end_time": current_end},
+        except Exception as api_err:
+            if "ALIGN_RATE" in str(api_err) and "DISTRIBUTION" in str(api_err):
+                req_current["aggregation"] = _build_aggregation(
+                    alignment_period_seconds=alignment_period_seconds,
+                    per_series_aligner="ALIGN_PERCENTILE_95",
+                    cross_series_reducer="REDUCE_PERCENTILE_95",
+                    group_by_fields=group_by_fields,
                 )
-            except Exception:
-                raw_current = []
+                try:
+                    raw_current = client.list_time_series(request=req_current)
+                except Exception:
+                    raw_current = []
+            else:
+                try:
+                    raw_current = client.list_time_series(
+                        name=f"projects/{pinned_project}",
+                        filter=effective_filter,
+                        interval={"start_time": current_start, "end_time": current_end},
+                    )
+                except Exception:
+                    raw_current = []
         current_values = _extract_metric_values(raw_current)
 
         req_baseline: Dict[str, Any] = {
-            "name": f"projects/{project_id}",
+            "name": f"projects/{pinned_project}",
             "filter": effective_filter,
             "interval": {"start_time": baseline_start, "end_time": baseline_end},
         }
@@ -280,15 +399,27 @@ def compare_to_baseline(
 
         try:
             raw_baseline = client.list_time_series(request=req_baseline)
-        except (TypeError, ValueError, AttributeError):
-            try:
-                raw_baseline = client.list_time_series(
-                    name=f"projects/{project_id}",
-                    filter=filter_str,
-                    interval={"start_time": baseline_start, "end_time": baseline_end},
+        except Exception as api_err:
+            if "ALIGN_RATE" in str(api_err) and "DISTRIBUTION" in str(api_err):
+                req_baseline["aggregation"] = _build_aggregation(
+                    alignment_period_seconds=alignment_period_seconds,
+                    per_series_aligner="ALIGN_PERCENTILE_95",
+                    cross_series_reducer="REDUCE_PERCENTILE_95",
+                    group_by_fields=group_by_fields,
                 )
-            except Exception:
-                raw_baseline = []
+                try:
+                    raw_baseline = client.list_time_series(request=req_baseline)
+                except Exception:
+                    raw_baseline = []
+            else:
+                try:
+                    raw_baseline = client.list_time_series(
+                        name=f"projects/{pinned_project}",
+                        filter=effective_filter,
+                        interval={"start_time": baseline_start, "end_time": baseline_end},
+                    )
+                except Exception:
+                    raw_baseline = []
         baseline_values = _extract_metric_values(raw_baseline)
 
     curr_mean = _calculate_mean(current_values)
@@ -321,7 +452,7 @@ def compare_to_baseline(
 
     return {
         "metric_filter": filter_str,
-        "project_id": project_id,
+        "project_id": pinned_project,
         "current_period": {
             "start": current_start.isoformat(),
             "end": current_end.isoformat(),
@@ -352,10 +483,14 @@ def compare_to_baseline(
     description="List Cloud Monitoring alerting policies and their active conditions.",
 )
 def list_alert_policies(
-    project_id: str,
+    project_id: Optional[str] = None,
     client: Any = None,
 ) -> List[Dict[str, Any]]:
     """List Cloud Monitoring alert policies."""
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+
     if client is None:
         client = get_monitoring_alert_client()
 
@@ -364,7 +499,7 @@ def list_alert_policies(
 
     policies: List[Dict[str, Any]] = []
     if client is not None:
-        raw_policies = client.list_alert_policies(name=f"projects/{project_id}")
+        raw_policies = client.list_alert_policies(name=f"projects/{pinned_project}")
         for pol in raw_policies:
             conditions_summary: List[Dict[str, Any]] = []
             for cond in getattr(pol, "conditions", []):
@@ -393,10 +528,14 @@ def list_alert_policies(
     description="List active/open incidents and alerts in Cloud Monitoring.",
 )
 def list_open_alerts(
-    project_id: str,
+    project_id: Optional[str] = None,
     client: Any = None,
 ) -> List[Dict[str, Any]]:
     """List open alerts and incident events."""
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+
     if client is None:
         client = get_monitoring_alert_client()
 
@@ -406,7 +545,7 @@ def list_open_alerts(
     alerts: List[Dict[str, Any]] = []
     if client is not None:
         if hasattr(client, "list_incidents"):
-            raw_incidents = client.list_incidents(name=f"projects/{project_id}")
+            raw_incidents = client.list_incidents(name=f"projects/{pinned_project}")
             for inc in raw_incidents:
                 alerts.append(
                     {

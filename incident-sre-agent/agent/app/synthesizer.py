@@ -714,16 +714,24 @@ class SynthesizerAgent:
         specialist_errors: Optional[Dict[str, str]] = None,
         skills_used: Optional[List[str]] = None,
     ) -> Report:
+        # Aggregate per-specialist skills_used from findings
+        specialist_skills: List[str] = []
+        for f in findings.values():
+            for s in getattr(f, "skills_used", []):
+                if s and s not in specialist_skills:
+                    specialist_skills.append(s)
+
         consulted_skills = self._consult_skills()
         if skills_used is not None:
             pipeline_skills = list(
                 dict.fromkeys(
                     skills_used
+                    + specialist_skills
                     + [s for s in consulted_skills if s in self.skills_loader.loaded_skills]
                 )
             )
         else:
-            pipeline_skills = consulted_skills
+            pipeline_skills = list(dict.fromkeys(specialist_skills + consulted_skills))
 
         llm_report: Optional[Report] = None
         if self.llm_client is not None:
@@ -745,6 +753,7 @@ class SynthesizerAgent:
             llm_report.metadata["synthesizer_mode"] = "llm"
             llm_report.metadata["window_start"] = plan.start_time.isoformat()
             llm_report.metadata["window_end"] = plan.end_time.isoformat()
+            llm_report.skills_used = list(dict.fromkeys(llm_report.skills_used + pipeline_skills))
 
             if not llm_report.specialists_status:
                 llm_report.specialists_status = self._build_specialist_statuses(

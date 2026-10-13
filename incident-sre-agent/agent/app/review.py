@@ -166,6 +166,13 @@ class ReviewEvaluator:
         # Confidence: take higher confidence or weighted average
         merged_confidence = max(original.confidence, follow_up.confidence)
 
+        # Combine skills_used
+        combined_skills = list(
+            dict.fromkeys(list(original.skills_used) + list(follow_up.skills_used))
+        )
+        combined_skill_first = original.skill_first or follow_up.skill_first
+        combined_fallback = original.fallback_used or follow_up.fallback_used
+
         summary = (
             f"{original.summary} Follow-up investigation added {len(follow_up.evidence)} "
             f"evidence items and {len(follow_up.anomalies)} anomalies."
@@ -178,4 +185,7 @@ class ReviewEvaluator:
             queries_run=combined_queries,
             confidence=merged_confidence,
             errors=combined_errors,
+            skills_used=combined_skills,
+            skill_first=combined_skill_first,
+            fallback_used=combined_fallback,
         )

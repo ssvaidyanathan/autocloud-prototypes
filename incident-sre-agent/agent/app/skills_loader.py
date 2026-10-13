@@ -213,8 +213,12 @@ class SkillsLoader:
         self._skills_mapping = mapping
         return self._skills_mapping
 
-    def get_skills_for_target(self, target: str) -> List[SkillMetadata]:
-        """Return all skills applicable to a specific agent target (including 'all')."""
+    def get_skills_for_target(
+        self,
+        target: str,
+        service_name: Optional[str] = None,
+    ) -> List[SkillMetadata]:
+        """Return all skills applicable to a specific target (including dynamic service runbook)."""
         if not self._skills_mapping:
             self.load_skills_mapping()
         if not self._metadata_cache:
@@ -223,6 +227,14 @@ class SkillsLoader:
         target_skill_names = set(self._skills_mapping.get(target, []))
         all_skill_names = set(self._skills_mapping.get("all", []))
         applicable_names = target_skill_names | all_skill_names
+        if service_name:
+            clean_service = service_name.strip()
+            runbook_name = (
+                clean_service
+                if clean_service.startswith("service-")
+                else f"service-{clean_service}"
+            )
+            applicable_names.add(runbook_name)
 
         results: List[SkillMetadata] = []
         for name in applicable_names:
@@ -234,11 +246,22 @@ class SkillsLoader:
 
 def get_skill_toolset_for_target(
     target: str,
+    service_name: Optional[str] = None,
     skills_dir: Optional[Union[str, Path]] = None,
+    tool_filter: Optional[List[str]] = None,
 ) -> Any:
-    """Create an ADK SkillToolset for a specific target agent using skills.yaml mapping."""
+    """Create an ADK SkillToolset for a specific target agent using skills.yaml mapping.
+
+    Dynamically resolves service runbook as 'service-<service_name>' at runtime
+    when service_name is provided, without hardcoding service names into static maps
+    or code (enforcing de-overfit guard).
+    """
     from google.adk.skills import load_skills_from_dir
     from google.adk.tools.skill_toolset import SkillToolset
+
+    if isinstance(service_name, Path):
+        skills_dir = service_name
+        service_name = None
 
     if skills_dir is None:
         base_path = Path(__file__).resolve().parent.parent / "skills"
@@ -258,11 +281,23 @@ def get_skill_toolset_for_target(
                     mapping[str(k)] = [v]
 
     target_skill_names = set(mapping.get(target, [])) | set(mapping.get("all", []))
+    if service_name:
+        clean_service = service_name.strip()
+        runbook_name = (
+            clean_service if clean_service.startswith("service-") else f"service-{clean_service}"
+        )
+        target_skill_names.add(runbook_name)
 
     all_skills = load_skills_from_dir(base_path)
     selected_skills = [s for s in all_skills if s.name in target_skill_names]
 
+    effective_tool_filter = (
+        tool_filter
+        if tool_filter is not None
+        else ["list_skills", "load_skill", "load_skill_resource"]
+    )
+
     return SkillToolset(
         skills=selected_skills,
-        tool_filter=["list_skills", "load_skill", "load_skill_resource"],
+        tool_filter=effective_tool_filter,
     )

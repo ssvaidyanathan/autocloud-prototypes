@@ -1,7 +1,10 @@
 import asyncio
+import json
 import logging
 import os
 import random
+import sys
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -9,11 +12,50 @@ import httpx
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("shop-api")
+
+class JsonLogFormatter(logging.Formatter):
+    """Structured JSON log formatter for Cloud Logging and observability."""
+
+    def __init__(self, service: str) -> None:
+        super().__init__()
+        self.service = service
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        if record.exc_info:
+            if not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            message = f"{message}\n{record.exc_text}" if message else record.exc_text
+        if record.stack_info:
+            message = f"{message}\n{self.formatStack(record.stack_info)}"
+
+        timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()
+        payload = {
+            "severity": record.levelname,
+            "message": message,
+            "timestamp": timestamp,
+            "serviceContext": {"service": self.service},
+        }
+        return json.dumps(payload)
+
+
+def setup_logger(name: str = "shop-api") -> logging.Logger:
+    """Configure and return a structured JSON logger."""
+    log = logging.getLogger(name)
+    log.setLevel(logging.INFO)
+    if not any(
+        isinstance(h, logging.StreamHandler)
+        and isinstance(getattr(h, "formatter", None), JsonLogFormatter)
+        for h in log.handlers
+    ):
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(JsonLogFormatter(service=name))
+        log.addHandler(handler)
+    return log
+
+
+logger = setup_logger("shop-api")
 
 app = FastAPI(
     title="Shop API",

@@ -49,6 +49,7 @@ def test_production_dispatcher_fails_fast(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_production_tools_fail_fast_without_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("GCP_PROJECT", "test")
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     clear_client_cache()
     monkeypatch.setattr("google.auth.default", _mock_no_credentials)
@@ -118,6 +119,7 @@ def test_production_tools_fail_fast_without_client(monkeypatch: pytest.MonkeyPat
 
 def test_local_mode_allows_offline_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("GCP_PROJECT", "test")
     clear_client_cache()
 
     now = datetime.now(timezone.utc)
@@ -150,3 +152,99 @@ def test_local_mode_allows_offline_fallback(monkeypatch: pytest.MonkeyPatch) -> 
 
     res_sql = describe_cloud_sql_instances(project_id="test", client=None)
     assert res_sql == []
+
+
+@pytest.mark.asyncio
+async def test_production_startup_failfast_when_genai_client_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.app.main import app, lifespan
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("GCP_PROJECT", "test-project")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+
+    import google.genai
+
+    monkeypatch.setattr(
+        google.genai,
+        "Client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("No API key was provided")),
+    )
+
+    with pytest.raises(
+        RuntimeError, match="Production fail-fast: failed to initialize Vertex AI Gemini client"
+    ):
+        async with lifespan(app):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_production_startup_failfast_when_not_vertex_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from agent.app.main import app, lifespan
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("GCP_PROJECT", "test-project")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+
+    mock_client = MagicMock()
+    mock_client.vertexai = False
+
+    import google.genai
+
+    monkeypatch.setattr(google.genai, "Client", lambda *args, **kwargs: mock_client)
+
+    with pytest.raises(
+        RuntimeError, match="google.genai.Client did not initialize in Vertex AI mode"
+    ):
+        async with lifespan(app):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_production_startup_succeeds_with_vertex_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from agent.app.main import app, lifespan
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("GCP_PROJECT", "test-project")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+
+    mock_client = MagicMock()
+    mock_client.vertexai = True
+
+    import google.genai
+
+    monkeypatch.setattr(google.genai, "Client", lambda *args, **kwargs: mock_client)
+
+    async with lifespan(app):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_local_startup_bypasses_vertex_failfast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.app.main import app, lifespan
+
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+
+    import google.genai
+
+    monkeypatch.setattr(
+        google.genai,
+        "Client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Should not be called")),
+    )
+
+    # In local mode, lifespan should NOT attempt to initialize Vertex AI client
+    async with lifespan(app):
+        pass

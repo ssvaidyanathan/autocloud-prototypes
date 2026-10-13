@@ -59,6 +59,30 @@ resource "google_cloud_run_v2_service" "agent" {
         name  = "VERTEX_LOCATION"
         value = var.vertex_location
       }
+      env {
+        name  = "GOOGLE_GENAI_USE_VERTEXAI"
+        value = "true"
+      }
+      env {
+        name  = "GOOGLE_GENAI_USE_ENTERPRISE"
+        value = "true"
+      }
+      env {
+        name  = "GOOGLE_CLOUD_PROJECT"
+        value = var.project_id
+      }
+      env {
+        name  = "GOOGLE_CLOUD_LOCATION"
+        value = var.vertex_location
+      }
+      env {
+        name  = "SPECIALIST_MAX_LLM_CALLS"
+        value = tostring(var.specialist_max_llm_calls)
+      }
+      env {
+        name  = "SPECIALIST_MAX_TOOL_CALLS"
+        value = tostring(var.specialist_max_tool_calls)
+      }
     }
   }
 }
