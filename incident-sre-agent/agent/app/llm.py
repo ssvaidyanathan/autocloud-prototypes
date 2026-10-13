@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from google.genai import types
+from pydantic import Field
 
 from .config import AgentConfig, get_settings
 from .contracts.findings import Findings
@@ -22,6 +23,18 @@ from .tools.clients import get_genai_client
 from .triage import InvestigationPlan
 
 logger = logging.getLogger(__name__)
+
+
+class SynthesisReportSchema(Report):
+    """Synthesis schema requiring probable_root_cause to prevent first-pass omissions."""
+
+    probable_root_cause: ProbableRootCause = Field(
+        ...,
+        description=(
+            "Mandatory probable root cause object containing 'text' (grounded causal prose) "
+            "and 'confidence' (float 0.0-1.0). Must NEVER be omitted or null."
+        ),
+    )
 
 
 class GeminiLlmClient:
@@ -189,7 +202,7 @@ class GeminiLlmClient:
             config=types.GenerateContentConfig(
                 system_instruction=instruction + skill_text,
                 response_mime_type="application/json",
-                response_schema=Report,
+                response_schema=SynthesisReportSchema,
                 temperature=0.2,
             ),
         )

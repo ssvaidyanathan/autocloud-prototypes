@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from agent.app.skills_loader import SkillsLoader
+from agent.app.skills_loader import SkillsLoader, get_skill_toolset_for_target
 
 
 def test_skills_loader_discovery_and_progressive_disclosure() -> None:
@@ -29,20 +29,64 @@ def test_skills_mapping_by_target() -> None:
     loader = SkillsLoader()
     loader.load_skills_mapping()
 
+    # 1. Unprovided service: zero service runbooks in mapping
     dispatcher_skills = [s.name for s in loader.get_skills_for_target("dispatcher")]
     assert "triage-playbook" in dispatcher_skills
-    # 'service-shop-api' is in 'all' and thus present for dispatcher
-    assert "service-shop-api" in dispatcher_skills
+    assert "service-shop-api" not in dispatcher_skills
 
     logs_skills = [s.name for s in loader.get_skills_for_target("logs")]
     assert "cloud-logging-queries" in logs_skills
-    assert "service-shop-api" in logs_skills
+    assert "service-shop-api" not in logs_skills
 
     metrics_skills = [s.name for s in loader.get_skills_for_target("metrics")]
     assert "cloud-monitoring-metrics" in metrics_skills
 
     synthesizer_skills = [s.name for s in loader.get_skills_for_target("synthesizer")]
     assert "report-style" in synthesizer_skills
+
+    # 2. Dynamic runtime resolution when service_name is provided
+    dispatcher_with_svc = [
+        s.name for s in loader.get_skills_for_target("dispatcher", service_name="shop-api")
+    ]
+    assert "service-shop-api" in dispatcher_with_svc
+
+    logs_with_svc = [s.name for s in loader.get_skills_for_target("logs", service_name="shop-api")]
+    assert "cloud-logging-queries" in logs_with_svc
+    assert "service-shop-api" in logs_with_svc
+
+
+def test_unknown_or_unprovided_service_gets_no_runbook_and_no_error() -> None:
+    """Verify that an unknown or unprovided service gets no runbook and does not error."""
+    # 1. Unprovided service (service_name=None)
+    toolset_none = get_skill_toolset_for_target("logs", service_name=None)
+    names_none = [s.name for s in toolset_none.skills]
+    assert names_none == ["cloud-logging-queries"]
+    assert not any(s.startswith("service-") for s in names_none)
+
+    # 2. Empty service string (service_name="")
+    toolset_empty = get_skill_toolset_for_target("logs", service_name="")
+    names_empty = [s.name for s in toolset_empty.skills]
+    assert names_empty == ["cloud-logging-queries"]
+    assert not any(s.startswith("service-") for s in names_empty)
+
+    # 3. Unknown service (service_name="unknown-svc")
+    toolset_unknown = get_skill_toolset_for_target("logs", service_name="unknown-service-xyz")
+    names_unknown = [s.name for s in toolset_unknown.skills]
+    assert names_unknown == ["cloud-logging-queries"]
+    assert not any(s.startswith("service-") for s in names_unknown)
+
+    # 4. Known service gets dynamically attached
+    toolset_known = get_skill_toolset_for_target("logs", service_name="shop-api")
+    names_known = [s.name for s in toolset_known.skills]
+    assert set(names_known) == {"cloud-logging-queries", "service-shop-api"}
+
+    # 5. SkillsLoader direct calls behave equivalently
+    loader = SkillsLoader()
+    skills_none = loader.get_skills_for_target("logs", service_name=None)
+    assert [s.name for s in skills_none] == ["cloud-logging-queries"]
+
+    skills_unknown = loader.get_skills_for_target("logs", service_name="unknown-service-xyz")
+    assert [s.name for s in skills_unknown] == ["cloud-logging-queries"]
 
 
 def test_skills_loader_rejects_scripts_directory(tmp_path: Path) -> None:

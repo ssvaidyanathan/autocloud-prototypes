@@ -16,12 +16,18 @@ from .registry import readonly_tool
     description="Describe Cloud Run service specs with env var names only (values redacted).",
 )
 def describe_cloud_run_service(
-    project_id: str,
-    service_name: str,
+    project_id: Optional[str] = None,
+    service_name: Optional[str] = None,
     region: Optional[str] = None,
     client: Any = None,
 ) -> Dict[str, Any]:
     """Describe Cloud Run service specs, strictly redacting all environment variable values."""
+    from .common import validate_service
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+    resolved_service = validate_service(service_name) or "default"
+
     if not region:
         try:
             from agent.app.config import get_settings
@@ -30,9 +36,7 @@ def describe_cloud_run_service(
         except Exception:
             region = os.getenv("GCP_REGION", "")
 
-    console_url = (
-        f"https://console.cloud.google.com/run/detail/{region}/{service_name}?project={project_id}"
-    )
+    console_url = f"https://console.cloud.google.com/run/detail/{region}/{resolved_service}?project={pinned_project}"
 
     if client is None:
         client = get_cloud_run_services_client()
@@ -40,12 +44,78 @@ def describe_cloud_run_service(
     if client is None and not is_local_mode():
         raise RuntimeError("GCP Cloud Run services client unavailable in production environment")
 
+    if client is None:
+        return {
+            "status": "NOT_FOUND",
+            "conclusive": True,
+            "message": (
+                f"Resource '{resolved_service}' not found on Cloud Run. "
+                "No infrastructure anomalies exist for this service."
+            ),
+            "service_name": resolved_service,
+            "region": region,
+            "project_id": pinned_project,
+            "uri": "",
+            "ingress": "INGRESS_TRAFFIC_UNSPECIFIED",
+            "container_image": "",
+            "env_var_names": [],
+            "cpu_limit": "",
+            "memory_limit": "",
+            "max_concurrency": 0,
+            "service_account": "",
+            "console_url": console_url,
+        }
+
+    from .common import get_candidate_service_names
+
+    candidates = get_candidate_service_names(resolved_service)
+    svc = None
+    resolved_cand_name = resolved_service
+    for cand in candidates:
+        cand_path = f"projects/{pinned_project}/locations/{region}/services/{cand}"
+        try:
+            try:
+                cand_svc = client.get_service(name=cand_path)
+            except (TypeError, ValueError):
+                cand_svc = client.get_service(request={"name": cand_path})
+            if cand_svc is not None:
+                svc = cand_svc
+                resolved_cand_name = cand
+                break
+        except Exception:
+            continue
+
+    if svc is None:
+        return {
+            "status": "NOT_FOUND",
+            "conclusive": True,
+            "message": (
+                f"Resource '{resolved_service}' not found on Cloud Run. "
+                "No infrastructure anomalies exist for this service."
+            ),
+            "service_name": resolved_service,
+            "region": region,
+            "project_id": pinned_project,
+            "uri": "",
+            "ingress": "INGRESS_TRAFFIC_UNSPECIFIED",
+            "container_image": "",
+            "env_var_names": [],
+            "cpu_limit": "",
+            "memory_limit": "",
+            "max_concurrency": 0,
+            "service_account": "",
+            "console_url": console_url,
+        }
+
     result: Dict[str, Any] = {
-        "service_name": service_name,
+        "status": "READY",
+        "conclusive": True,
+        "message": f"Resource '{resolved_cand_name}' found and running on Cloud Run.",
+        "service_name": resolved_cand_name,
         "region": region,
-        "project_id": project_id,
-        "uri": "",
-        "ingress": "INGRESS_TRAFFIC_UNSPECIFIED",
+        "project_id": pinned_project,
+        "uri": getattr(svc, "uri", ""),
+        "ingress": str(getattr(svc, "ingress", "INGRESS_TRAFFIC_UNSPECIFIED")),
         "container_image": "",
         "env_var_names": [],  # ONLY variable names are exposed
         "cpu_limit": "",
@@ -55,72 +125,47 @@ def describe_cloud_run_service(
         "console_url": console_url,
     }
 
-    if client is not None:
-        from .common import get_candidate_service_names
+    template = getattr(svc, "template", None)
+    if template:
+        result["service_account"] = getattr(template, "service_account", "")
+        result["max_concurrency"] = getattr(template, "max_instance_request_concurrency", 0)
 
-        candidates = get_candidate_service_names(service_name)
-        svc = None
-        resolved_service_name = service_name
-        for cand in candidates:
-            cand_path = f"projects/{project_id}/locations/{region}/services/{cand}"
-            try:
-                try:
-                    cand_svc = client.get_service(name=cand_path)
-                except (TypeError, ValueError):
-                    cand_svc = client.get_service(request={"name": cand_path})
-                if cand_svc is not None:
-                    svc = cand_svc
-                    resolved_service_name = cand
-                    break
-            except Exception:
-                continue
+        containers = getattr(template, "containers", [])
+        if containers and len(containers) > 0:
+            c0 = containers[0]
+            result["container_image"] = getattr(c0, "image", "")
 
-        if svc is not None:
-            result["service_name"] = resolved_service_name
-            result["uri"] = getattr(svc, "uri", "")
-            result["ingress"] = str(getattr(svc, "ingress", "INGRESS_TRAFFIC_UNSPECIFIED"))
-
-        template = getattr(svc, "template", None)
-        if template:
-            result["service_account"] = getattr(template, "service_account", "")
-            result["max_concurrency"] = getattr(template, "max_instance_request_concurrency", 0)
-
-            containers = getattr(template, "containers", [])
-            if containers and len(containers) > 0:
-                c0 = containers[0]
-                result["container_image"] = getattr(c0, "image", "")
-
-                resources = getattr(c0, "resources", None)
-                if resources:
-                    limits = getattr(resources, "limits", None)
-                    if limits is not None:
-                        if hasattr(limits, "get"):
-                            result["cpu_limit"] = str(limits.get("cpu", "") or "")
-                            result["memory_limit"] = str(limits.get("memory", "") or "")
-                        else:
-                            try:
-                                result["cpu_limit"] = str(limits["cpu"]) if "cpu" in limits else ""
-                            except Exception:
-                                pass
-                            try:
-                                result["memory_limit"] = (
-                                    str(limits["memory"]) if "memory" in limits else ""
-                                )
-                            except Exception:
-                                pass
-
-                # CRITICAL SECURITY RULE: Extract ONLY variable names, never values!
-                env_items = getattr(c0, "env", [])
-                safe_env_names: List[str] = []
-                for item in env_items:
-                    if isinstance(item, dict):
-                        name_val = item.get("name")
+            resources = getattr(c0, "resources", None)
+            if resources:
+                limits = getattr(resources, "limits", None)
+                if limits is not None:
+                    if hasattr(limits, "get"):
+                        result["cpu_limit"] = str(limits.get("cpu", "") or "")
+                        result["memory_limit"] = str(limits.get("memory", "") or "")
                     else:
-                        name_val = getattr(item, "name", None)
-                    if name_val:
-                        safe_env_names.append(str(name_val))
+                        try:
+                            result["cpu_limit"] = str(limits["cpu"]) if "cpu" in limits else ""
+                        except Exception:
+                            pass
+                        try:
+                            result["memory_limit"] = (
+                                str(limits["memory"]) if "memory" in limits else ""
+                            )
+                        except Exception:
+                            pass
 
-                result["env_var_names"] = safe_env_names
+            # CRITICAL SECURITY RULE: Extract ONLY variable names, never values!
+            env_items = getattr(c0, "env", [])
+            safe_env_names: List[str] = []
+            for item in env_items:
+                if isinstance(item, dict):
+                    name_val = item.get("name")
+                else:
+                    name_val = getattr(item, "name", None)
+                if name_val:
+                    safe_env_names.append(str(name_val))
+
+            result["env_var_names"] = safe_env_names
 
     return result
 
@@ -130,11 +175,15 @@ def describe_cloud_run_service(
     description="List GKE clusters, status, node counts, and location.",
 )
 def describe_gke_clusters(
-    project_id: str,
+    project_id: Optional[str] = None,
     location: Optional[str] = None,
     client: Any = None,
 ) -> List[Dict[str, Any]]:
     """List GKE clusters in project and location."""
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+
     if not location:
         try:
             from agent.app.config import get_settings
@@ -152,7 +201,7 @@ def describe_gke_clusters(
     clusters: List[Dict[str, Any]] = []
 
     if client is not None:
-        parent = f"projects/{project_id}/locations/{location}"
+        parent = f"projects/{pinned_project}/locations/{location}"
         try:
             raw_clusters = client.list_clusters(parent=parent)
         except (TypeError, ValueError):
@@ -164,7 +213,7 @@ def describe_gke_clusters(
                 cluster_name = getattr(cluster, "name", "")
                 cluster_console = (
                     f"https://console.cloud.google.com/kubernetes/clusters/details/"
-                    f"{location}/{cluster_name}?project={project_id}"
+                    f"{location}/{cluster_name}?project={pinned_project}"
                 )
                 clusters.append(
                     {
@@ -184,11 +233,15 @@ def describe_gke_clusters(
     description="List Compute Engine instances, status, and machine type in a zone.",
 )
 def describe_compute_instances(
-    project_id: str,
+    project_id: Optional[str] = None,
     zone: Optional[str] = None,
     client: Any = None,
 ) -> List[Dict[str, Any]]:
     """List Compute Engine instances."""
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+
     if not zone:
         zone = os.getenv("GCP_ZONE", "")
 
@@ -204,18 +257,18 @@ def describe_compute_instances(
         raw_instances = []
         if zone:
             if hasattr(client, "list_instances"):
-                raw_instances = client.list_instances(project=project_id, zone=zone)
+                raw_instances = client.list_instances(project=pinned_project, zone=zone)
             elif hasattr(client, "list"):
-                raw_instances = client.list(project=project_id, zone=zone)
+                raw_instances = client.list(project=pinned_project, zone=zone)
         else:
             if hasattr(client, "list_instances"):
                 try:
-                    raw_instances = client.list_instances(project=project_id)
+                    raw_instances = client.list_instances(project=pinned_project)
                 except Exception:
                     pass
             if not raw_instances and hasattr(client, "aggregated_list"):
                 try:
-                    agg = client.aggregated_list(project=project_id)
+                    agg = client.aggregated_list(project=pinned_project)
                     for _, zone_scoped_list in agg:
                         for item in getattr(zone_scoped_list, "instances", []):
                             raw_instances.append(item)
@@ -226,7 +279,7 @@ def describe_compute_instances(
             inst_name = getattr(inst, "name", "")
             inst_console = (
                 f"https://console.cloud.google.com/compute/instancesDetail/zones/"
-                f"{zone}/instances/{inst_name}?project={project_id}"
+                f"{zone}/instances/{inst_name}?project={pinned_project}"
             )
             instances.append(
                 {
@@ -246,10 +299,14 @@ def describe_compute_instances(
     description="List Cloud SQL instances, database version, tier, and state.",
 )
 def describe_cloud_sql_instances(
-    project_id: str,
+    project_id: Optional[str] = None,
     client: Any = None,
 ) -> List[Dict[str, Any]]:
     """List Cloud SQL instances for a project."""
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+
     if client is None:
         client = get_cloud_sql_admin_client()
 
@@ -260,9 +317,9 @@ def describe_cloud_sql_instances(
 
     if client is not None:
         if hasattr(client, "list_instances"):
-            raw_instances = client.list_instances(project=project_id)
+            raw_instances = client.list_instances(project=pinned_project)
         elif hasattr(client, "instances"):
-            resp = client.instances().list(project=project_id).execute()
+            resp = client.instances().list(project=pinned_project).execute()
             raw_instances = resp.get("items", [])
         else:
             raw_instances = []
@@ -286,14 +343,16 @@ def describe_cloud_sql_instances(
 
             inst_console = (
                 f"https://console.cloud.google.com/sql/instances/{inst_name}/overview"
-                f"?project={project_id}"
+                f"?project={pinned_project}"
             )
+
             instances.append(
                 {
                     "name": inst_name,
                     "database_version": db_ver,
                     "tier": tier_val,
                     "state": st,
+                    "status": st,
                     "region": reg,
                     "console_url": inst_console,
                 }

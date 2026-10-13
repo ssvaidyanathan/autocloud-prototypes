@@ -42,9 +42,10 @@ locals {
 }
 ```
 
-### Vertex AI Location vs GCP Region
+### Vertex AI Location vs GCP Region & SDK Environment
 - `GCP_REGION`: Defaults to `us-central1` for hosting Cloud Run, Cloud Tasks, and Artifact Registry.
 - `VERTEX_LOCATION`: Defaults to `global`. Google Gemini 3.x models (`gemini-3.8-flash`) are served **only** through the global Vertex AI endpoint. Calling `us-central1` returns HTTP 404 for Gemini 3.x models.
+- `GOOGLE_GENAI_USE_VERTEXAI`: Set to `"true"`. Required by the Google GenAI SDK (`google.genai.Client`) and Agent Development Kit (ADK) when running on GCP with Vertex AI instead of Gemini Developer API keys. Configured as explicit Cloud Run container environment variables in Terraform (`agent/infra/terraform/modules/cloud_run/main.tf`) and validated during application startup fail-fast checks (`agent/app/main.py`), along with `GOOGLE_GENAI_USE_ENTERPRISE`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`.
 
 ### Terraform Remote State & GCS Backend
 All 3 Terraform stacks define a partial GCS backend:
@@ -98,7 +99,9 @@ All agent settings are defined in `agent/app/config.py` via `AgentConfig`. Every
 | `max_review_rounds` | `MAX_REVIEW_ROUNDS` | Maximum review loops in investigation pipeline | `1` | `.env` | No |
 | `specialist_query_limit` | `SPECIALIST_QUERY_LIMIT` | Maximum queries permitted per specialist | `5` | `.env` | No |
 | `specialist_max_entries` | `SPECIALIST_MAX_ENTRIES` | Maximum telemetry entries fetched per tool query | `50` | `.env` | No |
-| `max_tool_calls_per_specialist`| `MAX_TOOL_CALLS_PER_SPECIALIST` | Tool invocation budget per specialist | `25` | `.env` | No |
+| `specialist_max_llm_calls` | `SPECIALIST_MAX_LLM_CALLS` | Maximum LLM turns allowed per specialist | `8` | Both (`.env`, `tfvars`) | No |
+| `specialist_max_tool_calls` | `SPECIALIST_MAX_TOOL_CALLS` | Maximum tool calls allowed per specialist | `5` | Both (`.env`, `tfvars`) | No |
+| `max_tool_calls_per_specialist`| `MAX_TOOL_CALLS_PER_SPECIALIST` | Legacy tool invocation budget per specialist | `25` | `.env` | No |
 | `default_lookback_minutes` | `DEFAULT_LOOKBACK_MINUTES` | Default telemetry time window lookback before incident | `60` | `.env` | No |
 | `max_query_window_hours` | `MAX_QUERY_WINDOW_HOURS` | Maximum lookback window allowed in hours | `24` | `.env` | No |
 | `callback_connect_timeout_seconds` | `CALLBACK_CONNECT_TIMEOUT_SECONDS` | HTTP connect timeout when posting investigation results | `2.0` | `.env` | No |

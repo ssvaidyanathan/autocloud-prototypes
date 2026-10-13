@@ -31,3 +31,6 @@ class Findings(BaseModel):
     queries_run: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
     errors: list[str] = Field(default_factory=list)
+    skills_used: list[str] = Field(default_factory=list)
+    skill_first: bool = False
+    fallback_used: bool = False

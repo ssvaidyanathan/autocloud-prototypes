@@ -1,6 +1,6 @@
 import urllib.parse
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .clients import get_logging_client, get_logging_service_client, is_local_mode
 from .registry import readonly_tool
@@ -153,48 +153,100 @@ def _extract_entry_excerpt(entry: Any) -> str:
 
 @readonly_tool(
     name="query_logs",
-    description="Query Cloud Logging for log entries matching a filter. Limit capped at 200.",
+    description=(
+        "Query Cloud Logging for log entries matching structured filters. "
+        "Accepts structured parameters (service, severity, status_code_range, "
+        "text_contains, lookback_minutes) and builds Cloud Logging queries safely."
+    ),
 )
 def query_logs(
-    filter_str: str,
-    resource_names: List[str],
+    filter_str: Optional[str] = None,
+    resource_names: Optional[List[str]] = None,
+    service: Optional[str] = None,
+    severity: Optional[str] = None,
+    status_code_range: Optional[str] = None,
+    text_contains: Optional[str] = None,
+    lookback_minutes: Optional[int] = None,
     max_entries: int = 50,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
+    start_time: Optional[Union[datetime, str]] = None,
+    end_time: Optional[Union[datetime, str]] = None,
+    project_id: Optional[str] = None,
     client: Any = None,
 ) -> Dict[str, Any]:
     """Query Cloud Logging entries with compact truncated output and console deep link."""
+    from .common import (
+        build_cloud_logging_filter,
+        clamp_lookback_minutes,
+        normalize_datetime,
+        validate_raw_filter,
+    )
+    from .registry import get_pinned_project_id
+
+    start_time_dt = normalize_datetime(start_time)
+    end_time_dt = normalize_datetime(end_time)
+
     # Enforce limit <= 200
     effective_limit = min(max(1, max_entries), 200)
 
-    # Compose final filter including timestamps if specified
-    filters: List[str] = [filter_str.strip()] if filter_str.strip() else []
-    if start_time:
-        start_iso = (
-            start_time.astimezone(timezone.utc).isoformat()
-            if start_time.tzinfo
-            else start_time.replace(tzinfo=timezone.utc).isoformat()
+    # 1. Resolve and validate pinned project ID
+    extracted_proj = None
+    if resource_names:
+        extracted_proj = _format_project_id(resource_names)
+    effective_proj_arg = project_id or extracted_proj
+    pinned_project = get_pinned_project_id(effective_proj_arg)
+    effective_resource_names = resource_names or [f"projects/{pinned_project}"]
+
+    # 2. Build or parameterize filter
+    filters: List[str] = []
+
+    has_structured_filter = any(
+        v is not None and (not isinstance(v, str) or v.strip() != "")
+        for v in (service, severity, status_code_range, text_contains)
+    )
+
+    if has_structured_filter and filter_str and filter_str.strip():
+        raise ValueError(
+            "Conflicting filter specification: cannot provide both structured arguments "
+            f"(service={service!r}, severity={severity!r}, "
+            f"status_code_range={status_code_range!r}, text_contains={text_contains!r}) "
+            f"and raw filter_str ({filter_str.strip()!r}) to query_logs."
         )
-        filters.append(f'timestamp >= "{start_iso}"')
-    if end_time:
-        end_iso = (
-            end_time.astimezone(timezone.utc).isoformat()
-            if end_time.tzinfo
-            else end_time.replace(tzinfo=timezone.utc).isoformat()
+
+    if has_structured_filter:
+        built_filter = build_cloud_logging_filter(
+            service=service,
+            severity=severity,
+            status_code_range=status_code_range,
+            text_contains=text_contains,
         )
-        filters.append(f'timestamp <= "{end_iso}"')
+        if built_filter:
+            filters.append(built_filter)
+    elif filter_str and filter_str.strip():
+        validated_raw = validate_raw_filter(filter_str)
+        if validated_raw:
+            filters.append(validated_raw)
+
+    if lookback_minutes is not None:
+        clamped_lb = clamp_lookback_minutes(lookback_minutes)
+        if clamped_lb is not None:
+            now_utc = datetime.now(timezone.utc)
+            if not end_time_dt:
+                end_time_dt = now_utc
+            start_time_dt = end_time_dt - timedelta(minutes=clamped_lb)
+
+    if start_time_dt:
+        filters.append(f'timestamp >= "{start_time_dt.isoformat()}"')
+    if end_time_dt:
+        filters.append(f'timestamp <= "{end_time_dt.isoformat()}"')
 
     final_filter = " AND ".join(filters)
-    project_id = _format_project_id(resource_names)
 
     # Cloud Console deep link
     encoded_query = urllib.parse.quote(final_filter)
-    console_url = (
-        f"https://console.cloud.google.com/logs/query;query={encoded_query};project={project_id}"
-    )
+    console_url = f"https://console.cloud.google.com/logs/query;query={encoded_query};project={pinned_project}"
 
     if client is None:
-        client = get_logging_client(project_id)
+        client = get_logging_client(pinned_project)
 
     if client is None and not is_local_mode():
         raise RuntimeError("GCP Logging client unavailable in production environment")
@@ -203,7 +255,7 @@ def query_logs(
 
     if client is not None:
         raw_entries = client.list_entries(
-            resource_names=resource_names,
+            resource_names=effective_resource_names,
             filter_=final_filter,
             page_size=effective_limit,
         )
@@ -313,19 +365,28 @@ def _is_probe_or_infra_noise(text: str) -> bool:
     description="Summarize Cloud Error Reporting error groups for a project.",
 )
 def summarize_error_groups(
-    project_id: str,
+    project_id: Optional[str] = None,
     time_window_hours: int = 1,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
+    start_time: Optional[Union[datetime, str]] = None,
+    end_time: Optional[Union[datetime, str]] = None,
     service_name: Optional[str] = None,
     candidate_services: Optional[List[str]] = None,
     client: Any = None,
 ) -> Dict[str, Any]:
     """Summarize Error Reporting error groups with error counts and console deep link."""
-    console_url = f"https://console.cloud.google.com/errors?project={project_id}"
+    from .common import normalize_datetime, validate_service
+    from .registry import get_pinned_project_id
+
+    start_time_dt = normalize_datetime(start_time)
+    end_time_dt = normalize_datetime(end_time)
+
+    pinned_project = get_pinned_project_id(project_id)
+    if service_name:
+        validate_service(service_name)
+    console_url = f"https://console.cloud.google.com/errors?project={pinned_project}"
 
     if client is None:
-        client = get_logging_client(project_id)
+        client = get_logging_client(pinned_project)
 
     if client is None and not is_local_mode():
         raise RuntimeError("GCP client unavailable in production environment")
@@ -411,25 +472,15 @@ def summarize_error_groups(
             # Fallback for Cloud Logging client: aggregate recent error entries by real error field
             try:
                 filter_parts = ["severity >= ERROR"]
-                if start_time:
-                    start_iso = (
-                        start_time.astimezone(timezone.utc).isoformat()
-                        if start_time.tzinfo
-                        else start_time.replace(tzinfo=timezone.utc).isoformat()
-                    )
-                    filter_parts.append(f'timestamp >= "{start_iso}"')
+                if start_time_dt:
+                    filter_parts.append(f'timestamp >= "{start_time_dt.isoformat()}"')
                 elif time_window_hours:
                     now = datetime.now(timezone.utc)
                     start_iso = (now - timedelta(hours=time_window_hours)).isoformat()
                     filter_parts.append(f'timestamp >= "{start_iso}"')
 
-                if end_time:
-                    end_iso = (
-                        end_time.astimezone(timezone.utc).isoformat()
-                        if end_time.tzinfo
-                        else end_time.replace(tzinfo=timezone.utc).isoformat()
-                    )
-                    filter_parts.append(f'timestamp <= "{end_iso}"')
+                if end_time_dt:
+                    filter_parts.append(f'timestamp <= "{end_time_dt.isoformat()}"')
 
                 if service_name:
                     svc_clauses = []
@@ -546,7 +597,7 @@ def summarize_error_groups(
                 pass
 
     return {
-        "project_id": project_id,
+        "project_id": pinned_project,
         "time_window_hours": time_window_hours,
         "error_groups": error_groups,
         "total_groups": len(error_groups),
@@ -559,12 +610,16 @@ def summarize_error_groups(
     description="List available Cloud Logging log IDs for a project.",
 )
 def list_log_names(
-    project_id: str,
+    project_id: Optional[str] = None,
     client: Any = None,
 ) -> List[str]:
     """List log names available within the project."""
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+
     if client is None:
-        client = get_logging_client(project_id)
+        client = get_logging_client(pinned_project)
 
     if client is None and not is_local_mode():
         raise RuntimeError("GCP Logging client unavailable in production environment")
@@ -572,13 +627,13 @@ def list_log_names(
     if client is not None:
         if hasattr(client, "list_logs"):
             try:
-                raw_logs = client.list_logs(project_id=project_id)
+                raw_logs = client.list_logs(project_id=pinned_project)
             except TypeError:
-                raw_logs = client.list_logs(parent=f"projects/{project_id}")
+                raw_logs = client.list_logs(parent=f"projects/{pinned_project}")
             return [str(log) for log in raw_logs]
         else:
             service_client = get_logging_service_client()
             if service_client is not None:
-                raw_logs = service_client.list_logs(parent=f"projects/{project_id}")
+                raw_logs = service_client.list_logs(parent=f"projects/{pinned_project}")
                 return [str(log) for log in raw_logs]
     return []

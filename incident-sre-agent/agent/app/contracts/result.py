@@ -26,3 +26,8 @@ class InvestigationResult(BaseModel):
             if not self.error or not self.error.strip():
                 raise ValueError("error must not be None and non-empty when status is 'failed'")
         return self
+
+    @property
+    def skills_used(self) -> list[str]:
+        """Aggregate list of skills used from report, if present."""
+        return self.report.skills_used if self.report else []

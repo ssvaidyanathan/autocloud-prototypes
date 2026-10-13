@@ -17,6 +17,8 @@ def test_agent_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.model_synthesizer == "gemini-3.8-flash"
     assert config.allowed_callback_hosts == ["*.run.app"]
     assert config.timeout_seconds == 600
+    assert config.specialist_max_llm_calls == 8
+    assert config.specialist_max_tool_calls == 5
     assert config.max_tool_calls_per_specialist == 25
     assert config.max_query_window_hours == 24
     assert config.callback_connect_timeout_seconds == 5.0
@@ -34,6 +36,8 @@ def test_agent_config_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MODEL_SYNTHESIZER", "test-model-synthesizer")
     monkeypatch.setenv("ALLOWED_CALLBACK_HOSTS", "custom.run.app,internal.net,localhost")
     monkeypatch.setenv("TIMEOUT_SECONDS", "300")
+    monkeypatch.setenv("SPECIALIST_MAX_LLM_CALLS", "12")
+    monkeypatch.setenv("SPECIALIST_MAX_TOOL_CALLS", "6")
     monkeypatch.setenv("MAX_TOOL_CALLS_PER_SPECIALIST", "15")
     monkeypatch.setenv("MAX_QUERY_WINDOW_HOURS", "12")
     monkeypatch.setenv("CALLBACK_CONNECT_TIMEOUT_SECONDS", "10.0")
@@ -51,6 +55,8 @@ def test_agent_config_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.model_synthesizer == "test-model-synthesizer"
     assert config.allowed_callback_hosts == ["custom.run.app", "internal.net", "localhost"]
     assert config.timeout_seconds == 300
+    assert config.specialist_max_llm_calls == 12
+    assert config.specialist_max_tool_calls == 6
     assert config.max_tool_calls_per_specialist == 15
     assert config.max_query_window_hours == 12
     assert config.callback_connect_timeout_seconds == 10.0

@@ -66,3 +66,6 @@ agent/scripts/*.json
 # Snapshots and archives
 snapshots/
 *.tar.gz
+
+# Design and process logs (kept in scratchpad)
+.design/

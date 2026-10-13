@@ -1,5 +1,6 @@
 import time
 from datetime import datetime, timezone
+from typing import Any, Optional, Union
 
 import pytest
 from agent.app.config import AgentConfig
@@ -10,6 +11,8 @@ from agent.app.contracts.result import InvestigationResult
 from agent.app.dispatcher import Dispatcher
 from agent.app.specialists.base import BaseSpecialist
 from agent.app.triage import InvestigationPlan
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_response import LlmResponse
 
 
 def _make_request() -> InvestigationRequest:
@@ -370,3 +373,266 @@ async def test_dispatcher_backfills_service_hint_and_passes_plan_to_specialists(
     assert plan_passed.affected_service == "shop-api"
     assert mock_logs.last_incident is not None
     assert mock_logs.last_incident.service_hint == "shop-api"
+
+
+class StubSkillLlm(BaseLlm):
+    """Stubbed LLM loading a specific skill and returning structured findings."""
+
+    model: str = "stub"
+    _skill_to_load: str = ""
+    _turn: int = 0
+
+    def __init__(self, skill_to_load: str) -> None:
+        super().__init__(model="stub")
+        self._skill_to_load = skill_to_load
+        self._turn = 0
+
+    async def generate_content_async(self, llm_request: Any, stream: bool = False) -> Any:
+        self._turn += 1
+        if self._turn == 1:
+            from google.genai import types
+
+            yield LlmResponse(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part.from_function_call(
+                            name="load_skill",
+                            args={"skill_name": self._skill_to_load},
+                        )
+                    ],
+                )
+            )
+        else:
+            from google.genai import types
+
+            yield LlmResponse(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            text=(
+                                f'{{"summary": "Analysis for {self._skill_to_load}", '
+                                f'"confidence": 0.85, '
+                                f'"anomalies": ["Anomaly for {self._skill_to_load}"]}}'
+                            )
+                        )
+                    ],
+                )
+            )
+
+
+@pytest.mark.anyio
+async def test_dispatcher_concurrent_fanout_all_four_specialists() -> None:
+    """Verify dispatcher fans out all 4 specialists concurrently via investigate_async."""
+    from unittest.mock import MagicMock
+
+    from agent.app.specialists.changes import ChangesSpecialist
+    from agent.app.specialists.logs import LogsSpecialist
+    from agent.app.specialists.metrics import MetricsSpecialist
+    from agent.app.specialists.resources import ResourcesSpecialist
+
+    mock_client = MagicMock()
+    mock_client.list_entries.return_value = []
+    mock_client.list_group_stats.return_value = []
+    mock_client.list_time_series.return_value = []
+    mock_client.list_incidents.return_value = []
+    mock_client.list_alert_policies.return_value = []
+    mock_client.list_revisions.return_value = []
+    mock_client.list_builds.return_value = MagicMock(builds=[])
+    mock_client.get_service.return_value = MagicMock(uri="", template=MagicMock(containers=[]))
+    mock_client.list_instances.return_value = []
+    mock_client.list_clusters.return_value = MagicMock(clusters=[])
+    mock_client.aggregated_list.return_value = []
+
+    specs = {
+        "logs": LogsSpecialist(
+            project_id="test-proj",
+            client=mock_client,
+            model=StubSkillLlm("cloud-logging-queries"),
+        ),
+        "metrics": MetricsSpecialist(
+            project_id="test-proj",
+            client=mock_client,
+            model=StubSkillLlm("cloud-monitoring-metrics"),
+        ),
+        "changes": ChangesSpecialist(
+            project_id="test-proj",
+            client=mock_client,
+            model=StubSkillLlm("change-correlation"),
+        ),
+        "resources": ResourcesSpecialist(
+            project_id="test-proj",
+            client=mock_client,
+            model=StubSkillLlm("cloud-run-troubleshooting"),
+        ),
+    }
+
+    config = AgentConfig(timeout_seconds=30)
+    disp = Dispatcher(config=config, specialists=specs)
+    req = _make_request()
+
+    result = await disp.investigate(req)
+
+    assert result.status == "completed"
+    assert result.report is not None
+    assert result.error is None
+
+    status_map = {s.specialist: s.status for s in result.report.specialists_status}
+    assert status_map["logs"] == "completed"
+    assert status_map["metrics"] == "completed"
+    assert status_map["changes"] == "completed"
+    assert status_map["resources"] == "completed"
+
+
+@pytest.mark.anyio
+async def test_dispatcher_error_isolation_single_specialist_failure() -> None:
+    """Verify single specialist exception does not fail other specialists or synthesis."""
+    from unittest.mock import MagicMock
+
+    from agent.app.specialists.changes import ChangesSpecialist
+    from agent.app.specialists.logs import LogsSpecialist
+    from agent.app.specialists.resources import ResourcesSpecialist
+
+    mock_client = MagicMock()
+    mock_client.list_entries.return_value = []
+    mock_client.list_group_stats.return_value = []
+    mock_client.list_time_series.return_value = []
+    mock_client.list_incidents.return_value = []
+    mock_client.list_alert_policies.return_value = []
+    mock_client.list_revisions.return_value = []
+    mock_client.list_builds.return_value = MagicMock(builds=[])
+    mock_client.get_service.return_value = MagicMock(uri="", template=MagicMock(containers=[]))
+    mock_client.list_instances.return_value = []
+    mock_client.list_clusters.return_value = MagicMock(clusters=[])
+    mock_client.aggregated_list.return_value = []
+
+    class ExplodingSpecialist(BaseSpecialist):
+        def __init__(self) -> None:
+            super().__init__(name="ExplodingSpecialist", description="Always explodes")
+
+        def run_investigation(
+            self,
+            incident: Incident,
+            start_time: Optional[Union[datetime, str]] = None,
+            end_time: Optional[Union[datetime, str]] = None,
+            **kwargs: object,
+        ) -> Findings:
+            raise RuntimeError("Fatal explosion in specialist async call")
+
+        async def investigate_async(
+            self,
+            incident: Incident,
+            start_time: Optional[Union[datetime, str]] = None,
+            end_time: Optional[Union[datetime, str]] = None,
+            **kwargs: Any,
+        ) -> Findings:
+            raise RuntimeError("Fatal explosion in specialist async call")
+
+    specs = {
+        "logs": LogsSpecialist(
+            project_id="test-proj",
+            client=mock_client,
+            model=StubSkillLlm("cloud-logging-queries"),
+        ),
+        "metrics": ExplodingSpecialist(),
+        "changes": ChangesSpecialist(
+            project_id="test-proj",
+            client=mock_client,
+            model=StubSkillLlm("change-correlation"),
+        ),
+        "resources": ResourcesSpecialist(
+            project_id="test-proj",
+            client=mock_client,
+            model=StubSkillLlm("cloud-run-troubleshooting"),
+        ),
+    }
+
+    config = AgentConfig(timeout_seconds=30)
+    disp = Dispatcher(config=config, specialists=specs)
+    req = _make_request()
+
+    result = await disp.investigate(req)
+
+    # Whole investigation still completes cleanly
+    assert result.status == "completed"
+    assert result.report is not None
+    assert result.error is None
+
+    status_map = {s.specialist: s for s in result.report.specialists_status}
+    assert status_map["logs"].status == "completed"
+    assert status_map["changes"].status == "completed"
+    assert status_map["resources"].status == "completed"
+    assert status_map["metrics"].status == "failed"
+    assert "Fatal explosion in specialist async call" in (status_map["metrics"].error or "")
+
+
+@pytest.mark.anyio
+async def test_dispatcher_no_skill_crosstalk_concurrent_fan_out() -> None:
+    """Verify concurrent execution of all specialists preserves zero skill crosstalk."""
+    from unittest.mock import MagicMock
+
+    from agent.app.specialists.changes import ChangesSpecialist
+    from agent.app.specialists.logs import LogsSpecialist
+    from agent.app.specialists.metrics import MetricsSpecialist
+    from agent.app.specialists.resources import ResourcesSpecialist
+
+    mock_client = MagicMock()
+    mock_client.list_entries.return_value = []
+    mock_client.list_group_stats.return_value = []
+    mock_client.list_time_series.return_value = []
+    mock_client.list_incidents.return_value = []
+    mock_client.list_alert_policies.return_value = []
+    mock_client.list_revisions.return_value = []
+    mock_client.list_builds.return_value = MagicMock(builds=[])
+    mock_client.get_service.return_value = MagicMock(uri="", template=MagicMock(containers=[]))
+    mock_client.list_instances.return_value = []
+    mock_client.list_clusters.return_value = MagicMock(clusters=[])
+    mock_client.aggregated_list.return_value = []
+
+    logs_spec = LogsSpecialist(
+        project_id="test-proj",
+        client=mock_client,
+        model=StubSkillLlm("cloud-logging-queries"),
+    )
+    metrics_spec = MetricsSpecialist(
+        project_id="test-proj",
+        client=mock_client,
+        model=StubSkillLlm("cloud-monitoring-metrics"),
+    )
+    changes_spec = ChangesSpecialist(
+        project_id="test-proj",
+        client=mock_client,
+        model=StubSkillLlm("change-correlation"),
+    )
+    resources_spec = ResourcesSpecialist(
+        project_id="test-proj",
+        client=mock_client,
+        model=StubSkillLlm("cloud-run-troubleshooting"),
+    )
+
+    specs = {
+        "logs": logs_spec,
+        "metrics": metrics_spec,
+        "changes": changes_spec,
+        "resources": resources_spec,
+    }
+
+    config = AgentConfig(timeout_seconds=30)
+    disp = Dispatcher(config=config, specialists=specs)
+    req = _make_request()
+
+    result = await disp.investigate(req)
+    assert result.status == "completed"
+
+    # Verify per-specialist skill isolation
+    assert logs_spec.skill_tracker.skills_used == ["cloud-logging-queries"]
+    assert metrics_spec.skill_tracker.skills_used == ["cloud-monitoring-metrics"]
+    assert changes_spec.skill_tracker.skills_used == ["change-correlation"]
+    assert resources_spec.skill_tracker.skills_used == ["cloud-run-troubleshooting"]
+
+    # Verify no cross-contamination
+    assert "cloud-monitoring-metrics" not in logs_spec.skill_tracker.skills_used
+    assert "change-correlation" not in logs_spec.skill_tracker.skills_used
+    assert "cloud-logging-queries" not in metrics_spec.skill_tracker.skills_used
+    assert "cloud-run-troubleshooting" not in changes_spec.skill_tracker.skills_used

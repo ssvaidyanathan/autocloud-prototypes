@@ -19,4 +19,6 @@ model_dispatcher                 = "gemini-3.8-flash"
 model_synthesizer                = "gemini-3.8-flash"
 model_specialist                 = "gemini-3.8-flash"
 allowed_callback_hosts           = "*.run.app"
+specialist_max_llm_calls         = 8
+specialist_max_tool_calls        = 5
 

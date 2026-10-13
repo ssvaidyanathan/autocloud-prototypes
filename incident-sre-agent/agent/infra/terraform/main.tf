@@ -65,6 +65,8 @@ module "cloud_run" {
   model_synthesizer             = var.model_synthesizer
   model_specialist              = var.model_specialist
   allowed_callback_hosts        = var.allowed_callback_hosts
+  specialist_max_llm_calls      = var.specialist_max_llm_calls
+  specialist_max_tool_calls     = var.specialist_max_tool_calls
 
   depends_on = [module.apis, module.iam]
 }

@@ -90,6 +90,8 @@ async def run_live_investigation(
     end_time: Optional[datetime] = None,
     incident_id: Optional[str] = None,
     severity: str = "P1",
+    title: Optional[str] = None,
+    description: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute complete live investigation against real GCP project."""
     target_project = project_id or os.getenv("GCP_PROJECT") or os.getenv("PROJECT_ID")
@@ -207,8 +209,9 @@ async def run_live_investigation(
         source="servicenow",
         external_id=incident_key,
         external_key=incident_key,
-        title=f"Service degradation and 5xx errors on {target_service}",
-        description=(
+        title=title or f"Service degradation and 5xx errors on {target_service}",
+        description=description
+        or (
             f"Intermittent HTTP 500 responses and latency spikes detected on Cloud Run service "
             f"'{target_service}' in {cfg.gcp_region}. Critical user workflows impacted."
         ),
@@ -341,6 +344,7 @@ async def run_live_investigation(
         "servicenow_html": service_now_html,
         "captured_callback_status": captured_data.get("status"),
         "specialists_status": [s.model_dump(mode="json") for s in report.specialists_status],
+        "findings": {k: v.model_dump(mode="json") for k, v in findings.items()},
     }
 
     return evidence_summary
@@ -388,6 +392,16 @@ def parse_args() -> argparse.Namespace:
         help="Incident severity level (default: P1)",
     )
     parser.add_argument(
+        "--title",
+        default=os.getenv("INCIDENT_TITLE"),
+        help="Incident title / short description",
+    )
+    parser.add_argument(
+        "--description",
+        default=os.getenv("INCIDENT_DESCRIPTION"),
+        help="Incident detailed description",
+    )
+    parser.add_argument(
         "--output",
         default=os.getenv(
             "OUTPUT_FILE",
@@ -428,6 +442,8 @@ def main() -> None:
                 end_time=end_dt,
                 incident_id=args.incident_id,
                 severity=args.severity,
+                title=args.title,
+                description=args.description,
             )
         )
         print("\n" + "=" * 70)

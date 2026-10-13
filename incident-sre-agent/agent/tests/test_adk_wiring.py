@@ -128,33 +128,42 @@ def test_fallback_heuristic_mode_recorded_in_report() -> None:
 
 
 def test_skill_toolset_integration_and_filtering() -> None:
-    # Verify dispatcher skill toolset
+    # 1. Verify unprovided service contains strictly base domain skills
     disp_toolset = get_skill_toolset_for_target("dispatcher")
     assert isinstance(disp_toolset, SkillToolset)
     disp_skill_names = [s.name for s in disp_toolset.skills]
     assert "triage-playbook" in disp_skill_names
-    assert "service-shop-api" in disp_skill_names
+    assert "service-shop-api" not in disp_skill_names
 
-    # Verify logs specialist skill toolset
-    logs_toolset = get_skill_toolset_for_target("logs")
+    logs_base = get_skill_toolset_for_target("logs")
+    assert [s.name for s in logs_base.skills] == ["cloud-logging-queries"]
+
+    # 2. Verify dynamic runtime resolution with service_name="shop-api"
+    disp_toolset_svc = get_skill_toolset_for_target("dispatcher", service_name="shop-api")
+    disp_svc_skill_names = [s.name for s in disp_toolset_svc.skills]
+    assert "triage-playbook" in disp_svc_skill_names
+    assert "service-shop-api" in disp_svc_skill_names
+
+    # Verify logs specialist skill toolset with dynamic resolution
+    logs_toolset = get_skill_toolset_for_target("logs", service_name="shop-api")
     assert isinstance(logs_toolset, SkillToolset)
     logs_skill_names = [s.name for s in logs_toolset.skills]
     assert set(logs_skill_names) == {"cloud-logging-queries", "service-shop-api"}
 
-    # Verify metrics specialist skill toolset
-    metrics_toolset = get_skill_toolset_for_target("metrics")
+    # Verify metrics specialist skill toolset with dynamic resolution
+    metrics_toolset = get_skill_toolset_for_target("metrics", service_name="shop-api")
     assert isinstance(metrics_toolset, SkillToolset)
     metrics_skill_names = [s.name for s in metrics_toolset.skills]
     assert set(metrics_skill_names) == {"cloud-monitoring-metrics", "service-shop-api"}
 
-    # Verify changes specialist skill toolset
-    changes_toolset = get_skill_toolset_for_target("changes")
+    # Verify changes specialist skill toolset with dynamic resolution
+    changes_toolset = get_skill_toolset_for_target("changes", service_name="shop-api")
     assert isinstance(changes_toolset, SkillToolset)
     changes_skill_names = [s.name for s in changes_toolset.skills]
     assert set(changes_skill_names) == {"change-correlation", "service-shop-api"}
 
-    # Verify synthesizer skill toolset
-    synth_toolset = get_skill_toolset_for_target("synthesizer")
+    # Verify synthesizer skill toolset with dynamic resolution
+    synth_toolset = get_skill_toolset_for_target("synthesizer", service_name="shop-api")
     assert isinstance(synth_toolset, SkillToolset)
     synth_skill_names = [s.name for s in synth_toolset.skills]
     assert set(synth_skill_names) == {"report-style", "service-shop-api"}
