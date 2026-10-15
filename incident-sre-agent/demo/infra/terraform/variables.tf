@@ -98,3 +98,10 @@ variable "shop_api_memory" {
   description = "Memory limit for shop-api Cloud Run service"
   default     = "1Gi"
 }
+
+variable "enable_fault_control_exclusion" {
+  type        = bool
+  description = "Whether to create a Cloud Logging exclusion for demo fault control endpoints (/fault/*)"
+  default     = true
+}
+

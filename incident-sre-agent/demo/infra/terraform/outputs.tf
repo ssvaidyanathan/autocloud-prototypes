@@ -22,3 +22,9 @@ output "shop_api_sa_email" {
   description = "Service account email for shop-api"
   value       = google_service_account.shop_api_sa.email
 }
+
+output "fault_control_exclusion_name" {
+  description = "Name of the Cloud Logging fault-control exclusion, if enabled"
+  value       = var.enable_fault_control_exclusion ? google_logging_project_exclusion.demo_fault_control[0].name : null
+}
+

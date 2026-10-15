@@ -448,7 +448,6 @@ def inject_fault(req: FaultInjectRequest) -> Dict[str, Any]:
             "Scenario 5: Dependency failure enabled (inventory-svc IAM token dropped/forbidden)"
         )
 
-    logger.info("Admin configuration updated")
     return {
         "status": "fault_injected",
         "scenario": scenario,
@@ -461,7 +460,6 @@ def inject_fault(req: FaultInjectRequest) -> Dict[str, Any]:
 def reset_faults() -> Dict[str, Any]:
     """Reset all injected faults to normal operation."""
     fault_state.reset()
-    logger.info("Admin configuration reset")
     return {
         "status": "reset",
         "active_scenarios": [],

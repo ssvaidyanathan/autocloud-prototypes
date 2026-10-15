@@ -229,3 +229,30 @@ def test_get_inventory_auth_headers_fallback_local_and_production(
     with mock.patch.dict(os.environ, {"INVENTORY_SERVICE_TOKEN": "custom-token"}):
         headers = _get_inventory_auth_headers()
         assert headers == {"Authorization": "Bearer custom-token"}
+
+
+def test_fault_control_endpoints_emit_zero_app_logs(
+    shop_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Verify fault injection and reset endpoints emit zero application log records.
+
+    Administrative toggles must remain silent so autonomous SRE agents do not
+    detect artificial fault injection in application telemetry.
+    """
+    with caplog.at_level(logging.DEBUG, logger="shop-api"):
+        caplog.clear()
+
+        # 1. Fault injection endpoint
+        inject_resp = shop_client.post("/fault/inject", json={"scenario": 1, "error_rate": 0.4})
+        assert inject_resp.status_code == 200
+        assert len(caplog.records) == 0
+
+        # 2. Fault status query endpoint
+        status_resp = shop_client.get("/fault/status")
+        assert status_resp.status_code == 200
+        assert len(caplog.records) == 0
+
+        # 3. Fault reset endpoint
+        reset_resp = shop_client.post("/fault/reset")
+        assert reset_resp.status_code == 200
+        assert len(caplog.records) == 0
