@@ -116,8 +116,8 @@ resource "google_logging_project_exclusion" "demo_fault_control" {
   count       = var.enable_fault_control_exclusion ? 1 : 0
   name        = "${var.name_prefix}-demo-fault-control"
   project     = var.project_id
-  description = "Exclude Cloud Run request logs for demo fault control endpoints (/fault/*) to prevent revealing synthetic fault injection during telemetry investigation"
-  filter      = "resource.type=\"cloud_run_revision\" AND (resource.labels.service_name=\"${local.shop_api_service_name}\" OR resource.labels.service_name=\"${local.inventory_svc_service_name}\") AND httpRequest.requestUrl=~\"/fault/\""
+  description = "Exclude Cloud Run request and stdout access logs for demo fault control endpoints (/fault/*) to prevent revealing synthetic fault injection during telemetry investigation"
+  filter      = "resource.type=\"cloud_run_revision\" AND (resource.labels.service_name=\"${local.shop_api_service_name}\" OR resource.labels.service_name=\"${local.inventory_svc_service_name}\") AND (httpRequest.requestUrl=~\"/fault/\" OR (logName=~\"stdout\" AND textPayload=~\"\\\"[A-Z]+ /fault/\"))"
 }
 
 
