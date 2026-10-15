@@ -1,12 +1,15 @@
 from .changes import (
+    diff_revisions,
     list_cloud_builds,
     list_cloud_run_revisions,
     query_audit_logs,
 )
 from .common import get_candidate_service_names
 from .logs import (
+    aggregate_requests,
     list_log_names,
     query_logs,
+    query_request_logs,
     summarize_error_groups,
 )
 from .metrics import (
@@ -26,6 +29,7 @@ from .resources import (
     describe_cloud_sql_instances,
     describe_compute_instances,
     describe_gke_clusters,
+    get_platform_events,
 )
 
 __all__ = [
@@ -34,6 +38,8 @@ __all__ = [
     "default_registry",
     "readonly_tool",
     "query_logs",
+    "query_request_logs",
+    "aggregate_requests",
     "summarize_error_groups",
     "list_log_names",
     "query_time_series",
@@ -41,9 +47,11 @@ __all__ = [
     "list_alert_policies",
     "list_open_alerts",
     "query_audit_logs",
+    "diff_revisions",
     "list_cloud_run_revisions",
     "list_cloud_builds",
     "describe_cloud_run_service",
+    "get_platform_events",
     "describe_gke_clusters",
     "describe_compute_instances",
     "describe_cloud_sql_instances",

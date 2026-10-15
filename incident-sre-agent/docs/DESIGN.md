@@ -148,10 +148,10 @@ To prevent duplicate work notes or comments if the SRE Agent retries callback su
 The SRE Agent uses Google Agent Development Kit (ADK) constructs to implement deterministic investigation control flow:
 1. **Triage Agent** (`LlmAgent`): Parses incident ticket fields, determines candidate service names, identifies reported symptoms, calculates the dynamic investigation time window (`[opened_at - 60m, now]` clamped to 24 hours), and formulates an `InvestigationPlan`.
 2. **Parallel Specialists** (`ParallelAgent`): Executes selected domain specialists concurrently:
-   - **Logs Specialist**: Queries Cloud Logging using Cloud Run request log filters (`run.googleapis.com/requests`), extracts error groups, and summarizes HTTP status distributions.
+   - **Logs Specialist**: Queries Cloud Logging using Cloud Run request log filters (`run.googleapis.com/requests`), extracts error groups, summarizes HTTP status distributions, and queries structured request log metrics via `query_request_logs` (and `aggregate_requests` alias).
    - **Metrics Specialist**: Queries Cloud Monitoring time series for request rates (`run.googleapis.com/request_count`), request latencies (`run.googleapis.com/request_latencies`), and resource utilization. Compares incident window against pre-incident baseline.
-   - **Changes Specialist**: Inspects Cloud Audit Logs for administrative actions (`UpdateService`, `CreateRevision`), deployment authors, and container image updates.
-   - **Resources Specialist**: Describes Cloud Run service specifications, CPU/memory limits, instance counts, and runtime configurations (with strict redaction of sensitive environment variable values).
+   - **Changes Specialist**: Inspects Cloud Audit Logs for administrative actions (`UpdateService`, `CreateRevision`), deployment authors, container image updates, and performs zero-secret-leakage revision diffing via `diff_revisions`.
+   - **Resources Specialist**: Describes Cloud Run service specifications, CPU/memory limits, instance counts, runtime configurations (with strict redaction of sensitive environment variable values), and queries container restarts, OOM terminations, and probe failures via `get_platform_events`.
 3. **Review Evaluator**: Inspects specialist findings against the triage plan. If anomalies require targeted drill-down, executes at most one focused follow-up query round.
 4. **Synthesizer Agent** (`LlmAgent`): Uses Vertex AI Gemini to correlate specialist evidence, establish chronological timelines, articulate root cause mechanisms, calibrate confidence scores, and populate actionable remediation playbooks.
 

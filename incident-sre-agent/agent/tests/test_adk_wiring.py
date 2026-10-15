@@ -72,9 +72,16 @@ def test_specialists_tool_segregation_and_readonly_allowlist() -> None:
         assert isinstance(spec.llm_agent, LlmAgent)
         assert spec.llm_agent.output_schema == Findings
 
-    # 1. Logs Specialist: ONLY query_logs, summarize_error_groups, list_log_names
+    # 1. Logs Specialist: query_logs, query_request_logs, aggregate_requests,
+    #    summarize_error_groups, list_log_names
     logs_tool_names = [t.name for t in logs_spec.get_tools()]
-    assert set(logs_tool_names) == {"query_logs", "summarize_error_groups", "list_log_names"}
+    assert set(logs_tool_names) == {
+        "query_logs",
+        "query_request_logs",
+        "aggregate_requests",
+        "summarize_error_groups",
+        "list_log_names",
+    }
     for t in logs_spec.get_tools():
         assert isinstance(t, FunctionTool)
 
@@ -88,19 +95,22 @@ def test_specialists_tool_segregation_and_readonly_allowlist() -> None:
         "list_open_alerts",
     }
 
-    # 3. Changes Specialist: ONLY query_audit_logs, list_cloud_run_revisions, list_cloud_builds
+    # 3. Changes Specialist: query_audit_logs, diff_revisions, list_cloud_run_revisions,
+    #    list_cloud_builds
     changes_tool_names = [t.name for t in changes_spec.get_tools()]
     assert set(changes_tool_names) == {
         "query_audit_logs",
+        "diff_revisions",
         "list_cloud_run_revisions",
         "list_cloud_builds",
     }
 
-    # 4. Resources Specialist: ONLY describe_cloud_run_service, describe_gke_clusters,
-    #    describe_compute_instances, describe_cloud_sql_instances
+    # 4. Resources Specialist: describe_cloud_run_service, get_platform_events,
+    #    describe_gke_clusters, describe_compute_instances, describe_cloud_sql_instances
     resources_tool_names = [t.name for t in resources_spec.get_tools()]
     assert set(resources_tool_names) == {
         "describe_cloud_run_service",
+        "get_platform_events",
         "describe_gke_clusters",
         "describe_compute_instances",
         "describe_cloud_sql_instances",

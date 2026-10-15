@@ -31,3 +31,15 @@ This skill guides the construction of precise, cost-effective Cloud Logging quer
   ```text
   logName =~ "cloudaudit.googleapis.com%2Factivity" OR jsonPayload.stack_trace:*
   ```
+- **Cloud Run Request Logs (Status Classes & Route Latency)**:
+  Cloud Run emits structured request logs under `run.googleapis.com/requests` independently of application logs. Use `query_request_logs` to inspect:
+  - HTTP 403 Forbidden occurrences logged at DEFAULT severity (e.g. IAM authorization checks, missing invoker roles, or expired tokens).
+  - HTTP 4xx and 5xx status classes and route breakdowns.
+  - Tail latency percentiles (p50, p95, p99) across request paths.
+  ```text
+  resource.type = "cloud_run_revision"
+  log_id("run.googleapis.com/requests")
+  resource.labels.service_name = "<service>"
+  httpRequest.status >= 400
+  ```
+

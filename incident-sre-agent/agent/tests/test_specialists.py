@@ -69,10 +69,8 @@ def test_logs_specialist_produces_valid_findings() -> None:
     assert not findings.errors
 
     # Verify query filter uses severity >= WARNING
-    call_args = mock_client.list_entries.call_args
-    filter_arg = call_args.kwargs.get("filter_", "")
-    assert "severity >= WARNING" in filter_arg
-    assert "shop-api" in filter_arg
+    filters = [c.kwargs.get("filter_", "") for c in mock_client.list_entries.call_args_list]
+    assert any("severity >= WARNING" in f and "shop-api" in f for f in filters)
 
     # Verify WARNING entry captured with kind warning_log
     warning_items = [e for e in findings.evidence if e.kind == "warning_log"]
@@ -235,3 +233,19 @@ def test_specialist_error_containment() -> None:
     assert isinstance(findings, Findings)
     assert len(findings.errors) > 0
     assert "Fatal GCP network timeout" in findings.errors[0]
+
+
+def test_specialists_get_tools_includes_new_tools() -> None:
+    logs_spec = LogsSpecialist(project_id="test-proj")
+    changes_spec = ChangesSpecialist(project_id="test-proj")
+    resources_spec = ResourcesSpecialist(project_id="test-proj")
+
+    logs_tools = [t.name for t in logs_spec.get_tools()]
+    assert "query_request_logs" in logs_tools
+    assert "aggregate_requests" in logs_tools
+
+    changes_tools = [t.name for t in changes_spec.get_tools()]
+    assert "diff_revisions" in changes_tools
+
+    resources_tools = [t.name for t in resources_spec.get_tools()]
+    assert "get_platform_events" in resources_tools

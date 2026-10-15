@@ -23,3 +23,15 @@ Over 75% of production outages are triggered by a recent deployment, configurati
    - Service account role bindings removed or altered.
 4. **Infrastructure Edits**:
    - Network firewall changes, Cloud SQL tier or flag modifications.
+
+## Revision Diffing Guidelines
+When multiple Cloud Run revisions are detected:
+1. **Compare Consecutive Revisions**:
+   - Use `diff_revisions` to compare the currently active revision with the preceding stable revision.
+2. **Environment Variable Regressions**:
+   - Inspect `env_vars_removed` to identify dropped configurations, service endpoints, or parameters (values are strictly redacted).
+3. **Container Image Rollouts**:
+   - Check if the container image tag or digest changed (`image_changed`).
+4. **Probes & Limits**:
+   - Verify health probe changes (readiness/liveness paths or timeouts) and container limits (CPU, memory, concurrency).
+

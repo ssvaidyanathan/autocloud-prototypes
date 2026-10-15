@@ -210,10 +210,10 @@ Each specialist operates as an independent ADK `LlmAgent` endowed with domain-sp
 
 | Specialist | Target Telemetry | Tool Modules | Assigned Skills | Typical Queries / Responsibilities |
 |---|---|---|---|---|
-| **Logs Specialist** | Google Cloud Logging | `tools/logging.py` | `cloud-logging-queries`, `service-<name>` | Query `severity>=ERROR`, parse stack traces, count error frequency, extract HTTP 5xx log entries, identify first/last occurrence. |
-| **Metrics Specialist** | Google Cloud Monitoring | `tools/monitoring.py` | `cloud-monitoring-metrics`, `service-<name>` | Fetch time-series for Cloud Run request latencies (p50, p95, p99), container CPU/memory utilization, instance auto-scaling counts. |
-| **Changes Specialist** | Cloud Audit Logs | `tools/changes.py` | `change-correlation`, `service-<name>` | Query `cloudaudit.googleapis.com` for service updates, new Cloud Run revisions, IAM policy modifications, and deployment rollout timestamps. |
-| **Resources Specialist** | Cloud Asset / Run API | `tools/resources.py` | `cloud-run-troubleshooting`, `gke-troubleshooting`, `cloud-sql-troubleshooting`, `service-<name>` | Inspect service specifications, ingress settings, env vars (with automated secret redaction), scaling limits, and dependency URLs. |
+| **Logs Specialist** | Google Cloud Logging | `tools/logs.py` | `cloud-logging-queries`, `service-<name>` | Query `severity>=ERROR`, parse stack traces, count error frequency, extract HTTP 5xx log entries, identify first/last occurrence, query request logs via `query_request_logs` (and `aggregate_requests` alias) for status breakdown and latency percentiles. |
+| **Metrics Specialist** | Google Cloud Monitoring | `tools/metrics.py` | `cloud-monitoring-metrics`, `service-<name>` | Fetch time-series for Cloud Run request latencies (p50, p95, p99), container CPU/memory utilization, instance auto-scaling counts. |
+| **Changes Specialist** | Cloud Audit Logs | `tools/changes.py` | `change-correlation`, `service-<name>` | Query `cloudaudit.googleapis.com` for service updates, new Cloud Run revisions, IAM policy modifications, deployment rollout timestamps, and compute configuration diffs via `diff_revisions` (with zero secret leakage). |
+| **Resources Specialist** | Cloud Asset / Run API | `tools/resources.py` | `cloud-run-troubleshooting`, `gke-troubleshooting`, `cloud-sql-troubleshooting`, `service-<name>` | Inspect service specifications, ingress settings, env var names (with automated secret redaction), scaling limits, dependency URLs, and inspect container restarts / OOM kills / probe failures via `get_platform_events`. |
 
 Key architectural execution characteristics:
 - **Skill-First Progressive Loading**: Each specialist loads its assigned skills first via ADK `SkillToolset` (`skill_first=True`) before executing diagnostic investigations.
