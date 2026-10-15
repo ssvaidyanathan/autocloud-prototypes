@@ -20,6 +20,7 @@ from ..contracts.incident import Incident
 from ..prompts import load_prompt
 from ..skills_loader import get_skill_toolset_for_target
 from ..tools.changes import (
+    diff_revisions,
     list_cloud_builds,
     list_cloud_run_revisions,
     normalize_cloud_build_status,
@@ -142,6 +143,7 @@ class ChangesSpecialist(BaseSpecialist):
 
         adk_tools: list[Any] = [
             FunctionTool(query_audit_logs),
+            FunctionTool(diff_revisions),
             FunctionTool(list_cloud_run_revisions),
             FunctionTool(list_cloud_builds),
         ]
@@ -219,6 +221,12 @@ class ChangesSpecialist(BaseSpecialist):
                 kwargs["client"] = self.client
             return query_audit_logs(**kwargs)
 
+        @functools.wraps(diff_revisions)
+        def _bound_diff_revisions(**kwargs: Any) -> Any:
+            if "client" not in kwargs and self.client is not None:
+                kwargs["client"] = self.client
+            return diff_revisions(**kwargs)
+
         @functools.wraps(list_cloud_run_revisions)
         def _bound_list_cloud_run_revisions(**kwargs: Any) -> Any:
             if "client" not in kwargs and self.client is not None:
@@ -234,6 +242,7 @@ class ChangesSpecialist(BaseSpecialist):
         tools: list[Any] = [
             skill_toolset,
             FunctionTool(_bound_query_audit_logs),
+            FunctionTool(_bound_diff_revisions),
             FunctionTool(_bound_list_cloud_run_revisions),
             FunctionTool(_bound_list_cloud_builds),
         ]
@@ -572,6 +581,54 @@ class ChangesSpecialist(BaseSpecialist):
                         )
                     )
                     anomalies.append(f"Recent revision deployment: {rev.get('name')} at {raw_ts}")
+
+                if len(revisions) >= 2:
+                    try:
+                        rev_latest = revisions[0].get("name", "")
+                        rev_prev = revisions[1].get("name", "")
+                        if rev_latest and rev_prev:
+                            diff_res = diff_revisions(
+                                service_name=effective_service,
+                                rev_a=rev_prev,
+                                rev_b=rev_latest,
+                                project_id=self.project_id,
+                                client=self.client,
+                            )
+                            queries_run.append(
+                                f"diff_revisions({effective_service}, {rev_prev}, {rev_latest})"
+                            )
+                            diff_summary = diff_res.get("diff_summary", "")
+                            diffs = diff_res.get("differences", {})
+
+                            evidence.append(
+                                self.create_evidence_item(
+                                    kind="revision_diff",
+                                    excerpt=(
+                                        f"Configuration diff ({rev_prev} -> {rev_latest}): "
+                                        f"{diff_summary}"
+                                    ),
+                                    timestamp=start_time_dt,
+                                    console_url=diff_res.get("console_url"),
+                                )
+                            )
+
+                            if diffs.get("env_vars_removed"):
+                                anomalies.append(
+                                    f"Environment variable regression: {diffs['env_vars_removed']} "
+                                    f"removed between {rev_prev} and {rev_latest}"
+                                )
+                            if diffs.get("image_changed"):
+                                anomalies.append(
+                                    "Container image rollout detected between "
+                                    f"{rev_prev} and {rev_latest}"
+                                )
+                            if diffs.get("probes_changed"):
+                                anomalies.append(
+                                    "Health probe configuration changed between "
+                                    f"{rev_prev} and {rev_latest}"
+                                )
+                    except Exception as diff_err:
+                        errors.append(f"Failed to diff revisions: {str(diff_err)}")
             except Exception as e:
                 errors.append(f"Failed to query Cloud Run revisions: {str(e)}")
 

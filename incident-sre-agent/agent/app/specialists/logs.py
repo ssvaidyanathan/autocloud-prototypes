@@ -20,7 +20,13 @@ from ..contracts.incident import Incident
 from ..prompts import load_prompt
 from ..skills_loader import get_skill_toolset_for_target
 from ..tools.common import normalize_datetime
-from ..tools.logs import list_log_names, query_logs, summarize_error_groups
+from ..tools.logs import (
+    aggregate_requests,
+    list_log_names,
+    query_logs,
+    query_request_logs,
+    summarize_error_groups,
+)
 from .base import BaseSpecialist, SkillTracker, run_sync
 
 logger = logging.getLogger(__name__)
@@ -53,6 +59,8 @@ class LogsSpecialist(BaseSpecialist):
         # Static tool definitions for inspection and ToolRegistry checks
         adk_tools: list[Any] = [
             FunctionTool(query_logs),
+            FunctionTool(query_request_logs),
+            FunctionTool(aggregate_requests),
             FunctionTool(summarize_error_groups),
             FunctionTool(list_log_names),
         ]
@@ -127,6 +135,18 @@ class LogsSpecialist(BaseSpecialist):
                     return query_logs(**kwargs)
                 raise
 
+        @functools.wraps(query_request_logs)
+        def _bound_query_request_logs(**kwargs: Any) -> Any:
+            if "client" not in kwargs and self.client is not None:
+                kwargs["client"] = self.client
+            return query_request_logs(**kwargs)
+
+        @functools.wraps(aggregate_requests)
+        def _bound_aggregate_requests(**kwargs: Any) -> Any:
+            if "client" not in kwargs and self.client is not None:
+                kwargs["client"] = self.client
+            return aggregate_requests(**kwargs)
+
         @functools.wraps(summarize_error_groups)
         def _bound_summarize_error_groups(**kwargs: Any) -> Any:
             if "client" not in kwargs and self.client is not None:
@@ -142,6 +162,8 @@ class LogsSpecialist(BaseSpecialist):
         tools: list[Any] = [
             skill_toolset,
             FunctionTool(_bound_query_logs),
+            FunctionTool(_bound_query_request_logs),
+            FunctionTool(_bound_aggregate_requests),
             FunctionTool(_bound_summarize_error_groups),
             FunctionTool(_bound_list_log_names),
         ]
@@ -516,6 +538,47 @@ class LogsSpecialist(BaseSpecialist):
 
         except Exception as e:
             errors.append(f"Failed to query logs: {str(e)}")
+
+        # 3. Query Cloud Run Request Logs if service is known
+        if effective_service:
+            try:
+                req_summary = query_request_logs(
+                    service_name=effective_service,
+                    project_id=self.project_id,
+                    start_time=start_time_dt,
+                    end_time=end_time_dt,
+                    client=self.client,
+                )
+                queries_run.append(f"query_request_logs({effective_service})")
+
+                total_reqs = req_summary.get("total_requests", 0)
+                status_bd = req_summary.get("status_breakdown", {})
+                errors_4xx = status_bd.get("4xx", 0)
+                errors_5xx = status_bd.get("5xx", 0)
+                p95_ms = req_summary.get("latency_p95_ms", 0.0)
+
+                evidence.append(
+                    self.create_evidence_item(
+                        kind="request_logs",
+                        excerpt=(
+                            f"Request log breakdown for {effective_service}: "
+                            f"{total_reqs} total requests "
+                            f"(2xx: {status_bd.get('2xx', 0)}, 3xx: {status_bd.get('3xx', 0)}, "
+                            f"4xx: {errors_4xx}, 5xx: {errors_5xx}), p95 latency: {p95_ms}ms"
+                        ),
+                        timestamp=start_time_dt,
+                        console_url=req_summary.get("console_url"),
+                    )
+                )
+
+                if errors_5xx > 0 or errors_4xx > 0:
+                    anomalies.append(
+                        f"Request logs show HTTP error responses on {effective_service}: "
+                        f"{errors_4xx} 4xx errors, {errors_5xx} 5xx errors "
+                        f"across {total_reqs} requests"
+                    )
+            except Exception as e:
+                errors.append(f"Failed to query request logs: {str(e)}")
 
         confidence = 0.85 if anomalies else 0.40
         summary = (

@@ -1,11 +1,14 @@
 import os
-from typing import Any, Dict, List, Optional
+import urllib.parse
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Union
 
 from .clients import (
     get_cloud_run_services_client,
     get_cloud_sql_admin_client,
     get_compute_instances_client,
     get_gke_cluster_client,
+    get_logging_client,
     is_local_mode,
 )
 from .registry import readonly_tool
@@ -359,3 +362,228 @@ def describe_cloud_sql_instances(
             )
 
     return instances
+
+
+@readonly_tool(
+    name="get_platform_events",
+    description=(
+        "Retrieve Cloud Run platform events: container restarts, OOM terminations, "
+        "probe failures, and system logs."
+    ),
+)
+def get_platform_events(
+    service_name: str,
+    project_id: Optional[str] = None,
+    window_minutes: int = 60,
+    start_time: Optional[Union[datetime, str]] = None,
+    end_time: Optional[Union[datetime, str]] = None,
+    region: Optional[str] = None,
+    client: Any = None,
+    logging_client: Any = None,
+) -> Dict[str, Any]:
+    """Retrieve Cloud Run platform events: restarts, OOM kills, and probe failures."""
+    from .common import (
+        get_candidate_service_names,
+        normalize_datetime,
+        validate_service,
+    )
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+    resolved_service = validate_service(service_name) or "default"
+
+    start_time_dt = normalize_datetime(start_time)
+    end_time_dt = normalize_datetime(end_time)
+    if not end_time_dt:
+        end_time_dt = datetime.now(timezone.utc)
+    if not start_time_dt:
+        clamped_window = max(1, min(1440, int(window_minutes or 60)))
+        start_time_dt = end_time_dt - timedelta(minutes=clamped_window)
+
+    target_client = None
+    if logging_client is not None and hasattr(logging_client, "list_entries"):
+        target_client = logging_client
+    elif client is not None and hasattr(client, "list_entries"):
+        target_client = client
+    else:
+        target_client = get_logging_client(pinned_project)
+
+    if target_client is None and not is_local_mode():
+        raise RuntimeError("GCP Logging client unavailable in production environment")
+
+    candidates = get_candidate_service_names(resolved_service)
+    svc_subclauses = [f'resource.labels.service_name = "{c}"' for c in candidates]
+    svc_filter = (
+        f"({' OR '.join(svc_subclauses)})"
+        if len(svc_subclauses) > 1
+        else (svc_subclauses[0] if svc_subclauses else "")
+    )
+
+    event_patterns = [
+        '"Memory limit"',
+        '"exceeded"',
+        '"exit code 137"',
+        '"terminated by kernel OOM-killer"',
+        '"Readiness probe failed"',
+        '"Startup probe failed"',
+        '"failed to start and listen"',
+        'logName =~ "run.googleapis.com%2Fvarlog%2Fsystem"',
+    ]
+    event_clause = f"({' OR '.join(event_patterns)})"
+
+    filter_parts = [
+        'resource.type = "cloud_run_revision"',
+        f'timestamp >= "{start_time_dt.isoformat()}"',
+        f'timestamp <= "{end_time_dt.isoformat()}"',
+    ]
+    if svc_filter:
+        filter_parts.append(svc_filter)
+    filter_parts.append(event_clause)
+
+    final_filter = " AND ".join(filter_parts)
+    console_url = (
+        f"https://console.cloud.google.com/logs/query;query="
+        f"{urllib.parse.quote(final_filter)};project={pinned_project}"
+    )
+
+    raw_entries: List[Any] = []
+    if target_client is not None:
+        try:
+            entries_iter = target_client.list_entries(
+                resource_names=[f"projects/{pinned_project}"],
+                filter_=final_filter,
+                page_size=100,
+                max_results=100,
+            )
+            for entry in entries_iter:
+                raw_entries.append(entry)
+                if len(raw_entries) >= 100:
+                    break
+        except TypeError:
+            try:
+                entries_iter = target_client.list_entries(
+                    resource_names=[f"projects/{pinned_project}"],
+                    filter_=final_filter,
+                    page_size=100,
+                )
+                for entry in entries_iter:
+                    raw_entries.append(entry)
+                    if len(raw_entries) >= 100:
+                        break
+            except Exception:
+                raw_entries = []
+        except Exception:
+            raw_entries = []
+
+    restarts: Dict[str, Any] = {"count": 0, "events": []}
+    probe_failures: Dict[str, Any] = {"count": 0, "events": []}
+    system_events: Dict[str, Any] = {"count": 0, "events": []}
+    has_oom = False
+    has_probe_failure = False
+
+    for entry in raw_entries:
+        ts = getattr(entry, "timestamp", None)
+        ts_str = (
+            str(ts.isoformat()) if (ts is not None and hasattr(ts, "isoformat")) else str(ts or "")
+        )
+
+        msg = ""
+        text_pl = getattr(entry, "text_payload", None) or getattr(entry, "textPayload", None)
+        if text_pl and not hasattr(text_pl, "_mock_name"):
+            msg = str(text_pl)
+        elif isinstance(entry, dict) and (entry.get("textPayload") or entry.get("text_payload")):
+            msg = str(entry.get("textPayload") or entry.get("text_payload"))
+        elif getattr(entry, "payload", None) and not hasattr(
+            getattr(entry, "payload", None), "_mock_name"
+        ):
+            msg = str(entry.payload)
+        elif isinstance(entry, dict) and entry.get("payload"):
+            msg = str(entry.get("payload"))
+        elif getattr(entry, "json_payload", None) and not hasattr(
+            getattr(entry, "json_payload", None), "_mock_name"
+        ):
+            msg = str(entry.json_payload)
+        elif isinstance(entry, dict) and (entry.get("jsonPayload") or entry.get("json_payload")):
+            msg = str(entry.get("jsonPayload") or entry.get("json_payload"))
+
+        msg_lower = msg.lower()
+        log_name = getattr(entry, "log_name", "") or (
+            entry.get("log_name", "") if isinstance(entry, dict) else ""
+        )
+
+        if any(
+            term in msg_lower
+            for term in ["memory limit", "exit code 137", "oom-killer", "terminated by kernel"]
+        ):
+            has_oom = True
+            restarts["count"] += 1
+            restarts["events"].append(
+                {
+                    "timestamp": ts_str,
+                    "reason": "OOM termination (memory limit exceeded)",
+                    "exit_code": 137,
+                    "message": msg[:256],
+                }
+            )
+        elif any(
+            term in msg_lower
+            for term in [
+                "container terminated",
+                "exit code",
+                "container failed",
+                "restarting container",
+            ]
+        ):
+            restarts["count"] += 1
+            restarts["events"].append(
+                {
+                    "timestamp": ts_str,
+                    "reason": "Container termination / restart",
+                    "message": msg[:256],
+                }
+            )
+        elif any(
+            term in msg_lower
+            for term in [
+                "readiness probe failed",
+                "startup probe failed",
+                "probe failed",
+                "failed to start and listen",
+            ]
+        ):
+            has_probe_failure = True
+            probe_failures["count"] += 1
+            p_type = (
+                "readiness"
+                if "readiness" in msg_lower
+                else ("startup" if "startup" in msg_lower else "probe")
+            )
+            probe_failures["events"].append(
+                {
+                    "timestamp": ts_str,
+                    "probe_type": p_type,
+                    "message": msg[:256],
+                }
+            )
+        else:
+            system_events["count"] += 1
+            system_events["events"].append(
+                {
+                    "timestamp": ts_str,
+                    "log_name": log_name,
+                    "message": msg[:256],
+                }
+            )
+
+    total_events = restarts["count"] + probe_failures["count"] + system_events["count"]
+
+    return {
+        "service_name": resolved_service,
+        "total_events": total_events,
+        "restarts": restarts,
+        "probe_failures": probe_failures,
+        "system_events": system_events,
+        "has_oom": has_oom,
+        "has_probe_failure": has_probe_failure,
+        "console_url": console_url,
+    }

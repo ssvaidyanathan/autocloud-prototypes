@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from agent.app.tools.changes import (
+    diff_revisions,
     list_cloud_builds,
     list_cloud_run_revisions,
     query_audit_logs,
@@ -10,8 +12,10 @@ from agent.app.tools.changes import (
 from agent.app.tools.common import get_candidate_service_names
 from agent.app.tools.logs import (
     _is_probe_or_infra_noise,
+    aggregate_requests,
     list_log_names,
     query_logs,
+    query_request_logs,
     summarize_error_groups,
 )
 from agent.app.tools.metrics import (
@@ -25,6 +29,7 @@ from agent.app.tools.resources import (
     describe_cloud_sql_instances,
     describe_compute_instances,
     describe_gke_clusters,
+    get_platform_events,
 )
 
 # ============================================================================
@@ -642,3 +647,416 @@ def test_query_audit_logs_filters_gke_autoscaler_and_infra_noise() -> None:
     assert len(logs) == 1
     assert logs[0]["resource_name"] == "namespaces/test-proj/services/shop-api"
     assert logs[0]["principal_email"] == "deployer@example.com"
+
+
+# ============================================================================
+# Core New Tools Tests (Item 8.2)
+# ============================================================================
+
+
+def test_query_request_logs_aggregation() -> None:
+    mock_client = MagicMock()
+
+    def make_entry(status: int, method: str, url: str, latency: str, ts: datetime) -> MagicMock:
+        entry = MagicMock()
+        entry.timestamp = ts
+        entry.http_request = {
+            "status": status,
+            "requestMethod": method,
+            "requestUrl": url,
+            "latency": latency,
+        }
+        return entry
+
+    base_time = datetime(2026, 10, 15, 10, 0, 0, tzinfo=timezone.utc)
+    mock_entries = [
+        make_entry(200, "GET", "https://shop-api.run.app/checkout", "0.100s", base_time),
+        make_entry(200, "GET", "https://shop-api.run.app/checkout", "0.200s", base_time),
+        make_entry(500, "POST", "https://shop-api.run.app/checkout", "0.500s", base_time),
+        make_entry(403, "GET", "https://shop-api.run.app/admin", "0.050s", base_time),
+        make_entry(200, "GET", "https://shop-api.run.app/health", "0.010s", base_time),
+    ]
+    mock_client.list_entries.return_value = mock_entries
+
+    res = query_request_logs(
+        service_name="shop-api",
+        project_id="test-proj",
+        client=mock_client,
+    )
+
+    assert res["service_name"] == "shop-api"
+    assert res["total_requests"] == 5
+    assert res["status_breakdown"] == {"2xx": 3, "3xx": 0, "4xx": 1, "5xx": 1}
+
+    # Route breakdown
+    assert "/checkout" in res["route_breakdown"]
+    assert res["route_breakdown"]["/checkout"]["count"] == 3
+    assert res["route_breakdown"]["/checkout"]["errors"] == 1
+
+    assert "/admin" in res["route_breakdown"]
+    assert res["route_breakdown"]["/admin"]["count"] == 1
+    assert res["route_breakdown"]["/admin"]["errors"] == 1
+
+    assert "/health" in res["route_breakdown"]
+    assert res["route_breakdown"]["/health"]["count"] == 1
+    assert res["route_breakdown"]["/health"]["errors"] == 0
+
+    # Latencies (10ms, 50ms, 100ms, 200ms, 500ms)
+    assert res["latency_p50_ms"] == 100.0
+    assert res["latency_p95_ms"] > 200.0
+    assert res["latency_p99_ms"] >= res["latency_p95_ms"]
+    assert len(res["sample_entries"]) == 5
+    assert "https://console.cloud.google.com/logs/query" in res["console_url"]
+
+
+def test_query_request_logs_status_class_and_route_filtering() -> None:
+    mock_client = MagicMock()
+
+    def make_entry(status: int, url: str) -> MagicMock:
+        entry = MagicMock()
+        entry.timestamp = datetime(2026, 10, 15, 10, 0, 0, tzinfo=timezone.utc)
+        entry.http_request = {
+            "status": status,
+            "requestMethod": "GET",
+            "requestUrl": url,
+            "latency": "0.050s",
+        }
+        return entry
+
+    mock_client.list_entries.return_value = [
+        make_entry(200, "https://shop-api.run.app/checkout"),
+        make_entry(403, "https://shop-api.run.app/checkout"),
+        make_entry(500, "https://shop-api.run.app/cart"),
+    ]
+
+    # Filter by 403 status class
+    res_403 = query_request_logs(
+        service_name="shop-api",
+        project_id="test-proj",
+        status_class="403",
+        client=mock_client,
+    )
+    assert res_403["total_requests"] == 1
+    assert res_403["status_breakdown"]["4xx"] == 1
+
+    # Filter by route
+    res_cart = query_request_logs(
+        service_name="shop-api",
+        project_id="test-proj",
+        route="/cart",
+        client=mock_client,
+    )
+    assert res_cart["total_requests"] == 1
+    assert res_cart["status_breakdown"]["5xx"] == 1
+
+
+def test_query_request_logs_empty() -> None:
+    mock_client = MagicMock()
+    mock_client.list_entries.return_value = []
+
+    res = query_request_logs(
+        service_name="shop-api",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert res["total_requests"] == 0
+    assert res["latency_p50_ms"] == 0.0
+    assert res["latency_p95_ms"] == 0.0
+    assert res["route_breakdown"] == {}
+    assert res["sample_entries"] == []
+
+
+def test_aggregate_requests_alias() -> None:
+    mock_client = MagicMock()
+    mock_client.list_entries.return_value = []
+
+    res = aggregate_requests(
+        service_name="shop-api",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert res["total_requests"] == 0
+    assert res["service_name"] == "shop-api"
+
+
+def test_diff_revisions_full_diff_and_zero_secret_leakage() -> None:
+    mock_client = MagicMock()
+
+    # Revision A (Baseline stable revision)
+    rev_a = MagicMock()
+    container_a = MagicMock()
+    container_a.image = "gcr.io/test-proj/shop-api:v1.0"
+    container_a.resources.limits = {"cpu": "1", "memory": "256Mi"}
+    # Env vars with sensitive secrets
+    container_a.env = [
+        {"name": "DATABASE_URL", "value": "postgres://user:SUPER_SECRET_PASS@db:5432/shop"},
+        {"name": "GATEWAY_API_KEY", "value": "AIzaSySecretKeyValue12345"},
+        {"name": "PORT", "value": "8080"},
+    ]
+    probe_a = MagicMock()
+    probe_a.http_get.path = "/health"
+    probe_a.http_get.port = 8080
+    probe_a.period_seconds = 10
+    probe_a.timeout_seconds = 3
+    probe_a.failure_threshold = 3
+    container_a.readiness_probe = probe_a
+
+    rev_a.template.containers = [container_a]
+    rev_a.template.service_account = "sa-old@test-proj.iam.gserviceaccount.com"
+    rev_a.template.max_instance_request_concurrency = 80
+
+    # Revision B (New revision with changes and regressions)
+    rev_b = MagicMock()
+    container_b = MagicMock()
+    container_b.image = "gcr.io/test-proj/shop-api:v2.0"
+    container_b.resources.limits = {"cpu": "2", "memory": "512Mi"}
+    container_b.env = [
+        {"name": "DATABASE_URL", "value": "postgres://user:DIFFERENT_SECRET@db:5432/shop"},
+        {"name": "PORT", "value": "8080"},
+        {"name": "FEATURE_V2_ENABLED", "value": "true"},
+    ]
+    probe_b = MagicMock()
+    probe_b.http_get.path = "/readyz"
+    probe_b.http_get.port = 8080
+    probe_b.period_seconds = 5
+    probe_b.timeout_seconds = 2
+    probe_b.failure_threshold = 2
+    container_b.readiness_probe = probe_b
+
+    rev_b.template.containers = [container_b]
+    rev_b.template.service_account = "sa-new@test-proj.iam.gserviceaccount.com"
+    rev_b.template.max_instance_request_concurrency = 100
+
+    def mock_get_revision(name: str) -> MagicMock:
+        if "rev-a" in name:
+            return rev_a
+        return rev_b
+
+    mock_client.get_revision.side_effect = mock_get_revision
+
+    diff = diff_revisions(
+        service_name="shop-api",
+        rev_a="rev-a",
+        rev_b="rev-b",
+        project_id="test-proj",
+        client=mock_client,
+    )
+
+    assert diff["service_name"] == "shop-api"
+    assert diff["rev_a"] == "rev-a"
+    assert diff["rev_b"] == "rev-b"
+
+    diffs = diff["differences"]
+    assert diffs["image_changed"] is True
+    assert diffs["image_details"]["rev_a"] == "gcr.io/test-proj/shop-api:v1.0"
+    assert diffs["image_details"]["rev_b"] == "gcr.io/test-proj/shop-api:v2.0"
+
+    # Environment variable names ONLY
+    assert diffs["env_vars_added"] == ["FEATURE_V2_ENABLED"]
+    assert diffs["env_vars_removed"] == ["GATEWAY_API_KEY"]
+
+    # CRITICAL SECURITY RULE: Zero secret leakage assertion!
+    raw_output_str = str(diff)
+    assert "SUPER_SECRET_PASS" not in raw_output_str
+    assert "DIFFERENT_SECRET" not in raw_output_str
+    assert "AIzaSySecretKeyValue12345" not in raw_output_str
+
+    # Limits diff
+    assert diffs["limits_changed"] is True
+    assert diffs["limits_details"]["rev_a"]["cpu"] == "1"
+    assert diffs["limits_details"]["rev_b"]["cpu"] == "2"
+
+    # Probes diff
+    assert diffs["probes_changed"] is True
+    assert diffs["probes_details"]["rev_a"]["readiness_probe"]["path"] == "/health"
+    assert diffs["probes_details"]["rev_b"]["readiness_probe"]["path"] == "/readyz"
+
+    # Service Account diff
+    assert diffs["service_account_changed"] is True
+    assert diffs["service_account_details"]["rev_a"] == "sa-old@test-proj.iam.gserviceaccount.com"
+    assert diffs["service_account_details"]["rev_b"] == "sa-new@test-proj.iam.gserviceaccount.com"
+
+
+def test_diff_revisions_no_changes() -> None:
+    mock_client = MagicMock()
+
+    rev = MagicMock()
+    container = MagicMock()
+    container.image = "gcr.io/test-proj/shop-api:v1.0"
+    container.resources.limits = {"cpu": "1", "memory": "256Mi"}
+    container.env = [{"name": "PORT", "value": "8080"}]
+    container.readiness_probe = None
+    container.liveness_probe = None
+    container.startup_probe = None
+    rev.template.containers = [container]
+    rev.template.service_account = "sa@test-proj.iam.gserviceaccount.com"
+    rev.template.max_instance_request_concurrency = 80
+
+    mock_client.get_revision.return_value = rev
+
+    diff = diff_revisions(
+        service_name="shop-api",
+        rev_a="rev-1",
+        rev_b="rev-1",
+        project_id="test-proj",
+        client=mock_client,
+    )
+
+    diffs = diff["differences"]
+    assert diffs["image_changed"] is False
+    assert diffs["env_vars_added"] == []
+    assert diffs["env_vars_removed"] == []
+    assert diffs["limits_changed"] is False
+    assert diffs["probes_changed"] is False
+    assert diffs["service_account_changed"] is False
+    assert "Image unchanged" in diff["diff_summary"]
+
+
+def test_get_platform_events_oom_detection() -> None:
+    mock_client = MagicMock()
+
+    entry_oom = MagicMock()
+    entry_oom.timestamp = datetime(2026, 10, 15, 10, 30, 0, tzinfo=timezone.utc)
+    entry_oom.text_payload = (
+        "Memory limit of 256Mi exceeded with 257Mi used. "
+        "Terminated by kernel OOM-killer (exit code 137)"
+    )
+    mock_client.list_entries.return_value = [entry_oom]
+
+    res = get_platform_events(
+        service_name="shop-api",
+        project_id="test-proj",
+        client=mock_client,
+    )
+
+    assert res["service_name"] == "shop-api"
+    assert res["total_events"] == 1
+    assert res["has_oom"] is True
+    assert res["has_probe_failure"] is False
+    assert res["restarts"]["count"] == 1
+    assert res["restarts"]["events"][0]["exit_code"] == 137
+    assert "OOM termination" in res["restarts"]["events"][0]["reason"]
+
+
+def test_get_platform_events_probe_failures() -> None:
+    mock_client = MagicMock()
+
+    entry_probe = MagicMock()
+    entry_probe.timestamp = datetime(2026, 10, 15, 10, 35, 0, tzinfo=timezone.utc)
+    entry_probe.text_payload = (
+        "Readiness probe failed for container shop-api on path /readyz: "
+        "HTTP 503 Service Unavailable"
+    )
+    mock_client.list_entries.return_value = [entry_probe]
+
+    res = get_platform_events(
+        service_name="shop-api",
+        project_id="test-proj",
+        client=mock_client,
+    )
+
+    assert res["total_events"] == 1
+    assert res["has_oom"] is False
+    assert res["has_probe_failure"] is True
+    assert res["probe_failures"]["count"] == 1
+    assert res["probe_failures"]["events"][0]["probe_type"] == "readiness"
+
+
+def test_get_platform_events_clean_zero_events() -> None:
+    mock_client = MagicMock()
+    mock_client.list_entries.return_value = []
+
+    res = get_platform_events(
+        service_name="shop-api",
+        project_id="test-proj",
+        client=mock_client,
+    )
+
+    assert res["total_events"] == 0
+    assert res["has_oom"] is False
+    assert res["has_probe_failure"] is False
+    assert res["restarts"]["count"] == 0
+    assert res["probe_failures"]["count"] == 0
+    assert res["system_events"]["count"] == 0
+
+
+def test_query_request_logs_bounded_pagination() -> None:
+    mock_client = MagicMock()
+
+    # Mock list_entries returning generator with more than effective_limit entries
+    def entry_generator() -> Any:
+        for _ in range(150):
+            entry = MagicMock()
+            entry.httpRequest = {"status": 200, "requestUrl": "/api/items", "latency": "0.010s"}
+            yield entry
+
+    mock_client.list_entries.return_value = entry_generator()
+
+    res = query_request_logs(
+        service_name="shop-api",
+        project_id="test-proj",
+        max_entries=25,
+        client=mock_client,
+    )
+    assert res["total_requests"] == 25
+    # Verify max_results passed in call
+    kwargs = mock_client.list_entries.call_args.kwargs
+    assert kwargs.get("max_results") == 25
+    assert kwargs.get("page_size") == 25
+
+
+def test_diff_revisions_multi_container() -> None:
+    mock_client = MagicMock()
+
+    # Revision with sidecar container
+    rev = MagicMock()
+    c1 = MagicMock()
+    c1.image = "gcr.io/test-proj/shop-app:v1.0"
+    c1.resources.limits = {"cpu": "1", "memory": "256Mi"}
+    c1.env = [{"name": "APP_PORT"}, {"name": "APP_ENV"}]
+    c1.readiness_probe = None
+
+    c2 = MagicMock()
+    c2.image = "gcr.io/test-proj/sidecar-proxy:v1.0"
+    c2.resources.limits = {"cpu": "0.5", "memory": "128Mi"}
+    c2.env = [{"name": "SIDECAR_CONFIG"}]
+    probe = MagicMock()
+    probe.http_get.path = "/healthz"
+    probe.http_get.port = 9090
+    probe.period_seconds = 10
+    c2.readiness_probe = probe
+
+    rev.template.containers = [c1, c2]
+    rev.template.service_account = "sa@test-proj.iam.gserviceaccount.com"
+    rev.template.max_instance_request_concurrency = 80
+    mock_client.get_revision.return_value = rev
+
+    diff = diff_revisions(
+        service_name="shop-api",
+        rev_a="rev-1",
+        rev_b="rev-1",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    # Check that both container images and all env vars were aggregated
+    assert "shop-app:v1.0" in diff["differences"]["image_details"]["rev_a"]
+    assert "sidecar-proxy:v1.0" in diff["differences"]["image_details"]["rev_a"]
+    assert diff["differences"]["limits_details"]["rev_a"]["cpu"] == "1, 0.5"
+    assert diff["differences"]["limits_details"]["rev_a"]["memory"] == "256Mi, 128Mi"
+    assert diff["differences"]["probes_details"]["rev_a"]["readiness_probe"]["path"] == "/healthz"
+
+
+def test_get_platform_events_client_disambiguation() -> None:
+    # Caller passes a non-logging client (e.g. ServicesClient without list_entries)
+    services_client = MagicMock(spec=["get_service", "list_services"])
+    mock_logging_client = MagicMock()
+    mock_logging_client.list_entries.return_value = []
+
+    res = get_platform_events(
+        service_name="shop-api",
+        project_id="test-proj",
+        client=services_client,
+        logging_client=mock_logging_client,
+    )
+    assert res["total_events"] == 0
+    assert mock_logging_client.list_entries.called

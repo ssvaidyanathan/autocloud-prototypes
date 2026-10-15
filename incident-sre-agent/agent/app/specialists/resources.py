@@ -25,6 +25,7 @@ from ..tools.resources import (
     describe_cloud_sql_instances,
     describe_compute_instances,
     describe_gke_clusters,
+    get_platform_events,
 )
 from .base import BaseSpecialist, SkillTracker, run_sync
 
@@ -57,6 +58,7 @@ class ResourcesSpecialist(BaseSpecialist):
 
         adk_tools: list[Any] = [
             FunctionTool(describe_cloud_run_service),
+            FunctionTool(get_platform_events),
             FunctionTool(describe_gke_clusters),
             FunctionTool(describe_compute_instances),
             FunctionTool(describe_cloud_sql_instances),
@@ -142,6 +144,12 @@ class ResourcesSpecialist(BaseSpecialist):
                 kwargs["client"] = self.client
             return describe_cloud_run_service(**kwargs)
 
+        @functools.wraps(get_platform_events)
+        def _bound_get_platform_events(**kwargs: Any) -> Any:
+            if "client" not in kwargs and self.client is not None:
+                kwargs["client"] = self.client
+            return get_platform_events(**kwargs)
+
         @functools.wraps(describe_gke_clusters)
         def _bound_describe_gke_clusters(**kwargs: Any) -> Any:
             if "client" not in kwargs and self.client is not None:
@@ -163,6 +171,7 @@ class ResourcesSpecialist(BaseSpecialist):
         tools: list[Any] = [
             skill_toolset,
             FunctionTool(_bound_describe_cloud_run_service),
+            FunctionTool(_bound_get_platform_events),
             FunctionTool(_bound_describe_gke_clusters),
             FunctionTool(_bound_describe_compute_instances),
             FunctionTool(_bound_describe_cloud_sql_instances),
@@ -424,7 +433,7 @@ class ResourcesSpecialist(BaseSpecialist):
         start_time_dt = normalize_datetime(start_time) or (
             datetime.now(timezone.utc) - timedelta(hours=1)
         )
-        _end_time_dt = normalize_datetime(end_time) or datetime.now(timezone.utc)
+        end_time_dt = normalize_datetime(end_time) or datetime.now(timezone.utc)
 
         queries_run: List[str] = []
         evidence: List[EvidenceItem] = []
@@ -492,6 +501,54 @@ class ResourcesSpecialist(BaseSpecialist):
                         console_url=svc_desc.get("console_url"),
                     )
                 )
+
+                try:
+                    events_res = get_platform_events(
+                        service_name=resolved_cand,
+                        project_id=self.project_id,
+                        client=self.client,
+                        start_time=start_time_dt,
+                        end_time=end_time_dt,
+                    )
+                    queries_run.append(f"get_platform_events({resolved_cand})")
+
+                    total_evts = events_res.get("total_events", 0)
+                    restarts = events_res.get("restarts", {})
+                    probe_fails = events_res.get("probe_failures", {})
+                    has_oom = events_res.get("has_oom", False)
+                    has_probe_fail = events_res.get("has_probe_failure", False)
+
+                    evidence.append(
+                        self.create_evidence_item(
+                            kind="platform_events",
+                            excerpt=(
+                                f"Platform events for {resolved_cand}: {total_evts} total events "
+                                f"(restarts: {restarts.get('count', 0)}, "
+                                f"probe failures: {probe_fails.get('count', 0)}, "
+                                f"OOM: {has_oom})"
+                            ),
+                            timestamp=start_time_dt,
+                            console_url=events_res.get("console_url"),
+                        )
+                    )
+
+                    if has_oom:
+                        anomalies.append(
+                            "Container termination due to out-of-memory (OOM) killer "
+                            f"detected on {resolved_cand}"
+                        )
+                    if has_probe_fail:
+                        anomalies.append(
+                            "Container startup / readiness probe failure detected on "
+                            f"{resolved_cand}"
+                        )
+                    if restarts.get("count", 0) > 0 and not has_oom:
+                        anomalies.append(
+                            f"Container restarts detected on {resolved_cand}: "
+                            f"{restarts.get('count')} events"
+                        )
+                except Exception as plat_err:
+                    errors.append(f"Failed to retrieve platform events: {str(plat_err)}")
             except Exception as e:
                 errors.append(f"Failed to describe Cloud Run service: {str(e)}")
 

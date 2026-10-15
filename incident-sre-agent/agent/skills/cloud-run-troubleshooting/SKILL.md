@@ -26,9 +26,10 @@ This skill provides service-agnostic diagnostic and remediation procedures for c
   - Cloud Monitoring metric: `run.googleapis.com/container/memory/utilizations` ramping linearly to 100%.
   - Intermittent HTTP 503 Service Unavailable errors as container instances crash and are replaced.
 - **Diagnostic Steps**:
-  1. Inspect container memory utilization curve in Cloud Monitoring to determine if consumption is gradual (leak) or instantaneous (workload spike).
-  2. Correlate container restart count (`run.googleapis.com/container/instance_count` or revision status) with OOM events.
-  3. Inspect application heap dumps and memory allocations for unreleased objects across request lifecycles.
+  1. Execute `get_platform_events` for the service to retrieve container restart counts, OOM events (exit code 137), and system error logs.
+  2. Inspect container memory utilization curve in Cloud Monitoring to determine if consumption is gradual (leak) or instantaneous (workload spike).
+  3. Correlate container restart count (`run.googleapis.com/container/instance_count` or revision status) with OOM events.
+  4. Inspect application heap dumps and memory allocations for unreleased objects across request lifecycles.
 - **Remediation Playbook**:
   1. Temporarily increase container memory limit to stabilize the service:
      ```bash
@@ -44,13 +45,10 @@ This skill provides service-agnostic diagnostic and remediation procedures for c
   - HTTP 503 errors on health probes (e.g. `/readyz`) and user-facing endpoints immediately following a revision deployment.
   - Cloud Audit Logs: Recent `UpdateService` or `CreateRevision` API calls.
 - **Diagnostic Steps**:
-  1. Compare environment variables and container configuration between the failing revision and prior stable revision:
-     ```bash
-     gcloud run revisions describe <FAILING_REV> --region <REGION> --format="yaml(spec.containers[0].env)"
-     gcloud run revisions describe <STABLE_REV> --region <REGION> --format="yaml(spec.containers[0].env)"
-     ```
-  2. Check Secret Manager references and IAM permissions of the service runtime service account.
-  3. Verify probe endpoints directly or via staging test calls.
+  1. Execute `get_platform_events` to detect probe failure logs (`Readiness probe failed`, `Startup probe failed`, or failure to listen on `$PORT`).
+  2. Compare environment variables and container configuration between the failing revision and prior stable revision using `diff_revisions` (strictly exposing variable names, not values).
+  3. Check Secret Manager references and IAM permissions of the service runtime service account.
+  4. Verify probe endpoints directly or via staging test calls.
 - **Remediation Playbook**:
   1. Immediate traffic rollback to the prior known-healthy revision:
      ```bash

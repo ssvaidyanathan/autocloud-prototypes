@@ -1,3 +1,4 @@
+import math
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Union
@@ -637,3 +638,341 @@ def list_log_names(
                 raw_logs = service_client.list_logs(parent=f"projects/{pinned_project}")
                 return [str(log) for log in raw_logs]
     return []
+
+
+def _parse_latency_ms(latency: Any) -> Optional[float]:
+    """Parse latency value from httpRequest field into milliseconds."""
+    if latency is None or hasattr(latency, "_mock_name"):
+        return None
+    if hasattr(latency, "seconds") or hasattr(latency, "nanos"):
+        sec = getattr(latency, "seconds", 0) or 0
+        nanos = getattr(latency, "nanos", 0) or 0
+        return round(float(sec * 1000 + nanos / 1e6), 2)
+    if isinstance(latency, str):
+        cleaned = latency.strip()
+        if not cleaned:
+            return None
+        if cleaned.endswith("ms"):
+            try:
+                return round(float(cleaned[:-2]), 2)
+            except ValueError:
+                return None
+        if cleaned.endswith("s"):
+            try:
+                return round(float(cleaned[:-1]) * 1000.0, 2)
+            except ValueError:
+                return None
+        try:
+            val = float(cleaned)
+            return round(val * 1000.0 if val < 10.0 else val, 2)
+        except ValueError:
+            return None
+    if isinstance(latency, (int, float)):
+        val = float(latency)
+        return round(val * 1000.0 if val < 10.0 else val, 2)
+    return None
+
+
+def _calculate_percentile(values: List[float], p: float) -> float:
+    """Calculate percentile for a list of floats."""
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    k = (len(sorted_vals) - 1) * (p / 100.0)
+    floor_k = int(math.floor(k))
+    ceil_k = int(math.ceil(k))
+    if floor_k == ceil_k:
+        return round(sorted_vals[floor_k], 2)
+    d0 = sorted_vals[floor_k] * (ceil_k - k)
+    d1 = sorted_vals[ceil_k] * (k - floor_k)
+    return round(d0 + d1, 2)
+
+
+@readonly_tool(
+    name="query_request_logs",
+    description=(
+        "Query and aggregate Cloud Run request logs by status class, route, "
+        "and latency percentiles."
+    ),
+)
+def query_request_logs(
+    service_name: str,
+    project_id: Optional[str] = None,
+    status_class: Optional[str] = None,  # e.g. "2xx", "3xx", "4xx", "5xx", "403", "500"
+    route: Optional[str] = None,  # e.g. "/api/v1/orders", "/health"
+    window_minutes: int = 60,
+    start_time: Optional[Union[datetime, str]] = None,
+    end_time: Optional[Union[datetime, str]] = None,
+    max_entries: int = 100,
+    client: Any = None,
+) -> Dict[str, Any]:
+    """Query Cloud Run request logs and aggregate metrics by status class and route."""
+    from .common import (
+        get_candidate_service_names,
+        normalize_datetime,
+        validate_service,
+    )
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+    resolved_service = validate_service(service_name) or "default"
+
+    start_time_dt = normalize_datetime(start_time)
+    end_time_dt = normalize_datetime(end_time)
+    if not end_time_dt:
+        end_time_dt = datetime.now(timezone.utc)
+    if not start_time_dt:
+        clamped_window = max(1, min(1440, int(window_minutes or 60)))
+        start_time_dt = end_time_dt - timedelta(minutes=clamped_window)
+
+    effective_limit = min(max(1, max_entries), 200)
+
+    filter_parts = [
+        'resource.type = "cloud_run_revision"',
+        '(logName =~ "run.googleapis.com%2Frequests" OR log_id("run.googleapis.com/requests"))',
+        f'timestamp >= "{start_time_dt.isoformat()}"',
+        f'timestamp <= "{end_time_dt.isoformat()}"',
+    ]
+
+    candidates = get_candidate_service_names(resolved_service)
+    svc_subclauses = [f'resource.labels.service_name = "{c}"' for c in candidates]
+    if len(svc_subclauses) == 1:
+        filter_parts.append(svc_subclauses[0])
+    elif svc_subclauses:
+        filter_parts.append(f"({' OR '.join(svc_subclauses)})")
+
+    if status_class:
+        sc = status_class.strip().lower()
+        if sc == "2xx":
+            filter_parts.append("httpRequest.status >= 200 AND httpRequest.status <= 299")
+        elif sc == "3xx":
+            filter_parts.append("httpRequest.status >= 300 AND httpRequest.status <= 399")
+        elif sc == "4xx":
+            filter_parts.append("httpRequest.status >= 400 AND httpRequest.status <= 499")
+        elif sc == "5xx":
+            filter_parts.append("httpRequest.status >= 500 AND httpRequest.status <= 599")
+        elif sc.isdigit():
+            filter_parts.append(f"httpRequest.status = {int(sc)}")
+        elif "-" in sc:
+            parts = sc.split("-")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                low_s, high_s = int(parts[0]), int(parts[1])
+                filter_parts.append(
+                    f"httpRequest.status >= {low_s} AND httpRequest.status <= {high_s}"
+                )
+
+    if route:
+        sanitized_route = route.strip()
+        filter_parts.append(f'httpRequest.requestUrl =~ "{sanitized_route}"')
+
+    final_filter = " AND ".join(filter_parts)
+    console_url = (
+        f"https://console.cloud.google.com/logs/query;query="
+        f"{urllib.parse.quote(final_filter)};project={pinned_project}"
+    )
+
+    if client is None:
+        client = get_logging_client(pinned_project)
+
+    if client is None and not is_local_mode():
+        raise RuntimeError("GCP Logging client unavailable in production environment")
+
+    raw_entries: List[Any] = []
+    if client is not None:
+        try:
+            entries_iter = client.list_entries(
+                resource_names=[f"projects/{pinned_project}"],
+                filter_=final_filter,
+                page_size=effective_limit,
+                max_results=effective_limit,
+            )
+            for entry in entries_iter:
+                raw_entries.append(entry)
+                if len(raw_entries) >= effective_limit:
+                    break
+        except TypeError:
+            # Handle mock or stub clients that do not accept max_results
+            try:
+                entries_iter = client.list_entries(
+                    resource_names=[f"projects/{pinned_project}"],
+                    filter_=final_filter,
+                    page_size=effective_limit,
+                )
+                for entry in entries_iter:
+                    raw_entries.append(entry)
+                    if len(raw_entries) >= effective_limit:
+                        break
+            except Exception:
+                raw_entries = []
+        except Exception:
+            raw_entries = []
+
+    total_requests = 0
+    status_breakdown = {"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0}
+    route_breakdown: Dict[str, Dict[str, int]] = {}
+    latencies: List[float] = []
+    sample_entries: List[Dict[str, Any]] = []
+
+    for entry in raw_entries:
+        http_req = (
+            getattr(entry, "http_request", None)
+            or getattr(entry, "httpRequest", None)
+            or (entry.get("httpRequest") if isinstance(entry, dict) else None)
+            or (entry.get("http_request") if isinstance(entry, dict) else None)
+        )
+        if hasattr(http_req, "_mock_name"):
+            http_req = None
+
+        raw_status = None
+        method = "GET"
+        raw_url = ""
+        raw_latency = None
+
+        if http_req is not None:
+            if isinstance(http_req, dict):
+                raw_status = http_req.get("status")
+                method = http_req.get("requestMethod") or http_req.get("request_method") or "GET"
+                raw_url = http_req.get("requestUrl") or http_req.get("request_url") or ""
+                raw_latency = http_req.get("latency")
+            else:
+                raw_status = getattr(http_req, "status", None)
+                method = (
+                    getattr(http_req, "request_method", None)
+                    or getattr(http_req, "requestMethod", None)
+                    or "GET"
+                )
+                raw_url = (
+                    getattr(http_req, "request_url", None)
+                    or getattr(http_req, "requestUrl", None)
+                    or ""
+                )
+                raw_latency = getattr(http_req, "latency", None)
+
+        if hasattr(raw_status, "_mock_name"):
+            raw_status = None
+        if hasattr(method, "_mock_name"):
+            method = "GET"
+        if hasattr(raw_url, "_mock_name"):
+            raw_url = ""
+        if hasattr(raw_latency, "_mock_name"):
+            raw_latency = None
+
+        status_code = 0
+        if raw_status is not None:
+            try:
+                status_code = int(raw_status)
+            except (ValueError, TypeError):
+                status_code = 0
+
+        parsed_route = "/"
+        if raw_url:
+            parsed_url = urllib.parse.urlsplit(str(raw_url))
+            parsed_route = parsed_url.path or "/"
+            if not parsed_route.startswith("/"):
+                parsed_route = "/" + parsed_route
+
+        # In-memory post filtering for mocks / robust evaluation
+        if status_class:
+            sc = status_class.strip().lower()
+            if sc == "2xx" and not (200 <= status_code <= 299):
+                continue
+            elif sc == "3xx" and not (300 <= status_code <= 399):
+                continue
+            elif sc == "4xx" and not (400 <= status_code <= 499):
+                continue
+            elif sc == "5xx" and not (500 <= status_code <= 599):
+                continue
+            elif sc.isdigit() and status_code != int(sc):
+                continue
+            elif "-" in sc:
+                parts = sc.split("-")
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    if not (int(parts[0]) <= status_code <= int(parts[1])):
+                        continue
+
+        if route:
+            clean_route = route.strip()
+            if clean_route not in parsed_route and parsed_route not in clean_route:
+                continue
+
+        total_requests += 1
+
+        if 200 <= status_code <= 299:
+            status_breakdown["2xx"] += 1
+        elif 300 <= status_code <= 399:
+            status_breakdown["3xx"] += 1
+        elif 400 <= status_code <= 499:
+            status_breakdown["4xx"] += 1
+        elif 500 <= status_code <= 599:
+            status_breakdown["5xx"] += 1
+
+        if parsed_route not in route_breakdown:
+            route_breakdown[parsed_route] = {"count": 0, "errors": 0}
+        route_breakdown[parsed_route]["count"] += 1
+        if status_code >= 400:
+            route_breakdown[parsed_route]["errors"] += 1
+
+        latency_ms = _parse_latency_ms(raw_latency)
+        if latency_ms is not None:
+            latencies.append(latency_ms)
+
+        ts = getattr(entry, "timestamp", None)
+        if ts is not None and hasattr(ts, "isoformat"):
+            ts_str = str(ts.isoformat())
+        else:
+            ts_str = str(ts or "")
+
+        if len(sample_entries) < 10:
+            sample_entries.append(
+                {
+                    "timestamp": ts_str,
+                    "method": str(method),
+                    "route": parsed_route,
+                    "status": status_code,
+                    "latency_ms": latency_ms if latency_ms is not None else 0.0,
+                    "excerpt": (
+                        f"{method} {parsed_route} HTTP {status_code} ({latency_ms or 0.0}ms)"
+                    ),
+                }
+            )
+
+    return {
+        "service_name": resolved_service,
+        "total_requests": total_requests,
+        "status_breakdown": status_breakdown,
+        "route_breakdown": route_breakdown,
+        "latency_p50_ms": _calculate_percentile(latencies, 50.0),
+        "latency_p95_ms": _calculate_percentile(latencies, 95.0),
+        "latency_p99_ms": _calculate_percentile(latencies, 99.0),
+        "sample_entries": sample_entries,
+        "console_url": console_url,
+    }
+
+
+@readonly_tool(
+    name="aggregate_requests",
+    description="Aggregate Cloud Run request logs by status class, route, and latency percentiles.",
+)
+def aggregate_requests(
+    service_name: str,
+    project_id: Optional[str] = None,
+    status_class: Optional[str] = None,
+    route: Optional[str] = None,
+    window_minutes: int = 60,
+    start_time: Optional[Union[datetime, str]] = None,
+    end_time: Optional[Union[datetime, str]] = None,
+    max_entries: int = 100,
+    client: Any = None,
+) -> Dict[str, Any]:
+    """Aggregate Cloud Run request logs (alias for query_request_logs)."""
+    return query_request_logs(
+        service_name=service_name,
+        project_id=project_id,
+        status_class=status_class,
+        route=route,
+        window_minutes=window_minutes,
+        start_time=start_time,
+        end_time=end_time,
+        max_entries=max_entries,
+        client=client,
+    )

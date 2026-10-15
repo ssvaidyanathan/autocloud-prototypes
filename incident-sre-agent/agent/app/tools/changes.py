@@ -578,3 +578,384 @@ def list_cloud_builds(
             )
 
     return builds
+
+
+def _extract_revision_spec(rev: Any) -> Dict[str, Any]:
+    """Extract container image, env var names (ONLY names), limits, probes, and SA."""
+    spec: Dict[str, Any] = {
+        "image": "",
+        "env_var_names": set(),
+        "cpu_limit": "",
+        "memory_limit": "",
+        "concurrency": 0,
+        "probes": {},
+        "service_account": "",
+    }
+    if rev is None:
+        return spec
+
+    template = (
+        getattr(rev, "template", None)
+        or (rev.get("template") if isinstance(rev, dict) else None)
+        or rev
+    )
+    containers = (
+        getattr(template, "containers", None)
+        or (template.get("containers") if isinstance(template, dict) else None)
+        or getattr(rev, "containers", None)
+        or (rev.get("containers") if isinstance(rev, dict) else [])
+    )
+    if hasattr(containers, "_mock_name"):
+        containers = []
+
+    sa = (
+        getattr(template, "service_account", None)
+        or getattr(template, "service_account_name", None)
+        or getattr(template, "serviceAccountName", None)
+        or (template.get("service_account") if isinstance(template, dict) else None)
+        or (template.get("serviceAccountName") if isinstance(template, dict) else None)
+        or getattr(rev, "service_account", None)
+        or getattr(rev, "serviceAccountName", None)
+        or ""
+    )
+    if sa and not hasattr(sa, "_mock_name"):
+        spec["service_account"] = str(sa).strip()
+
+    concurrency = (
+        getattr(template, "max_instance_request_concurrency", None)
+        or getattr(template, "container_concurrency", None)
+        or getattr(template, "containerConcurrency", None)
+        or (
+            template.get("max_instance_request_concurrency") if isinstance(template, dict) else None
+        )
+        or (template.get("containerConcurrency") if isinstance(template, dict) else None)
+        or getattr(rev, "max_instance_request_concurrency", 0)
+    )
+    if isinstance(concurrency, (int, float)) and not hasattr(concurrency, "_mock_name"):
+        spec["concurrency"] = int(concurrency)
+
+    if containers and len(containers) > 0:
+        images: List[str] = []
+        cpu_limits: List[str] = []
+        mem_limits: List[str] = []
+        all_env_names: set[str] = set()
+        probes_map: Dict[str, Any] = {}
+
+        for c0 in containers:
+            img = (
+                getattr(c0, "image", None)
+                or (c0.get("image") if isinstance(c0, dict) else None)
+                or ""
+            )
+            if img and not hasattr(img, "_mock_name"):
+                img_str = str(img).strip()
+                if img_str and img_str not in images:
+                    images.append(img_str)
+
+            resources = getattr(c0, "resources", None) or (
+                c0.get("resources") if isinstance(c0, dict) else None
+            )
+            if resources is not None:
+                limits = getattr(resources, "limits", None) or (
+                    resources.get("limits") if isinstance(resources, dict) else None
+                )
+                if limits is not None and not hasattr(limits, "_mock_name"):
+                    if isinstance(limits, dict) or hasattr(limits, "get"):
+                        cpu_val = limits.get("cpu", "")
+                        mem_val = limits.get("memory", "")
+                    else:
+                        cpu_val = getattr(limits, "cpu", "")
+                        mem_val = getattr(limits, "memory", "")
+                    if cpu_val and not hasattr(cpu_val, "_mock_name"):
+                        cpu_limits.append(str(cpu_val).strip())
+                    if mem_val and not hasattr(mem_val, "_mock_name"):
+                        mem_limits.append(str(mem_val).strip())
+
+            # CRITICAL SECURITY GUARANTEE: Extract ONLY variable names, never values
+            env_items = getattr(c0, "env", None) or (c0.get("env") if isinstance(c0, dict) else [])
+            if env_items and not hasattr(env_items, "_mock_name"):
+                for item in env_items:
+                    if isinstance(item, dict):
+                        name_val = item.get("name")
+                    else:
+                        name_val = getattr(item, "name", None)
+                    if name_val and not hasattr(name_val, "_mock_name"):
+                        all_env_names.add(str(name_val).strip())
+
+            probe_keys = [
+                ("startup_probe", ["startup_probe", "startupProbe"]),
+                ("liveness_probe", ["liveness_probe", "livenessProbe"]),
+                ("readiness_probe", ["readiness_probe", "readinessProbe"]),
+            ]
+            for canon_name, attrs in probe_keys:
+                p_obj = None
+                for attr in attrs:
+                    val = getattr(c0, attr, None) or (
+                        c0.get(attr) if isinstance(c0, dict) else None
+                    )
+                    if val is not None:
+                        if (
+                            hasattr(val, "http_get")
+                            or hasattr(val, "httpGet")
+                            or isinstance(val, dict)
+                        ):
+                            p_obj = val
+                            break
+                if p_obj is not None:
+                    http_get = (
+                        getattr(p_obj, "http_get", None)
+                        or getattr(p_obj, "httpGet", None)
+                        or (p_obj.get("httpGet") if isinstance(p_obj, dict) else None)
+                        or (p_obj.get("http_get") if isinstance(p_obj, dict) else None)
+                    )
+                    path = ""
+                    port = 0
+                    if http_get is not None:
+                        raw_path = getattr(http_get, "path", "") or (
+                            http_get.get("path", "") if isinstance(http_get, dict) else ""
+                        )
+                        if isinstance(raw_path, str) and not hasattr(raw_path, "_mock_name"):
+                            path = str(raw_path).strip()
+                        raw_port = getattr(http_get, "port", 0) or (
+                            http_get.get("port", 0) if isinstance(http_get, dict) else 0
+                        )
+                        if isinstance(raw_port, (int, float)) and not hasattr(
+                            raw_port, "_mock_name"
+                        ):
+                            port = int(raw_port)
+
+                    period = 0
+                    raw_period = (
+                        getattr(p_obj, "period_seconds", None)
+                        or getattr(p_obj, "periodSeconds", None)
+                        or (p_obj.get("periodSeconds", 0) if isinstance(p_obj, dict) else 0)
+                    )
+                    if isinstance(raw_period, (int, float)) and not hasattr(
+                        raw_period, "_mock_name"
+                    ):
+                        period = int(raw_period)
+
+                    timeout = 0
+                    raw_timeout = (
+                        getattr(p_obj, "timeout_seconds", None)
+                        or getattr(p_obj, "timeoutSeconds", None)
+                        or (p_obj.get("timeoutSeconds", 0) if isinstance(p_obj, dict) else 0)
+                    )
+                    if isinstance(raw_timeout, (int, float)) and not hasattr(
+                        raw_timeout, "_mock_name"
+                    ):
+                        timeout = int(raw_timeout)
+
+                    failure = 0
+                    raw_failure = (
+                        getattr(p_obj, "failure_threshold", None)
+                        or getattr(p_obj, "failureThreshold", None)
+                        or (p_obj.get("failureThreshold", 0) if isinstance(p_obj, dict) else 0)
+                    )
+                    if isinstance(raw_failure, (int, float)) and not hasattr(
+                        raw_failure, "_mock_name"
+                    ):
+                        failure = int(raw_failure)
+
+                    if path or port or period or timeout or failure:
+                        if canon_name not in probes_map:
+                            probes_map[canon_name] = {
+                                "path": path,
+                                "port": port,
+                                "period_seconds": int(period)
+                                if isinstance(period, (int, float))
+                                and not hasattr(period, "_mock_name")
+                                else 0,
+                                "timeout_seconds": int(timeout)
+                                if isinstance(timeout, (int, float))
+                                and not hasattr(timeout, "_mock_name")
+                                else 0,
+                                "failure_threshold": int(failure)
+                                if isinstance(failure, (int, float))
+                                and not hasattr(failure, "_mock_name")
+                                else 0,
+                            }
+
+        spec["image"] = ", ".join(images) if images else ""
+        spec["cpu_limit"] = ", ".join(cpu_limits) if cpu_limits else ""
+        spec["memory_limit"] = ", ".join(mem_limits) if mem_limits else ""
+        spec["env_var_names"] = all_env_names
+        spec["probes"] = probes_map
+
+    return spec
+
+
+@readonly_tool(
+    name="diff_revisions",
+    description=(
+        "Diff two Cloud Run revisions comparing image, env var names "
+        "(values redacted), limits, probes, and service account."
+    ),
+)
+def diff_revisions(
+    service_name: str,
+    rev_a: str,
+    rev_b: str,
+    project_id: Optional[str] = None,
+    region: Optional[str] = None,
+    client: Any = None,
+) -> Dict[str, Any]:
+    """Diff two Cloud Run revisions strictly exposing env var names only and redacting secrets."""
+    from .common import validate_service
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+    resolved_service = validate_service(service_name) or "default"
+
+    if not region:
+        try:
+            from agent.app.config import get_settings
+
+            region = get_settings().gcp_region
+        except Exception:
+            region = os.getenv("GCP_REGION", "")
+
+    console_url = (
+        f"https://console.cloud.google.com/run/detail/{region}/{resolved_service}/revisions"
+        f"?project={pinned_project}"
+    )
+
+    if client is None:
+        client = get_cloud_run_revisions_client()
+
+    if client is None and not is_local_mode():
+        raise RuntimeError("GCP Cloud Run revisions client unavailable in production environment")
+
+    def _fetch_revision(rev_target: str) -> Any:
+        if client is None:
+            return None
+        short_name = rev_target.split("/")[-1] if "/" in rev_target else rev_target
+        # Try direct invocation with target or candidate path
+        for candidate_name in [
+            rev_target,
+            f"projects/{pinned_project}/locations/{region}/services/{resolved_service}/revisions/{short_name}",
+            short_name,
+        ]:
+            try:
+                try:
+                    res = client.get_revision(name=candidate_name)
+                except (TypeError, ValueError):
+                    res = client.get_revision(request={"name": candidate_name})
+                if res is not None:
+                    return res
+            except Exception:
+                pass
+        try:
+            res = client.get_revision(rev_target)
+            if res is not None:
+                return res
+        except Exception:
+            pass
+
+        from .common import get_candidate_service_names
+
+        for cand in get_candidate_service_names(resolved_service):
+            cand_name = (
+                f"projects/{pinned_project}/locations/{region}/"
+                f"services/{cand}/revisions/{short_name}"
+            )
+            try:
+                try:
+                    res = client.get_revision(name=cand_name)
+                except (TypeError, ValueError):
+                    res = client.get_revision(request={"name": cand_name})
+                if res is not None:
+                    return res
+            except Exception:
+                pass
+        return None
+
+    rev_a_obj = _fetch_revision(rev_a)
+    rev_b_obj = _fetch_revision(rev_b)
+
+    spec_a = _extract_revision_spec(rev_a_obj)
+    spec_b = _extract_revision_spec(rev_b_obj)
+
+    image_changed = spec_a["image"] != spec_b["image"]
+    env_vars_added = sorted(list(spec_b["env_var_names"] - spec_a["env_var_names"]))
+    env_vars_removed = sorted(list(spec_a["env_var_names"] - spec_b["env_var_names"]))
+    limits_changed = (
+        spec_a["cpu_limit"] != spec_b["cpu_limit"]
+        or spec_a["memory_limit"] != spec_b["memory_limit"]
+        or spec_a["concurrency"] != spec_b["concurrency"]
+    )
+    probes_changed = spec_a["probes"] != spec_b["probes"]
+    sa_changed = spec_a["service_account"] != spec_b["service_account"]
+
+    summary_parts = []
+    if image_changed:
+        summary_parts.append(f"Image changed ({spec_a['image']} -> {spec_b['image']})")
+    else:
+        summary_parts.append("Image unchanged")
+
+    if env_vars_added or env_vars_removed:
+        if env_vars_added:
+            summary_parts.append(f"Env vars added: {env_vars_added}")
+        if env_vars_removed:
+            summary_parts.append(f"Env vars removed: {env_vars_removed}")
+    else:
+        summary_parts.append("Env vars unchanged")
+
+    if limits_changed:
+        summary_parts.append(
+            f"Limits changed (CPU: {spec_a['cpu_limit']}->{spec_b['cpu_limit']}, "
+            f"Mem: {spec_a['memory_limit']}->{spec_b['memory_limit']}, "
+            f"Concurrency: {spec_a['concurrency']}->{spec_b['concurrency']})"
+        )
+    else:
+        summary_parts.append("Limits unchanged")
+
+    if probes_changed:
+        summary_parts.append("Probes changed")
+    else:
+        summary_parts.append("Probes unchanged")
+
+    if sa_changed:
+        summary_parts.append(
+            f"Service account changed ({spec_a['service_account']} -> {spec_b['service_account']})"
+        )
+    else:
+        summary_parts.append("Service account unchanged")
+
+    diff_summary = "; ".join(summary_parts)
+
+    differences: Dict[str, Any] = {
+        "image_changed": image_changed,
+        "image_details": {"rev_a": spec_a["image"], "rev_b": spec_b["image"]},
+        "env_vars_added": env_vars_added,
+        "env_vars_removed": env_vars_removed,
+        "limits_changed": limits_changed,
+        "limits_details": {
+            "rev_a": {
+                "cpu": spec_a["cpu_limit"],
+                "memory": spec_a["memory_limit"],
+                "concurrency": spec_a["concurrency"],
+            },
+            "rev_b": {
+                "cpu": spec_b["cpu_limit"],
+                "memory": spec_b["memory_limit"],
+                "concurrency": spec_b["concurrency"],
+            },
+        },
+        "probes_changed": probes_changed,
+        "probes_details": {"rev_a": spec_a["probes"], "rev_b": spec_b["probes"]},
+        "service_account_changed": sa_changed,
+        "service_account_details": {
+            "rev_a": spec_a["service_account"],
+            "rev_b": spec_b["service_account"],
+        },
+    }
+
+    return {
+        "service_name": resolved_service,
+        "rev_a": rev_a,
+        "rev_b": rev_b,
+        "diff_summary": diff_summary,
+        "differences": differences,
+        "console_url": console_url,
+    }
