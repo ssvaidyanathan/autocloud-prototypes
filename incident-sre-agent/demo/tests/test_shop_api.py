@@ -5,7 +5,11 @@ from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
-from shop_app import _get_inventory_auth_headers
+from shop_app import (
+    FaultAccessLogFilter,
+    _get_inventory_auth_headers,
+    install_fault_access_log_filter,
+)
 
 
 def test_shop_health(shop_client: TestClient) -> None:
@@ -256,3 +260,205 @@ def test_fault_control_endpoints_emit_zero_app_logs(
         reset_resp = shop_client.post("/fault/reset")
         assert reset_resp.status_code == 200
         assert len(caplog.records) == 0
+
+
+def test_uvicorn_access_log_filter_drops_fault_endpoints_and_passes_checkout() -> None:
+    """Verify FaultAccessLogFilter drops uvicorn.access records for /fault/inject,
+    /fault/reset, and /fault/status, while allowing /checkout and normal traffic through.
+    """
+    flt = FaultAccessLogFilter()
+
+    # 1. Test individual records via filter() directly with standard uvicorn args format
+    # (client_addr, method, path, http_version, status_code)
+    def make_record(
+        method: str,
+        path: str,
+        status_code: int = 200,
+        formatted: str | None = None,
+    ) -> logging.LogRecord:
+        msg = '%s - "%s %s HTTP/%s" %d' if formatted is None else formatted
+        args: tuple[object, ...] = (
+            ("127.0.0.1:12345", method, path, "1.1", status_code) if formatted is None else ()
+        )
+        return logging.LogRecord(
+            name="uvicorn.access",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg=msg,
+            args=args,
+            exc_info=None,
+        )
+
+    # Fault endpoints must be dropped (filter returns False)
+    assert flt.filter(make_record("POST", "/fault/inject")) is False
+    assert flt.filter(make_record("POST", "/fault/reset")) is False
+    assert flt.filter(make_record("GET", "/fault/status")) is False
+    assert flt.filter(make_record("GET", "/fault")) is False
+    assert flt.filter(make_record("GET", "/fault/")) is False
+    assert flt.filter(make_record("GET", "/fault/x")) is False
+    assert flt.filter(make_record("GET", "/fault?query=1")) is False
+
+    # Normal application endpoints must pass through (filter returns True)
+    assert flt.filter(make_record("POST", "/checkout")) is True
+    assert flt.filter(make_record("GET", "/catalog")) is True
+    assert flt.filter(make_record("GET", "/health")) is True
+    assert flt.filter(make_record("GET", "/readyz")) is True
+    assert flt.filter(make_record("GET", "/faultyroute")) is True
+
+    # 2. Test fallback path with records without args (pre-formatted strings or raw messages)
+    def make_args_free_record(msg: str) -> logging.LogRecord:
+        return logging.LogRecord(
+            name="uvicorn.access",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg=msg,
+            args=(),
+            exc_info=None,
+        )
+
+    # Fallback pre-formatted access lines (Cloud Logging stdout textPayload format)
+    assert (
+        flt.filter(
+            make_args_free_record(
+                'INFO:     169.254.169.126:22774 - "GET /fault/status HTTP/1.1" 200 OK'
+            )
+        )
+        is False
+    )
+    assert (
+        flt.filter(
+            make_args_free_record(
+                'INFO:     127.0.0.1:44248 - "POST /fault/inject HTTP/1.1" 200 OK'
+            )
+        )
+        is False
+    )
+    assert (
+        flt.filter(
+            make_args_free_record('INFO:     127.0.0.1:44248 - "POST /fault/reset HTTP/1.1" 200 OK')
+        )
+        is False
+    )
+    assert (
+        flt.filter(
+            make_args_free_record('INFO:     127.0.0.1:44248 - "GET /fault HTTP/1.1" 200 OK')
+        )
+        is False
+    )
+    assert (
+        flt.filter(
+            make_args_free_record('INFO:     127.0.0.1:44248 - "GET /fault/ HTTP/1.1" 200 OK')
+        )
+        is False
+    )
+    assert (
+        flt.filter(
+            make_args_free_record('INFO:     127.0.0.1:44248 - "GET /fault/x HTTP/1.1" 200 OK')
+        )
+        is False
+    )
+    assert (
+        flt.filter(
+            make_args_free_record(
+                'INFO:     127.0.0.1:44248 - "GET /fault?query=1 HTTP/1.1" 200 OK'
+            )
+        )
+        is False
+    )
+
+    # Bare path fallback messages without args
+    assert flt.filter(make_args_free_record("/fault/status")) is False
+    assert flt.filter(make_args_free_record("/fault")) is False
+    assert flt.filter(make_args_free_record("/fault/")) is False
+    assert flt.filter(make_args_free_record("/fault/x")) is False
+    assert flt.filter(make_args_free_record("/fault?query=1")) is False
+
+    # Confirm zero false drops on fallback path
+    assert (
+        flt.filter(
+            make_args_free_record(
+                'INFO:     169.254.169.126:22774 - "POST /checkout HTTP/1.1" 200 OK'
+            )
+        )
+        is True
+    )
+    assert (
+        flt.filter(
+            make_args_free_record(
+                'INFO:     169.254.169.126:22774 - "GET /catalog HTTP/1.1" 200 OK'
+            )
+        )
+        is True
+    )
+    assert (
+        flt.filter(
+            make_args_free_record(
+                'INFO:     169.254.169.126:22774 - "GET /faultyroute HTTP/1.1" 200 OK'
+            )
+        )
+        is True
+    )
+    assert flt.filter(make_args_free_record("/checkout")) is True
+    assert flt.filter(make_args_free_record("/catalog")) is True
+    assert flt.filter(make_args_free_record("/faultyroute")) is True
+
+    # 3. Test integrated logger behavior on uvicorn.access
+    access_logger = logging.getLogger("uvicorn.access")
+    install_fault_access_log_filter()
+
+    captured: list[logging.LogRecord] = []
+
+    class RecordCollector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    collector = RecordCollector()
+    access_logger.addHandler(collector)
+    old_level = access_logger.level
+    access_logger.setLevel(logging.INFO)
+
+    try:
+        # Simulate uvicorn logging access records for fault endpoints
+        access_logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:12345",
+            "POST",
+            "/fault/inject",
+            "1.1",
+            200,
+        )
+        access_logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:12345",
+            "POST",
+            "/fault/reset",
+            "1.1",
+            200,
+        )
+        access_logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "169.254.169.126:22774",
+            "GET",
+            "/fault/status",
+            "1.1",
+            200,
+        )
+
+        # Simulate uvicorn logging access record for checkout
+        access_logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:12345",
+            "POST",
+            "/checkout",
+            "1.1",
+            200,
+        )
+
+        # Assert only /checkout was emitted to handlers
+        assert len(captured) == 1
+        assert captured[0].args[2] == "/checkout"  # type: ignore[index]
+    finally:
+        access_logger.removeHandler(collector)
+        access_logger.setLevel(old_level)

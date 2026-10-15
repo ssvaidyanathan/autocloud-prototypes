@@ -3,7 +3,10 @@ import json
 import logging
 import os
 import random
+import re
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -57,11 +60,66 @@ def setup_logger(name: str = "shop-api") -> logging.Logger:
 
 logger = setup_logger("shop-api")
 
+_FAULT_FALLBACK_PATTERN = re.compile(r'"[A-Z]+ /fault(?:/|[ ?]|$)|(?:^|\s)/fault(?:/|\?|\s|$)')
+
+
+class FaultAccessLogFilter(logging.Filter):
+    """Filter out uvicorn access logs for fault-control endpoints (/fault/*).
+
+    Autonomous SRE investigation agents inspect stdout / access logs for anomalies.
+    Dropping uvicorn access logs for /fault/* prevents agents from discovering synthetic
+    test-harness fault injection / reset calls on stdout while preserving all genuine
+    traffic access logs (/catalog, /checkout, /readyz, etc.).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Standard uvicorn access log record.args format:
+        # (client_addr, method, full_path, http_version, status_code)
+        args = record.args
+        if isinstance(args, (tuple, list)) and len(args) >= 3:
+            path = args[2]
+            if isinstance(path, str) and (
+                path == "/fault" or path.startswith("/fault/") or path.startswith("/fault?")
+            ):
+                return False
+
+        # Fallback check on formatted message or unformatted msg (records without args)
+        try:
+            msg = record.getMessage()
+            if _FAULT_FALLBACK_PATTERN.search(msg):
+                return False
+        except Exception:
+            pass
+
+        return True
+
+
+def install_fault_access_log_filter() -> None:
+    """Install FaultAccessLogFilter on the uvicorn.access logger and its handlers."""
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, FaultAccessLogFilter) for f in access_logger.filters):
+        access_logger.addFilter(FaultAccessLogFilter())
+    for handler in access_logger.handlers:
+        if not any(isinstance(f, FaultAccessLogFilter) for f in handler.filters):
+            handler.addFilter(FaultAccessLogFilter())
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Application lifespan context manager for startup/shutdown tasks."""
+    install_fault_access_log_filter()
+    yield
+
+
 app = FastAPI(
     title="Shop API",
     description="Online storefront API service for browsing catalog and processing checkout",
     version="0.1.0",
+    lifespan=lifespan,
 )
+
+# Also install at import time for early logger setup
+install_fault_access_log_filter()
 
 
 class CatalogItem(BaseModel):
