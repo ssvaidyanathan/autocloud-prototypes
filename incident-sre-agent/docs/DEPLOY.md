@@ -226,13 +226,26 @@ BRIDGE_SERVICE_URL=$(terraform output -raw bridge_service_url)
 
 ### Step 3 (Optional): Deploy Demo Stack (`demo/infra/terraform`)
 
+To deploy or update the demo microservices (`shop-api` and `inventory-svc`), build and push the container images before applying Terraform:
+
 ```bash
 cd ../../../demo/infra/terraform
 cp terraform.tfvars.example terraform.tfvars
 cp backend.hcl.example backend.hcl
 
+# 1. Build and push demo container images (or pass --with-demo to scripts/deploy-all.sh)
+gcloud builds submit ../shop-api \
+  --tag="${REGION}-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-incident-demo/${NAME_PREFIX}-shop-api:${IMAGE_TAG}" \
+  --project="${PROJECT_ID}"
+
+gcloud builds submit ../inventory-svc \
+  --tag="${REGION}-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-incident-demo/${NAME_PREFIX}-inventory-svc:${IMAGE_TAG}" \
+  --project="${PROJECT_ID}"
+
+# 2. Plan and apply demo infrastructure
 terraform init -backend-config=backend.hcl
-terraform apply
+terraform plan -var="image_tag=${IMAGE_TAG}" -out=tfplan-demo
+terraform apply tfplan-demo
 ```
 
 ---

@@ -201,6 +201,8 @@ sequenceDiagram
   - `demo/inventory-svc`: Private Cloud Run stock reservation service requiring IAM authentication.
   - `demo/loadgen`: Asynchronous traffic generator simulating baseline user traffic.
   - `demo/scripts/`: Fault injection scripts simulating 5 realistic production failure scenarios (error spikes, latency degradation, bad release, memory leaks, and IAM permission revocation).
+  - **Telemetry Realism & Fault Exclusion**: Fault injection endpoints (`/fault/*`) are decoupled from project telemetry via a Cloud Logging exclusion (`<prefix>-demo-fault-control`) and silent application handlers. Autonomous SRE agents must diagnose incidents strictly through authentic operational symptoms (stack traces, metrics, container lifecycle events, downstream auth failures) rather than detecting test-harness control calls.
+
 
 ---
 

@@ -105,8 +105,6 @@ import logging
 logger = logging.getLogger("shop-api")
 
 def handle_request():
-    logger.info("Admin configuration updated")
-    logger.info("Admin configuration reset")
     logger.error("Missing required environment variable: PAYMENT_GATEWAY_KEY")
     logger.error("Cannot process checkout; missing PAYMENT_GATEWAY_KEY")
     logger.error("Downstream dependency inventory-svc returned HTTP 403 Forbidden")

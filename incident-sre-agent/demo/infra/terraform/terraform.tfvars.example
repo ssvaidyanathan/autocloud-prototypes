@@ -8,4 +8,6 @@ inventory_svc_image = "us-central1-docker.pkg.dev/your-project-id/isa-incident-d
 payment_gateway_key = "demo-live-payment-key-xyz"
 shop_api_cpu        = "1"
 shop_api_memory     = "1Gi"
+enable_fault_control_exclusion = true
+
 
