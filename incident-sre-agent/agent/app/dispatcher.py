@@ -11,7 +11,9 @@ from .config import AgentConfig, get_settings
 from .contracts.findings import Findings
 from .contracts.request import InvestigationRequest
 from .contracts.result import InvestigationResult
+from .dependencies import extract_downstream_dependencies, inspect_downstream_dependency
 from .llm import GeminiLlmClient
+from .onset import detect_onset_from_telemetry
 from .review import ReviewEvaluator
 from .skills_loader import SkillsLoader
 from .specialists.base import BaseSpecialist
@@ -149,6 +151,7 @@ class Dispatcher(BaseAgent):
         self.skills_loader = loader
         self.parallel_agent = parallel
         self.llm_client = llm_client
+        self.client = client
 
     async def _run_specialist_safely(
         self,
@@ -283,13 +286,77 @@ class Dispatcher(BaseAgent):
             if plan.affected_service and plan.affected_service != "unknown-service":
                 incident.service_hint = plan.affected_service
 
+        # Onset Detection & Window Anchoring (Item 8.3)
+        if plan.affected_service and plan.affected_service != "unknown-service":
+            try:
+                onset_res = await asyncio.to_thread(
+                    detect_onset_from_telemetry,
+                    service_name=plan.affected_service,
+                    end_time=plan.end_time,
+                    window_minutes=self.config.onset_window_minutes,
+                    pre_buffer_minutes=self.config.onset_pre_buffer_minutes,
+                    project_id=self.config.gcp_project,
+                    logging_client=self.client,
+                    metrics_client=self.client,
+                    config=self.config,
+                    prior_quiescent_minutes=self.config.prior_incident_quiescent_minutes,
+                )
+                if onset_res and onset_res.onset_time:
+                    plan.onset_time = onset_res.onset_time
+                    plan.start_time = onset_res.anchored_start_time
+                    if onset_res.prior_incidents:
+                        setattr(plan, "prior_incidents", onset_res.prior_incidents)
+            except Exception as exc:
+                logger.warning("Onset detection failed; continuing with triage window: %s", exc)
+
         # 2. Parallel Fan-out: run selected specialists concurrently
         findings, specialist_errors = await self._execute_fan_out(plan, incident)
 
         # 3. Review: evaluate findings & execute <= 1 follow-up
         await self._execute_review_step(plan, incident, findings, specialist_errors)
 
-        # 4. Synthesis: produce Report with actually loaded and consulted skills
+        # 4. Dependency Traversal & Downstream Attribution (Item 8.3)
+        if plan.affected_service and plan.affected_service != "unknown-service":
+            downstream_services = extract_downstream_dependencies(
+                primary_service=plan.affected_service,
+                findings=findings,
+                max_services=self.config.dependency_max_services,
+            )
+
+            async def _inspect_dep(dep_name: str) -> tuple[str, Optional[Findings], Optional[str]]:
+                try:
+                    res = await asyncio.to_thread(
+                        inspect_downstream_dependency,
+                        service_name=dep_name,
+                        start_time=plan.start_time,
+                        end_time=plan.end_time,
+                        project_id=self.config.gcp_project,
+                        client=self.client,
+                        config=self.config,
+                        max_depth=self.config.dependency_fanout_max_depth,
+                    )
+                    err_msg = "; ".join(res.errors) if res.errors else None
+                    return dep_name, res, err_msg
+                except Exception as exc:
+                    logger.warning(
+                        "Downstream dependency inspection failed for %s: %s",
+                        dep_name,
+                        exc,
+                    )
+                    return dep_name, None, str(exc)
+
+            if downstream_services:
+                dep_results = await asyncio.gather(
+                    *[_inspect_dep(s) for s in downstream_services],
+                    return_exceptions=False,
+                )
+                for dep_svc, dep_f, dep_err in dep_results:
+                    if dep_f is not None:
+                        findings[f"dependency:{dep_svc}"] = dep_f
+                    if dep_err:
+                        specialist_errors[f"dependency:{dep_svc}"] = dep_err
+
+        # 5. Synthesis: produce Report with actually loaded and consulted skills
         loaded_skills = list(self.skills_loader.loaded_skills) if self.skills_loader else []
         report = self.synthesizer.synthesize(
             incident=incident,

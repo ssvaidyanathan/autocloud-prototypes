@@ -237,7 +237,36 @@ Key architectural execution characteristics:
    - Output is strictly validated against the `Report` contract (`contracts/report.py`).
    - Includes partial failure handling: if one specialist times out or fails, the report marks that specialist as degraded but completes the synthesis using remaining available signals.
 
-### 3.7 Outbound Callback & ID Token Authentication
+### 3.7 Temporal Reasoning, Dependency Traversal & Attribution (Roadmap Item 8.3)
+
+To prevent misattributions, timeline discrepancies, and cascade diagnostic failures, the agent incorporates advanced temporal reasoning and dependency traversal:
+
+1. **Onset Detection & Window Anchoring**:
+   - Before specialist fan-out, recent telemetry (request logs, error logs, and metric anomalies) for the affected service is scanned across `onset_window_minutes` (default: 60m).
+   - The engine determines the precise symptom onset timestamp (`onset_time`): the earliest timestamp where error rates (HTTP 5xx, 403) or latency percentiles deviated from baseline.
+   - The investigation window is anchored to `start_time = onset_time - onset_pre_buffer_minutes` (default 10m buffer to capture triggering deployments and pre-incident baselines).
+   - If telemetry exhibits zero error spikes, the agent falls back safely to ticket-stated time (`opened_at - lookback`).
+   - `onset_time` is recorded in `InvestigationPlan` and propagated across all specialist contexts and the unified timeline.
+
+2. **Prior-Incident Separation**:
+   - If an error spike occurred earlier in the lookback window but completely recovered with >= 10 minutes of normal healthy traffic before onset, it is classified as a prior resolved incident.
+   - Prior incidents are documented in the timeline with `[PRIOR_INCIDENT]` tags and caveats, and are strictly prevented from being attributed as the cause of the active incident.
+
+3. **Revision-Causality Rule**:
+   - When evaluating recent changes, revision creation timestamps are matched against `onset_time`.
+   - Only revisions deployed within `revision_causality_window_minutes` (default: 30m) prior to or during symptom onset are treated as plausible causal candidates.
+   - Long-running baseline revisions deployed hours or days prior to onset with steady healthy traffic are marked as benign baseline deployments.
+   - If no revisions were deployed within the causality window, confidence is calibrated downward and caveats note the absence of proximate deployments.
+
+4. **Dependency Traversal & Downstream Attribution**:
+   - Primary specialist findings are parsed for downstream failure signals (e.g. calls to other services returning HTTP 403 Forbidden, 502 Bad Gateway, 504 Gateway Timeout, connection timeouts).
+   - Downstream service names are extracted generically from URLs, hostnames, and error logs, fanning out bounded specialist investigations (`dependency_max_services: 3`, `dependency_fanout_max_depth: 2`).
+   - If evidence demonstrates that the downstream dependency failed (e.g. downstream service returned 403 due to IAM permissions or crashed), the Synthesizer attributes probable root cause to the downstream dependency failure rather than the upstream caller's application code.
+
+5. **Unified Chronological Timeline**:
+   - `Report.timeline` reflects detected onset (`[ONSET]`), causal changes (`[CHANGES]`), downstream dependency events (`[DEPENDENCY: <service>]`), and ticket opening in strict chronological order with normalized UTC timestamps.
+
+### 3.8 Outbound Callback & ID Token Authentication
 
 When synthesis completes:
 1. `sre-agent` queries the Google Cloud Metadata Server to obtain an OpenID Connect (OIDC) identity token:
@@ -251,7 +280,7 @@ When synthesis completes:
    - The `aud` claim matches its callback URL.
    - The `email` claim matches `agent-sa@<project>.iam.gserviceaccount.com`.
 
-### 3.8 Ticketing Delivery & Report Rendering
+### 3.9 Ticketing Delivery & Report Rendering
 
 Upon receiving the verified callback, the bridge renders the findings into vendor-native formats:
 - **ServiceNow**:

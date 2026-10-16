@@ -95,6 +95,12 @@ class AgentConfig(BaseSettings):
     callback_read_timeout_seconds: float = 45.0
     callback_max_retries: int = 3
     callback_backoff_factor: float = 1.5
+    onset_window_minutes: int = 60
+    onset_pre_buffer_minutes: int = 10
+    revision_causality_window_minutes: int = 30
+    dependency_fanout_max_depth: int = 2
+    dependency_max_services: int = 3
+    prior_incident_quiescent_minutes: int = 5
 
     @model_validator(mode="after")
     def apply_model_aliases_and_resolve_project(self) -> "AgentConfig":

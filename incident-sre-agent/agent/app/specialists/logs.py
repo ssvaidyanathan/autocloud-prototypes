@@ -566,7 +566,7 @@ class LogsSpecialist(BaseSpecialist):
                             f"(2xx: {status_bd.get('2xx', 0)}, 3xx: {status_bd.get('3xx', 0)}, "
                             f"4xx: {errors_4xx}, 5xx: {errors_5xx}), p95 latency: {p95_ms}ms"
                         ),
-                        timestamp=start_time_dt,
+                        timestamp=None,
                         console_url=req_summary.get("console_url"),
                     )
                 )

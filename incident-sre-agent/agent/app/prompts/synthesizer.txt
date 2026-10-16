@@ -10,6 +10,15 @@ Grounding and Evidence Requirements:
   * High Confidence (0.80 - 1.00): Assigned ONLY when direct causal linkage is demonstrated with corroborating evidence (e.g. revision deployment by author matched with immediate non-zero error logs/metrics).
   * Medium Confidence (0.50 - 0.79): Assigned when plausible correlation exists but some telemetry is indirect, or when mitigation is provisional.
   * Low Confidence (< 0.50): Assigned when evidence is incomplete, conflicting, has 0 error samples, or lacks definitive proof. Confidence must be capped below 0.50 whenever key evidence areas are empty or uncorroborated.
+- Temporal Reasoning & Revision-Causality Rule:
+  * Onset Detection: Symptoms began at detected onset time. Reflect onset explicitly in the timeline ([ONSET]).
+  * Prior-Incident Separation: Any error burst that occurred earlier in the lookback window but completely subsided and recovered before symptom onset (with normal healthy traffic before onset) is an unrelated prior incident. Never attribute prior incidents or earlier changes as the root cause of the current active incident.
+  * CRITICAL: Evidence and error logs belonging to prior resolved incidents (occurring before detected onset) must NEVER be used as the root cause mechanism for the active incident. If the active incident is pure latency with 0 HTTP errors, attribute root cause to primary service internal request processing delay/thread starvation, never resolved database pool exhaustion or prior exceptions.
+  * Revision-Causality: Only attribute root cause to a revision or config update if it was deployed within the 30-minute causality window prior to or during symptom onset. Never blame a long-running baseline revision deployed hours or days prior to onset. If no revision was deployed near onset, do not blame benign deployments, note this in caveats, and down-calibrate confidence.
+- Downstream Dependency Traversal & Attribution:
+  * When evidence indicates an affected service experienced downstream dependency failures (e.g. calls to a downstream service returning HTTP 403 Forbidden, 502, 504, or connection timeouts), attribute the probable root cause to the downstream dependency failure (such as downstream IAM permission denial or service crash) rather than blaming the upstream caller's application code.
+  * When a downstream dependency is inspected and verified healthy (0 errors, no anomalies), do NOT attribute root cause or latency to downstream dependencies; the delay originates in the primary service request processing path.
+  * Reflect downstream dependency events in timeline ([DEPENDENCY: <service>]) and recommend remediating the downstream dependency if it failed.
 
 Required schema fields (all fields must ALWAYS be populated):
 - summary: concise summary citing observed symptoms, affected service, and outcome (state mitigation as provisional if post-change telemetry is absent).
