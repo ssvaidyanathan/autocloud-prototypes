@@ -1,6 +1,8 @@
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
+
+from agent.app.specialists.base import DiagnosticResult
 
 from .contracts.findings import EvidenceItem
 from .contracts.incident import Incident
@@ -18,11 +20,10 @@ def extract_error_lines(log_text: str) -> list[str]:
     diagnostic_lines: list[str] = []
     generic_exit_lines: list[str] = []
 
-    # Diagnostic patterns (specific compiler / linter / test / exception lines)
     diagnostic_patterns = [
         re.compile(r":\d+:\d*:?\s*(?:[A-Z]\d+|error)", re.IGNORECASE),
         re.compile(r":\d+:\s*(?:[A-Z]\d+|error)", re.IGNORECASE),
-        re.compile(r"\b[A-Z]\d{3,4}\b"),  # e.g. F841, E501
+        re.compile(r"\b[A-Z]\d{3,4}\b"),
         re.compile(r"\bassertionerror\b", re.IGNORECASE),
         re.compile(r"\bexception\b", re.IGNORECASE),
         re.compile(r"\btraceback\b", re.IGNORECASE),
@@ -38,7 +39,6 @@ def extract_error_lines(log_text: str) -> list[str]:
 
     for line in lines:
         cleaned = line.strip()
-        # Strip timestamp prefix if present (e.g. "2026-10-16T21:00:00.0000000Z ")
         content = re.sub(r"^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s*", "", cleaned)
         if not content:
             continue
@@ -49,7 +49,6 @@ def extract_error_lines(log_text: str) -> list[str]:
         elif any(pat.search(content) for pat in generic_patterns):
             generic_exit_lines.append(content)
 
-    # Return diagnostic lines first, followed by generic exit lines
     return diagnostic_lines + generic_exit_lines
 
 
@@ -58,27 +57,36 @@ def synthesize_report(
     failed_job: dict[str, Any],
     failed_step: dict[str, Any],
     log_text: str,
+    diagnostic_result: Optional[DiagnosticResult] = None,
 ) -> Report:
-    """Synthesize canonical Report with ProbableRootCause and diagnostic evidence."""
+    """Synthesize canonical Report with ProbableRootCause, evidence, and specialist findings."""
     job_name = failed_job.get("name", "pipeline")
     step_name = failed_step.get("name", "execution")
     now_utc = datetime.now(timezone.utc)
 
     error_lines = extract_error_lines(log_text)
-    primary_error = error_lines[0] if error_lines else f"Step '{step_name}' exited with failure"
+    if diagnostic_result and diagnostic_result.probable_cause:
+        primary_error = diagnostic_result.probable_cause
+        confidence_val = diagnostic_result.confidence
+    elif error_lines:
+        primary_error = error_lines[0]
+        confidence_val = 0.92
+    else:
+        primary_error = f"Step '{step_name}' exited with failure"
+        confidence_val = 0.75
 
-    # Formulate root cause
     probable_root_cause = ProbableRootCause(
         text=(
             f"Automated fallback (LLM unavailable): Pipeline step '{step_name}' in job "
             f"'{job_name}' failed: {primary_error}"
         ),
-        confidence=0.92 if error_lines else 0.75,
+        confidence=confidence_val,
     )
 
+    stage_label = diagnostic_result.stage if diagnostic_result else "execution"
     summary = (
         f"Workflow run for repository '{incident.github_repo or incident.title}' "
-        f"failed at stage '{step_name}'. Primary failure: {primary_error}"
+        f"failed at stage '{stage_label}' (step '{step_name}'). Primary failure: {primary_error}"
     )
 
     timeline = [
@@ -88,42 +96,46 @@ def synthesize_report(
         ),
         TimelineItem(
             timestamp=now_utc,
-            description=f"Step '{step_name}' failed in job '{job_name}'",
+            description=f"Step '{step_name}' failed in job '{job_name}' (stage: {stage_label})",
         ),
     ]
 
-    excerpt = "\n".join(error_lines[:5]) if error_lines else log_text[-500:]
-    evidence = [
-        EvidenceItem(
-            kind="github_runner_log",
-            excerpt=excerpt,
-            timestamp=now_utc,
-            console_url=incident.external_url,
+    evidence: list[EvidenceItem] = []
+    if diagnostic_result and diagnostic_result.evidence_items:
+        evidence.extend(diagnostic_result.evidence_items)
+    else:
+        excerpt = "\n".join(error_lines[:5]) if error_lines else log_text[-500:]
+        evidence.append(
+            EvidenceItem(
+                source="ci_logs",
+                kind="github_runner_log",
+                excerpt=excerpt,
+                timestamp=now_utc,
+                console_url=incident.external_url,
+            )
         )
-    ]
 
-    recommended_actions = [
-        f"Inspect failure in step '{step_name}' of workflow '{incident.github_repo}'",
-        f"Review culprit log output: {primary_error}",
-    ]
-    if "ruff" in step_name.lower() or "lint" in step_name.lower():
+    recommended_actions: list[str] = []
+    if diagnostic_result and diagnostic_result.remediation_actions:
+        recommended_actions.extend(diagnostic_result.remediation_actions)
+    else:
         recommended_actions.append(
-            "Run local linter (`ruff check .`) to verify and fix syntax/style violations"
+            f"Inspect failure in step '{step_name}' of workflow '{incident.github_repo}'"
         )
-    elif "test" in step_name.lower() or "pytest" in step_name.lower():
-        recommended_actions.append(
-            "Run failing tests locally (`pytest`) to reproduce and verify fixes"
-        )
-    elif "build" in step_name.lower() or "docker" in step_name.lower():
-        recommended_actions.append("Validate Dockerfile directives and build context locally")
+        recommended_actions.append(f"Review culprit log output: {primary_error}")
 
+    spec_name = (
+        diagnostic_result.specialist_name if diagnostic_result else "pipeline_logs_specialist"
+    )
     specialists_status = [
         SpecialistStatus(
-            specialist="pipeline_logs",
+            specialist=spec_name,
             status="completed",
             error=None,
         )
     ]
+
+    annotations = diagnostic_result.annotations if diagnostic_result else []
 
     return Report(
         summary=summary,
@@ -134,13 +146,18 @@ def synthesize_report(
         recent_changes=[],
         recommended_actions=recommended_actions,
         specialists_status=specialists_status,
-        skills_used=["github-actions-logs-analysis"],
+        skills_used=[
+            f"{stage_label}-troubleshooting"
+            if stage_label in ("lint", "test")
+            else "container-build-troubleshooting"
+        ],
         caveats=[],
-        annotations=[],
+        annotations=annotations,
         queries_appendix={"job_id": [str(failed_job.get("id", ""))]},
         metadata={
             "failing_step": step_name,
             "failing_job": job_name,
+            "failing_stage": stage_label,
             "repo": incident.github_repo,
             "run_id": incident.github_run_id,
         },

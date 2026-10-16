@@ -1,0 +1,17 @@
+# Mapping of agents/specialists to their assigned CI/CD troubleshooting runbook skills
+dispatcher:
+  - lint-troubleshooting
+  - test-failure-triage
+  - container-build-troubleshooting
+  - cloudrun-deploy-troubleshooting
+
+pipeline_logs:
+  - lint-troubleshooting
+  - test-failure-triage
+  - container-build-troubleshooting
+
+runtime_health:
+  - cloudrun-deploy-troubleshooting
+
+iac_config:
+  - cloudrun-deploy-troubleshooting

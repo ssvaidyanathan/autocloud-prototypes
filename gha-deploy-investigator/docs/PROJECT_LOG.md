@@ -91,3 +91,72 @@ Resolved all 8 findings (3 blocking, 5 non-blocking) identified by reviewer `gha
 - **Pytest Suite**: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/pytest -v` -> 24 passed (100% pass).
 - **Ruff Linter**: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator` -> 0 errors ("All checks passed!").
 - **AST Guard Check**: `python3 scripts/check-no-rootcause-overrides.py agent/app/synthesizer.py agent/app/dispatcher.py` -> 0 violations.
+
+## Entry: Phase 2 Multi-Stage Failure Coverage & Specialized Diagnostics
+- **Date**: 2026-10-16
+- **Author**: `gha-dev-1` (Developer Agent)
+- **Role**: Developer
+- **Supervisor**: `gha-em`
+- **Branch**: `feat/gha-deploy-investigator`
+- **Status**: Completed
+
+### 1. Overview & Objectives
+Implemented Phase 2: Multi-Stage Failure Coverage & Specialized Diagnostics per `design.md` Section 3.3 and Section 6. Expanded the single-stage prototype into an intelligent multi-stage diagnostic system that classifies failure stages, delegates investigation to specialized diagnostic agents, correlates multi-source telemetry (CI logs, commit diffs, Cloud Run revisions, Cloud Logging stderr), and writes comprehensive diagnostics back to developers via GitHub Check Runs and PR/Commit comments with links to ServiceNow.
+
+### 2. Deliverables Implemented
+1. **GitHub App Auth & REST Client (`agent/app/github/`)**:
+   - `auth.py`: `GitHubAppAuth` generating RS256 JWT signed with App Private Key (PEM) or falling back to local test tokens in `APP_ENV == "local"`. Handles installation token exchange (`POST /app/installations/{installation_id}/access_tokens`) and caches access tokens with expiration TTL.
+   - `client.py`: `GitHubRestClient` read-only client with methods: `get_workflow_run_jobs`, `get_job_logs`, `get_commit_diff`, and `get_file_content`.
+2. **Specialized Diagnostic Specialists (`agent/app/specialists/`)**:
+   - `base.py`: `BaseSpecialist` interface defining `diagnose(...)` returning `DiagnosticResult` (stage, specialist name, summary, probable cause, confidence, evidence items, remediation actions, suggested fix, annotations).
+   - `pipeline_logs.py` (`PipelineLogsSpecialist`):
+     - **Lint / Static Analysis**: Regex parses `ruff`, `flake8`, `mypy`, `eslint` outputs; extracts file, line number, rule, message; correlates with git commit diffs (`get_commit_diff`).
+     - **Unit / Integration Tests**: Parses `pytest` and `jest` failures, extracting failing test name, assertion error message, and bottom-frame traceback.
+     - **Build & Packaging**: Parses Docker build errors (`COPY failed`, `RUN non-zero code`) and package conflicts (`ResolutionImpossible`).
+   - `runtime_health.py` (`RuntimeHealthSpecialist`):
+     - Diagnoses Cloud Run deployment failures by querying revision condition status (`describe_cloud_run_revision`), detecting container termination exit codes (e.g. exit code 137 OOM) and probe timeouts.
+     - Correlates with container stderr logs via Cloud Logging tool (`query_cloud_logging`).
+   - `iac_config.py` (`IaCConfigSpecialist`):
+     - Analyzes Terraform plan/apply execution errors (`TERRAFORM_ERROR_PATTERN`) and YAML manifest errors.
+3. **Read-Only Tools Expansion (`agent/app/tools/`)**:
+   - `github_tools.py`: Added `@readonly_tool` implementations for `get_commit_diff(repo, head_sha)` and `get_file_content(repo, path, ref)`.
+   - `runtime_tools.py`: Added `@readonly_tool` implementations for `describe_cloud_run_revision(service_name, revision_name, region)` and `query_cloud_logging(filter_query, limit)`.
+4. **CI/CD Runbooks & Progressive Disclosure (`agent/skills/`)**:
+   - `skills.yaml` mapping diagnostic stages and specialists to runbooks.
+   - Markdown runbooks in `skills/`: `lint-troubleshooting/SKILL.md`, `test-failure-triage/SKILL.md`, `container-build-troubleshooting/SKILL.md`, `cloudrun-deploy-troubleshooting/SKILL.md`.
+5. **Multi-Stage Classifier & Dispatcher Routing (`agent/app/dispatcher.py` & `synthesizer.py`)**:
+   - `classify_stage`: Classifies failing steps into `deploy`, `iac_config`, `lint`, `test`, `build`, or `pipeline_logs`.
+   - `InvestigationDispatcher`: Routes failing jobs/steps to matching specialists, collects diagnostics, and supplies specialist findings and annotations to `synthesizer.py`.
+   - `synthesizer.py`: Generates canonical `Report` with `ProbableRootCause` complying with AST static guard (`Automated fallback (LLM unavailable): ...`).
+6. **Developer-Facing Write-Back Enhancement (`bridge/app/adapters/github.py`)**:
+   - In `post_report_link`, posts Check Run annotations (culprit file, line, rule, title, message) and posts PR / Commit comments with collapsible `<details>` Markdown sections containing:
+     - Probable root cause callout
+     - Failing stage and error excerpt
+     - Direct hyperlink to created ServiceNow ticket (`INC...`)
+7. **Hermetic Test Infrastructure Expansion**:
+   - `bridge/tests/fake_github_server.py`: Added handlers for installation tokens, commit diffs, file contents, PR comments, and commit comments.
+   - `agent/tests/test_specialists.py`: 6 tests covering all specialists across lint, pytest, Docker build, Cloud Run exit 137 OOM, Cloud Logging stderr correlation, and Terraform errors.
+   - `agent/tests/test_github_app.py`: 4 tests for `GitHubAppAuth` and `GitHubRestClient`.
+   - `agent/tests/test_dispatcher.py`: Multi-stage tests verifying end-to-end diagnosis across all 4 stages (lint, test, build, deploy).
+   - `bridge/tests/test_github_adapter.py`: Added tests for Check Run annotations and PR comment posting.
+
+### 3. Key Invariants & Architectural Patterns
+- **Strict Read-Only Guarantee**: All tools in `github_tools.py` and `runtime_tools.py` are registered as `@readonly_tool`. Verified by `test_readonly_tool_invariant`.
+- **Contract Byte-Identity**: Verified by `scripts/check-contracts.sh` (0 differences).
+- **AST Root Cause Guard**: Verified zero post-LLM template overrides via `scripts/check-no-rootcause-overrides.py`.
+- **100% Offline Hermetic Tests**: Zero network calls, completely isolated within fake test servers.
+
+### 4. Verification & Test Results
+- **Contract Synchronization Check**:
+  - Command: `bash gha-deploy-investigator/scripts/check-contracts.sh`
+  - Result: `SUCCESS: Contracts are byte-identical.`
+- **AST Root Cause Guard**:
+  - Command: `python3 incident-sre-agent/scripts/check-no-rootcause-overrides.py gha-deploy-investigator/agent/app/synthesizer.py gha-deploy-investigator/agent/app/dispatcher.py`
+  - Result: `[PASS] Zero post-LLM root cause template overrides or regex classifiers found.`
+- **Automated Pytest Suite**:
+  - Command: `PYTHONPATH=gha-deploy-investigator/agent:gha-deploy-investigator/bridge /scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/pytest gha-deploy-investigator/agent/tests gha-deploy-investigator/bridge/tests`
+  - Result: `39 passed in 0.87s` (21 agent tests, 18 bridge tests).
+- **Ruff Linter**:
+  - Command: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator`
+  - Result: `All checks passed!`
+

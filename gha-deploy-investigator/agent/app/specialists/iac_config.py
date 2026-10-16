@@ -1,0 +1,82 @@
+import logging
+import re
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from agent.app.config import AgentConfig
+from agent.app.contracts.findings import EvidenceItem
+from agent.app.contracts.incident import Incident
+from agent.app.specialists.base import BaseSpecialist, DiagnosticResult
+
+logger = logging.getLogger(__name__)
+
+TERRAFORM_ERROR_PATTERN = re.compile(
+    r"(?:Error:\s*(?P<msg>.+?)(?:\n\s*on\s+(?P<file>[^\s:]+)\s+line\s+(?P<line>\d+))?"
+    r"|Error applying plan:\s*(?P<plan_err>.+))",
+    re.DOTALL,
+)
+
+
+class IaCConfigSpecialist(BaseSpecialist):
+    """Diagnoses Infrastructure-as-Code (Terraform, YAML manifests) errors."""
+
+    def __init__(self) -> None:
+        super().__init__(name="iac_config_specialist", stage="iac_config")
+
+    def diagnose(
+        self,
+        incident: Incident,
+        failing_job: dict[str, Any],
+        failing_step: dict[str, Any],
+        log_text: str,
+        client: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
+    ) -> DiagnosticResult:
+        step_name = failing_step.get("name", "IaC Step")
+        now = datetime.now(timezone.utc)
+        evidence_items: list[EvidenceItem] = []
+
+        tf_match = TERRAFORM_ERROR_PATTERN.search(log_text)
+        if tf_match:
+            msg = (tf_match.group("msg") or tf_match.group("plan_err") or "").strip()
+            file_name = tf_match.group("file") or "main.tf"
+            line_str = tf_match.group("line") or "1"
+            probable_cause = f"Terraform execution failure in {file_name}:{line_str}: {msg[:200]}."
+            remediation = [
+                f"Inspect Terraform configuration in {file_name} around line {line_str}",
+                (
+                    "Run 'terraform validate' and 'terraform plan' locally to identify "
+                    "syntax or provider schema issues"
+                ),
+            ]
+        else:
+            probable_cause = (
+                f"Infrastructure configuration or manifest error in step '{step_name}'."
+            )
+            remediation = [
+                (
+                    f"Verify infrastructure manifests and cloud provider credentials "
+                    f"for step '{step_name}'"
+                )
+            ]
+
+        tail_log = log_text[-1500:] if len(log_text) > 1500 else log_text
+        evidence_items.append(
+            EvidenceItem(
+                kind="github_runner_log",
+                excerpt=f"IaC configuration error in '{step_name}': {probable_cause}\n{tail_log}",
+                timestamp=now,
+                console_url=incident.external_url,
+            )
+        )
+
+        return DiagnosticResult(
+            stage="iac_config",
+            specialist_name=self.name,
+            summary=f"IaC / Configuration error in step '{step_name}': {probable_cause}",
+            probable_cause=probable_cause,
+            confidence=0.85 if tf_match else 0.70,
+            evidence_items=evidence_items,
+            remediation_actions=remediation,
+            suggested_fix="Correct Terraform definition or YAML schema configuration",
+        )

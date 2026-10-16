@@ -1,0 +1,196 @@
+from datetime import datetime, timezone
+
+from agent.app.contracts.incident import Incident
+from agent.app.specialists.iac_config import IaCConfigSpecialist
+from agent.app.specialists.pipeline_logs import PipelineLogsSpecialist
+from agent.app.specialists.runtime_health import RuntimeHealthSpecialist
+from agent.app.tools.runtime_tools import (
+    add_mock_log,
+    reset_runtime_state,
+    set_mock_revision,
+)
+
+
+def _make_incident(failing_stage: str = "pipeline") -> Incident:
+    return Incident(
+        id="gha-test-123",
+        source="github",
+        external_id="123",
+        external_key="my-org/sample-app#123",
+        external_url="https://github.com/my-org/sample-app/actions/runs/123",
+        title="[CI/CD Failure] sample-app: CI",
+        description="Run 123 failed",
+        severity="P2",
+        service_hint="sample-app",
+        opened_at=datetime.now(timezone.utc),
+        github_repo="my-org/sample-app",
+        github_run_id=123,
+        github_head_sha="e4b2a8d39c01",
+        github_branch="main",
+        github_failing_stage=failing_stage,
+    )
+
+
+class TestSpecialists:
+    def test_pipeline_logs_specialist_lint_failure(self) -> None:
+        specialist = PipelineLogsSpecialist()
+        incident = _make_incident("lint")
+        job = {"id": 1, "name": "lint-job"}
+        step = {"name": "Run Ruff Linter", "conclusion": "failure"}
+        log_text = (
+            "2026-10-16T21:00:10Z app/main.py:42:5: F841 "
+            "Local variable `secret_key` is assigned to but never used\n"
+            "2026-10-16T21:00:11Z Found 1 error.\n"
+            "Process completed with exit code 1."
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "lint"
+        assert res.confidence >= 0.90
+        assert "F841" in res.probable_cause
+        assert "app/main.py" in res.probable_cause
+        assert len(res.evidence_items) >= 1
+        assert len(res.annotations) == 1
+        assert res.annotations[0].path == "app/main.py"
+        assert res.annotations[0].start_line == 42
+        assert any("ruff check --fix" in act for act in res.remediation_actions)
+
+    def test_pipeline_logs_specialist_pytest_failure(self) -> None:
+        specialist = PipelineLogsSpecialist()
+        incident = _make_incident("test")
+        job = {"id": 2, "name": "unit-tests"}
+        step = {"name": "Run Pytest", "conclusion": "failure"}
+        log_text = (
+            "============================= test session starts ==============================\n"
+            "tests/test_auth.py:28: in test_token_expiration\n"
+            ">       assert response.status_code == 200\n"
+            "E       AssertionError: assert 401 == 200\n"
+            "FAILED tests/test_auth.py::test_token_expiration - AssertionError: assert 401 == 200\n"
+            "============================== 1 failed in 0.45s ==============================="
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "test"
+        assert res.confidence >= 0.85
+        assert "test_token_expiration" in res.probable_cause
+        assert "AssertionError" in res.probable_cause or "401 == 200" in res.probable_cause
+        assert len(res.evidence_items) >= 1
+        assert any("pytest" in act for act in res.remediation_actions)
+
+    def test_pipeline_logs_specialist_build_failure(self) -> None:
+        specialist = PipelineLogsSpecialist()
+        incident = _make_incident("build")
+        job = {"id": 3, "name": "build-container"}
+        step = {"name": "Docker Build & Push", "conclusion": "failure"}
+        log_text = (
+            "#7 [4/7] COPY requirements.txt .\n"
+            "#7 ERROR: failed to solve: failed to compute cache key: "
+            "COPY failed: file not found in build context or excluded by .dockerignore: "
+            "stat requirements.txt: file does not exist\n"
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "build"
+        assert res.confidence >= 0.85
+        assert "COPY failed" in res.probable_cause or ".dockerignore" in res.probable_cause
+        assert any(
+            ".dockerignore" in act or "Dockerfile" in act for act in res.remediation_actions
+        )
+
+    def test_runtime_health_specialist_oom_exit_137(self) -> None:
+        reset_runtime_state()
+        specialist = RuntimeHealthSpecialist()
+        incident = _make_incident("deploy")
+        job = {"id": 4, "name": "deploy-cloudrun"}
+        step = {"name": "Deploy to Cloud Run", "conclusion": "failure"}
+        log_text = (
+            "Deploying container to Cloud Run service [sample-app] in region [us-central1]...\n"
+            "Deploying revision [sample-app-00002-oom]...\n"
+            "ERROR: (gcloud.run.deploy) Container failed to start and listen on $PORT.\n"
+        )
+
+        # Configure mock telemetry indicating exit code 137 OOM
+        set_mock_revision(
+            "sample-app-00002-oom",
+            {
+                "service_name": "sample-app",
+                "revision_name": "sample-app-00002-oom",
+                "region": "us-central1",
+                "conditions": [
+                    {
+                        "type": "Ready",
+                        "status": "False",
+                        "reason": "ContainerTerminated",
+                        "message": "Container terminated due to memory limit (exit code 137)",
+                    }
+                ],
+                "container_statuses": [
+                    {
+                        "name": "sample-app",
+                        "restart_count": 3,
+                        "last_exit_code": 137,
+                    }
+                ],
+            },
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "deploy"
+        assert res.confidence >= 0.90
+        assert (
+            "137" in res.probable_cause
+            or "OOM" in res.probable_cause
+            or "memory" in res.probable_cause.lower()
+        )
+        assert any("--memory 1Gi" in act for act in res.remediation_actions)
+        assert len(res.evidence_items) >= 2
+
+    def test_runtime_health_specialist_cloud_logging_correlation(self) -> None:
+        reset_runtime_state()
+        specialist = RuntimeHealthSpecialist()
+        incident = _make_incident("deploy")
+        job = {"id": 5, "name": "deploy-cloudrun"}
+        step = {"name": "Deploy to Cloud Run", "conclusion": "failure"}
+        log_text = (
+            "Deploying container to Cloud Run service [sample-app] in region [us-central1]...\n"
+            "Deploying revision [sample-app-00003-crash]...\n"
+        )
+
+        # Set mock revision without OOM, but mock logs with startup crash
+        set_mock_revision(
+            "sample-app-00003-crash",
+            {
+                "service_name": "sample-app",
+                "revision_name": "sample-app-00003-crash",
+                "conditions": [],
+                "container_statuses": [{"last_exit_code": 1}],
+            },
+        )
+        add_mock_log(
+            {
+                "text_payload": "ModuleNotFoundError: No module named 'cryptography'",
+                "severity": "ERROR",
+            }
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "deploy"
+        assert "ModuleNotFoundError" in res.probable_cause
+        assert any(e.kind == "cloud_logging" for e in res.evidence_items)
+
+    def test_iac_config_specialist_terraform_error(self) -> None:
+        specialist = IaCConfigSpecialist()
+        incident = _make_incident("iac_config")
+        job = {"id": 6, "name": "terraform-apply"}
+        step = {"name": "Terraform Apply", "conclusion": "failure"}
+        log_text = (
+            "Error: Unsupported attribute\n"
+            '  on main.tf line 45, in resource "google_cloud_run_service" "app":\n'
+            'This object has no argument, nested block, or exported attribute '
+            'named "invalid_field".\n'
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "iac_config"
+        assert "main.tf:45" in res.probable_cause or "main.tf" in res.probable_cause
+        assert any("terraform validate" in act for act in res.remediation_actions)

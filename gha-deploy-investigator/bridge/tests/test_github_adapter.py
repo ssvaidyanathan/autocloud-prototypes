@@ -125,3 +125,34 @@ class TestGitHubAdapter:
         assert check_run["head_sha"] == sample_incident.github_head_sha
         assert check_run["status"] == "completed"
         assert "INC0019482" in check_run["output"]["summary"]
+
+        # Verify comment was posted
+        assert len(github_state.comments) == 1
+        comment = github_state.comments[0]
+        assert "<details open>" in comment["body"]
+        assert "INC0019482" in comment["body"]
+        assert "Probable Root Cause" in comment["body"]
+
+    def test_post_report_link_pr_comment(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_github_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        adapter = GitHubAdapter(config=bridge_settings, http_client=fake_github_client)
+        ref = IncidentRef(
+            id="sn-sys_456",
+            source="servicenow",
+            external_id="sys_456",
+            external_key="INC0019483",
+        )
+        sample_incident.github_pr_number = 42
+        github_state.comments.clear()
+
+        adapter.post_report_link(sample_incident, sample_report, ref)
+
+        assert len(github_state.comments) == 1
+        comment = github_state.comments[0]
+        assert comment.get("issue_number") == 42
+        assert "INC0019483" in comment["body"]

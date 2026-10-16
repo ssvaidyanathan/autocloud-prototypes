@@ -1,6 +1,12 @@
 import httpx
 from agent.app.config import AgentConfig
-from agent.app.tools.github_tools import fetch_job_logs, fetch_workflow_run_jobs
+from agent.app.tools import runtime_tools  # noqa: F401
+from agent.app.tools.github_tools import (
+    fetch_job_logs,
+    fetch_workflow_run_jobs,
+    get_commit_diff,
+    get_file_content,
+)
 from agent.app.tools.registry import default_query_cache, default_registry
 from bridge.tests.fake_github_server import state as github_state
 
@@ -45,6 +51,34 @@ class TestGitHubTools:
         names = default_registry.get_tool_names()
         assert "fetch_workflow_run_jobs" in names
         assert "fetch_job_logs" in names
+        assert "get_commit_diff" in names
+        assert "get_file_content" in names
+        assert "describe_cloud_run_revision" in names
+        assert "query_cloud_logging" in names
+
+    def test_get_commit_diff_and_file_content(
+        self,
+        fake_github_client: httpx.Client,
+        agent_settings: AgentConfig,
+    ) -> None:
+        default_query_cache.clear()
+        diff = get_commit_diff(
+            repo="my-org/sample-app",
+            head_sha="e4b2a8d39c01",
+            client=fake_github_client,
+            config=agent_settings,
+        )
+        assert diff["sha"] == "e4b2a8d39c01"
+        assert len(diff["files"]) >= 1
+
+        content = get_file_content(
+            repo="my-org/sample-app",
+            path="app/main.py",
+            ref="main",
+            client=fake_github_client,
+            config=agent_settings,
+        )
+        assert "Content for app/main.py" in content
 
     def test_query_caching(
         self,

@@ -25,9 +25,7 @@ def render_servicenow_html(report: Report) -> str:
 
     # Summary (safely truncate if necessary before HTML formatting)
     safe_summary = (
-        report.summary[:2000] + "... (truncated)"
-        if len(report.summary) > 2000
-        else report.summary
+        report.summary[:2000] + "... (truncated)" if len(report.summary) > 2000 else report.summary
     )
     lines.extend(
         [
@@ -56,10 +54,7 @@ def render_servicenow_html(report: Report) -> str:
                     'border-left: 4px solid #bf8700; border-radius: 2px;">'
                 ),
                 '      <div style="font-weight: 600; color: #7d4e00;">Probable Root Cause</div>',
-                (
-                    f'      <div style="margin-top: 4px;">'
-                    f"{html.escape(prc_text)}</div>"
-                ),
+                (f'      <div style="margin-top: 4px;">{html.escape(prc_text)}</div>'),
                 (
                     f'      <div style="margin-top: 4px; font-size: 11px; color: #57606a;">'
                     f"Confidence: <strong>{conf_pct}%</strong></div>"
@@ -83,9 +78,7 @@ def render_servicenow_html(report: Report) -> str:
         for item in report.timeline[:10]:
             ts = item.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
             desc = (
-                item.description[:200] + "..."
-                if len(item.description) > 200
-                else item.description
+                item.description[:200] + "..." if len(item.description) > 200 else item.description
             )
             lines.append(f"        <li><strong>{ts}</strong>: {html.escape(desc)}</li>")
         lines.extend(

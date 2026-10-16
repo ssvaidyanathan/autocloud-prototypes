@@ -74,7 +74,67 @@ def fetch_job_logs(
             c.close()
 
 
+@readonly_tool(
+    name="get_commit_diff",
+    description="Fetch commit details, modified files, and diff for a given commit SHA",
+)
+def get_commit_diff(
+    repo: str,
+    head_sha: str,
+    client: Optional[httpx.Client] = None,
+    config: Optional[AgentConfig] = None,
+) -> dict[str, Any]:
+    """Fetch commit diff details from GitHub REST API."""
+    cfg = config or get_settings()
+    api_url = cfg.github_api_url.rstrip("/")
+    endpoint = f"{api_url}/repos/{repo}/commits/{head_sha}"
+
+    c, owns_client = _build_client(client, config)
+    try:
+        resp = c.get(endpoint)
+        resp.raise_for_status()
+        return resp.json()  # type: ignore[no-any-return]
+    finally:
+        if owns_client:
+            c.close()
+
+
+@readonly_tool(
+    name="get_file_content",
+    description="Fetch repository file content for a given path and git reference",
+)
+def get_file_content(
+    repo: str,
+    path: str,
+    ref: str = "main",
+    client: Optional[httpx.Client] = None,
+    config: Optional[AgentConfig] = None,
+) -> str:
+    """Fetch file content from GitHub repository."""
+    import base64
+
+    cfg = config or get_settings()
+    api_url = cfg.github_api_url.rstrip("/")
+    endpoint = f"{api_url}/repos/{repo}/contents/{path}"
+
+    c, owns_client = _build_client(client, config)
+    try:
+        resp = c.get(endpoint, params={"ref": ref})
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and data.get("encoding") == "base64" and "content" in data:
+            return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+        elif isinstance(data, dict) and "content" in data:
+            return str(data["content"])
+        return resp.text
+    finally:
+        if owns_client:
+            c.close()
+
+
 __all__ = [
     "fetch_job_logs",
     "fetch_workflow_run_jobs",
+    "get_commit_diff",
+    "get_file_content",
 ]
