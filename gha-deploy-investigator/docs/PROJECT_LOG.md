@@ -214,4 +214,82 @@ Resolved all 6 findings (3 blocking, 3 non-blocking) identified by reviewer `gha
   - Command: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator`
   - Result: `All checks passed!`
 
+## Entry: Phase 3 Dedicated Demo App & Multi-Stage Pipeline
+- **Date**: 2026-10-16
+- **Author**: `gha-dev-1` (Developer Agent)
+- **Role**: Developer
+- **Supervisor**: `gha-em`
+- **Branch**: `feat/gha-deploy-investigator`
+- **Status**: Completed
+
+### 1. Overview & Objectives
+Implemented Phase 3: Dedicated Demo App with Multi-Stage GitHub Actions Pipeline per `design.md` Section 3.5 & Section 6, and Amendments 6 & 7. Created a self-contained, production-grade FastAPI order processing microservice under `demo/sample-pipeline-app/` with a 4-stage GitHub Actions CI/CD pipeline, reproducible deterministic fault injection scripts, a standalone repository seeding script for Phase 5 live deployment, and automated integration tests verifying fault injection lifecycles and autonomous agent diagnosis.
+
+### 2. Deliverables Implemented
+1. **Dedicated Demo Microservice (`demo/sample-pipeline-app/`)**:
+   - `app/config.py`: Application configuration model with failure simulation flags (`DEMO_CRASH_ON_STARTUP`, `DEMO_ALLOCATE_OOM`).
+   - `app/main.py`: Production-grade FastAPI service with lifespan handler and endpoints:
+     - `GET /`: Service metadata and environment.
+     - `GET /health`: Readiness and liveness probe.
+     - `GET /api/v1/orders`: List confirmed customer orders.
+     - `POST /api/v1/orders`: Create new customer orders with itemized pricing.
+     - `GET /api/v1/orders/{order_id}`: Retrieve existing order by ID (with 404 handling).
+   - `tests/test_main.py`: Unit test suite verifying endpoints and business logic.
+   - `Dockerfile`: Multi-stage build (builder and runtime stages).
+   - `pyproject.toml`: Dependency declarations, package configuration, and ruff settings.
+   - `scripts/deploy.sh`: Executable Cloud Run deployment script with revision tagging and dry-run/simulation mode.
+   - `README.md`: Comprehensive documentation covering architecture, local development, pipeline stages, and fault injection runbook.
+2. **Multi-Stage GitHub Actions Workflow (`.github/workflows/pipeline.yml`)**:
+   - Sequenced 4-job pipeline triggered on push and pull requests:
+     1. `lint`: Runs `ruff check app/`
+     2. `unit-test`: Needs `lint`, runs `pytest tests/ -v`
+     3. `build-container`: Needs `unit-test`, runs `docker build -t sample-pipeline-app:${{ github.sha }} .`
+     4. `deploy-cloudrun`: Needs `build-container`, deploys to Cloud Run with revision tagging.
+3. **Reproducible Fault Injection Scenarios (`scenarios/`)**:
+   - `trigger-lint-failure.sh`: Injects unused imports (`F401`) and multiple statements on a single line (`E701`) into `app/main.py`.
+   - `trigger-test-failure.sh`: Appends failing assertion `test_order_discount_calculation_failure` into `tests/test_main.py`.
+   - `trigger-build-failure.sh`: Appends invalid `COPY missing_asset_configuration.json` instruction to `Dockerfile`.
+   - `trigger-deploy-failure.sh`: Injects `DEMO_ALLOCATE_OOM=true` and memory constraint `128Mi` into `scripts/deploy.sh`.
+   - `reset-scenarios.sh`: Reverts all injected code and configuration modifications back to pristine clean state.
+4. **Standalone Repository Seed Script (`seed-demo-repo.sh`)**:
+   - Script `seed-demo-repo.sh` (provided at both `demo/` and `demo/sample-pipeline-app/`):
+     - Takes a target directory (defaults to `/tmp/gdi-sample-pipeline-app`).
+     - Copies clean source files (excluding caches and temporary backups).
+     - Initializes a standalone git repository with an initial pristine commit on branch `main`.
+     - Displays instructions for pushing to `ssvaidyanathan/gdi-sample-pipeline-app` for Phase 5 live verification.
+5. **Automated Unit & Integration Tests (`demo/tests/`)**:
+   - `demo/tests/conftest.py`: Isolated module loader fixture avoiding package namespace collisions with `bridge.app` or `agent.app`.
+   - `demo/tests/test_demo_scenarios.py`:
+     - `test_pristine_demo_app_functionality`: Verifies all REST endpoints of the demo microservice.
+     - `test_scenario_1_lint_failure_lifecycle`: Tests lint failure injection, ruff failure verification, `PipelineLogsSpecialist` diagnosis, and clean reset.
+     - `test_scenario_2_test_failure_lifecycle`: Tests test failure injection, pytest failure verification, `PipelineLogsSpecialist` diagnosis, and clean reset.
+     - `test_scenario_3_build_failure_lifecycle`: Tests build failure injection, Dockerfile modification verification, `PipelineLogsSpecialist` diagnosis, and clean reset.
+     - `test_scenario_4_deploy_failure_lifecycle`: Tests deploy failure injection, simulation exit 137, `RuntimeHealthSpecialist` OOM diagnosis, and clean reset.
+     - `test_stage_classification_for_demo_pipeline_jobs`: Verifies accurate stage classification for all 4 demo workflow jobs.
+     - `test_seed_demo_repo_script`: Tests standalone repository seeding, git initialization, commit creation, and artifact hygiene.
+
+### 3. Key Invariants & Architectural Patterns
+- **Contract Byte-Identity**: Verified by `scripts/check-contracts.sh` (0 differences).
+- **Strict Read-Only Guarantee**: All agent tools remain `@readonly_tool`.
+- **AST Root Cause Guard**: Zero post-LLM template overrides verified by `check-no-rootcause-overrides.py`.
+- **100% Offline Hermetic Execution**: Zero external network requests during test execution.
+
+### 4. Verification & Test Results
+- **Contract Synchronization Check**:
+  - Command: `bash gha-deploy-investigator/scripts/check-contracts.sh`
+  - Result: `SUCCESS: Contracts are byte-identical.`
+- **AST Root Cause Guard**:
+  - Command: `python3 incident-sre-agent/scripts/check-no-rootcause-overrides.py gha-deploy-investigator/agent/app/synthesizer.py gha-deploy-investigator/agent/app/dispatcher.py`
+  - Result: `[PASS] Zero post-LLM root cause template overrides or regex classifiers found.`
+- **Automated Pytest Suite**:
+  - Command: `PYTHONPATH=gha-deploy-investigator/agent:gha-deploy-investigator/bridge:gha-deploy-investigator/demo/sample-pipeline-app /scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/pytest gha-deploy-investigator/agent/tests gha-deploy-investigator/bridge/tests gha-deploy-investigator/demo/tests -v`
+  - Result: `49 passed in 2.91s` (23 agent tests, 19 bridge tests, 7 demo tests).
+- **Demo Microservice Pytest Suite**:
+  - Command: `PYTHONPATH=. pytest tests/ -v` (inside `demo/sample-pipeline-app`)
+  - Result: `5 passed in 0.04s`.
+- **Ruff Linter**:
+  - Command: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator`
+  - Result: `All checks passed!`
+
+
 
