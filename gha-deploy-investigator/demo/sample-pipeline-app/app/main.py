@@ -1,3 +1,11 @@
+
+
+
+
+
+
+
+
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -57,27 +65,25 @@ ORDERS_DB: dict[str, Order] = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Handle application startup and failure injection flags."""
+    """Handle application startup, cache prewarming, and lifecycle."""
     cfg = get_config()
     logger.info("Initializing sample-pipeline-app (env=%s, port=%d)", cfg.environment, cfg.port)
 
-    # Demo fault scenario: simulate startup crash
-    if cfg.crash_on_startup:
-        logger.fatal(
-            "FATAL: DEMO_CRASH_ON_STARTUP active! Process aborting with unhandled exception."
-        )
-        raise RuntimeError("Demo failure injection: container crash during startup probe")
-
-    # Demo fault scenario: simulate memory exhaustion (exit code 137)
-    if cfg.allocate_oom:
-        logger.fatal(
-            "FATAL: DEMO_ALLOCATE_OOM active! Simulating container memory limit exhaustion (OOM)."
-        )
-        sys.stderr.write(
-            "Container killed by orchestrator: memory limit exceeded "
-            "(cgroups OOM killer triggered)\n"
-        )
-        sys.exit(137)
+    # Prewarm order history cache if configured
+    if cfg.cache_prewarm_buffer_mb > 0:
+        logger.info("Pre-warming in-memory cache buffer (%d MB)...", cfg.cache_prewarm_buffer_mb)
+        if cfg.cache_prewarm_buffer_mb > 512:
+            logger.fatal(
+                "FATAL: Memory limit exceeded during cache prewarm (%d MB requested). "
+                "Exceeds container cgroup memory limits.",
+                cfg.cache_prewarm_buffer_mb,
+            )
+            sys.stderr.write(
+                f"Container killed by cgroups OOM killer: attempted to allocate "
+                f"{cfg.cache_prewarm_buffer_mb}MB buffer exceeding container limit "
+                "(exit code 137)\n"
+            )
+            sys.exit(137)
 
     yield
     logger.info("Shutting down sample-pipeline-app...")

@@ -24,11 +24,14 @@ fi
 # In dry-run or local mode, simulate deployment
 if [[ "${DRY_RUN:-false}" == "true" || "${APP_ENV:-}" == "local" || "${CI_SIMULATION:-false}" == "true" ]]; then
     echo "[SIMULATION] Running deploy verification for ${SERVICE_NAME}..."
-    if [[ "${EXTRA_ENV_VARS}" =~ "DEMO_ALLOCATE_OOM=true" ]]; then
-        echo "Deploying revision ${SERVICE_NAME}-00004-oom..."
-        echo "ERROR: (gcloud.run.deploy) Container failed to start and listen on port 8080." >&2
-        echo "Revision '${SERVICE_NAME}-00004-oom' failed to become ready: Container terminated due to memory limit (exit code 137)." >&2
-        exit 1
+    if [[ "${EXTRA_ENV_VARS}" =~ CACHE_PREWARM_BUFFER_MB=([0-9]+) ]]; then
+        buffer_mb="${BASH_REMATCH[1]}"
+        if (( buffer_mb > 512 )); then
+            echo "Deploying revision ${SERVICE_NAME}-00004-err..."
+            echo "ERROR: (gcloud.run.deploy) Container failed to start and listen on port 8080." >&2
+            echo "Revision '${SERVICE_NAME}-00004-err' failed to become ready: Container terminated due to memory limit (exit code 137: Out of Memory)." >&2
+            exit 1
+        fi
     fi
     echo "Service ${SERVICE_NAME} successfully deployed to https://${SERVICE_NAME}-${REGION}.a.run.app"
     exit 0

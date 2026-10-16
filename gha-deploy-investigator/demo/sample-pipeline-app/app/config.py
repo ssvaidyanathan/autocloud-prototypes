@@ -16,13 +16,13 @@ class AppConfig(BaseModel):
         default_factory=lambda: int(os.getenv("PORT", "8080")),
         description="Listening HTTP port",
     )
-    crash_on_startup: bool = Field(
-        default_factory=lambda: os.getenv("DEMO_CRASH_ON_STARTUP", "").lower() in ("true", "1"),
-        description="Demo failure injection flag to crash process on startup",
+    cache_prewarm_buffer_mb: int = Field(
+        default_factory=lambda: int(os.getenv("CACHE_PREWARM_BUFFER_MB", "0")),
+        description="Size in MB of in-memory cache pre-allocation during startup",
     )
-    allocate_oom: bool = Field(
-        default_factory=lambda: os.getenv("DEMO_ALLOCATE_OOM", "").lower() in ("true", "1"),
-        description="Demo failure injection flag to simulate memory exhaustion (exit 137)",
+    strict_schema_validation: bool = Field(
+        default_factory=lambda: os.getenv("STRICT_SCHEMA_VALIDATION", "false").lower() == "true",
+        description="Enable strict startup schema verification",
     )
 
 

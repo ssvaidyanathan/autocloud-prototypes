@@ -62,13 +62,13 @@ def test_pristine_demo_app_functionality(demo_client: TestClient) -> None:
 
 def test_scenario_1_lint_failure_lifecycle(demo_app_path: Path) -> None:
     """Verify Scenario 1 injection, ruff failure, specialist diagnosis, and clean reset."""
-    scenarios_dir = demo_app_path / "scenarios"
+    scenarios_dir = demo_app_path.parent / "scenarios"
     main_py = demo_app_path / "app" / "main.py"
 
     try:
         # 1. Trigger lint fault
         res = subprocess.run(
-            ["bash", str(scenarios_dir / "trigger-lint-failure.sh")],
+            ["bash", str(scenarios_dir / "trigger-lint-failure.sh"), str(demo_app_path)],
             capture_output=True,
             text=True,
             check=True,
@@ -113,7 +113,7 @@ def test_scenario_1_lint_failure_lifecycle(demo_app_path: Path) -> None:
     finally:
         # 3. Reset scenario
         subprocess.run(
-            ["bash", str(scenarios_dir / "reset-scenarios.sh")],
+            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(demo_app_path)],
             capture_output=True,
             text=True,
             check=True,
@@ -129,13 +129,13 @@ def test_scenario_1_lint_failure_lifecycle(demo_app_path: Path) -> None:
 
 def test_scenario_2_test_failure_lifecycle(demo_app_path: Path) -> None:
     """Verify Scenario 2 injection, pytest failure, specialist diagnosis, and clean reset."""
-    scenarios_dir = demo_app_path / "scenarios"
+    scenarios_dir = demo_app_path.parent / "scenarios"
     test_main_py = demo_app_path / "tests" / "test_main.py"
 
     try:
         # 1. Trigger test fault
         res = subprocess.run(
-            ["bash", str(scenarios_dir / "trigger-test-failure.sh")],
+            ["bash", str(scenarios_dir / "trigger-test-failure.sh"), str(demo_app_path)],
             capture_output=True,
             text=True,
             check=True,
@@ -180,7 +180,7 @@ def test_scenario_2_test_failure_lifecycle(demo_app_path: Path) -> None:
     finally:
         # 3. Reset scenario
         subprocess.run(
-            ["bash", str(scenarios_dir / "reset-scenarios.sh")],
+            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(demo_app_path)],
             capture_output=True,
             text=True,
             check=True,
@@ -196,26 +196,26 @@ def test_scenario_2_test_failure_lifecycle(demo_app_path: Path) -> None:
 
 def test_scenario_3_build_failure_lifecycle(demo_app_path: Path) -> None:
     """Verify Scenario 3 injection, Dockerfile modification, specialist diagnosis, and reset."""
-    scenarios_dir = demo_app_path / "scenarios"
+    scenarios_dir = demo_app_path.parent / "scenarios"
     dockerfile = demo_app_path / "Dockerfile"
 
     try:
         # 1. Trigger build fault
         res = subprocess.run(
-            ["bash", str(scenarios_dir / "trigger-build-failure.sh")],
+            ["bash", str(scenarios_dir / "trigger-build-failure.sh"), str(demo_app_path)],
             capture_output=True,
             text=True,
             check=True,
         )
-        assert "Injected failing COPY instruction" in res.stdout
+        assert "Injected missing COPY asset instruction" in res.stdout
         dockerfile_content = dockerfile.read_text()
-        assert "missing_asset_configuration.json" in dockerfile_content
+        assert "cache-warmup.json" in dockerfile_content
 
         # 2. Verify specialist diagnoses simulated build log
         build_log = (
-            "#7 [builder 3/4] COPY missing_asset_configuration.json .\n"
+            "#7 [builder 3/4] COPY config/cache-warmup.json /app/config/cache-warmup.json\n"
             "#7 ERROR: failed to solve: failed to compute cache key: "
-            "COPY failed: file not found in build context: missing_asset_configuration.json\n"
+            "COPY failed: file not found in build context: config/cache-warmup.json\n"
         )
         specialist = PipelineLogsSpecialist()
         incident = Incident(
@@ -239,36 +239,36 @@ def test_scenario_3_build_failure_lifecycle(demo_app_path: Path) -> None:
             log_text=build_log,
         )
         assert diag.stage == "build"
-        assert "COPY failed" in diag.probable_cause or "missing_asset" in diag.probable_cause
+        assert "COPY failed" in diag.probable_cause or "cache-warmup" in diag.probable_cause
 
     finally:
         # 3. Reset scenario
         subprocess.run(
-            ["bash", str(scenarios_dir / "reset-scenarios.sh")],
+            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(demo_app_path)],
             capture_output=True,
             text=True,
             check=True,
         )
-        assert "missing_asset_configuration.json" not in dockerfile.read_text()
+        assert "cache-warmup.json" not in dockerfile.read_text()
 
 
 def test_scenario_4_deploy_failure_lifecycle(demo_app_path: Path) -> None:
     """Verify Scenario 4 injection, deploy.sh simulation, specialist diagnosis, and reset."""
-    scenarios_dir = demo_app_path / "scenarios"
+    scenarios_dir = demo_app_path.parent / "scenarios"
     deploy_sh = demo_app_path / "scripts" / "deploy.sh"
     reset_runtime_state()
 
     try:
         # 1. Trigger deploy fault
         res = subprocess.run(
-            ["bash", str(scenarios_dir / "trigger-deploy-failure.sh")],
+            ["bash", str(scenarios_dir / "trigger-deploy-failure.sh"), str(demo_app_path)],
             capture_output=True,
             text=True,
             check=True,
         )
-        assert "Injected OOM fault parameters" in res.stdout
+        assert "Injected production cache buffer parameters" in res.stdout
         deploy_content = deploy_sh.read_text()
-        assert "DEMO_ALLOCATE_OOM=true" in deploy_content
+        assert "CACHE_PREWARM_BUFFER_MB=2048" in deploy_content
 
         # Execute deploy.sh simulation
         sim_res = subprocess.run(
@@ -282,10 +282,10 @@ def test_scenario_4_deploy_failure_lifecycle(demo_app_path: Path) -> None:
 
         # 2. Configure mock runtime revision and verify RuntimeHealthSpecialist
         set_mock_revision(
-            "sample-pipeline-app-00004-oom",
+            "sample-pipeline-app-00004-err",
             {
                 "service_name": "sample-pipeline-app",
-                "revision_name": "sample-pipeline-app-00004-oom",
+                "revision_name": "sample-pipeline-app-00004-err",
                 "region": "us-central1",
                 "conditions": [
                     {
@@ -333,15 +333,15 @@ def test_scenario_4_deploy_failure_lifecycle(demo_app_path: Path) -> None:
     finally:
         # 3. Reset scenario
         subprocess.run(
-            ["bash", str(scenarios_dir / "reset-scenarios.sh")],
+            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(demo_app_path)],
             capture_output=True,
             text=True,
             check=True,
         )
         clean_text = deploy_sh.read_text()
         assert 'MEMORY="${MEMORY:-512Mi}"' in clean_text
-        assert 'MEMORY="${MEMORY:-128Mi}"' not in clean_text
-        assert 'EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-DEMO_ALLOCATE_OOM=true}"' not in clean_text
+        assert 'MEMORY="${MEMORY:-256Mi}"' not in clean_text
+        assert "CACHE_PREWARM_BUFFER_MB=2048" not in clean_text
 
 
 def test_stage_classification_for_demo_pipeline_jobs() -> None:
@@ -353,8 +353,8 @@ def test_stage_classification_for_demo_pipeline_jobs() -> None:
 
 
 def test_seed_demo_repo_script(demo_app_path: Path) -> None:
-    """Verify seed-demo-repo.sh creates a pristine standalone git repository."""
-    seed_script = demo_app_path / "seed-demo-repo.sh"
+    """Verify seed-demo-repo.sh creates a pristine repo without leaked scenarios."""
+    seed_script = demo_app_path.parent / "seed-demo-repo.sh"
     target_dir = Path(tempfile.mkdtemp(prefix="test-gdi-seed-"))
 
     try:
@@ -379,13 +379,74 @@ def test_seed_demo_repo_script(demo_app_path: Path) -> None:
         # Verify key pipeline files exist in seeded repository
         assert (target_dir / ".github" / "workflows" / "pipeline.yml").exists()
         assert (target_dir / "app" / "main.py").exists()
+        assert (target_dir / "app" / "config.py").exists()
         assert (target_dir / "tests" / "test_main.py").exists()
         assert (target_dir / "Dockerfile").exists()
-        assert (target_dir / "scenarios" / "trigger-lint-failure.sh").exists()
-        assert (target_dir / "scenarios" / "reset-scenarios.sh").exists()
+        assert (target_dir / "scripts" / "deploy.sh").exists()
+        assert (target_dir / ".gitignore").exists()
+
+        # CRITICAL INVARIANT: scenarios and seed script MUST NOT leak into customer repo
+        assert not (target_dir / "scenarios").exists()
+        assert not (target_dir / "seed-demo-repo.sh").exists()
 
         # Verify no backup or temporary files leak into the seeded repo
         assert len(list(target_dir.glob("**/*.bak"))) == 0
+        assert len(list(target_dir.glob("**/*.orig"))) == 0
+
+    finally:
+        shutil.rmtree(target_dir, ignore_errors=True)
+
+
+def test_scenario_commit_and_revert_workflow(demo_app_path: Path) -> None:
+    """Verify scenarios run with --commit produce commits and reset reverts them."""
+    seed_script = demo_app_path.parent / "seed-demo-repo.sh"
+    scenarios_dir = demo_app_path.parent / "scenarios"
+    target_dir = Path(tempfile.mkdtemp(prefix="test-gdi-commit-"))
+
+    try:
+        # Seed fresh git repository
+        subprocess.run(
+            ["bash", str(seed_script), str(target_dir)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Trigger Scenario 4 with --commit
+        res = subprocess.run(
+            ["bash", str(scenarios_dir / "trigger-deploy-failure.sh"), str(target_dir), "--commit"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "Created git commit" in res.stdout
+
+        # Verify git commit log shows realistic message
+        log_res = subprocess.run(
+            ["git", "-C", str(target_dir), "log", "-1", "--pretty=%s"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "feat(cache): pre-warm order history cache on startup" in log_res.stdout
+
+        # Reset with --commit flag
+        reset_res = subprocess.run(
+            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(target_dir), "--commit"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "SUCCESS: Demo app restored to clean pristine state" in reset_res.stdout
+
+        # Check git status is clean
+        status_res = subprocess.run(
+            ["git", "-C", str(target_dir), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert status_res.stdout.strip() == ""
 
     finally:
         shutil.rmtree(target_dir, ignore_errors=True)

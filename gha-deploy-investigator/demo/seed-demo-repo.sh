@@ -25,7 +25,9 @@ rsync -av \
     --exclude='__pycache__' \
     --exclude='*.pyc' \
     --exclude='.pytest_cache' \
+    --exclude='.ruff_cache' \
     --exclude='*.bak' \
+    --exclude='*.orig' \
     --exclude='*.egg-info' \
     "${SOURCE_DIR}/" "${TARGET_DIR}/"
 

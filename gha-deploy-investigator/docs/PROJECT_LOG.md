@@ -289,7 +289,59 @@ Implemented Phase 3: Dedicated Demo App with Multi-Stage GitHub Actions Pipeline
   - Result: `5 passed in 0.04s`.
 - **Ruff Linter**:
   - Command: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator`
-  - Result: `All checks passed!`
+
+
+## 2026-10-16 - Phase 3 Architectural Refinement: Fault Tooling Placement & Realistic Scenarios
+- **Author**: `gha-dev-1`
+- **Role**: Developer
+- **Supervisor**: `gha-em`
+- **Branch**: `feat/gha-deploy-investigator`
+- **Status**: Completed
+
+### 1. Overview & Objectives
+Incorporated architectural refinements for Phase 3 demo tooling and scenarios requested by EM:
+1. **Fault Tooling Placement (No Leaked Answers in Seeded Repo)**: Relocated all scenario scripts from `sample-pipeline-app/scenarios/` to `demo/scenarios/` (strictly outside the customer-style demo app directory) and removed `demo/sample-pipeline-app/seed-demo-repo.sh` to prevent evaluation overfitting and maintain a pristine customer repository.
+2. **Realistic, Production-Grade Fault Names (No `DEMO_*` identifiers)**: Replaced all synthetic demo identifiers (`DEMO_ALLOCATE_OOM`, `DEMO_CRASH_ON_STARTUP`) with realistic domain configuration: `cache_prewarm_buffer_mb` / `CACHE_PREWARM_BUFFER_MB=2048` (exceeding container memory limits, inducing exit code 137).
+3. **Clean File Operations & `.gitignore`**: Ensured scripts do not leave `.bak` or `.orig` artifacts around. Added `*.bak` and `*.orig` to both root and demo `.gitignore`.
+4. **Scenario Workflow with Git Commit Support**: Added target directory parameter and optional `--commit` flag to all scenario triggers and `reset-scenarios.sh` producing realistic conventional commits and clean git revert restoration. Documented workflow in `demo/SCENARIOS.md` and updated `demo/sample-pipeline-app/README.md`.
+
+### 2. Deliverables Implemented & Updated
+1. `demo/scenarios/`:
+   - `trigger-lint-failure.sh`: Injects unused imports (`F401`) and multiple statements on single line (`E701`) into `app/main.py`. Supports `--commit` with message `refactor(orders): add order export and audit formatting`.
+   - `trigger-test-failure.sh`: Injects broken business logic assertion into `tests/test_main.py`. Supports `--commit` with message `feat(pricing): update order discount tier calculation`.
+   - `trigger-build-failure.sh`: Injects missing asset COPY instruction into `Dockerfile`. Supports `--commit` with message `chore(deps): configure cache warmup asset packaging`.
+   - `trigger-deploy-failure.sh`: Injects `CACHE_PREWARM_BUFFER_MB=2048` and memory limit `256Mi` into `scripts/deploy.sh`. Supports `--commit` with message `feat(cache): pre-warm order history cache on startup`.
+   - `reset-scenarios.sh`: Idempotently reverts git commits (when `--commit` passed) and restores files to clean baseline state without leaving `.bak` files.
+2. `demo/sample-pipeline-app/`:
+   - Removed `scenarios/` and `seed-demo-repo.sh` from the application directory.
+   - Added clean `.gitignore` (ignoring `.pytest_cache`, `.ruff_cache`, `*.bak`, `*.orig`, etc.).
+   - Updated `app/config.py`: Replaced `crash_on_startup` and `allocate_oom` with `cache_prewarm_buffer_mb` and `strict_schema_validation`.
+   - Updated `app/main.py`: Lifespan prewarms cache buffer and simulates cgroups OOM killer when allocation exceeds container threshold (`> 512MB`).
+   - Updated `scripts/deploy.sh`: Inspects `CACHE_PREWARM_BUFFER_MB` and simulates Cloud Run container termination (exit code 137) when exceeding limits.
+   - Updated `README.md`: Customer-facing documentation referencing external `demo/SCENARIOS.md`.
+3. `demo/seed-demo-repo.sh`:
+   - Excludes caches, backups, and ensures only `sample-pipeline-app/` is seeded (no scenario triggers or answers leaked).
+4. `demo/SCENARIOS.md`:
+   - Comprehensive catalog and runbook for triggering, testing, and resetting scenarios.
+5. `demo/tests/test_demo_scenarios.py`:
+   - Updated to execute scenarios from `demo/scenarios/`.
+   - Added `test_scenario_commit_and_revert_workflow` verifying `--commit` and `reset-scenarios.sh --commit`.
+   - Updated `test_seed_demo_repo_script` verifying `scenarios/` and `seed-demo-repo.sh` are NOT leaked into seeded repo.
+
+### 3. Verification & Test Results
+- **Contracts Synchronization**:
+  - `bash gha-deploy-investigator/scripts/check-contracts.sh` -> `SUCCESS: Contracts are byte-identical.`
+- **AST Root Cause Guard**:
+  - `python3 incident-sre-agent/scripts/check-no-rootcause-overrides.py ...` -> `[PASS] Zero post-LLM root cause template overrides found.`
+- **Zero Forbidden Identifiers**:
+  - `grep -rn "DEMO_" gha-deploy-investigator/demo/sample-pipeline-app/ gha-deploy-investigator/agent/ gha-deploy-investigator/bridge/` -> `0 occurrences.`
+- **Full Offline Pytest Suite**:
+  - `PYTHONPATH=gha-deploy-investigator/agent:gha-deploy-investigator/bridge:gha-deploy-investigator/demo/sample-pipeline-app pytest ...` -> `50 passed in 3.13s` (100% offline).
+- **Internal Demo App Pytest Suite**:
+  - `pytest tests -v` (inside `demo/sample-pipeline-app`) -> `5 passed in 0.04s`.
+- **Ruff Linter**:
+  - `ruff check gha-deploy-investigator` -> `All checks passed!`
+
 
 
 
