@@ -93,7 +93,7 @@ pytest -v bridge agent demo
 | `bridge/tests/` | [`test_config.py`](../bridge/tests/test_config.py) | 3 | Configuration loading, environment overrides, singleton caching. |
 | `bridge/tests/` | [`test_e2e.py`](../bridge/tests/test_e2e.py) | 4 | In-memory end-to-end simulation of ServiceNow and Jira incident lifecycles, duplicate webhooks, and failure reporting. |
 | `agent/tests/` | [`test_contracts.py`](../agent/tests/test_contracts.py) | 16 | Agent-side verification of byte-identical data contracts. |
-| `agent/tests/` | [`test_config.py`](../agent/tests/test_config.py) | 3 | Agent settings, model names (`gemini-2.5-pro`, `gemini-2.5-flash`), execution timeouts, callback allowlists. |
+| `agent/tests/` | [`test_config.py`](../agent/tests/test_config.py) | 3 | Agent settings, model names (`gemini-3.8-flash`), execution timeouts, callback allowlists. |
 | `agent/tests/` | [`test_triage.py`](../agent/tests/test_triage.py) | 4 | Dynamic time window calculation (`[opened_at - 60m, min(opened_at + 30m, now)]`); 24-hour clamping; specialist selection. |
 | `agent/tests/` | [`test_tool_registry.py`](../agent/tests/test_tool_registry.py) | 4 | Tool registry immutability; verification that only read-only GCP tools are registered; mutating APIs strictly blocked. |
 | `agent/tests/` | [`test_tools.py`](../agent/tests/test_tools.py) | 10 | Cloud Logging queries, error group summarization, Cloud Monitoring metrics, Cloud Audit Logs, and Cloud Run env var redaction. |
@@ -234,14 +234,14 @@ gcloud config get-value project
 ```bash
 # 1. Verify required Google APIs enabled
 gcloud services list --enabled --project="${PROJECT_ID}" \
-  --filter="NAME:(run.googleapis.com OR cloudtasks.googleapis.com OR aiplatform.googleapis.com OR logging.googleapis.com OR monitoring.googleapis.com OR cloudasset.googleapis.com)"
+  --filter="NAME:(run.googleapis.com OR cloudtasks.googleapis.com OR aiplatform.googleapis.com OR logging.googleapis.com OR monitoring.googleapis.com)"
 
 # 2. Verify agent-sa has read-only IAM viewer roles
 gcloud projects get-iam-policy "${PROJECT_ID}" \
   --flatten="bindings[].members" \
   --format="table(bindings.role)" \
   --filter="bindings.members:agent-sa@${PROJECT_ID}.iam.gserviceaccount.com"
-# Expected roles: roles/logging.viewer, roles/monitoring.viewer, roles/run.viewer, roles/compute.viewer, roles/cloudasset.viewer
+# Expected roles: roles/logging.viewer, roles/monitoring.viewer, roles/run.viewer, roles/compute.viewer, roles/container.viewer, roles/cloudsql.viewer, roles/cloudbuild.builds.viewer, roles/aiplatform.user
 
 # 3. Verify Cloud Tasks queue configuration
 gcloud tasks queues describe investigations \
@@ -491,9 +491,9 @@ In stubbed mode, `SynthesizerAgent` (`agent/app/synthesizer.py`) executes determ
 
 In real execution mode, the agent queries Google Vertex AI Gemini models via `google-adk` and `google-genai`:
 
-- **Dispatcher & Synthesis Reasoning**: `MODEL_DISPATCHER=gemini-2.5-pro` (or `gemini-1.5-pro`, configurable via `GEMINI_PRO_MODEL`)
+- **Dispatcher & Synthesis Reasoning**: `MODEL_DISPATCHER=gemini-3.8-flash` (configurable via `MODEL_DISPATCHER` or `GEMINI_PRO_MODEL`)
   - Formulates dynamic triage plans, parses incident symptoms, selects specialists, and performs final multi-modal synthesis.
-- **Specialist Telemetry Analysis**: `MODEL_SPECIALIST=gemini-2.5-flash` (or `gemini-1.5-flash`, configurable via `GEMINI_FLASH_MODEL`)
+- **Specialist Telemetry Analysis**: `MODEL_SPECIALIST=gemini-3.8-flash` (configurable via `MODEL_SPECIALIST` or `GEMINI_FLASH_MODEL`)
   - High-throughput parsing of structured log streams, time series anomaly detection, and Cloud Audit Log filtering.
 - **Structured Pydantic Contract Output**: Prompts enforce JSON schema generation strictly matching the canonical `Report` contract.
 
@@ -520,8 +520,8 @@ export GCP_PROJECT="your-target-project-id"
 export GCP_REGION="us-central1"
 export VERTEX_AI_PROJECT="your-target-project-id"
 export VERTEX_AI_LOCATION="us-central1"
-export MODEL_DISPATCHER="gemini-2.5-pro"
-export MODEL_SPECIALIST="gemini-2.5-flash"
+export MODEL_DISPATCHER="gemini-3.8-flash"
+export MODEL_SPECIALIST="gemini-3.8-flash"
 
 # 3. Launch the SRE agent locally
 python3 -m uvicorn agent.app.main:app --port 8080
@@ -534,8 +534,8 @@ sre-agent:
   environment:
     - APP_ENV=local           # Set to 'production' or 'development' for real Gemini
     - GCP_PROJECT=your-project
-    - MODEL_DISPATCHER=gemini-2.5-pro
-    - MODEL_SPECIALIST=gemini-2.5-flash
+    - MODEL_DISPATCHER=gemini-3.8-flash
+    - MODEL_SPECIALIST=gemini-3.8-flash
     # For real Gemini locally, mount host GCP credentials:
     # - GOOGLE_APPLICATION_CREDENTIALS=/tmp/keys/sa.json
 ```
@@ -545,10 +545,10 @@ In production Cloud Run, Gemini execution is enabled automatically via Terraform
 - `agent/infra/terraform/variables.tf`:
   ```hcl
   variable "model_dispatcher" {
-    default = "gemini-2.5-pro"
+    default = "gemini-3.8-flash"
   }
   variable "model_specialist" {
-    default = "gemini-2.5-flash"
+    default = "gemini-3.8-flash"
   }
   ```
 - IAM Permissions: `agent-sa` is granted `roles/aiplatform.user` on the GCP project.
