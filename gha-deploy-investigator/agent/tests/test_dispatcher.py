@@ -7,7 +7,9 @@ from agent.app.callback import send_callback_report
 from agent.app.config import AgentConfig
 from agent.app.contracts.request import InvestigationRequest
 from agent.app.contracts.result import InvestigationResult
-from agent.app.dispatcher import InvestigationDispatcher
+from agent.app.dispatcher import InvestigationDispatcher, classify_stage
+from agent.app.specialists.base import DiagnosticResult
+from agent.app.synthesizer import STAGE_TO_SKILL, synthesize_report
 from agent.app.tools.registry import default_query_cache
 from agent.app.tools.runtime_tools import reset_runtime_state, set_mock_revision
 from bridge.tests.fake_github_server import state as github_state
@@ -315,3 +317,65 @@ class TestInvestigationDispatcher:
             or "memory" in result.report.probable_root_cause.text.lower()
         )
         assert any("--memory 1Gi" in act for act in result.report.recommended_actions)
+
+    def test_classify_stage_tricky_cases(self) -> None:
+        """Verify regex word boundaries prevent substring misclassifications."""
+        # 'platform' contains 'tf' but must NOT classify as iac_config
+        assert classify_stage("CI", "Build platform image") == "build"
+        assert classify_stage("CI", "Platform Tests") == "test"
+
+        # 'checkout' contains 'check' but must NOT classify as lint
+        assert classify_stage("CI", "Checkout code") == "pipeline_logs"
+
+        # Explicit stages
+        assert classify_stage("Deploy Service", "Deploy to Cloud Run") == "deploy"
+        assert classify_stage("Infrastructure", "Terraform Apply") == "iac_config"
+        assert classify_stage("CI", "Run ESLint") == "lint"
+        assert classify_stage("CI", "Check format") == "lint"
+        assert classify_stage("CI", "pytest unit tests") == "test"
+
+    def test_synthesize_report_fallback_path(
+        self,
+        sample_request: InvestigationRequest,
+    ) -> None:
+        """Verify synthesizer fallback path completes without Pydantic ValidationError."""
+        failed_job = {"id": 101, "name": "build-job"}
+        failed_step = {"number": 2, "name": "Compile"}
+        raw_log = "Error: compilation failed\nexit code 1"
+
+        # 1. Fallback with diagnostic_result=None
+        report1 = synthesize_report(
+            incident=sample_request.incident,
+            failed_job=failed_job,
+            failed_step=failed_step,
+            log_text=raw_log,
+            diagnostic_result=None,
+        )
+        assert report1 is not None
+        assert "Automated fallback (LLM unavailable): " in report1.probable_root_cause.text
+        assert len(report1.evidence_by_area["logs"]) > 0
+        assert report1.skills_used == ["container-build-troubleshooting"]
+
+        # 2. Fallback with diagnostic_result having empty evidence
+        diag_empty = DiagnosticResult(
+            stage="lint",
+            specialist_name="pipeline_logs_specialist",
+            summary="Linter failed",
+            probable_cause="Syntax error",
+            confidence=0.85,
+            evidence_items=[],
+            remediation_actions=["Fix syntax"],
+            suggested_fix="Fix code",
+            annotations=[],
+        )
+        report2 = synthesize_report(
+            incident=sample_request.incident,
+            failed_job=failed_job,
+            failed_step=failed_step,
+            log_text=raw_log,
+            diagnostic_result=diag_empty,
+        )
+        assert report2 is not None
+        assert len(report2.evidence_by_area["logs"]) > 0
+        assert report2.skills_used == [STAGE_TO_SKILL["lint"]]
+

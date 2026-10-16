@@ -160,3 +160,58 @@ Implemented Phase 2: Multi-Stage Failure Coverage & Specialized Diagnostics per 
   - Command: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator`
   - Result: `All checks passed!`
 
+## Entry: Phase 2 Round 1 Code Review Findings Resolution
+- **Date**: 2026-10-16
+- **Author**: `gha-dev-1` (Developer Agent)
+- **Role**: Developer
+- **Supervisor**: `gha-em`
+- **Branch**: `feat/gha-deploy-investigator`
+- **Status**: Completed
+
+### 1. Overview
+Resolved all 6 findings (3 blocking, 3 non-blocking) identified by reviewer `gha-rev-3` in `reviews/phase2-round1-review.md` following review of commit `5622913`.
+
+### 2. Resolution Details per Finding
+1. **Finding 1 (Blocking) - Fatal Pydantic `ValidationError` in `synthesizer.py`**:
+   - Removed forbidden `source="ci_logs"` argument from the fallback `EvidenceItem(...)` instantiation in `agent/app/synthesizer.py`.
+   - Added unit test `test_synthesize_report_fallback_path` in `agent/tests/test_dispatcher.py` verifying fallback report synthesis both when `diagnostic_result=None` and when `evidence_items=[]`, asserting report generation succeeds without `ValidationError`.
+2. **Finding 2 (Blocking) - GitHub App JWT Lifetime Exceeds GitHub API 10-Minute Maximum**:
+   - In `agent/app/github/auth.py`, updated `generate_jwt` to calculate `iat = now - 60` and `exp = iat + min(expiration_seconds, 600)`, guaranteeing that `exp - iat <= 600` (<= 10 minutes) under all circumstances.
+   - Updated `test_github_app_auth_rs256_generation` in `agent/tests/test_github_app.py` verifying `exp - iat == 300 <= 600`, and that requesting 1200s is capped at 600s.
+3. **Finding 3 (Blocking) - Unanchored Substring Matching in `classify_stage`**:
+   - In `agent/app/dispatcher.py`, replaced unanchored `in` substring checks with compiled regex patterns using word boundaries `\b`:
+     - `STAGE_DEPLOY_RE`: `r"\b(deploy|deployments?|rollout|release|cloudrun|gcloud)\b"`
+     - `STAGE_IAC_RE`: `r"\b(terraform|iac|manifest|manifests|tf)\b"`
+     - `STAGE_LINT_RE` & `STAGE_CHECK_RE`: `r"\b(lint|linters?|ruff|flake8|mypy|eslint|fmt|syntax)\b"` and `r"\bcheck\b"`
+     - `STAGE_TEST_RE`: `r"\b(tests?|pytest|jest|unit|integration|spec)\b"`
+     - `STAGE_BUILD_RE`: `r"\b(build|builds?|docker|image|images?|container|containers?|package|compile|push)\b"`
+   - Added unit test `test_classify_stage_tricky_cases` in `agent/tests/test_dispatcher.py` validating that `"Build platform image"` classifies as `build` (not `iac_config`), `"Platform Tests"` classifies as `test`, `"Checkout code"` classifies as `pipeline_logs` (not `lint`), and explicit stages classify accurately.
+4. **Finding 4 (Non-Blocking) - Canonical Skill Mapping in `synthesizer.py`**:
+   - Defined `STAGE_TO_SKILL` mapping in `synthesizer.py` aligning with the actual runbook folders in `agent/skills/`:
+     - `lint` -> `lint-troubleshooting`
+     - `test` -> `test-failure-triage`
+     - `build` -> `container-build-troubleshooting`
+     - `deploy` -> `cloudrun-deploy-troubleshooting`
+     - `iac_config` -> `cloudrun-deploy-troubleshooting`
+   - Populated `Report.skills_used` via `[STAGE_TO_SKILL.get(stage_label, "container-build-troubleshooting")]`.
+5. **Finding 5 (Non-Blocking) - Unused `ESLINT_PATTERN` in `pipeline_logs.py`**:
+   - Removed unused regex definition `ESLINT_PATTERN` from `agent/app/specialists/pipeline_logs.py`.
+6. **Finding 6 (Non-Blocking) - Path Sanitization for Check Run Annotations**:
+   - In `agent/app/specialists/pipeline_logs.py` and `bridge/app/adapters/github.py`, sanitized file paths via `re.sub(r"^\.?/", "", path)` stripping leading `./` or `/` to prevent GitHub API HTTP 422 Unprocessable Entity responses.
+   - Added unit test `test_post_report_link_annotation_path_sanitization` in `bridge/tests/test_github_adapter.py`.
+
+### 3. Verification Results
+- **Contract Synchronization Check**:
+  - Command: `bash gha-deploy-investigator/scripts/check-contracts.sh`
+  - Result: `SUCCESS: Contracts are byte-identical.`
+- **AST Root Cause Guard**:
+  - Command: `python3 incident-sre-agent/scripts/check-no-rootcause-overrides.py gha-deploy-investigator/agent/app/synthesizer.py gha-deploy-investigator/agent/app/dispatcher.py`
+  - Result: `[PASS] Zero post-LLM root cause template overrides or regex classifiers found.`
+- **Automated Pytest Suite**:
+  - Command: `PYTHONPATH=gha-deploy-investigator/agent:gha-deploy-investigator/bridge /scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/pytest gha-deploy-investigator/agent/tests gha-deploy-investigator/bridge/tests -v`
+  - Result: `42 passed in 0.99s` (23 agent tests, 19 bridge tests).
+- **Ruff Linter**:
+  - Command: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator`
+  - Result: `All checks passed!`
+
+

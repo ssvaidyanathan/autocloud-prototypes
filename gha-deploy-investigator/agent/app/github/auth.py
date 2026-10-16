@@ -31,9 +31,11 @@ class GitHubAppAuth:
             return "mock-github-app-jwt"
 
         now = int(time.time())
+        iat = now - 60
+        exp = iat + min(expiration_seconds, 600)
         payload = {
-            "iat": now - 60,
-            "exp": now + expiration_seconds,
+            "iat": iat,
+            "exp": exp,
             "iss": self.app_id,
         }
         return jwt.encode(payload, self.private_key_pem, algorithm="RS256")

@@ -18,12 +18,6 @@ LINT_PATTERN = re.compile(
     re.MULTILINE,
 )
 
-# Alternative lint pattern: file: line X, col Y, error - msg
-ESLINT_PATTERN = re.compile(
-    r"^\s*(?P<line>\d+):(?P<col>\d+)\s+error\s+(?P<msg>.+?)\s+(?P<code>[\w\-/]+)$",
-    re.MULTILINE,
-)
-
 # Pytest failure patterns
 PYTEST_FAILURE_PATTERN = re.compile(
     r"(?:FAILED|ERROR)\s+(?P<test>[a-zA-Z0-9_\-\./\\]+(?:::[a-zA-Z0-9_]+)+)\s*(?:-\s*(?P<msg>.+))?",
@@ -107,7 +101,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
         culprit_msg = "Static analysis check failed"
 
         for match in matches[:5]:
-            f_path = match.group("file").strip()
+            raw_path = match.group("file").strip()
+            f_path = re.sub(r"^\.?/", "", raw_path)
             line_str = match.group("line")
             line = int(line_str) if line_str else 1
             code = (match.group("code") or "").strip()

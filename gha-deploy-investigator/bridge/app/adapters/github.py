@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import logging
+import re
 from typing import Any, Literal, Optional
 
 import httpx
@@ -169,7 +170,7 @@ class GitHubAdapter(BaseAdapter):
         if report.annotations:
             output_data["annotations"] = [
                 {
-                    "path": a.path,
+                    "path": re.sub(r"^\.?/", "", a.path),
                     "start_line": a.start_line,
                     "end_line": a.end_line,
                     "annotation_level": a.annotation_level,

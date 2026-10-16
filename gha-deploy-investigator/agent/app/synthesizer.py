@@ -52,6 +52,15 @@ def extract_error_lines(log_text: str) -> list[str]:
     return diagnostic_lines + generic_exit_lines
 
 
+STAGE_TO_SKILL = {
+    "lint": "lint-troubleshooting",
+    "test": "test-failure-triage",
+    "build": "container-build-troubleshooting",
+    "deploy": "cloudrun-deploy-troubleshooting",
+    "iac_config": "cloudrun-deploy-troubleshooting",
+}
+
+
 def synthesize_report(
     incident: Incident,
     failed_job: dict[str, Any],
@@ -107,7 +116,6 @@ def synthesize_report(
         excerpt = "\n".join(error_lines[:5]) if error_lines else log_text[-500:]
         evidence.append(
             EvidenceItem(
-                source="ci_logs",
                 kind="github_runner_log",
                 excerpt=excerpt,
                 timestamp=now_utc,
@@ -136,6 +144,7 @@ def synthesize_report(
     ]
 
     annotations = diagnostic_result.annotations if diagnostic_result else []
+    skill = STAGE_TO_SKILL.get(stage_label, "container-build-troubleshooting")
 
     return Report(
         summary=summary,
@@ -146,11 +155,7 @@ def synthesize_report(
         recent_changes=[],
         recommended_actions=recommended_actions,
         specialists_status=specialists_status,
-        skills_used=[
-            f"{stage_label}-troubleshooting"
-            if stage_label in ("lint", "test")
-            else "container-build-troubleshooting"
-        ],
+        skills_used=[skill],
         caveats=[],
         annotations=annotations,
         queries_appendix={"job_id": [str(failed_job.get("id", ""))]},

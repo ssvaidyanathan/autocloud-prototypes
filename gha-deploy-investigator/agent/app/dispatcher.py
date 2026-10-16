@@ -1,4 +1,5 @@
 import logging
+import re
 import uuid
 from typing import Any, Optional
 
@@ -19,24 +20,37 @@ from .tools.github_tools import fetch_job_logs, fetch_workflow_run_jobs
 logger = logging.getLogger(__name__)
 
 
+STAGE_DEPLOY_RE = re.compile(
+    r"\b(deploy|deployments?|rollout|release|cloudrun|gcloud)\b", re.IGNORECASE
+)
+STAGE_IAC_RE = re.compile(
+    r"\b(terraform|iac|manifest|manifests|tf)\b", re.IGNORECASE
+)
+STAGE_LINT_RE = re.compile(
+    r"\b(lint|linters?|ruff|flake8|mypy|eslint|fmt|syntax)\b", re.IGNORECASE
+)
+STAGE_CHECK_RE = re.compile(r"\bcheck\b", re.IGNORECASE)
+STAGE_TEST_RE = re.compile(
+    r"\b(tests?|pytest|jest|unit|integration|spec)\b", re.IGNORECASE
+)
+STAGE_BUILD_RE = re.compile(
+    r"\b(build|builds?|docker|image|images?|container|containers?|package|compile|push)\b",
+    re.IGNORECASE,
+)
+
+
 def classify_stage(job_name: str, step_name: str) -> str:
-    """Classify pipeline failure into standardized stage categories."""
-    combined = f"{job_name} {step_name}".lower()
-    if any(k in combined for k in ("deploy", "rollout", "release", "cloudrun", "gcloud")):
+    """Classify pipeline failure into standardized stage categories using word boundaries."""
+    combined = f"{job_name} {step_name}"
+    if STAGE_DEPLOY_RE.search(combined):
         return "deploy"
-    if any(k in combined for k in ("terraform", "iac", "manifest", "tf")):
+    if STAGE_IAC_RE.search(combined):
         return "iac_config"
-    if any(
-        k in combined
-        for k in ("lint", "ruff", "flake8", "mypy", "eslint", "fmt", "check", "syntax")
-    ):
+    if STAGE_LINT_RE.search(combined) or STAGE_CHECK_RE.search(combined):
         return "lint"
-    if any(k in combined for k in ("test", "pytest", "jest", "unit", "integration", "spec")):
+    if STAGE_TEST_RE.search(combined):
         return "test"
-    if any(
-        k in combined
-        for k in ("build", "docker", "image", "container", "package", "compile", "push")
-    ):
+    if STAGE_BUILD_RE.search(combined):
         return "build"
     return "pipeline_logs"
 

@@ -41,6 +41,13 @@ class TestGitHubApp:
         unverified = jwt.decode(token_str, options={"verify_signature": False})
         assert unverified["iss"] == "9999"
         assert unverified["exp"] > unverified["iat"]
+        assert unverified["exp"] - unverified["iat"] == 300
+        assert unverified["exp"] - unverified["iat"] <= 600
+
+        # Verify capped at 600 seconds even when expiration_seconds is large
+        token_large = auth.generate_jwt(expiration_seconds=1200)
+        unverified_large = jwt.decode(token_large, options={"verify_signature": False})
+        assert unverified_large["exp"] - unverified_large["iat"] <= 600
 
     def test_github_app_token_exchange_and_caching(
         self,

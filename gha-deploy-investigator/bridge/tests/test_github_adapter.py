@@ -7,7 +7,7 @@ from bridge.app.adapters.base import IncidentRef
 from bridge.app.adapters.github import GitHubAdapter
 from bridge.app.config import BridgeConfig
 from bridge.app.contracts.incident import Incident
-from bridge.app.contracts.report import Report
+from bridge.app.contracts.report import CheckRunAnnotation, Report
 from bridge.tests.fake_github_server import state as github_state
 from starlette.requests import Request
 
@@ -156,3 +156,45 @@ class TestGitHubAdapter:
         comment = github_state.comments[0]
         assert comment.get("issue_number") == 42
         assert "INC0019483" in comment["body"]
+
+    def test_post_report_link_annotation_path_sanitization(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_github_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        adapter = GitHubAdapter(config=bridge_settings, http_client=fake_github_client)
+        ref = IncidentRef(
+            id="sn-sys_789",
+            source="servicenow",
+            external_id="sys_789",
+            external_key="INC0019484",
+        )
+        sample_report.annotations = [
+            CheckRunAnnotation(
+                path="./agent/app/main.py",
+                start_line=10,
+                end_line=10,
+                annotation_level="failure",
+                message="Syntax error",
+            ),
+            CheckRunAnnotation(
+                path="/agent/app/models.py",
+                start_line=20,
+                end_line=20,
+                annotation_level="failure",
+                message="Type error",
+            ),
+        ]
+        github_state.check_runs.clear()
+
+        adapter.post_report_link(sample_incident, sample_report, ref)
+
+        assert len(github_state.check_runs) == 1
+        output = github_state.check_runs[0].get("output", {})
+        annotations = output.get("annotations", [])
+        assert len(annotations) == 2
+        assert annotations[0]["path"] == "agent/app/main.py"
+        assert annotations[1]["path"] == "agent/app/models.py"
+
