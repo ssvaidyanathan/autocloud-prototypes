@@ -23,7 +23,12 @@ def render_servicenow_html(report: Report) -> str:
         ),
     ]
 
-    # Summary
+    # Summary (safely truncate if necessary before HTML formatting)
+    safe_summary = (
+        report.summary[:2000] + "... (truncated)"
+        if len(report.summary) > 2000
+        else report.summary
+    )
     lines.extend(
         [
             '    <div style="margin-bottom: 12px;">',
@@ -31,7 +36,7 @@ def render_servicenow_html(report: Report) -> str:
                 '      <div style="font-weight: 600; color: #57606a; '
                 'margin-bottom: 4px;">Summary</div>'
             ),
-            f"      <div>{html.escape(report.summary)}</div>",
+            f"      <div>{html.escape(safe_summary)}</div>",
             "    </div>",
         ]
     )
@@ -39,6 +44,11 @@ def render_servicenow_html(report: Report) -> str:
     # Probable Root Cause
     if report.probable_root_cause:
         conf_pct = int(report.probable_root_cause.confidence * 100)
+        prc_text = (
+            report.probable_root_cause.text[:1000] + "... (truncated)"
+            if len(report.probable_root_cause.text) > 1000
+            else report.probable_root_cause.text
+        )
         lines.extend(
             [
                 (
@@ -48,7 +58,7 @@ def render_servicenow_html(report: Report) -> str:
                 '      <div style="font-weight: 600; color: #7d4e00;">Probable Root Cause</div>',
                 (
                     f'      <div style="margin-top: 4px;">'
-                    f"{html.escape(report.probable_root_cause.text)}</div>"
+                    f"{html.escape(prc_text)}</div>"
                 ),
                 (
                     f'      <div style="margin-top: 4px; font-size: 11px; color: #57606a;">'
@@ -70,9 +80,14 @@ def render_servicenow_html(report: Report) -> str:
                 '      <ul style="margin: 0; padding-left: 20px;">',
             ]
         )
-        for item in report.timeline:
+        for item in report.timeline[:10]:
             ts = item.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
-            lines.append(f"        <li><strong>{ts}</strong>: {html.escape(item.description)}</li>")
+            desc = (
+                item.description[:200] + "..."
+                if len(item.description) > 200
+                else item.description
+            )
+            lines.append(f"        <li><strong>{ts}</strong>: {html.escape(desc)}</li>")
         lines.extend(
             [
                 "      </ul>",
@@ -92,8 +107,9 @@ def render_servicenow_html(report: Report) -> str:
                 '      <ol style="margin: 0; padding-left: 20px;">',
             ]
         )
-        for action in report.recommended_actions:
-            lines.append(f"        <li>{html.escape(action)}</li>")
+        for action in report.recommended_actions[:10]:
+            action_text = action[:300] + "..." if len(action) > 300 else action
+            lines.append(f"        <li>{html.escape(action_text)}</li>")
         lines.extend(
             [
                 "      </ol>",
@@ -115,10 +131,13 @@ def chunk_servicenow_work_note(html_content: str, max_chars: int = 12000) -> lis
     wrapped = (
         f"[code]{html_content}[/code]" if not html_content.startswith("[code]") else html_content
     )
-    if len(wrapped) > max_chars:
-        closing = "</div>[/code]"
-        wrapped = wrapped[: max_chars - len(closing)] + closing
-    return [wrapped]
+    if len(wrapped) <= max_chars:
+        return [wrapped]
+
+    # If content exceeds limit, safely escape plain text instead of mid-tag slicing
+    max_inner = max_chars - len("[code]<div></div>[/code]") - 32
+    safe_text = html.escape(html_content[:max_inner] + " ... [report truncated]")
+    return [f"[code]<div>{safe_text}</div>[/code]"]
 
 
 def render_standalone_html(report: Report, incident_ref: Optional[Any] = None) -> str:

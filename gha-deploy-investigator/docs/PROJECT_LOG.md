@@ -48,3 +48,46 @@ Implemented Phase 1: Minimal End-to-End Vertical Slice under `gha-deploy-investi
 - **Linting & Code Quality**:
   - Command: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator`
   - Result: All checks passed!
+
+## Entry: Phase 1 Round 1 Code Review Findings Resolution
+- **Date**: 2026-10-16
+- **Author**: `gha-dev-1` (Developer Agent)
+- **Role**: Developer
+- **Supervisor**: `gha-em`
+- **Branch**: `feat/gha-deploy-investigator`
+- **Status**: Completed
+
+### 1. Overview
+Resolved all 8 findings (3 blocking, 5 non-blocking) identified by reviewer `gha-rev-1` in `reviews/phase1-round1-review.md` following review of commit `e35e0db`.
+
+### 2. Resolution Details per Finding
+1. **Finding 1 (Blocking) - AST Guard Violation in `agent/app/synthesizer.py`**:
+   - Fixed fallback text construction in `ProbableRootCause(text=...)` to begin with the mandatory fallback label:
+     `Automated fallback (LLM unavailable): Pipeline step '{step_name}' in job '{job_name}' failed: {primary_error}`.
+   - Verified via `scripts/check-no-rootcause-overrides.py` and incident-sre-agent's AST check script, confirming 0 violations.
+2. **Finding 2 (Blocking) - Dead / Bypassed Test Assertion in `bridge/tests/test_adapters.py`**:
+   - Removed bypassed `if False else None` assignment and `assert res is None`.
+   - Constructed a valid `InvestigationResult` with `sample_incident` and `sample_report`, called `IncidentRef.from_result(res)`, and verified all fields (`id`, `source`, `external_id`, `external_key`) match `sample_incident`.
+3. **Finding 3 (Blocking) - Dynamic OIDC Bearer Token in `agent/app/callback.py`**:
+   - Replaced hardcoded mock token with dynamic OIDC token acquisition mirroring `incident-sre-agent/agent/app/callback.py`.
+   - In local/dev environments (`APP_ENV` / `ENVIRONMENT` in `("local", "dev", "test", ...)` or `config.is_local`), falls back to `mock-oidc-token-for-testing`.
+   - In production environments, queries the Google Cloud metadata server (`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience={audience}`) with `Metadata-Flavor: Google`, raising `RuntimeError` if unavailable.
+   - Added unit test in `agent/tests/test_dispatcher.py` verifying dynamic token acquisition, custom token providers, production metadata failure, and local fallback behavior.
+4. **Finding 4 (Non-Blocking) - Dead Helper Function in `agent/app/tools/github_tools.py`**:
+   - Integrated `_build_client(client, config)` into `fetch_workflow_run_jobs` and `fetch_job_logs`, eliminating duplicated client instantiation and cleanup logic.
+5. **Finding 5 (Non-Blocking) - Custom `cast` in `agent/app/tools/registry.py`**:
+   - Removed redundant custom `def cast` re-implementation and imported standard `cast` from `typing`.
+6. **Finding 6 (Non-Blocking) - Defensive Repo Validation in `bridge/app/adapters/github.py`**:
+   - Added guard checking `if not incident.github_head_sha or not repo_str or "/" not in repo_str: logger.warning(...); return` in `post_report_link`, preventing malformed Check Run URL calls.
+7. **Finding 7 (Non-Blocking) - Non-Failure Webhook Filtering in `bridge/app/main.py`**:
+   - Updated `_process_webhook` to catch `ValueError` from `adapter.to_incident` when non-failure events (e.g. conclusion != "failure") are ingested.
+   - Returns HTTP 200 with `{"status": "ignored", "reason": str(exc)}`.
+   - Added end-to-end test `test_non_failure_webhook_ignored_with_http_200` in `bridge/tests/test_e2e_reverse.py`.
+8. **Finding 8 (Non-Blocking) - HTML Slicing in `chunk_servicenow_work_note`**:
+   - Pre-truncated raw summary text and evidence item excerpts before HTML formatting in `chunk_servicenow_work_note`, ensuring rendered HTML stays within ServiceNow character limits without slicing mid-tag.
+
+### 3. Verification Results
+- **Contract Sync Check**: `bash scripts/check-contracts.sh` -> 0 diff, byte-identical.
+- **Pytest Suite**: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/pytest -v` -> 24 passed (100% pass).
+- **Ruff Linter**: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator` -> 0 errors ("All checks passed!").
+- **AST Guard Check**: `python3 scripts/check-no-rootcause-overrides.py agent/app/synthesizer.py agent/app/dispatcher.py` -> 0 violations.

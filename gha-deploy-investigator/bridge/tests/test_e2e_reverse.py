@@ -144,3 +144,34 @@ class TestE2EReverseFlow:
         )
         assert dup_cb_response.status_code == 200
         assert dup_cb_response.json()["status"] == "duplicate_ignored"
+
+    def test_non_failure_webhook_ignored_with_http_200(
+        self,
+        bridge_settings: BridgeConfig,
+    ) -> None:
+        client = TestClient(app)
+        payload = {
+            "action": "completed",
+            "workflow_run": {
+                "id": 12345,
+                "name": "CI",
+                "conclusion": "success",
+            },
+            "repository": {"name": "sample-app"},
+        }
+        body_bytes = json.dumps(payload).encode("utf-8")
+        secret = bridge_settings.github_webhook_secret or ""
+        valid_sig = "sha256=" + hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
+
+        resp = client.post(
+            "/webhook/github",
+            content=body_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": valid_sig,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ignored"
+        assert "Ignoring non-failure" in data["reason"]

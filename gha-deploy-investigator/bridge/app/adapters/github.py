@@ -136,16 +136,18 @@ class GitHubAdapter(BaseAdapter):
 
     def post_report_link(self, incident: Incident, report: Report, ref: IncidentRef) -> None:
         """Post a Check Run on commit SHA linking to the ServiceNow incident."""
-        if not incident.github_head_sha:
-            logger.warning("No github_head_sha on incident %s; skipping check run", incident.id)
+        repo_str = incident.github_repo or incident.service_hint or ""
+        if not incident.github_head_sha or not repo_str or "/" not in repo_str:
+            logger.warning(
+                "Missing or invalid repo/head_sha on incident %s "
+                "(repo=%s, sha=%s); skipping Check Run",
+                incident.id,
+                repo_str,
+                incident.github_head_sha,
+            )
             return
 
-        repo_str = incident.github_repo or incident.service_hint or ""
-        if "/" in repo_str:
-            owner, repo_name = repo_str.split("/", 1)
-        else:
-            owner, repo_name = "unknown", repo_str
-
+        owner, repo_name = repo_str.split("/", 1)
         api_url = (self.config.github_api_url or "https://api.github.com").rstrip("/")
         endpoint = f"{api_url}/repos/{owner}/{repo_name}/check-runs"
 

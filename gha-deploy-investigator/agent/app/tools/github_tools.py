@@ -12,16 +12,16 @@ logger = logging.getLogger(__name__)
 def _build_client(
     client: Optional[httpx.Client] = None,
     config: Optional[AgentConfig] = None,
-) -> httpx.Client:
+) -> tuple[httpx.Client, bool]:
     if client is not None:
-        return client
+        return client, False
     cfg = config or get_settings()
     headers = {
         "Accept": "application/vnd.github+json",
     }
     if cfg.github_token:
         headers["Authorization"] = f"Bearer {cfg.github_token}"
-    return httpx.Client(headers=headers, timeout=30.0)
+    return httpx.Client(headers=headers, timeout=30.0), True
 
 
 @readonly_tool(
@@ -39,12 +39,7 @@ def fetch_workflow_run_jobs(
     api_url = cfg.github_api_url.rstrip("/")
     endpoint = f"{api_url}/repos/{repo}/actions/runs/{run_id}/jobs"
 
-    headers = {"Accept": "application/vnd.github+json"}
-    if cfg.github_token:
-        headers["Authorization"] = f"Bearer {cfg.github_token}"
-
-    owns_client = client is None
-    c = client or httpx.Client(headers=headers, timeout=30.0)
+    c, owns_client = _build_client(client, config)
     try:
         resp = c.get(endpoint)
         resp.raise_for_status()
@@ -69,12 +64,7 @@ def fetch_job_logs(
     api_url = cfg.github_api_url.rstrip("/")
     endpoint = f"{api_url}/repos/{repo}/actions/jobs/{job_id}/logs"
 
-    headers = {"Accept": "application/vnd.github+json"}
-    if cfg.github_token:
-        headers["Authorization"] = f"Bearer {cfg.github_token}"
-
-    owns_client = client is None
-    c = client or httpx.Client(headers=headers, timeout=30.0)
+    c, owns_client = _build_client(client, config)
     try:
         resp = c.get(endpoint)
         resp.raise_for_status()

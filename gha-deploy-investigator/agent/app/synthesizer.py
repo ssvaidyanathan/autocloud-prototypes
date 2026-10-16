@@ -69,7 +69,10 @@ def synthesize_report(
 
     # Formulate root cause
     probable_root_cause = ProbableRootCause(
-        text=f"Pipeline step '{step_name}' in job '{job_name}' failed: {primary_error}",
+        text=(
+            f"Automated fallback (LLM unavailable): Pipeline step '{step_name}' in job "
+            f"'{job_name}' failed: {primary_error}"
+        ),
         confidence=0.92 if error_lines else 0.75,
     )
 

@@ -15,6 +15,7 @@ from typing import (
     List,
     Optional,
     TypeVar,
+    cast,
     get_type_hints,
     overload,
 )
@@ -341,7 +342,3 @@ def readonly_tool(
     if callable(name_or_func):
         return decorator(name_or_func)
     return decorator
-
-
-def cast(typ: Any, val: Any) -> Any:
-    return val

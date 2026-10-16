@@ -74,6 +74,17 @@ async def _process_webhook(
 
     try:
         incident = adapter.to_incident(json_payload)
+    except ValueError as exc:
+        err_msg = str(exc)
+        if "ignoring non-failure" in err_msg.lower():
+            logger.info("Ignoring non-failure event: %s", exc)
+            response.status_code = status.HTTP_200_OK
+            return {"status": "ignored", "reason": str(exc)}
+        logger.error("Failed to normalize payload to Incident contract: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Payload normalization failed: {exc}",
+        ) from exc
     except Exception as exc:
         logger.error("Failed to normalize payload to Incident contract: %s", exc)
         raise HTTPException(

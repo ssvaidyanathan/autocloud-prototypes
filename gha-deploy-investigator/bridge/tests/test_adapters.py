@@ -10,6 +10,7 @@ from bridge.app.adapters import (
 from bridge.app.adapters.base import parse_utc_datetime
 from bridge.app.config import BridgeConfig
 from bridge.app.contracts.incident import Incident
+from bridge.app.contracts.report import Report
 from bridge.app.contracts.result import InvestigationResult
 
 
@@ -27,7 +28,11 @@ class TestAdapters:
         with pytest.raises(ValueError, match="Unsupported adapter source"):
             get_adapter("unknown_platform", bridge_settings)
 
-    def test_incident_ref_conversions(self, sample_incident: Incident) -> None:
+    def test_incident_ref_conversions(
+        self,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
         ref = IncidentRef.from_incident(sample_incident)
         assert ref.id == sample_incident.id
         assert ref.source == "github"
@@ -35,15 +40,20 @@ class TestAdapters:
         assert ref.external_key == sample_incident.external_key
 
         res = InvestigationResult(
+            investigation_id="inv-test-1",
             incident_id=sample_incident.id,
             incident_source=sample_incident.source,
             incident_external_id=sample_incident.external_id,
             incident_external_key=sample_incident.external_key,
             status="completed",
-            report=None,  # will fail unless bypassed
+            report=sample_report,
             incident=sample_incident,
-        ) if False else None
-        assert res is None
+        )
+        ref_from_res = IncidentRef.from_result(res)
+        assert ref_from_res.id == sample_incident.id
+        assert ref_from_res.source == sample_incident.source
+        assert ref_from_res.external_id == sample_incident.external_id
+        assert ref_from_res.external_key == sample_incident.external_key
 
     def test_parse_utc_datetime(self) -> None:
         dt1 = parse_utc_datetime("2026-10-16T21:00:00Z")
