@@ -1,0 +1,70 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# Testing & Linting caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Terraform
+*.tfstate
+*.tfstate*
+*.tfstate.backup
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+backend.hcl
+*.backend.hcl
+!backend.hcl.example
+!*.backend.hcl.example
+.terraform/
+.terraform.lock.hcl
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local logs & run artifacts
+*.log
+logs/
+
+# Snapshots and archives
+snapshots/
+*.tar.gz
+
+# Design and process logs (kept in scratchpad)
+.design/
