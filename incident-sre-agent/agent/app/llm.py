@@ -104,6 +104,7 @@ class GeminiLlmClient:
             raise RuntimeError("Vertex AI Gemini returned empty response for triage plan")
 
         plan = InvestigationPlan.model_validate_json(response.text)
+        plan.onset_time = None
 
         # Real-time window anchoring
         now_utc = datetime.now(timezone.utc)
@@ -127,6 +128,21 @@ class GeminiLlmClient:
 
         return plan
 
+    def synthesize_report(
+        self,
+        incident: Incident,
+        plan: InvestigationPlan,
+        findings: Dict[str, Findings],
+        skills_used: Optional[List[str]] = None,
+    ) -> Report:
+        """Synthesize specialist findings into a structured Report using Gemini on Vertex AI."""
+        return self.generate_report(
+            incident=incident,
+            plan=plan,
+            findings=findings,
+            skills_used=skills_used,
+        )
+
     def generate_report(
         self,
         incident: Incident,
@@ -143,32 +159,93 @@ class GeminiLlmClient:
         except Exception:
             pass
 
+        onset_time = getattr(plan, "onset_time", None) if plan else None
+        onset_utc = None
+        if onset_time:
+            onset_utc = (
+                onset_time
+                if onset_time.tzinfo is not None
+                else onset_time.replace(tzinfo=timezone.utc)
+            )
+
+        def is_prior_ev(excerpt: str, ts: Optional[datetime]) -> bool:
+            if "[prior_incident]" in excerpt.lower():
+                return True
+            if onset_utc and ts is not None:
+                utc_ts = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+                if utc_ts < onset_utc:
+                    return True
+            return False
+
         findings_summary: Dict[str, Any] = {}
         for spec_name, f in findings.items():
+            ev_list = []
+            for e in f.evidence:
+                dumped = e.model_dump(mode="json")
+                if is_prior_ev(e.excerpt, e.timestamp):
+                    dumped["prior_status"] = (
+                        "[PRIOR RESOLVED INCIDENT EVIDENCE - DO NOT USE AS ACTIVE MECHANISM]"
+                    )
+                    dumped["excerpt"] = (
+                        f"[PRIOR RESOLVED INCIDENT EVIDENCE - DO NOT USE AS ACTIVE MECHANISM] "
+                        f"{dumped.get('excerpt', '')}"
+                    )
+                ev_list.append(dumped)
             findings_summary[spec_name] = {
                 "summary": f.summary,
                 "anomalies": f.anomalies,
-                "evidence": [e.model_dump(mode="json") for e in f.evidence],
+                "evidence": ev_list,
                 "confidence": f.confidence,
                 "errors": f.errors,
                 "queries_run": f.queries_run,
             }
 
+        prior_tag = "[PRIOR RESOLVED INCIDENT EVIDENCE - DO NOT USE AS ACTIVE MECHANISM]"
         logs_evidence = []
         if "logs" in findings:
             for ev in findings["logs"].evidence:
-                logs_evidence.append(f"  - {ev.excerpt}")
+                if is_prior_ev(ev.excerpt, ev.timestamp):
+                    logs_evidence.append(f"  - {prior_tag} {ev.excerpt}")
+                else:
+                    logs_evidence.append(f"  - {ev.excerpt}")
             for anom in findings["logs"].anomalies:
-                logs_evidence.append(f"  - [Anomaly] {anom}")
+                if "[prior_incident]" in anom.lower():
+                    logs_evidence.append(f"  - {prior_tag} [Anomaly] {anom}")
+                else:
+                    logs_evidence.append(f"  - [Anomaly] {anom}")
         metrics_evidence = []
         if "metrics" in findings:
             for ev in findings["metrics"].evidence:
-                metrics_evidence.append(f"  - {ev.excerpt}")
+                if is_prior_ev(ev.excerpt, ev.timestamp):
+                    metrics_evidence.append(f"  - {prior_tag} {ev.excerpt}")
+                else:
+                    metrics_evidence.append(f"  - {ev.excerpt}")
             for anom in findings["metrics"].anomalies:
-                metrics_evidence.append(f"  - [Anomaly] {anom}")
+                if "[prior_incident]" in anom.lower():
+                    metrics_evidence.append(f"  - {prior_tag} [Anomaly] {anom}")
+                else:
+                    metrics_evidence.append(f"  - [Anomaly] {anom}")
 
         logs_section = "\n".join(logs_evidence) if logs_evidence else "  None recorded"
         metrics_section = "\n".join(metrics_evidence) if metrics_evidence else "  None recorded"
+
+        dep_statuses: List[str] = []
+        for dep_key, dep_f in findings.items():
+            if dep_key.startswith("dependency:"):
+                dep_svc = dep_key.split(":", 1)[1]
+                if dep_f.anomalies or dep_f.errors:
+                    dep_statuses.append(
+                        f"  - Downstream dependency '{dep_svc}': FAILING/ERRORS "
+                        f"({len(dep_f.errors)} errors, {len(dep_f.anomalies)} anomalies). "
+                        "Probable root cause originates in this downstream dependency."
+                    )
+                else:
+                    dep_statuses.append(
+                        f"  - Downstream dependency '{dep_svc}': HEALTHY "
+                        "(0 errors, no anomalies). Delay originates in primary service "
+                        "request processing path, not downstream dependencies."
+                    )
+        dep_section = "\n".join(dep_statuses) if dep_statuses else "  None inspected"
 
         user_content = (
             "Synthesize the incident investigation findings into a complete "
@@ -184,6 +261,8 @@ class GeminiLlmClient:
             f"{logs_section}\n\n"
             "Collected Metrics Telemetry:\n"
             f"{metrics_section}\n\n"
+            "Downstream Dependency Health Status:\n"
+            f"{dep_section}\n\n"
             f"Specialist Findings:\n{json.dumps(findings_summary, default=str, indent=2)}\n\n"
             "CRITICAL INSTRUCTIONS:\n"
             "1. 'probable_root_cause' MUST accurately name the failing service, the affected "
@@ -191,7 +270,15 @@ class GeminiLlmClient:
             "2. Never return null or an empty object for probable_root_cause.\n"
             "3. Do not use formulaic templates like 'Regression introduced by recent change "
             "(...)'. Write professional, natural SRE prose.\n"
-            "4. Never include Kubernetes/GKE endpoints (e.g. /api/v1/namespaces/...)"
+            "4. If a downstream dependency was inspected and verified healthy "
+            "(0 errors, no anomalies), do NOT attribute root cause to that downstream dependency; "
+            "the delay originates in the primary service's request processing path.\n"
+            "5. CRITICAL: Evidence and error logs belonging to prior resolved incidents "
+            "(occurring before detected onset) must NEVER be used as the root cause mechanism for "
+            "the active incident. If the active incident is pure latency with 0 HTTP errors, "
+            "attribute root cause to primary service internal request processing delay/thread "
+            "starvation, never resolved database pool exhaustion or prior exceptions.\n"
+            "6. Never include Kubernetes/GKE endpoints (e.g. /api/v1/namespaces/...)"
             " when diagnosing Cloud Run services.\n"
         )
 
@@ -219,6 +306,9 @@ class GeminiLlmClient:
         report.metadata["incident_id"] = incident.id
         report.metadata["external_key"] = incident.external_key
         report.metadata["affected_service"] = plan.affected_service
+        report.metadata["detected_onset"] = (
+            plan.onset_time.isoformat() if plan and plan.onset_time is not None else None
+        )
         report.metadata["window_start"] = plan.start_time.isoformat()
         report.metadata["window_end"] = plan.end_time.isoformat()
         report.metadata.setdefault("generated_at", datetime.now(timezone.utc).isoformat())
@@ -266,7 +356,13 @@ class GeminiLlmClient:
                     "mechanism, triggering deployment (citing Cloud Run revision and author if "
                     "present), and user impact. Do NOT use formulaic templates like "
                     "'Regression introduced by recent change (...)', parenthetical dumps, "
-                    "or bullet points. Return ONLY the prose text.\n\n"
+                    "or bullet points. "
+                    "CRITICAL: Evidence and error logs belonging to prior resolved incidents "
+                    "(occurring before detected onset) must NEVER be used as root cause mechanism "
+                    "for the active incident. If the active incident is pure latency with 0 HTTP "
+                    "errors, attribute root cause to primary service internal request processing "
+                    "delay/thread starvation, never resolved database pool exhaustion or prior "
+                    "exceptions. Return ONLY the prose text.\n\n"
                     f"Findings:\n{json.dumps(findings_summary, default=str)}"
                 )
                 prc_resp = self.client.models.generate_content(
@@ -359,4 +455,4 @@ class GeminiLlmClient:
                         SpecialistStatus(specialist=spec_name, status="skipped", error=None)
                     )
 
-        return calibrate_report_confidence(report, findings)
+        return calibrate_report_confidence(report, findings, plan=plan)

@@ -23,10 +23,14 @@ class InvestigationPlan(BaseModel):
     end_time: datetime
     selected_specialists: List[str] = Field(default_factory=list)
     initial_hypotheses: List[str] = Field(default_factory=list)
+    onset_time: Optional[datetime] = None
+    prior_incidents: List[Any] = Field(default_factory=list)
 
-    @field_validator("start_time", "end_time", mode="after")
+    @field_validator("start_time", "end_time", "onset_time", mode="after")
     @classmethod
-    def ensure_utc(cls, v: datetime) -> datetime:
+    def ensure_utc(cls, v: Optional[datetime]) -> Optional[datetime]:
+        if v is None:
+            return None
         if v.tzinfo is None:
             return v.replace(tzinfo=timezone.utc)
         return v.astimezone(timezone.utc)
@@ -361,6 +365,7 @@ class TriageAgent:
         incident: Incident,
         start_time_override: Optional[datetime] = None,
         end_time_override: Optional[datetime] = None,
+        onset_time_override: Optional[datetime] = None,
     ) -> InvestigationPlan:
         """Produce an InvestigationPlan for the incoming incident."""
         self._consult_playbook()
@@ -389,6 +394,10 @@ class TriageAgent:
                             llm_res.start_time = opened_at - timedelta(minutes=15)
                         else:
                             llm_res.start_time = now_utc - timedelta(minutes=60)
+                    if onset_time_override is not None:
+                        llm_res.onset_time = onset_time_override
+                    else:
+                        llm_res.onset_time = None
                     return llm_res
                 if isinstance(llm_res, dict):
                     self.triage_mode = "llm"
@@ -410,6 +419,10 @@ class TriageAgent:
                             plan_obj.start_time = opened_at - timedelta(minutes=15)
                         else:
                             plan_obj.start_time = now_utc - timedelta(minutes=60)
+                    if onset_time_override is not None:
+                        plan_obj.onset_time = onset_time_override
+                    else:
+                        plan_obj.onset_time = None
                     return plan_obj
             except Exception:
                 # Fallback to deterministic triage on LLM failure
@@ -423,6 +436,16 @@ class TriageAgent:
             start_time_override=start_time_override,
             end_time_override=end_time_override,
         )
+        if onset_time_override is not None:
+            onset_time = onset_time_override
+            if start_time_override is None:
+                start_time = max(
+                    onset_time - timedelta(minutes=10),
+                    end_time - timedelta(hours=self.max_query_window_hours),
+                )
+        else:
+            onset_time = None
+
         selected_specialists = self._select_specialists(incident, symptoms)
         hypotheses = self._generate_hypotheses(service, symptoms, selected_specialists)
 
@@ -433,4 +456,5 @@ class TriageAgent:
             end_time=end_time,
             selected_specialists=selected_specialists,
             initial_hypotheses=hypotheses,
+            onset_time=onset_time,
         )

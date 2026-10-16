@@ -173,6 +173,7 @@ def query_logs(
     end_time: Optional[Union[datetime, str]] = None,
     project_id: Optional[str] = None,
     client: Any = None,
+    order_by: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Query Cloud Logging entries with compact truncated output and console deep link."""
     from .common import (
@@ -255,11 +256,18 @@ def query_logs(
     entries: List[Dict[str, Any]] = []
 
     if client is not None:
-        raw_entries = client.list_entries(
-            resource_names=effective_resource_names,
-            filter_=final_filter,
-            page_size=effective_limit,
-        )
+        call_kwargs: Dict[str, Any] = {
+            "resource_names": effective_resource_names,
+            "filter_": final_filter,
+            "page_size": effective_limit,
+        }
+        if order_by is not None:
+            call_kwargs["order_by"] = order_by
+        try:
+            raw_entries = client.list_entries(**call_kwargs)
+        except TypeError:
+            call_kwargs.pop("order_by", None)
+            raw_entries = client.list_entries(**call_kwargs)
         for entry in raw_entries:
             if len(entries) >= effective_limit:
                 break
@@ -700,6 +708,7 @@ def query_request_logs(
     project_id: Optional[str] = None,
     status_class: Optional[str] = None,  # e.g. "2xx", "3xx", "4xx", "5xx", "403", "500"
     route: Optional[str] = None,  # e.g. "/api/v1/orders", "/health"
+    min_latency_ms: Optional[float] = None,
     window_minutes: int = 60,
     start_time: Optional[Union[datetime, str]] = None,
     end_time: Optional[Union[datetime, str]] = None,
@@ -761,6 +770,13 @@ def query_request_logs(
                     f"httpRequest.status >= {low_s} AND httpRequest.status <= {high_s}"
                 )
 
+    if min_latency_ms is not None and min_latency_ms > 0:
+        sec = min_latency_ms / 1000.0
+        filter_parts.append(f'httpRequest.latency > "{sec:.1f}s"')
+
+    if not route or route.strip() != "/health":
+        filter_parts.append('(NOT httpRequest.requestUrl =~ "/health")')
+
     if route:
         sanitized_route = route.strip()
         filter_parts.append(f'httpRequest.requestUrl =~ "{sanitized_route}"')
@@ -783,6 +799,7 @@ def query_request_logs(
             entries_iter = client.list_entries(
                 resource_names=[f"projects/{pinned_project}"],
                 filter_=final_filter,
+                order_by="timestamp desc",
                 page_size=effective_limit,
                 max_results=effective_limit,
             )
@@ -791,17 +808,31 @@ def query_request_logs(
                 if len(raw_entries) >= effective_limit:
                     break
         except TypeError:
-            # Handle mock or stub clients that do not accept max_results
+            # Handle mock or stub clients that do not accept max_results or order_by
             try:
                 entries_iter = client.list_entries(
                     resource_names=[f"projects/{pinned_project}"],
                     filter_=final_filter,
+                    order_by="timestamp desc",
                     page_size=effective_limit,
                 )
                 for entry in entries_iter:
                     raw_entries.append(entry)
                     if len(raw_entries) >= effective_limit:
                         break
+            except TypeError:
+                try:
+                    entries_iter = client.list_entries(
+                        resource_names=[f"projects/{pinned_project}"],
+                        filter_=final_filter,
+                        page_size=effective_limit,
+                    )
+                    for entry in entries_iter:
+                        raw_entries.append(entry)
+                        if len(raw_entries) >= effective_limit:
+                            break
+                except Exception:
+                    raw_entries = []
             except Exception:
                 raw_entries = []
         except Exception:
@@ -895,6 +926,11 @@ def query_request_logs(
             if clean_route not in parsed_route and parsed_route not in clean_route:
                 continue
 
+        latency_ms = _parse_latency_ms(raw_latency)
+        if min_latency_ms is not None and min_latency_ms > 0:
+            if latency_ms is None or latency_ms < min_latency_ms:
+                continue
+
         total_requests += 1
 
         if 200 <= status_code <= 299:
@@ -912,7 +948,6 @@ def query_request_logs(
         if status_code >= 400:
             route_breakdown[parsed_route]["errors"] += 1
 
-        latency_ms = _parse_latency_ms(raw_latency)
         if latency_ms is not None:
             latencies.append(latency_ms)
 
@@ -922,7 +957,7 @@ def query_request_logs(
         else:
             ts_str = str(ts or "")
 
-        if len(sample_entries) < 10:
+        if len(sample_entries) < effective_limit:
             sample_entries.append(
                 {
                     "timestamp": ts_str,
@@ -945,6 +980,7 @@ def query_request_logs(
         "latency_p95_ms": _calculate_percentile(latencies, 95.0),
         "latency_p99_ms": _calculate_percentile(latencies, 99.0),
         "sample_entries": sample_entries,
+        "query_filter": final_filter,
         "console_url": console_url,
     }
 
@@ -958,6 +994,7 @@ def aggregate_requests(
     project_id: Optional[str] = None,
     status_class: Optional[str] = None,
     route: Optional[str] = None,
+    min_latency_ms: Optional[float] = None,
     window_minutes: int = 60,
     start_time: Optional[Union[datetime, str]] = None,
     end_time: Optional[Union[datetime, str]] = None,
@@ -970,6 +1007,7 @@ def aggregate_requests(
         project_id=project_id,
         status_class=status_class,
         route=route,
+        min_latency_ms=min_latency_ms,
         window_minutes=window_minutes,
         start_time=start_time,
         end_time=end_time,

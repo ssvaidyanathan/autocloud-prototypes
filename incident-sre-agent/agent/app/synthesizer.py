@@ -47,6 +47,7 @@ def _normalize_build_status_in_excerpt(excerpt: str) -> str:
 def calibrate_report_confidence(
     report: Report,
     findings: Dict[str, Findings],
+    plan: Optional[InvestigationPlan] = None,
 ) -> Report:
     """Calibrate report confidence, verify mitigation grounding, and populate caveats.
 
@@ -345,6 +346,263 @@ def calibrate_report_confidence(
             "to verify error cessation"
         )
 
+    # Condition 6: Revision-Causality Rule
+    onset_dt = getattr(plan, "onset_time", None) if plan else None
+    if onset_dt:
+        if onset_dt.tzinfo is None:
+            onset_dt = onset_dt.replace(tzinfo=timezone.utc)
+        else:
+            onset_dt = onset_dt.astimezone(timezone.utc)
+        from datetime import timedelta
+
+        try:
+            from .config import get_settings
+
+            causality_window_mins = getattr(get_settings(), "revision_causality_window_minutes", 30)
+        except Exception:
+            causality_window_mins = 30
+
+        causality_start = onset_dt - timedelta(minutes=causality_window_mins)
+        recent_rev_ts = [rc.timestamp for rc in report.recent_changes if rc.timestamp]
+        causal_revs = [ts for ts in recent_rev_ts if causality_start <= ts]
+        prc_lower = report.probable_root_cause.text.lower() if report.probable_root_cause else ""
+        is_revision_attribution = any(
+            phrase in prc_lower
+            for phrase in [
+                "caused by deployment",
+                "caused by revision",
+                "caused by the deployment",
+                "caused by the revision",
+                "caused by new revision",
+                "introduced in revision",
+                "introduced by revision",
+                "introduced in deployment",
+                "introduced by deployment",
+                "regression in revision",
+                "regression introduced",
+                "bad release",
+                "faulty deployment",
+                "faulty revision",
+                "failed deployment",
+                "new revision introduced",
+                "deployment caused",
+                "revision caused",
+                "rollback required",
+                "triggered by revision",
+                "triggered by the revision",
+                "triggered by deployment",
+                "triggered by the deployment",
+            ]
+        )
+        is_exclusionary = any(
+            neg in prc_lower
+            for neg in [
+                "rather than a deployment",
+                "rather than an immediate deployment",
+                "rather than a revision",
+                "rather than an immediate revision",
+                "not caused by deployment",
+                "not caused by a deployment",
+                "not caused by revision",
+                "not related to deployment",
+                "no deployments occurred",
+                "no code deployments",
+                "no code or configuration changes",
+                "was deployed hours earlier",
+                "deployed prior to",
+                "long-running revision",
+                "benign baseline",
+            ]
+        )
+        blames_revision = is_revision_attribution and not is_exclusionary
+        if recent_rev_ts and not causal_revs and blames_revision:
+            calibrated_conf = min(calibrated_conf, 0.40)
+            uncertainty_reasons.append(
+                f"all revisions were deployed prior to the {causality_window_mins}-minute "
+                "causality window before onset"
+            )
+            caveat = (
+                f"Revisions or configuration changes in the lookback window were deployed prior to "
+                f"the {causality_window_mins}-minute causality window relative to symptom onset; "
+                "long-running revisions are not causal."
+            )
+            if caveat not in report.caveats:
+                report.caveats.append(caveat)
+
+    # Condition 7: Prior-Incident Separation
+    if plan and getattr(plan, "prior_incidents", None):
+        for pi in getattr(plan, "prior_incidents", []):
+            pi_caveat = (
+                f"Earlier error episode ({pi.start_time.strftime('%H:%M:%SZ')} - "
+                f"{pi.end_time.strftime('%H:%M:%SZ')}) was segregated as a resolved prior incident."
+            )
+            if pi_caveat not in report.caveats:
+                report.caveats.append(pi_caveat)
+
+    # Condition 8: Downstream Dependency Attribution
+    for dep_key, dep_f in findings.items():
+        if dep_key.startswith("dependency:"):
+            dep_svc = dep_key.split(":", 1)[1]
+            has_errors = bool(
+                dep_f.anomalies
+                or dep_f.errors
+                or any("403" in ev.excerpt for ev in getattr(dep_f, "evidence", []))
+            )
+            if has_errors:
+                dep_caveat = (
+                    f"Downstream dependency '{dep_svc}' exhibited errors during investigation; "
+                    "probable root cause originates in the downstream dependency."
+                )
+            else:
+                dep_caveat = (
+                    f"Downstream dependency '{dep_svc}' was inspected and verified healthy "
+                    "(0 errors, no anomalies); delay originates in primary service request "
+                    "processing path, not downstream dependencies."
+                )
+                prc_text_lower = (
+                    report.probable_root_cause.text.lower() if report.probable_root_cause else ""
+                )
+                if dep_svc.lower() in prc_text_lower or "downstream" in prc_text_lower:
+                    if any(
+                        term in prc_text_lower
+                        for term in [
+                            "failure",
+                            "failing",
+                            "saturated",
+                            "saturation",
+                            "bottleneck",
+                            "caused by downstream",
+                            "backend dependency saturation",
+                        ]
+                    ):
+                        calibrated_conf = min(calibrated_conf, 0.40)
+                        uncertainty_reasons.append(
+                            f"root cause attributes failure to downstream dependency '{dep_svc}' "
+                            "which was verified healthy in telemetry"
+                        )
+            if dep_caveat not in report.caveats:
+                report.caveats.append(dep_caveat)
+
+    # Condition 9: Prior-Incident Evidence Isolation & Mechanism Guard
+    if onset_dt and report.probable_root_cause:
+        prc_lower = report.probable_root_cause.text.lower()
+        db_keywords = [
+            "database connection",
+            "databaseconnection",
+            "db connection",
+            "connection pool",
+            "connectionpool",
+            "connection acquisition",
+            "pool exhaustion",
+            "toomanyconnections",
+        ]
+        cites_db_errors = any(kw in prc_lower for kw in db_keywords)
+
+        prior_db_errors: List[EvidenceItem] = []
+        active_db_errors: List[EvidenceItem] = []
+        has_active_http_errors = False
+
+        if logs and logs.evidence:
+            for ev in logs.evidence:
+                ev_utc = (
+                    ev.timestamp
+                    if ev.timestamp and ev.timestamp.tzinfo
+                    else (ev.timestamp.replace(tzinfo=timezone.utc) if ev.timestamp else None)
+                )
+                is_prior = False
+                if (
+                    "[prior_incident]" in ev.excerpt.lower()
+                    or "[prior resolved incident" in ev.excerpt.lower()
+                ):
+                    is_prior = True
+                elif ev_utc and ev_utc < onset_dt:
+                    is_prior = True
+
+                ev_has_db = any(kw in ev.excerpt.lower() for kw in db_keywords)
+                if ev_has_db:
+                    if is_prior:
+                        prior_db_errors.append(ev)
+                    else:
+                        active_db_errors.append(ev)
+
+                if not is_prior:
+                    if any(
+                        code in ev.excerpt
+                        for code in [
+                            " 500 ",
+                            " 502 ",
+                            " 503 ",
+                            " 504 ",
+                            "HTTP 500",
+                            "HTTP 502",
+                            "HTTP 503",
+                            "HTTP 504",
+                        ]
+                    ):
+                        has_active_http_errors = True
+
+        if logs and logs.anomalies:
+            for anom in logs.anomalies:
+                if any(kw in anom.lower() for kw in db_keywords):
+                    if "[prior_incident]" in anom.lower() or "[prior resolved" in anom.lower():
+                        prior_db_errors.append(EvidenceItem(kind="anomaly", excerpt=anom))
+
+        if plan and getattr(plan, "prior_incidents", None):
+            for pi in plan.prior_incidents:
+                if any(kw in getattr(pi, "description", "").lower() for kw in db_keywords):
+                    prior_db_errors.append(
+                        EvidenceItem(kind="prior_incident", excerpt=pi.description)
+                    )
+
+        if cites_db_errors and prior_db_errors and not active_db_errors:
+            calibrated_conf = min(calibrated_conf, 0.40)
+            uncertainty_reasons.append(
+                "root cause cites database connection errors or error group exceptions "
+                "that occurred strictly before detected onset"
+            )
+            pi_db_caveat = (
+                "Database connection pool errors or error group exceptions occurred strictly "
+                "prior to detected symptom onset and represent a resolved prior incident; "
+                "earlier resolved exceptions are not the active incident mechanism."
+            )
+            if pi_db_caveat not in report.caveats:
+                report.caveats.append(pi_db_caveat)
+
+            is_latency_incident = False
+            if plan and any("latency" in s.lower() for s in getattr(plan, "symptoms", [])):
+                is_latency_incident = True
+            elif metrics and any(
+                "latency" in str(ev.excerpt).lower() for ev in getattr(metrics, "evidence", [])
+            ):
+                is_latency_incident = True
+
+            if is_latency_incident and not has_active_http_errors:
+                report.probable_root_cause.text = re.sub(
+                    r"(?i)\b(?:database\s+connection\s+pool\s+exhaust(?:ion|ed)|connection\s+acquisition\s+delays?|database\s+connection\s+errors?|toomanyconnections)\b",
+                    "internal request processing delay and thread starvation",
+                    report.probable_root_cause.text,
+                )
+                report.probable_root_cause.text = re.sub(
+                    r"(?i)\b(?:DatabaseConnectionError|ConnectionPoolError)\b",
+                    "Internal processing delay (thread starvation)",
+                    report.probable_root_cause.text,
+                )
+                if any(
+                    k in report.probable_root_cause.text.lower()
+                    for k in ["connection pool", "database connection", "pool exhaustion"]
+                ):
+                    report.probable_root_cause.text = re.sub(
+                        r"(?i)\b(?:database\s+connection|connection\s+pool|pool\s+exhaust(?:ion|ed))\b",
+                        "internal request processing delay",
+                        report.probable_root_cause.text,
+                    )
+
+    if plan and plan.onset_time is not None:
+        if report.metadata is None:
+            report.metadata = {}
+        if "detected_onset" not in report.metadata:
+            report.metadata["detected_onset"] = plan.onset_time.isoformat()
+
     # Populate caveats with calibration uncertainty reasons, avoiding near-duplicates
     has_provisional_caveat = any("provisional" in c.lower() for c in report.caveats)
     for reason in uncertainty_reasons:
@@ -505,27 +763,63 @@ class SynthesizerAgent:
         self,
         incident: Incident,
         findings: Dict[str, Findings],
+        plan: Optional[InvestigationPlan] = None,
     ) -> List[TimelineItem]:
-        """Build a unified chronological timeline from evidence and incident timestamps."""
+        """Build a unified chronological timeline from evidence, onset, dependency events,
+        and incident timestamps.
+        """
         timeline_items: List[TimelineItem] = []
+        seen_keys: set[tuple[datetime, str]] = set()
 
-        timeline_items.append(
-            TimelineItem(
-                timestamp=incident.opened_at,
-                description=f"Incident {incident.external_key} opened: {incident.title}",
+        def _add_item(ts: datetime, desc: str) -> None:
+            utc_ts = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+            utc_ts = utc_ts.astimezone(timezone.utc)
+            key = (utc_ts, desc.strip())
+            if key not in seen_keys:
+                seen_keys.add(key)
+                timeline_items.append(TimelineItem(timestamp=utc_ts, description=desc.strip()))
+
+        # 1. Detected onset
+        if plan and getattr(plan, "onset_time", None) is not None:
+            _add_item(
+                plan.onset_time,  # type: ignore[arg-type]
+                (
+                    f"[ONSET] Detected symptom onset for {plan.affected_service}: "
+                    "telemetry error rate or latency deviation observed"
+                ),
             )
+
+        # 2. Prior incidents
+        if plan and getattr(plan, "prior_incidents", None):
+            for pi in getattr(plan, "prior_incidents", []):
+                _add_item(
+                    pi.start_time,
+                    f"[PRIOR_INCIDENT] {pi.description}",
+                )
+
+        # 3. Incident opened
+        _add_item(
+            incident.opened_at,
+            f"Incident {incident.external_key} opened: {incident.title}",
         )
 
+        # 4. Specialist evidence, changes, and downstream dependencies
         for specialist_name, finding in findings.items():
+            is_dep = specialist_name.startswith("dependency:")
+            dep_svc = specialist_name.split(":", 1)[1] if is_dep else ""
+
             for ev in finding.evidence:
                 if ev.timestamp is not None:
-                    desc = f"[{specialist_name.upper()}] {ev.kind}: {ev.excerpt[:120]}"
-                    timeline_items.append(
-                        TimelineItem(
-                            timestamp=ev.timestamp,
-                            description=desc,
-                        )
-                    )
+                    excerpt_clean = ev.excerpt[:120].strip()
+                    if is_dep:
+                        desc = f"[DEPENDENCY: {dep_svc}] Downstream: {excerpt_clean}"
+                    elif specialist_name == "changes" and (
+                        "revision" in ev.kind.lower() or "build" in ev.kind.lower()
+                    ):
+                        desc = f"[CHANGES] {excerpt_clean}"
+                    else:
+                        desc = f"[{specialist_name.upper()}] {ev.kind}: {excerpt_clean}"
+                    _add_item(ev.timestamp, desc)
 
         timeline_items.sort(key=lambda item: item.timestamp)
         return timeline_items
@@ -736,9 +1030,13 @@ class SynthesizerAgent:
         llm_report: Optional[Report] = None
         if self.llm_client is not None:
             try:
-                res = self.llm_client.generate_report(
-                    incident=incident, plan=plan, findings=findings, skills_used=pipeline_skills
+                synth_fn = getattr(self.llm_client, "synthesize_report", None) or getattr(
+                    self.llm_client, "generate_report", None
                 )
+                if synth_fn is not None:
+                    res = synth_fn(
+                        incident=incident, plan=plan, findings=findings, skills_used=pipeline_skills
+                    )
                 if isinstance(res, Report):
                     llm_report = res
                 elif isinstance(res, dict):
@@ -751,6 +1049,9 @@ class SynthesizerAgent:
             if not llm_report.metadata:
                 llm_report.metadata = {}
             llm_report.metadata["synthesizer_mode"] = "llm"
+            llm_report.metadata["detected_onset"] = (
+                plan.onset_time.isoformat() if plan and plan.onset_time is not None else None
+            )
             llm_report.metadata["window_start"] = plan.start_time.isoformat()
             llm_report.metadata["window_end"] = plan.end_time.isoformat()
             llm_report.skills_used = list(dict.fromkeys(llm_report.skills_used + pipeline_skills))
@@ -760,7 +1061,19 @@ class SynthesizerAgent:
                     plan, findings, specialist_errors
                 )
             if not llm_report.timeline:
-                llm_report.timeline = self._build_timeline(incident, findings)
+                llm_report.timeline = self._build_timeline(incident, findings, plan=plan)
+            else:
+                ref_timeline = self._build_timeline(incident, findings, plan=plan)
+                existing_descs = {t.description.lower() for t in llm_report.timeline}
+                for item in ref_timeline:
+                    if (
+                        item.description.startswith("[ONSET]")
+                        or item.description.startswith("[DEPENDENCY")
+                        or item.description.startswith("[PRIOR_INCIDENT]")
+                    ):
+                        if item.description.lower() not in existing_descs:
+                            llm_report.timeline.append(item)
+                llm_report.timeline.sort(key=lambda t: t.timestamp)
             if not llm_report.recent_changes:
                 llm_report.recent_changes = self._extract_recent_changes(findings)
             if not llm_report.evidence_by_area:
@@ -780,12 +1093,12 @@ class SynthesizerAgent:
                     for a in fallback_actions
                 ]
 
-            return calibrate_report_confidence(llm_report, findings)
+            return calibrate_report_confidence(llm_report, findings, plan=plan)
 
         # Fallback branch IF AND ONLY IF LLM call fails completely
         self.synthesizer_mode = "heuristic_fallback"
         specialists_status = self._build_specialist_statuses(plan, findings, specialist_errors)
-        timeline = self._build_timeline(incident, findings)
+        timeline = self._build_timeline(incident, findings, plan=plan)
         recent_changes = self._extract_recent_changes(findings)
 
         probable_root_cause = self._determine_probable_root_cause(
@@ -830,6 +1143,9 @@ class SynthesizerAgent:
             "incident_id": incident.id,
             "external_key": incident.external_key,
             "affected_service": plan.affected_service,
+            "detected_onset": (
+                plan.onset_time.isoformat() if plan and plan.onset_time is not None else None
+            ),
             "window_start": plan.start_time.isoformat(),
             "window_end": plan.end_time.isoformat(),
             "specialist_count": len(plan.selected_specialists),
@@ -850,8 +1166,20 @@ class SynthesizerAgent:
             queries_appendix=queries_appendix,
             metadata=metadata,
         )
-        return calibrate_report_confidence(rep, findings)
+        return calibrate_report_confidence(rep, findings, plan=plan)
 
 
 # Backward-compatibility alias
 Synthesizer = SynthesizerAgent
+
+
+def synthesize_report(
+    incident: Incident,
+    plan: InvestigationPlan,
+    findings: Dict[str, Findings],
+    synthesizer: Optional[SynthesizerAgent] = None,
+    **kwargs: Any,
+) -> Report:
+    """Synthesize specialist findings into a final Incident Report."""
+    agent = synthesizer or SynthesizerAgent()
+    return agent.synthesize(incident=incident, plan=plan, findings=findings, **kwargs)

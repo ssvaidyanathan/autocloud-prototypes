@@ -154,3 +154,42 @@ def test_triage_specialist_selection() -> None:
     )
     plan_p4 = agent.plan(p4_inc)
     assert "metrics" in plan_p4.selected_specialists
+
+
+def test_triage_resets_onset_time_unless_override_provided() -> None:
+    """Verifies that triage completion sets onset_time to None unless explicitly overridden."""
+    from unittest.mock import MagicMock
+
+    agent = TriageAgent()
+    inc = _create_incident()
+
+    # 1. Heuristic triage without override -> onset_time is None
+    plan_heuristic = agent.plan(inc)
+    assert plan_heuristic.onset_time is None
+
+    # 2. Heuristic triage with override -> onset_time matches override
+    override_ts = datetime(2026, 10, 9, 1, 55, 0, tzinfo=timezone.utc)
+    plan_override = agent.plan(inc, onset_time_override=override_ts)
+    assert plan_override.onset_time == override_ts
+
+    # 3. LLM triage returning plan with onset_time set -> reset to None when override is None
+    now = datetime(2026, 10, 9, 2, 0, 0, tzinfo=timezone.utc)
+    mock_plan = InvestigationPlan(
+        affected_service="shop-api",
+        symptoms=["5xx errors"],
+        start_time=now - timedelta(hours=1),
+        end_time=now,
+        selected_specialists=["logs", "metrics"],
+        initial_hypotheses=["Error spike"],
+        onset_time=inc.opened_at,
+    )
+    mock_llm_client = MagicMock()
+    mock_llm_client.generate_plan.return_value = mock_plan
+
+    llm_agent = TriageAgent(llm_client=mock_llm_client)
+    plan_llm = llm_agent.plan(inc)
+    assert plan_llm.onset_time is None
+
+    # 4. LLM triage with explicit override -> preserves override
+    plan_llm_override = llm_agent.plan(inc, onset_time_override=override_ts)
+    assert plan_llm_override.onset_time == override_ts

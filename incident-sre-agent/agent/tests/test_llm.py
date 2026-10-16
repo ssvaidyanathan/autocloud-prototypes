@@ -64,11 +64,42 @@ def test_generate_plan_success() -> None:
     assert abs((plan.end_time - now_utc_approx).total_seconds()) < 5
     assert abs((plan.start_time - (now_utc_approx - timedelta(minutes=60))).total_seconds()) < 5
     assert plan.initial_hypotheses == expected_plan.initial_hypotheses
+    assert plan.onset_time is None
 
     assert mock_client.models.generate_content.called
     call_args = mock_client.models.generate_content.call_args
     assert call_args.kwargs["model"] == "test-model"
     assert "INC009988" in call_args.kwargs["contents"]
+
+
+def test_generate_plan_resets_onset_time() -> None:
+    """Verifies that generate_plan resets onset_time to None even if the LLM populated it."""
+    incident = _create_sample_incident()
+    now = datetime(2026, 10, 9, 2, 0, 0, tzinfo=timezone.utc)
+    expected_plan = InvestigationPlan(
+        affected_service="shop-api",
+        symptoms=["HTTP 500 Internal Server Error"],
+        start_time=now - timedelta(hours=1),
+        end_time=now,
+        selected_specialists=["logs"],
+        initial_hypotheses=["Database connection pool exhausted"],
+        onset_time=incident.opened_at,
+    )
+
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = expected_plan.model_dump_json()
+    mock_client.models.generate_content.return_value = mock_response
+
+    llm_client = GeminiLlmClient(
+        project_id="test-project",
+        location="test-location",
+        model="test-model",
+        client=mock_client,
+    )
+
+    plan = llm_client.generate_plan(incident)
+    assert plan.onset_time is None
 
 
 def test_generate_plan_empty_response() -> None:

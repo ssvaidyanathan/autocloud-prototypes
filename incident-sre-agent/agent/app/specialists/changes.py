@@ -558,29 +558,75 @@ class ChangesSpecialist(BaseSpecialist):
                         pass
                 if not any("list_cloud_run_revisions" in q for q in queries_run):
                     queries_run.append(f"list_cloud_run_revisions({effective_service})")
+                plan = kwargs.get("plan")
+                plan_onset = getattr(plan, "onset_time", None) if plan else None
+                ref_time = plan_onset or start_time_dt
+                if ref_time.tzinfo is None:
+                    ref_time = ref_time.replace(tzinfo=timezone.utc)
+                else:
+                    ref_time = ref_time.astimezone(timezone.utc)
+                causality_window = getattr(self.config, "revision_causality_window_minutes", 30)
+                causality_start = ref_time - timedelta(minutes=causality_window)
+
+                has_causal_candidate = False
                 for rev in revisions[:3]:
                     ts_val = None
                     raw_ts = rev.get("creation_timestamp")
                     if raw_ts:
                         try:
                             ts_val = datetime.fromisoformat(raw_ts)
+                            if ts_val.tzinfo is None:
+                                ts_val = ts_val.replace(tzinfo=timezone.utc)
+                            else:
+                                ts_val = ts_val.astimezone(timezone.utc)
                         except Exception:
                             ts_val = None
 
                     author = rev.get("author") or "system"
                     traffic = rev.get("traffic_percent", 0)
+
+                    # Revision-Causality Rule:
+                    # A revision is a plausible causal candidate only if deployed within
+                    # revision_causality_window_minutes prior to onset (up to 2 min clock buffer).
+                    # Cause must precede effect: revisions deployed after onset cannot cause it.
+                    # Revisions deployed long before onset are marked as benign baseline.
+                    clock_buffer = timedelta(minutes=2)
+                    if ts_val and ts_val < causality_start:
+                        excerpt = (
+                            f"Revision {rev.get('name')} (author: {author}, traffic: {traffic}%) "
+                            f"[benign baseline: deployed at {raw_ts}, before causality window]"
+                        )
+                    elif ts_val and ts_val > ref_time + clock_buffer:
+                        # Deployed after onset: cannot be the cause; potential mitigation
+                        tag = " [post-onset deployment: candidate mitigation]"
+                        rev_name = rev.get("name")
+                        excerpt = (
+                            f"Revision {rev_name} (author: {author}, traffic: {traffic}%){tag}"
+                        )
+                        anomalies.append(f"Post-onset revision deployment: {rev_name} at {raw_ts}")
+                    else:
+                        is_near = ts_val and (causality_start <= ts_val <= ref_time + clock_buffer)
+                        tag = " [causal candidate: deployed near onset]" if is_near else ""
+                        rev_name = rev.get("name")
+                        excerpt = (
+                            f"Revision {rev_name} (author: {author}, traffic: {traffic}%){tag}"
+                        )
+                        anomalies.append(f"Recent revision deployment: {rev_name} at {raw_ts}")
+                        has_causal_candidate = True
+
                     evidence.append(
                         self.create_evidence_item(
                             kind="revision",
-                            excerpt=(
-                                f"Revision {rev.get('name')} (author: {author}, "
-                                f"traffic: {traffic}%)"
-                            ),
+                            excerpt=excerpt,
                             timestamp=ts_val,
                             console_url=rev.get("console_url"),
                         )
                     )
-                    anomalies.append(f"Recent revision deployment: {rev.get('name')} at {raw_ts}")
+
+                if revisions and not has_causal_candidate:
+                    queries_run.append(
+                        "revision_causality_rule: no revisions deployed within causality window"
+                    )
 
                 if len(revisions) >= 2:
                     try:
