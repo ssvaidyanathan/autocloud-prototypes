@@ -15,7 +15,7 @@ The Incident SRE Agent is architected around four core pillars:
    Ticketing webhooks frequently fire duplicate events upon status changes, reassignment, or network retries. Using deterministic task naming (`inv-<sha256(incident_id + opened_at)>`), Cloud Tasks natively discards duplicate task creation attempts (returning HTTP 409 Conflict / ALREADY_EXISTS), preventing redundant agent executions and eliminating noisy or conflicting reports.
 
 3. **Strict Least-Privilege & Read-Only Inspection**:
-   Automated agents investigating critical production outages must never introduce state changes or exacerbate incidents. The `sre-agent` service account holds strictly read-only IAM viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/compute.viewer`, `roles/cloudasset.viewer`). All specialist tools are hardcoded to read-only API calls, and mutating methods are structurally prohibited by design.
+   Automated agents investigating critical production outages must never introduce state changes or exacerbate incidents. The `sre-agent` service account holds strictly read-only IAM viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/compute.viewer`, `roles/container.viewer`, `roles/cloudsql.viewer`, `roles/cloudbuild.builds.viewer`) plus `roles/aiplatform.user` for Gemini model invocation. All specialist tools are hardcoded to read-only API calls, and mutating methods are structurally prohibited by design.
 
 4. **Structured Multi-Agent Specialization**:
    Rather than asking a single generalist LLM prompt to digest massive volumes of telemetry, the agent employs a **hub-and-spoke multi-agent topology**. A central Dispatcher triages the incident description and fans out targeted queries to four domain-specific specialists (`Logs`, `Metrics`, `Changes`, `Resources`), allowing parallel execution, localized error handling, and synthesized cross-telemetry correlation.
@@ -35,7 +35,7 @@ sequenceDiagram
     participant Tasks as Google Cloud Tasks (investigations)
     participant Agent as sre-agent (Cloud Run)
     participant GCP as GCP Telemetry APIs (Logging, Monitoring, Asset)
-    participant Gemini as Vertex AI (Gemini 2.5 Flash / Pro)
+    participant Gemini as Vertex AI (Gemini, model from config)
 
     User->>Ticket: Files Incident (e.g. INC0019482)
     Ticket->>Bridge: POST /webhook/{snow,jira,generic} (Signed/Token)

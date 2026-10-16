@@ -304,7 +304,7 @@ For authoring workflows and style guides, consult [docs/OPERATIONS.md Section 4]
 
 The Incident SRE Agent is designed with zero-trust security and defense-in-depth:
 
-- **Strictly Read-Only IAM Roles**: The `agent-sa` service account possesses only read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/compute.viewer`, `roles/cloudasset.viewer`). It cannot modify, reboot, or alter any production resources.
+- **Strictly Read-Only IAM Roles**: The `agent-sa` service account possesses only read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/compute.viewer`, `roles/container.viewer`, `roles/cloudsql.viewer`, `roles/cloudbuild.builds.viewer`) plus `roles/aiplatform.user` for Gemini model invocation. It cannot modify, reboot, or alter any production resources.
 - **Tool Registry Immutability**: All specialist tools in `agent/app/tools/` wrap read-only SDK calls. Mutating API methods are strictly excluded from the tool registry.
 - **Automatic Configuration Redaction**: When inspecting environment variables or configuration files, the `ResourcesTool` automatically masks sensitive values (`KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `AUTH`) with `[REDACTED]`.
 - **Zero-Trust Mutual Authentication**:

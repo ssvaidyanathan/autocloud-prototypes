@@ -47,7 +47,7 @@ The system is compartmentalized into five distinct trust zones, each governed by
 | Zone 5: GCP Telemetry & Foundation APIs       |  | Return Path to Zone 2 (Incident Bridge)        |
 | - Cloud Logging, Cloud Monitoring             |  | - POST /callback/report                        |
 | - Cloud Audit Logs, Cloud Asset Inventory     |  | - Verified: Audience + agent-sa caller email   |
-| - Vertex AI (Gemini 2.5)                      |  | - Restricted by ALLOWED_CALLBACK_HOSTS         |
+| - Vertex AI (Gemini)                          |  | - Restricted by ALLOWED_CALLBACK_HOSTS         |
 +───────────────────────────────────────────────+  +────────────────────────────────────────────────+
 ```
 
@@ -87,7 +87,9 @@ The system strictly enforces separation of concerns across three dedicated servi
      +-- roles/monitoring.viewer       (read Cloud Monitoring time-series and metrics)
      +-- roles/run.viewer              (read Cloud Run service specs and revisions)
      +-- roles/compute.viewer          (read Compute Engine instances and metadata)
-     +-- roles/cloudasset.viewer       (read resource configurations via Asset Inventory)
+     +-- roles/container.viewer        (read GKE clusters and workloads)
+     +-- roles/cloudsql.viewer         (read Cloud SQL instances and metadata)
+     +-- roles/cloudbuild.builds.viewer (read Cloud Build history)
      +-- roles/aiplatform.user         (invoke Vertex AI Gemini models)
 ```
 
@@ -110,7 +112,7 @@ Every tool registered in `agent/app/tools/registry.py` is guaranteed read-only t
    - `LoggingTool`: Uses `google.cloud.logging.Client.list_entries()` only; no sink or metric creation.
    - `MonitoringTool`: Uses `google.cloud.monitoring_v3.MetricServiceClient.list_time_series()` only; no custom metric mutation.
    - `ChangesTool`: Filters `cloudaudit.googleapis.com` via read-only log filters.
-   - `ResourcesTool`: Uses `google.cloud.run_v2.ServicesClient.get_service()` and `google.cloud.asset_v1` read operations.
+   - `ResourcesTool`: Uses `google.cloud.run_v2.ServicesClient.get_service()`, `google.cloud.compute_v1.InstancesClient`, and resource viewer clients.
 
 ### Automatic Secret Redaction in Resources Tool
 When the `ResourcesTool` inspects Cloud Run services or container environments, all sensitive values are automatically sanitized before passing to LLM context:

@@ -150,7 +150,7 @@ Configure the following alerting policies in Google Cloud Monitoring:
 - **Symptoms**: Agent fails during synthesis step with `429 ResourceExhausted: Quota exceeded for aiplatform.googleapis.com`.
 - **Diagnostic Steps**:
   1. Check Vertex AI quota usage in Cloud Console under **IAM & Admin > Quotas**.
-  2. Review current requests per minute (RPM) and tokens per minute (TPM) limits for `gemini-2.5-flash`.
+  2. Review current requests per minute (RPM) and tokens per minute (TPM) limits for `gemini-3.8-flash`.
 - **Resolution**:
   - Switch model configuration to fallback or increase quota via GCP Console.
   - SRE Agent built-in heuristic fallback will output raw specialist findings even when synthesis is degraded.
