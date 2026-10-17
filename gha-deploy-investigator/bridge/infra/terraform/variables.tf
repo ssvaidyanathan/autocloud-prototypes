@@ -103,27 +103,3 @@ variable "cloud_run_memory" {
   type        = string
   default     = "512Mi"
 }
-
-variable "github_webhook_secret_id" {
-  description = "Secret Manager secret ID for GitHub webhook HMAC secret (defaults to ${var.name_prefix}-github-webhook-secret)"
-  type        = string
-  default     = ""
-}
-
-variable "servicenow_password_secret_id" {
-  description = "Secret Manager secret ID for ServiceNow password (defaults to ${var.name_prefix}-servicenow-password, e.g. gdi-bridge-servicenow-password)"
-  type        = string
-  default     = ""
-}
-
-variable "servicenow_webhook_token_secret_id" {
-  description = "Secret Manager secret ID for ServiceNow webhook token (defaults to ${var.name_prefix}-servicenow-webhook-token, e.g. gdi-bridge-servicenow-webhook-token)"
-  type        = string
-  default     = ""
-}
-
-variable "servicenow_username_secret_id" {
-  description = "Optional Secret Manager secret ID for ServiceNow username (e.g. gdi-bridge-servicenow-username). If set, read from secret; otherwise use servicenow_username variable."
-  type        = string
-  default     = ""
-}

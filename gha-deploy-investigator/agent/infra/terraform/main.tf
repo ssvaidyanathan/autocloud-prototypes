@@ -6,10 +6,9 @@ locals {
     prefix    = var.name_prefix
   }
 
-  agent_sa_id                      = substr("${var.name_prefix}-agent-sa", 0, 30)
-  tasks_invoker_sa_id              = substr("${var.name_prefix}-tasks-invoker-sa", 0, 30)
-  service_name                     = "${var.name_prefix}-${var.service_name}"
-  github_app_private_key_secret_id = var.github_app_private_key_secret_id != "" ? var.github_app_private_key_secret_id : "${var.name_prefix}-github-app-private-key"
+  agent_sa_id         = substr("${var.name_prefix}-agent-sa", 0, 30)
+  tasks_invoker_sa_id = substr("${var.name_prefix}-tasks-invoker-sa", 0, 30)
+  service_name        = "${var.name_prefix}-${var.service_name}"
 }
 
 # Service Account for Agent
@@ -48,7 +47,7 @@ resource "google_project_iam_member" "agent_cloud_run_viewer" {
 # Secret Definition for GitHub App Private Key
 resource "google_secret_manager_secret" "github_app_private_key" {
   project   = var.project_id
-  secret_id = local.github_app_private_key_secret_id
+  secret_id = "${var.name_prefix}-github-app-private-key"
   labels    = local.common_labels
 
   replication {

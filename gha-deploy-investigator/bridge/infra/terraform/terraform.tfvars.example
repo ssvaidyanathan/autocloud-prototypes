@@ -10,12 +10,6 @@ image_tag    = "latest"
 servicenow_instance_url = "https://your-instance.service-now.com"
 servicenow_username     = "gdi_bridge_user"
 
-# Optional ServiceNow & GitHub Secret Manager naming overrides (defaults to gdi-servicenow-*):
-# servicenow_password_secret_id      = "gdi-bridge-servicenow-password"
-# servicenow_webhook_token_secret_id = "gdi-bridge-servicenow-webhook-token"
-# servicenow_username_secret_id      = "gdi-bridge-servicenow-username"
-# github_webhook_secret_id           = "gdi-github-webhook-secret"
-
 # Values populated after agent deployment:
 agent_service_url                   = "https://gdi-agent-xyz-uc.a.run.app"
 agent_service_account_email         = "gdi-agent-sa@your-gcp-project-id.iam.gserviceaccount.com"

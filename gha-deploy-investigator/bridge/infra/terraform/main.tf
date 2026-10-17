@@ -9,11 +9,6 @@ locals {
   service_account_id = substr("${var.name_prefix}-bridge-sa", 0, 30)
   queue_name         = "${var.name_prefix}-${var.tasks_queue_name}"
   service_name       = "${var.name_prefix}-${var.service_name}"
-
-  github_webhook_secret_id           = var.github_webhook_secret_id != "" ? var.github_webhook_secret_id : "${var.name_prefix}-github-webhook-secret"
-  servicenow_password_secret_id      = var.servicenow_password_secret_id != "" ? var.servicenow_password_secret_id : "${var.name_prefix}-servicenow-password"
-  servicenow_webhook_token_secret_id = var.servicenow_webhook_token_secret_id != "" ? var.servicenow_webhook_token_secret_id : "${var.name_prefix}-servicenow-webhook-token"
-  use_servicenow_username_secret     = var.servicenow_username_secret_id != ""
 }
 
 # Service Account for Bridge
@@ -53,7 +48,7 @@ resource "google_cloud_tasks_queue_iam_member" "bridge_task_enqueuer" {
 # Secret Definitions in Secret Manager
 resource "google_secret_manager_secret" "github_webhook_secret" {
   project   = var.project_id
-  secret_id = local.github_webhook_secret_id
+  secret_id = "${var.name_prefix}-github-webhook-secret"
   labels    = local.common_labels
 
   replication {
@@ -63,7 +58,7 @@ resource "google_secret_manager_secret" "github_webhook_secret" {
 
 resource "google_secret_manager_secret" "servicenow_password" {
   project   = var.project_id
-  secret_id = local.servicenow_password_secret_id
+  secret_id = "${var.name_prefix}-servicenow-password"
   labels    = local.common_labels
 
   replication {
@@ -73,18 +68,7 @@ resource "google_secret_manager_secret" "servicenow_password" {
 
 resource "google_secret_manager_secret" "servicenow_webhook_token" {
   project   = var.project_id
-  secret_id = local.servicenow_webhook_token_secret_id
-  labels    = local.common_labels
-
-  replication {
-    auto {}
-  }
-}
-
-resource "google_secret_manager_secret" "servicenow_username" {
-  count     = local.use_servicenow_username_secret ? 1 : 0
-  project   = var.project_id
-  secret_id = var.servicenow_username_secret_id
+  secret_id = "${var.name_prefix}-servicenow-webhook-token"
   labels    = local.common_labels
 
   replication {
@@ -110,14 +94,6 @@ resource "google_secret_manager_secret_iam_member" "bridge_snow_pwd_access" {
 resource "google_secret_manager_secret_iam_member" "bridge_snow_token_access" {
   project   = var.project_id
   secret_id = google_secret_manager_secret.servicenow_webhook_token.secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.bridge_sa.email}"
-}
-
-resource "google_secret_manager_secret_iam_member" "bridge_snow_username_access" {
-  count     = local.use_servicenow_username_secret ? 1 : 0
-  project   = var.project_id
-  secret_id = google_secret_manager_secret.servicenow_username[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.bridge_sa.email}"
 }
@@ -180,26 +156,9 @@ resource "google_cloud_run_v2_service" "bridge" {
         name  = "SERVICENOW_INSTANCE_URL"
         value = var.servicenow_instance_url
       }
-
-      dynamic "env" {
-        for_each = local.use_servicenow_username_secret ? [1] : []
-        content {
-          name = "SERVICENOW_USERNAME"
-          value_source {
-            secret_key_ref {
-              secret  = google_secret_manager_secret.servicenow_username[0].secret_id
-              version = "latest"
-            }
-          }
-        }
-      }
-
-      dynamic "env" {
-        for_each = local.use_servicenow_username_secret ? [] : [1]
-        content {
-          name  = "SERVICENOW_USERNAME"
-          value = var.servicenow_username
-        }
+      env {
+        name  = "SERVICENOW_USERNAME"
+        value = var.servicenow_username
       }
 
       env {
@@ -236,7 +195,6 @@ resource "google_cloud_run_v2_service" "bridge" {
     google_secret_manager_secret_iam_member.bridge_gh_secret_access,
     google_secret_manager_secret_iam_member.bridge_snow_pwd_access,
     google_secret_manager_secret_iam_member.bridge_snow_token_access,
-    google_secret_manager_secret_iam_member.bridge_snow_username_access,
   ]
 }
 
