@@ -126,6 +126,21 @@ class SynthesizerAgent:
                         for e in diagnostic_result.evidence_items
                         if e.kind == "linter_breakdown"
                     ]
+                    container_logs = [
+                        e.excerpt
+                        for e in diagnostic_result.evidence_items
+                        if e.kind == "cloud_run_container_log"
+                    ]
+                    telemetry_evidence = [
+                        e.excerpt
+                        for e in diagnostic_result.evidence_items
+                        if e.kind == "cloud_run_telemetry"
+                    ]
+                    runner_evidence = [
+                        e.excerpt
+                        for e in diagnostic_result.evidence_items
+                        if e.kind == "github_runner_log"
+                    ]
 
                     spec_findings = {
                         "probable_cause": diagnostic_result.probable_cause,
@@ -134,6 +149,9 @@ class SynthesizerAgent:
                         "structured_errors": structured_errors,
                         "diff_info": diff_evidence[0] if diff_evidence else None,
                         "linter_breakdown": linter_evidence[0] if linter_evidence else None,
+                        "container_logs": container_logs[0] if container_logs else None,
+                        "telemetry_info": telemetry_evidence[0] if telemetry_evidence else None,
+                        "runner_log_excerpt": runner_evidence[0] if runner_evidence else None,
                     }
 
                 llm_result = generate_gemini_synthesis(

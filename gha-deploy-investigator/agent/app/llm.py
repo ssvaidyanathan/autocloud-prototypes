@@ -77,6 +77,15 @@ def generate_gemini_synthesis(
         diff_info = specialist_findings.get("diff_info")
         if diff_info:
             findings_parts.append(f"Git Diff Context:\n{diff_info}")
+        container_logs = specialist_findings.get("container_logs")
+        if container_logs:
+            findings_parts.append(f"Container Logs Before Termination:\n{container_logs}")
+        telemetry_info = specialist_findings.get("telemetry_info")
+        if telemetry_info:
+            findings_parts.append(f"Runtime Telemetry:\n{telemetry_info}")
+        runner_log_excerpt = specialist_findings.get("runner_log_excerpt")
+        if runner_log_excerpt:
+            findings_parts.append(f"Runner Log Evidence Excerpt:\n{runner_log_excerpt}")
         structured_errors = specialist_findings.get("structured_errors")
         if structured_errors:
             lines = [
@@ -116,10 +125,13 @@ def generate_gemini_synthesis(
         "(for example, deprecation or runtime warnings not on the failing step's fatal error path) "
         "under 'Unrelated Observations' rather than primary remediation actions. Do not treat "
         "un-linked warnings as the primary root cause.\n"
-        "6. Deploy & runtime failure correlation: Correlate container termination "
-        "(e.g. exit 137 out-of-memory) with git diff changes (e.g. container resource limits, "
-        "environment variables, or configuration changes) and quote the decisive container log "
-        "lines before termination.\n"
+        "6. Deploy & runtime failure correlation: When container logs or runtime "
+        "telemetry indicate termination (e.g. out of memory / exit code 137, signal 9, or "
+        "health probe failure), the root cause MUST quote the exact decisive log line(s) before "
+        "termination (e.g. 'Memory limit of ... exceeded with ... used' or probe error) and "
+        "correlate directly with specific parameters modified in git diff hunks (e.g. memory "
+        "limits reduced or buffer allocations added). Primary remediation must lead directly "
+        "with reverting or adjusting the specific modified configuration in the diff.\n"
         "7. Do NOT invent or hallucinate revision numbers, resource names, or "
         "projects not in the logs.\n"
         "8. Provide actionable remediation steps addressing each distinct violation directly.\n"

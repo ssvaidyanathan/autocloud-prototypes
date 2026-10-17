@@ -11,7 +11,12 @@ from ..config import AgentConfig
 from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
 from ..contracts.report import CheckRunAnnotation
-from ..specialists.base import BaseSpecialist, DiagnosticResult, SkillTracker
+from ..specialists.base import (
+    BaseSpecialist,
+    DiagnosticResult,
+    SkillTracker,
+    format_git_diff_excerpt,
+)
 from ..tools.github_tools import (
     fetch_job_logs,
     fetch_workflow_run_jobs,
@@ -487,13 +492,11 @@ class PipelineLogsSpecialist(BaseSpecialist):
                 if f.get("filename")
             ]
             if changed_files:
+                diff_excerpt = format_git_diff_excerpt(diff_data)
                 evidence_items.append(
                     EvidenceItem(
                         kind="git_diff",
-                        excerpt=(
-                            f"Commit diff touched {len(changed_files)} file(s): "
-                            f"{', '.join(changed_files)}"
-                        ),
+                        excerpt=diff_excerpt,
                         timestamp=now,
                         console_url=incident.external_url,
                     )

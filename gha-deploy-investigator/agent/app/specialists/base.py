@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -15,6 +16,38 @@ from ..contracts.report import CheckRunAnnotation
 from ..tools.registry import default_registry
 
 logger = logging.getLogger(__name__)
+
+
+def format_git_diff_excerpt(diff_data: Optional[dict[str, Any]], max_patch_len: int = 2000) -> str:
+    """Format git diff files and patch hunks into structured evidence text."""
+    if not isinstance(diff_data, dict) or "files" not in diff_data:
+        return ""
+    files = diff_data.get("files", [])
+    changed_files = [
+        re.sub(r"^\.?/", "", f.get("filename", ""))
+        for f in files
+        if isinstance(f, dict) and f.get("filename")
+    ]
+    if not changed_files:
+        return ""
+
+    header = f"Commit diff touched {len(changed_files)} file(s): {', '.join(changed_files)}"
+    patches = []
+    for f in files:
+        if isinstance(f, dict):
+            fn = re.sub(r"^\.?/", "", f.get("filename", ""))
+            patch = f.get("patch")
+            if patch and isinstance(patch, str) and patch.strip():
+                patches.append(f"--- {fn}\n+++ {fn}\n{patch.strip()}")
+
+    if not patches:
+        return header
+
+    patch_text = "\n\n".join(patches)
+    if len(patch_text) > max_patch_len:
+        patch_text = patch_text[:max_patch_len] + "\n... [diff truncated]"
+
+    return f"{header}\n\nDiff Hunks:\n{patch_text}"
 
 
 def run_sync(coro: Any) -> Any:

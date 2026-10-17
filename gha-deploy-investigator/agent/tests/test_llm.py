@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import httpx
@@ -311,3 +312,190 @@ class TestVertexAIGemini:
         assert "Diff-grounded test failure remediation" in prompt_text
         assert "Warning segregation" in prompt_text
         assert "Deploy & runtime failure correlation" in prompt_text
+
+    def test_generate_gemini_synthesis_includes_container_logs_and_telemetry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = AgentConfig(
+            app_env="production",
+            gcp_project="test-proj-123",
+            vertex_ai_location="us-central1",
+            gemini_model="test-gemini-model",
+        )
+
+        captured_request: dict[str, Any] = {}
+
+        class MockCreds:
+            valid = True
+            token = "mock-vertex-bearer-token"
+
+            def refresh(self, req: Any) -> None:
+                pass
+
+        monkeypatch.setattr(
+            "google.auth.default",
+            lambda scopes: (MockCreds(), "test-proj-123"),
+        )
+
+        def mock_post(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            nonlocal captured_request
+            captured_request = kwargs.get("json", {})
+            raw_json_text = json.dumps(
+                {
+                    "root_cause": "Container crashed due to OOM.",
+                    "remediation_actions": ["Increase memory limit."],
+                    "confidence": 0.99,
+                }
+            )
+            mock_response_data = {
+                "candidates": [{"content": {"parts": [{"text": raw_json_text}]}}]
+            }
+            req = httpx.Request("POST", str(url))
+            return httpx.Response(200, request=req, json=mock_response_data)
+
+        client = httpx.Client()
+        client.post = mock_post  # type: ignore[method-assign]
+
+        spec_findings = {
+            "probable_cause": "OOM during startup",
+            "diff_info": (
+                "Commit diff touched 1 file(s): scripts/deploy.sh\n\n"
+                "Diff Hunks:\n--- scripts/deploy.sh\n+++ scripts/deploy.sh\n"
+                "-MEMORY=512Mi\n+MEMORY=256Mi\n+EXTRA_ENV_VARS=CACHE_PREWARM_BUFFER_MB=2048"
+            ),
+            "container_logs": "Memory limit of 256 MiB exceeded with 584 MiB used.",
+            "telemetry_info": "Cloud Run revision container terminated with exit code 137 (OOM).",
+        }
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "deploy"},
+            failing_step={"name": "Deploy Step"},
+            log_text="Deploy error log",
+            config=cfg,
+            client=client,
+            specialist_findings=spec_findings,
+        )
+
+        assert res is not None
+        prompt_text = captured_request["contents"][0]["parts"][0]["text"]
+        assert "Container Logs Before Termination:" in prompt_text
+        assert "Memory limit of 256 MiB exceeded with 584 MiB used." in prompt_text
+        assert "Runtime Telemetry:" in prompt_text
+        assert "Cloud Run revision container terminated with exit code 137 (OOM)." in prompt_text
+        assert "Diff Hunks:" in prompt_text
+        assert "+MEMORY=256Mi" in prompt_text
+        assert "+EXTRA_ENV_VARS=CACHE_PREWARM_BUFFER_MB=2048" in prompt_text
+
+    def test_synthesizer_passes_container_logs_and_diff_hunks_to_llm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import datetime, timezone
+
+        from agent.app.contracts.findings import EvidenceItem
+        from agent.app.contracts.incident import Incident
+        from agent.app.specialists.base import DiagnosticResult, format_git_diff_excerpt
+        from agent.app.synthesizer import SynthesizerAgent
+
+        incident = Incident(
+            id="inc-oom",
+            source="github",
+            external_id="39043854698",
+            external_key="repo#39043854698",
+            title="Deploy failure",
+            description="Failed deploy",
+            severity="P2",
+            opened_at="2026-10-17T00:00:00Z",
+            github_repo="owner/app",
+        )
+
+        now = datetime.now(timezone.utc)
+        diff_payload = {
+            "files": [
+                {
+                    "filename": "scripts/deploy.sh",
+                    "patch": "@@ -5,2 +5,3 @@\n-MEMORY=512Mi\n+MEMORY=256Mi",
+                }
+            ]
+        }
+        diff_text = format_git_diff_excerpt(diff_payload)
+        diag = DiagnosticResult(
+            stage="deploy",
+            specialist_name="runtime_health",
+            summary="Cloud Run deploy failed",
+            probable_cause="Container terminated with exit code 137 (OOM)",
+            confidence=0.95,
+            evidence_items=[
+                EvidenceItem(kind="git_diff", excerpt=diff_text, timestamp=now),
+                EvidenceItem(
+                    kind="cloud_run_telemetry",
+                    excerpt="Terminated with exit code 137 (OOM)",
+                    timestamp=now,
+                ),
+                EvidenceItem(
+                    kind="cloud_run_container_log",
+                    excerpt="Memory limit of 256 MiB exceeded with 584 MiB used.",
+                    timestamp=now,
+                ),
+            ],
+        )
+
+        captured_spec_findings: dict[str, Any] = {}
+
+        def mock_generate_synthesis(**kwargs: Any) -> dict[str, Any]:
+            nonlocal captured_spec_findings
+            captured_spec_findings = kwargs.get("specialist_findings", {})
+            return {
+                "root_cause": "OOM due to lowered memory in deploy.sh",
+                "remediation_actions": ["Increase memory"],
+                "confidence": 0.99,
+            }
+
+        monkeypatch.setattr(
+            "agent.app.llm.generate_gemini_synthesis",
+            mock_generate_synthesis,
+        )
+
+        cfg = AgentConfig(app_env="production", gcp_project="test-proj")
+        agent = SynthesizerAgent(config=cfg)
+        report = agent.synthesize(
+            incident=incident,
+            failed_job={"name": "deploy-job"},
+            failed_step={"name": "deploy-step"},
+            log_text="gcloud deploy error",
+            diagnostic_result=diag,
+        )
+
+        assert report.probable_root_cause is not None
+        expected_log = "Memory limit of 256 MiB exceeded with 584 MiB used."
+        assert captured_spec_findings.get("container_logs") == expected_log
+        assert (
+            captured_spec_findings.get("telemetry_info")
+            == "Terminated with exit code 137 (OOM)"
+        )
+        assert "Diff Hunks:" in captured_spec_findings.get("diff_info", "")
+        assert "+MEMORY=256Mi" in captured_spec_findings.get("diff_info", "")
+
+    def test_format_git_diff_excerpt_empty_and_populated(self) -> None:
+        from agent.app.specialists.base import format_git_diff_excerpt
+
+        assert format_git_diff_excerpt(None) == ""
+        assert format_git_diff_excerpt({}) == ""
+        assert format_git_diff_excerpt({"files": []}) == ""
+
+        data_no_patch = {"files": [{"filename": "app/main.py"}]}
+        expected_no_patch = "Commit diff touched 1 file(s): app/main.py"
+        assert format_git_diff_excerpt(data_no_patch) == expected_no_patch
+
+        data_with_patch = {
+            "files": [
+                {
+                    "filename": "scripts/deploy.sh",
+                    "patch": "@@ -1,2 +1,2 @@\n-old\n+new",
+                }
+            ]
+        }
+        res = format_git_diff_excerpt(data_with_patch)
+        assert "Commit diff touched 1 file(s): scripts/deploy.sh" in res
+        assert "Diff Hunks:" in res
+        assert "--- scripts/deploy.sh\n+++ scripts/deploy.sh\n@@ -1,2 +1,2 @@\n-old\n+new" in res
+

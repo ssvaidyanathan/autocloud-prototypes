@@ -10,7 +10,12 @@ from google.adk.tools.function_tool import FunctionTool
 from ..config import AgentConfig
 from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
-from ..specialists.base import BaseSpecialist, DiagnosticResult, SkillTracker
+from ..specialists.base import (
+    BaseSpecialist,
+    DiagnosticResult,
+    SkillTracker,
+    format_git_diff_excerpt,
+)
 from ..tools.github_tools import (
     fetch_job_logs,
     fetch_workflow_run_jobs,
@@ -245,19 +250,12 @@ class IaCConfigSpecialist(BaseSpecialist):
                 logger.debug("Could not fetch job logs: %s", exc)
 
         if diff_data and "files" in diff_data:
-            changed_files = [
-                re.sub(r"^\.?/", "", f.get("filename", ""))
-                for f in diff_data["files"]
-                if f.get("filename")
-            ]
-            if changed_files:
+            diff_excerpt = format_git_diff_excerpt(diff_data)
+            if diff_excerpt:
                 evidence_items.append(
                     EvidenceItem(
                         kind="git_diff",
-                        excerpt=(
-                            f"Commit diff touched {len(changed_files)} file(s): "
-                            f"{', '.join(changed_files)}"
-                        ),
+                        excerpt=diff_excerpt,
                         timestamp=now,
                         console_url=incident.external_url,
                     )
