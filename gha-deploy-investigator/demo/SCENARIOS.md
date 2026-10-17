@@ -60,6 +60,15 @@ This directory contains deterministic failure injection and reset tooling for te
 - **Diagnosed By**: `RuntimeHealthSpecialist`
 - **Expected Outcome**: Stage identified as `deploy`, root cause diagnoses exit code 137 (OOM), recommends remediation action `--memory 1Gi`.
 
+### Declarative Environment Behavior (`--clear-env-vars`)
+In Google Cloud Run, `gcloud run deploy` commands preserve previously configured environment variables across service revisions unless explicitly cleared or overwritten. If an injection script or prior release configured temporary environment variables (such as `EXTRA_ENV_VARS="CACHE_PREWARM_BUFFER_MB=2048"` in Scenario 4), a subsequent deployment or revert commit that omits `EXTRA_ENV_VARS` would otherwise retain the stale variable in the newly created revision.
+
+To enforce strictly declarative deployments:
+- `scripts/deploy.sh` checks if `EXTRA_ENV_VARS` is populated:
+  - When non-empty: passes `--set-env-vars "${EXTRA_ENV_VARS}"`.
+  - When empty: passes `--clear-env-vars` to clear any prior revision overrides.
+- This ensures the deployed Cloud Run service environment strictly mirrors the repository state, preventing leaked or persisted environment variables during rollbacks and resets.
+
 ---
 
 ## Reset Workflow

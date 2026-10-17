@@ -1,6 +1,6 @@
 # Configuration Reference: GitHub Actions Deployment Failure Investigator
 
-This document provides a comprehensive configuration reference for `gha-deploy-investigator`, including environment variables, GitHub App manifest and setup instructions, and ServiceNow integration settings.
+This document provides a comprehensive configuration reference for `gha-deploy-investigator`, including environment variables, GitHub App manifest and setup instructions, ServiceNow integration settings, and Terraform mappings.
 
 ---
 
@@ -8,45 +8,70 @@ This document provides a comprehensive configuration reference for `gha-deploy-i
 
 ### 1.1 GDI Bridge (`bridge`)
 
-| Variable | Type | Default | Description |
-|---|---|---|---|
-| `PORT` | Integer | `8080` | Port the HTTP service listens on |
-| `ENVIRONMENT` / `APP_ENV` | String | `production` | Deployment environment (`production`, `staging`, `dev`, `local`) |
-| `NAME_PREFIX` | String | `gdi` | Resource name prefix applied to GCP resources |
-| `GCP_PROJECT` | String | *(ADC / Metadata)* | Target Google Cloud Platform project ID |
-| `GCP_REGION` | String | `us-central1` | GCP region for Cloud Run and Cloud Tasks |
-| `TASKS_QUEUE` | String | `investigations` | Cloud Tasks queue name for asynchronous task dispatch |
-| `TASKS_LOCATION` | String | `us-central1` | Region where the Cloud Tasks queue resides |
-| `TASKS_INVOKER_SA` | String | `""` | Service account email used for Cloud Tasks OIDC invocation |
-| `AGENT_SERVICE_URL` | String | `""` | URL of the internal `gdi-agent` Cloud Run service |
-| `CALLBACK_URL` | String | `""` | Public URL where `gdi-agent` posts completed investigation results |
-| `GITHUB_WEBHOOK_SECRET` | String (Secret) | `None` | Shared secret key used to verify `X-Hub-Signature-256` HMAC headers |
-| `GITHUB_TOKEN` | String (Secret) | `None` | Optional personal access token (used if GitHub App not active) |
-| `GITHUB_API_URL` | String | `https://api.github.com` | Base URL of the GitHub REST API |
-| `ENABLE_GITHUB_WRITEBACK` | Boolean | `true` | Whether to create/update GitHub Check Runs and PR comments |
-| `SERVICENOW_INSTANCE_URL` | String | `None` | ServiceNow base URL (e.g. `https://dev12345.service-now.com`) |
-| `SERVICENOW_USERNAME` | String (Secret) | `None` | ServiceNow integration username (mounted from Secret Manager secret `gdi-servicenow-username`) |
-| `SERVICENOW_PASSWORD` | String (Secret) | `None` | ServiceNow integration user password (mounted from Secret Manager secret `gdi-servicenow-password`) |
-| `SERVICENOW_WEBHOOK_TOKEN` | String (Secret) | `None` | Optional token for ServiceNow inbound webhooks (mounted from Secret Manager secret `gdi-servicenow-webhook-token`) |
-| `SERVICENOW_IN_PROGRESS_STATE` | String | `"2"` | State integer value assigned to newly created incidents |
-| `SERVICENOW_CORRELATION_DISPLAY` | String | `"gha-deploy-investigator"` | Identifier string set on created ServiceNow incidents (`correlation_display`) |
+The bridge service receives GitHub webhook events, verifies HMAC signatures, dispatches async investigations to Cloud Tasks, and performs bi-directional write-back to ServiceNow and GitHub.
+
+| Variable | Type | Default | Required | Terraform Mapping | Description |
+|---|---|---|---|---|---|
+| `PORT` | Integer | `8080` | No | Cloud Run container port | Port the HTTP service listens on |
+| `ENVIRONMENT` / `APP_ENV` | String | `production` | No | `var.environment` | Deployment environment (`production`, `staging`, `dev`, `local`) |
+| `NAME_PREFIX` | String | `gdi` | No | `var.name_prefix` | Resource name prefix applied to GCP resources and secrets |
+| `SERVICE_NAME` | String | `gdi-bridge` | No | `var.service_name` | Cloud Run service identifier |
+| `GCP_PROJECT` | String | *(ADC / Metadata)* | Yes (in GCP) | `var.project_id` | Target Google Cloud Platform project ID (aliases: `PROJECT_ID`, `GOOGLE_CLOUD_PROJECT`) |
+| `GCP_REGION` | String | `us-central1` | No | `var.region` | GCP region for Cloud Run and Cloud Tasks |
+| `TASKS_QUEUE` | String | `investigations` | Yes (in GCP) | `google_cloud_tasks_queue.tasks_queue.name` (`var.tasks_queue_name`) | Cloud Tasks queue name for asynchronous investigation dispatch |
+| `TASKS_LOCATION` | String | `us-central1` | No | `var.region` | Region where the Cloud Tasks queue resides |
+| `TASKS_INVOKER_SA` | String | `""` | Yes (in GCP) | `var.tasks_invoker_service_account_email` | Service account email used for Cloud Tasks OIDC invocation of internal agent |
+| `AGENT_SERVICE_URL` | String | `""` | Yes (in GCP) | `var.agent_service_url` | Target URL of the internal `gdi-agent` Cloud Run service |
+| `AGENT_SA` | String | `""` | No | `var.agent_service_account_email` | Service account email of internal agent for identity verification |
+| `CALLBACK_URL` | String | `""` | Yes (in GCP) | `var.callback_url` | Public URL where `gdi-agent` posts completed investigation results |
+| `ADAPTER_TIMEOUT_SECONDS` | Float | `60.0` | No | Container default | HTTP request timeout in seconds for outbound ServiceNow and GitHub adapter calls |
+| `GITHUB_WEBHOOK_SECRET` | String (Secret) | `None` | Yes (in prod) | Secret `${var.name_prefix}-github-webhook-secret` | Shared secret key used to verify `X-Hub-Signature-256` HMAC inbound webhook headers |
+| `GITHUB_TOKEN` | String (Secret) | `None` | No | Secret / Environment | Optional fallback personal access token (used if GitHub App not active) |
+| `GITHUB_API_URL` | String | `https://api.github.com` | No | Container default | Base URL of the GitHub REST API |
+| `ENABLE_GITHUB_WRITEBACK` | Boolean | `true` | No | Container default | Whether to create/update GitHub Check Runs and PR/commit comments |
+| `GITHUB_APP_ID` | String | `None` | Yes (for GitHub App) | `var.github_app_id` | Numeric GitHub App ID installed on target repositories |
+| `GITHUB_APP_PRIVATE_KEY` | String (Secret) | `None` | Yes (for GitHub App) | Secret `${var.name_prefix}-github-app-private-key` | PEM-encoded RSA private key for GitHub App authentication and Check Run creation |
+| `SERVICENOW_INSTANCE_URL` | String | `None` | Yes (in prod) | `var.servicenow_instance_url` | ServiceNow base URL (e.g. `https://dev12345.service-now.com`) |
+| `SERVICENOW_USERNAME` | String (Secret) | `None` | Yes (in prod) | Secret `${var.name_prefix}-servicenow-username` | ServiceNow integration username |
+| `SERVICENOW_PASSWORD` | String (Secret) | `None` | Yes (in prod) | Secret `${var.name_prefix}-servicenow-password` | ServiceNow integration user password |
+| `SERVICENOW_WEBHOOK_TOKEN` | String (Secret) | `None` | No | Secret `${var.name_prefix}-servicenow-webhook-token` | Optional bearer token for ServiceNow inbound webhooks |
+| `SERVICENOW_IN_PROGRESS_STATE` | String | `"2"` | No | Container default | State integer assigned to newly created incidents (`"2"` = In Progress) |
+| `SERVICENOW_INCIDENT_STATE_AFTER_REPORT` | String | `"2"` | No | Container default | Target incident state integer when findings and report attachments are uploaded (`"2"` = In Progress) |
+| `SERVICENOW_CORRELATION_DISPLAY` | String | `"gha-deploy-investigator"` | No | Container default | Correlation display tag set on created ServiceNow incidents for bi-directional exclusion |
+| `SERVICENOW_CALLER` | String | `"admin"` | No | Container default | Configurable user ID / username assigned to `caller_id` on created incidents (defaults to `"admin"`) |
+| `SERVICENOW_ASSIGNMENT_GROUP` | String | `None` | No | Container default | Optional assignment group sys_id or group name for routing created incidents |
+
+---
 
 ### 1.2 GDI Agent (`agent`)
 
-| Variable | Type | Default | Description |
-|---|---|---|---|
-| `PORT` | Integer | `8080` | Port the internal HTTP service listens on |
-| `ENVIRONMENT` / `APP_ENV` | String | `production` | Deployment environment |
-| `NAME_PREFIX` | String | `gdi` | Resource name prefix |
-| `GCP_PROJECT` | String | *(ADC / Metadata)* | Target Google Cloud Platform project ID |
-| `BRIDGE_SERVICE_URL` | String | `""` | URL of the `gdi-bridge` service for posting results |
-| `GITHUB_API_URL` | String | `https://api.github.com` | GitHub REST API base URL |
-| `GITHUB_APP_ID` | String | `None` | Numerical GitHub App ID |
-| `GITHUB_APP_PRIVATE_KEY` | String (Secret) | `None` | PEM-encoded RSA private key for GitHub App authentication |
-| `GITHUB_TOKEN` | String (Secret) | `None` | Optional fallback personal access token |
-| `GEMINI_MODEL` | String | `gemini-2.5-flash` | Gemini model name for analytical synthesis |
-| `VERTEX_AI_LOCATION` | String | `us-central1` | GCP region for Vertex AI Gemini API endpoint |
+The agent service runs behind internal ingress, coordinates autonomous ADK multi-agent specialists, discovers runtime troubleshooting skills, queries Cloud Logging, and synthesizes root-cause diagnoses using Vertex AI Gemini.
 
+| Variable | Type | Default | Required | Terraform Mapping | Description |
+|---|---|---|---|---|---|
+| `PORT` | Integer | `8080` | No | Cloud Run container port | Port the internal HTTP service listens on |
+| `ENVIRONMENT` / `APP_ENV` | String | `production` | No | `var.environment` | Deployment environment |
+| `NAME_PREFIX` | String | `gdi` | No | `var.name_prefix` | Resource name prefix |
+| `SERVICE_NAME` | String | `gdi-agent` | No | `var.service_name` | Cloud Run service identifier |
+| `GCP_PROJECT` | String | *(ADC / Metadata)* | Yes (in GCP) | `var.project_id` | Target Google Cloud Platform project ID (aliases: `PROJECT_ID`, `GOOGLE_CLOUD_PROJECT`) |
+| `BRIDGE_SERVICE_URL` | String | `""` | Yes (in GCP) | `var.bridge_service_url` | URL of the `gdi-bridge` callback endpoint for reporting results |
+| `GITHUB_API_URL` | String | `https://api.github.com` | No | Container default | GitHub REST API base URL |
+| `GITHUB_APP_ID` | String | `None` | Yes (for GitHub App) | `var.github_app_id` | Numeric GitHub App ID used for authenticated repo API queries |
+| `GITHUB_APP_PRIVATE_KEY` | String (Secret) | `None` | Yes (for GitHub App) | Secret `${var.name_prefix}-github-app-private-key` | PEM-encoded RSA private key for GitHub App authentication |
+| `GITHUB_TOKEN` | String (Secret) | `None` | No | Secret / Environment | Optional fallback personal access token |
+| `GEMINI_MODEL` | String | `gemini-2.5-flash` | No | `var.gemini_model` | Vertex AI Gemini model name for diagnostic synthesis |
+| `VERTEX_AI_LOCATION` | String | `us-central1` | No | `var.vertex_ai_location` | GCP region for Vertex AI Gemini API endpoint |
+
+#### LLM & SDK Inference Settings (Read in `base.py` & Tool Clients)
+
+| Variable | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `GOOGLE_CLOUD_PROJECT` | String | *(ADC / Metadata)* | Yes (in GCP) | Project ID used for Vertex AI Gemini model initialization and Cloud Logging queries |
+| `GOOGLE_GENAI_USE_VERTEXAI` | Boolean String | Auto (`true` in GCP) | No | Set to `"true"` or `"1"` to force Google GenAI SDK to route through Vertex AI endpoints |
+| `GOOGLE_GENAI_USE_ENTERPRISE` | Boolean String | `"false"` | No | Set to `"true"` or `"1"` to enable Vertex AI enterprise endpoint routing |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path | `None` | No | Path to service account JSON key file for local testing or non-GCP hosting |
+| `GOOGLE_API_KEY` | String (Secret) | `None` | No | Direct Google AI Studio API key (used if running offline/local outside Vertex AI) |
+| `GEMINI_API_KEY` | String (Secret) | `None` | No | Alias for `GOOGLE_API_KEY` for Google AI Studio API access |
 
 ---
 
@@ -124,14 +149,15 @@ The integration user specified in `SERVICENOW_USERNAME` must possess the followi
 
 ### 3.3 Created Incident Attributes
 - **Table**: `incident`
-- **Short Description**: `CI/CD Failure: <repository> - <job_name> (<stage>)`
-- **Category**: `Software`
-- **Subcategory**: `CI/CD Pipeline`
-- **State**: `2` (In Progress)
-- **Correlation Display**: `gha-deploy-investigator` (identifies GDI-created tickets for downstream automation)
-- **Correlation ID**: `gdi:<owner>/<repo>:<run_id>:<run_attempt>` (ensures create-before-query idempotency)
-- **Work Notes**: Formatted markdown analysis with probable root cause, evidence table, and suggested remediation commands.
-- **Attachment**: `investigation-report.html` containing interactive styling, failure timeline, and specialist telemetry breakdown.
+- **Short Description**: `[gdi-demo] [CI/CD Failure] <repository> (<stage>)`
+- **Caller (`caller_id`)**: Configurable via `SERVICENOW_CALLER` (defaults to `"admin"`)
+- **Category**: `inquiry`
+- **Severity / Urgency / Impact**: `3` / `2` / `2` (P3/P2)
+- **State**: `2` (In Progress; configurable via `SERVICENOW_IN_PROGRESS_STATE` and `SERVICENOW_INCIDENT_STATE_AFTER_REPORT`)
+- **Correlation Display**: `gha-deploy-investigator` (identifies GDI-created tickets for bi-directional exclusion)
+- **Correlation ID**: `gdi:<owner>/<repo>:<run_id>:<run_attempt>` (ensures query-before-create idempotency)
+- **Description**: Formatted markdown analysis with failing commit, actor, author, probable root cause, and suggested remediation commands.
+- **Attachment**: `ci_cd_investigation_report_<INCIDENT_NUMBER>.html` containing interactive styling, failure timeline, and specialist telemetry breakdown.
 
 ---
 
