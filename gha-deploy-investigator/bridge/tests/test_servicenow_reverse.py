@@ -42,6 +42,11 @@ class TestServiceNowReverse:
         assert created_ticket["correlation_id"] == "gdi:my-org/sample-app:1849201948:1"
         assert created_ticket["work_notes"].startswith("[code]")
         assert created_ticket["work_notes"].endswith("[/code]")
+        assert "Recommended Remediation:" in created_ticket["description"]
+        assert (
+            "- Run local linter (`ruff check .`) to verify and fix syntax/style violations"
+            in created_ticket["description"]
+        )
 
         # Verify Attachment API in fake server
         assert len(ticket_state.servicenow_attachments) == 1

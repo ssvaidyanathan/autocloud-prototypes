@@ -280,6 +280,31 @@ class ServiceNowAdapter(BaseAdapter):
                     "Root Cause:",
                     root_cause_text,
                 ]
+                if report.recommended_actions:
+                    description_lines.extend(["", "Recommended Remediation:"])
+                    for action in report.recommended_actions:
+                        if isinstance(action, str):
+                            description_lines.append(f"- {action}")
+                        elif hasattr(action, "title") and not callable(getattr(action, "title")):
+                            desc = getattr(action, "description", None)
+                            description_lines.append(
+                                f"- {action.title}: {desc}"
+                                if desc
+                                else f"- {action.title}"
+                            )
+                        elif isinstance(action, dict) and "title" in action:
+                            desc = action.get("description")
+                            description_lines.append(
+                                f"- {action['title']}: {desc}"
+                                if desc
+                                else f"- {action['title']}"
+                            )
+                        elif hasattr(action, "title"):
+                            # Handle model or object where title might be an attribute
+                            title_val = action.title() if callable(action.title) else action.title
+                            description_lines.append(f"- {title_val}")
+                        else:
+                            description_lines.append(f"- {action}")
                 description = "\n".join(description_lines)
 
                 if existing_incident:

@@ -270,6 +270,21 @@ class TestVertexAIGemini:
         specialist_findings = {
             "probable_cause": "Linter detected 9 errors in 'main.py': 7x E402, 1x E702, 1x F401",
             "findings": ["Error 1", "Error 2"],
+            "diff_info": "Commit diff touched 1 file(s): app/main.py",
+            "structured_errors": [
+                {
+                    "code": "F401",
+                    "file": "app/main.py",
+                    "line": 1,
+                    "message": "math imported but unused",
+                },
+                {
+                    "code": "E702",
+                    "file": "app/main.py",
+                    "line": 5,
+                    "message": "Multiple statements on one line",
+                },
+            ],
         }
         diagnostic_summary = "Specialist diagnostic summary text"
 
@@ -287,5 +302,9 @@ class TestVertexAIGemini:
         prompt_text = captured_request["contents"][0]["parts"][0]["text"]
         assert "Specialist Analysis & Findings:" in prompt_text
         assert "7x E402, 1x E702, 1x F401" in prompt_text
+        assert "Git Diff Context:\nCommit diff touched 1 file(s): app/main.py" in prompt_text
+        assert "[F401] app/main.py:1:" in prompt_text
         assert "Diagnostic Summary: Specialist diagnostic summary text" in prompt_text
         assert "Do NOT guess, approximate, or misattribute error counts" in prompt_text
+        assert "Correlate findings with git diff hunks" in prompt_text
+        assert "consequential violations" in prompt_text

@@ -71,6 +71,19 @@ def generate_gemini_synthesis(
         findings_list = specialist_findings.get("findings")
         if findings_list:
             findings_parts.append("Findings:\n" + "\n".join(f"- {f}" for f in findings_list))
+        linter_breakdown = specialist_findings.get("linter_breakdown")
+        if linter_breakdown:
+            findings_parts.append(f"Linter Breakdown:\n{linter_breakdown}")
+        diff_info = specialist_findings.get("diff_info")
+        if diff_info:
+            findings_parts.append(f"Git Diff Context:\n{diff_info}")
+        structured_errors = specialist_findings.get("structured_errors")
+        if structured_errors:
+            lines = [
+                f"- [{err.get('code')}] {err.get('file')}:{err.get('line')}: {err.get('message')}"
+                for err in structured_errors[:20]
+            ]
+            findings_parts.append("Detailed Violations:\n" + "\n".join(lines))
 
     findings_context = ""
     if findings_parts:
@@ -87,12 +100,20 @@ def generate_gemini_synthesis(
         "1. Identify the exact root cause grounded strictly in the provided runner log text and "
         "specialist findings.\n"
         "2. Incorporate the specialist's structured findings and exact error counts/codes. "
+        "List each distinct error code with its count and message "
+        "(e.g. 7x E402, 1x E702, 1x F401). "
         "Do NOT guess, approximate, or misattribute error counts, codes, or files. "
-        "If 7x E402, 1x E702, and 1x F401 were found, cite all codes and counts accurately.\n"
-        "3. Do NOT invent or hallucinate revision numbers, resource names, or "
+        "Cite all codes and counts accurately.\n"
+        "3. Correlate findings with git diff hunks when available, explicitly distinguishing "
+        "violations introduced by the commit (e.g. F401 unused import `math`, "
+        "E702 semicolon statement) from consequential violations "
+        "(e.g. E402 module-level imports shifted below new statements).\n"
+        "4. Do NOT invent or hallucinate revision numbers, resource names, or "
         "projects not in the logs.\n"
-        "4. Provide actionable remediation steps to fix the root cause.\n"
-        "5. Respond with valid JSON with keys: 'root_cause' (string), "
+        "5. Provide actionable remediation steps addressing each distinct violation "
+        "(e.g. remove unused import `math`; split statement on line 5; "
+        "move helper function below top-level imports).\n"
+        "6. Respond with valid JSON with keys: 'root_cause' (string), "
         "'remediation_actions' (list of strings), 'confidence' (float between 0.0 and 1.0).\n"
     )
 

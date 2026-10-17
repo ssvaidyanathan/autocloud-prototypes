@@ -104,10 +104,36 @@ class SynthesizerAgent:
                 spec_findings = None
                 if diagnostic_result:
                     diag_summary = diagnostic_result.summary
+                    structured_errors: list[dict[str, Any]] = []
+                    for ann in diagnostic_result.annotations:
+                        title_str = ann.title or ""
+                        code_match = re.search(r"Linter Violation:\s*([A-Za-z0-9_]+)", title_str)
+                        c_code = code_match.group(1) if code_match else (ann.title or "LINT")
+                        structured_errors.append(
+                            {
+                                "code": c_code,
+                                "file": ann.path,
+                                "line": ann.start_line,
+                                "message": ann.message,
+                            }
+                        )
+
+                    diff_evidence = [
+                        e.excerpt for e in diagnostic_result.evidence_items if e.kind == "git_diff"
+                    ]
+                    linter_evidence = [
+                        e.excerpt
+                        for e in diagnostic_result.evidence_items
+                        if e.kind == "linter_breakdown"
+                    ]
+
                     spec_findings = {
                         "probable_cause": diagnostic_result.probable_cause,
                         "summary": diagnostic_result.summary,
                         "remediation_actions": diagnostic_result.remediation_actions,
+                        "structured_errors": structured_errors,
+                        "diff_info": diff_evidence[0] if diff_evidence else None,
+                        "linter_breakdown": linter_evidence[0] if linter_evidence else None,
                     }
 
                 llm_result = generate_gemini_synthesis(
