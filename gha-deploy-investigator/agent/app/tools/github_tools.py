@@ -1,6 +1,5 @@
+import base64
 import logging
-import os
-import sys
 from typing import Any, Optional
 
 import httpx
@@ -9,6 +8,20 @@ from ..config import AgentConfig, get_settings
 from .registry import readonly_tool
 
 logger = logging.getLogger(__name__)
+
+
+def _is_production(cfg: Optional[AgentConfig]) -> bool:
+    """Determine if execution environment is production."""
+    if cfg is None:
+        cfg = get_settings()
+    env = (getattr(cfg, "app_env", "") or getattr(cfg, "environment", "")).lower()
+    return not getattr(cfg, "is_local", False) and env not in (
+        "local",
+        "dev",
+        "development",
+        "test",
+        "testing",
+    )
 
 
 def _build_client(
@@ -31,47 +44,20 @@ def _build_client(
             token = auth.get_installation_token_for_repo(repo)
         except Exception as exc:
             logger.warning("Failed to obtain installation token for repo %s: %s", repo, exc)
+            if _is_production(cfg) and cfg.github_app_id:
+                raise RuntimeError(
+                    f"Failed to obtain GitHub App installation token for repo {repo} "
+                    f"in production: {exc}"
+                ) from exc
+
+    if not token and _is_production(cfg) and (cfg.github_token or cfg.github_app_id):
+        raise RuntimeError(
+            "No GitHub authentication token or GitHub App credentials available in production"
+        )
 
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return httpx.Client(headers=headers, timeout=30.0, follow_redirects=True), True
-
-
-@readonly_tool(
-    name="fetch_workflow_run_jobs",
-    description="Fetch list of jobs and step statuses for a GitHub Actions workflow run",
-)
-def fetch_workflow_run_jobs(
-    repo: str,
-    run_id: int,
-    client: Optional[Any] = None,
-    config: Optional[AgentConfig] = None,
-) -> dict[str, Any]:
-    """Fetch jobs for a GitHub Actions workflow run from GitHub REST API."""
-    cfg = config or get_settings()
-    api_url = cfg.github_api_url.rstrip("/")
-    endpoint = f"{api_url}/repos/{repo}/actions/runs/{run_id}/jobs"
-
-    c, owns_client = _build_client(client, config, repo=repo)
-    try:
-        if run_id in _mock_workflow_jobs:
-            return _mock_workflow_jobs[run_id]
-        try:
-            resp = c.get(endpoint)
-            resp.raise_for_status()
-            return resp.json()  # type: ignore[no-any-return]
-        except Exception as exc:
-            if owns_client and (
-                getattr(cfg, "is_local", False)
-                or os.environ.get("APP_ENV") in ("local", "test", "dev")
-                or "pytest" in sys.modules
-            ):
-                logger.debug("Falling back to empty jobs in test/local environment: %s", exc)
-                return {"jobs": []}
-            raise
-    finally:
-        if owns_client:
-            c.close()
 
 
 # In-memory mock stores for offline test hermeticity
@@ -103,6 +89,39 @@ def set_mock_workflow_jobs(run_id: int, data: dict[str, Any]) -> None:
 
 
 @readonly_tool(
+    name="fetch_workflow_run_jobs",
+    description="Fetch list of jobs and step statuses for a GitHub Actions workflow run",
+)
+def fetch_workflow_run_jobs(
+    repo: str,
+    run_id: int,
+    client: Optional[Any] = None,
+    config: Optional[AgentConfig] = None,
+) -> dict[str, Any]:
+    """Fetch jobs for a GitHub Actions workflow run from GitHub REST API."""
+    cfg = config or get_settings()
+    api_url = cfg.github_api_url.rstrip("/")
+    endpoint = f"{api_url}/repos/{repo}/actions/runs/{run_id}/jobs"
+
+    c, owns_client = _build_client(client, config, repo=repo)
+    try:
+        if run_id in _mock_workflow_jobs:
+            return _mock_workflow_jobs[run_id]
+        try:
+            resp = c.get(endpoint)
+            resp.raise_for_status()
+            return resp.json()  # type: ignore[no-any-return]
+        except Exception as exc:
+            if owns_client and not _is_production(cfg):
+                logger.debug("Falling back to empty jobs in test/local environment: %s", exc)
+                return {"jobs": []}
+            raise
+    finally:
+        if owns_client:
+            c.close()
+
+
+@readonly_tool(
     name="fetch_job_logs",
     description="Fetch execution runner logs for a specific GitHub Actions job",
 )
@@ -127,11 +146,7 @@ def fetch_job_logs(
             resp.raise_for_status()
             return resp.text
         except Exception as exc:
-            if owns_client and (
-                getattr(cfg, "is_local", False)
-                or os.environ.get("APP_ENV") in ("local", "test", "dev")
-                or "pytest" in sys.modules
-            ):
+            if owns_client and not _is_production(cfg):
                 logger.debug("Falling back to empty job logs in test/local environment: %s", exc)
                 return ""
             raise
@@ -173,11 +188,7 @@ def get_commit_diff(
             resp.raise_for_status()
             return resp.json()  # type: ignore[no-any-return]
         except Exception as exc:
-            if owns_client and (
-                getattr(cfg, "is_local", False)
-                or os.environ.get("APP_ENV") in ("local", "test", "dev")
-                or "pytest" in sys.modules
-            ):
+            if owns_client and not _is_production(cfg):
                 logger.debug("Falling back to empty diff in test/local environment: %s", exc)
                 return {"files": []}
             raise
@@ -198,22 +209,26 @@ def get_file_content(
     config: Optional[AgentConfig] = None,
 ) -> str:
     """Fetch file content from GitHub repository."""
-    import base64
-
     cfg = config or get_settings()
     api_url = cfg.github_api_url.rstrip("/")
     endpoint = f"{api_url}/repos/{repo}/contents/{path}"
 
     c, owns_client = _build_client(client, config, repo=repo)
     try:
-        resp = c.get(endpoint, params={"ref": ref})
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict) and data.get("encoding") == "base64" and "content" in data:
-            return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
-        elif isinstance(data, dict) and "content" in data:
-            return str(data["content"])
-        return resp.text
+        try:
+            resp = c.get(endpoint, params={"ref": ref})
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and data.get("encoding") == "base64" and "content" in data:
+                return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+            elif isinstance(data, dict) and "content" in data:
+                return str(data["content"])
+            return resp.text
+        except Exception as exc:
+            if owns_client and not _is_production(cfg):
+                logger.debug("Falling back to empty content in test/local environment: %s", exc)
+                return ""
+            raise
     finally:
         if owns_client:
             c.close()

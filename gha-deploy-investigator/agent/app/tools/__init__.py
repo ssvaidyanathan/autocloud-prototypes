@@ -7,6 +7,7 @@ from .github_tools import (
 )
 from .runtime_tools import (
     add_mock_log,
+    build_cloud_logging_filter,
     describe_cloud_run_revision,
     describe_service,
     list_service_revisions,
@@ -21,6 +22,7 @@ __all__ = [
     "ToolDefinition",
     "ToolRegistry",
     "add_mock_log",
+    "build_cloud_logging_filter",
     "default_registry",
     "describe_cloud_run_revision",
     "describe_service",

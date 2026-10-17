@@ -210,10 +210,24 @@ class RuntimeHealthSpecialist(BaseSpecialist):
 
         @functools.wraps(query_cloud_logging)
         def _bound_query_logging(
-            filter_query: str, limit: int = 20
+            filter_query: str = "",
+            service_name: Optional[str] = None,
+            revision_name: Optional[str] = None,
+            start_time: Optional[str] = None,
+            end_time: Optional[str] = None,
+            severity: Optional[str] = None,
+            limit: int = 20,
         ) -> list[dict[str, Any]]:
             return query_cloud_logging(
-                filter_query=filter_query, limit=limit, client=client, config=config
+                filter_query=filter_query,
+                service_name=service_name,
+                revision_name=revision_name,
+                start_time=start_time,
+                end_time=end_time,
+                severity=severity,
+                limit=limit,
+                client=client,
+                config=config,
             )
 
         bound_tools = [
@@ -596,21 +610,40 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             t_start = (opened_at - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
             t_end = (opened_at + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
             filter_q = (
-                f'resource.type="cloud_run_revision" revision_name="{revision_name}" '
+                f'resource.type="cloud_run_revision" '
+                f'resource.labels.service_name="{service_name}" '
+                f'resource.labels.revision_name="{revision_name}" '
                 f'timestamp>="{t_start}" timestamp<="{t_end}"'
             )
             try:
                 log_entries = self.tracked_tool_call(
                     "query_cloud_logging",
-                    {"filter_query": filter_q},
+                    {
+                        "filter_query": filter_q,
+                        "service_name": service_name,
+                        "revision_name": revision_name,
+                        "start_time": t_start,
+                        "end_time": t_end,
+                    },
                     lambda: query_cloud_logging(
                         filter_query=filter_q,
+                        service_name=service_name,
+                        revision_name=revision_name,
+                        start_time=t_start,
+                        end_time=t_end,
                         limit=20,
                         config=config,
                     ),
                 )
             except Exception as exc:
                 logger.warning("Failed to query Cloud Logging: %s", exc)
+
+            if revision_name and not log_entries:
+                logger.warning(
+                    "Cloud Logging returned empty log entries for revision '%s' with filter '%s'",
+                    revision_name,
+                    filter_q,
+                )
 
         # 4. Analyze conditions and exit codes
         is_oom = False
@@ -648,6 +681,23 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             if "exit code 137" in log_text.lower() or "out of memory" in log_text.lower():
                 is_oom = True
                 exit_code = 137
+
+        # Also inspect container log entries from Cloud Logging for OOM / memory limit / signal 9
+        if not is_oom and log_entries:
+            for entry in log_entries:
+                payload = str(entry.get("text_payload") or entry.get("json_payload") or "").strip()
+                p_lower = payload.lower()
+                if (
+                    "memory limit" in p_lower
+                    or "out of memory" in p_lower
+                    or "oom" in p_lower
+                    or "signal 9" in p_lower
+                    or "exceeded with" in p_lower
+                ):
+                    is_oom = True
+                    exit_code = 137
+                    failure_reason = payload
+                    break
 
         # Format findings based on telemetry
         if is_oom or exit_code == 137:
@@ -689,13 +739,29 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                     for e in log_entries
                     if (e.get("text_payload") or e.get("json_payload"))
                 ]
-                last_lines = (
-                    container_lines[-5:] if len(container_lines) > 5 else container_lines
+                relevant_lines = [
+                    line
+                    for line in container_lines
+                    if any(
+                        term in line.lower()
+                        for term in (
+                            "memory limit",
+                            "signal 9",
+                            "killed",
+                            "error",
+                            "warning",
+                            "probe",
+                            "exceeded with",
+                        )
+                    )
+                ]
+                selected_lines = (
+                    relevant_lines[-5:] if relevant_lines else container_lines[-5:]
                 )
                 evidence_items.append(
                     EvidenceItem(
                         kind="cloud_run_container_log",
-                        excerpt="\n".join(last_lines),
+                        excerpt="\n".join(selected_lines),
                         timestamp=now,
                         console_url=incident.external_url,
                     )

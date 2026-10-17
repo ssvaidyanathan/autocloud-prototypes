@@ -18,8 +18,8 @@ description: Troubleshooting Cloud Run deployment rollouts, startup probe failur
 3. **Correlate with Commit Diff**:
    - Query `get_commit_diff` to correlate deployment failures with triggering commit changes (e.g. `scripts/deploy.sh` resource limits like `--memory`, environment variables, configuration regressions).
 4. **Query Container Stderr Logs**:
-   - Query Cloud Logging via `query_cloud_logging` for `resource.type="cloud_run_revision"` and the failing revision name.
-   - Capture stack traces, uncaught exceptions, and database connection timeouts.
+   - Query Cloud Logging via `query_cloud_logging` using structured parameters (`service_name`, `revision_name`) or valid Cloud Logging filter syntax (`resource.type="cloud_run_revision" resource.labels.service_name="<service>" resource.labels.revision_name="<revision>"`).
+   - Capture stack traces, uncaught exceptions, memory limit exhaustion warnings, and container termination signals.
 5. **Formulate Recommended Remediation**:
    - If OOM (exit 137): increase memory limit via `gcloud run services update <service> --memory 1Gi`.
    - If startup crash: fix missing environment variables, secrets, or module imports.
