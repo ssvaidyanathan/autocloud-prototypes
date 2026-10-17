@@ -21,6 +21,22 @@ To allow a newcomer or automation pipeline to deploy `gha-deploy-investigator` e
 - **`roles/serviceusage.serviceUsageAdmin`**: Enables required Google Cloud APIs if not already activated.
 - **Terraform State Access**: `roles/storage.objectAdmin` on the remote GCS state bucket (if using a remote backend).
 
+> [!NOTE]
+> **Post-Deployment Least-Privilege Role Revocation**:
+> Privileged bootstrapping roles granted to the deploying principal specifically for initial infrastructure provisioning (such as `roles/iam.workloadIdentityPoolAdmin` and `roles/artifactregistry.admin`) should be revoked after initial setup is complete:
+> ```bash
+> # Revoke temporary provisioning privileges from deployer SA
+> gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
+>     --member="serviceAccount:${DEPLOYER_SA_EMAIL}" \
+>     --role="roles/iam.workloadIdentityPoolAdmin" \
+>     --condition=None
+> 
+> gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
+>     --member="serviceAccount:${DEPLOYER_SA_EMAIL}" \
+>     --role="roles/artifactregistry.admin" \
+>     --condition=None
+> ```
+
 ### Required Google Cloud APIs
 Ensure the following APIs are enabled in your target GCP project:
 ```bash
