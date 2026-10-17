@@ -71,6 +71,12 @@ copy_secret() {
             --replication-policy="automatic"
     fi
 
+    # Check if target secret already has an enabled version
+    if gcloud secrets versions describe latest --secret="${target_secret}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+        echo "[NOTICE] Target secret ${target_secret} already has an active version; skipping version copy (will not overwrite)."
+        return 0
+    fi
+
     # Check if source secret exists with source prefix or without
     local actual_source=""
     if gcloud secrets describe "${source_secret}" --project="${PROJECT_ID}" >/dev/null 2>&1; then

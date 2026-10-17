@@ -73,3 +73,9 @@ variable "cloud_run_memory" {
   type        = string
   default     = "2Gi"
 }
+
+variable "github_app_private_key_secret_id" {
+  description = "Secret Manager secret ID for GitHub App private key (defaults to ${var.name_prefix}-github-app-private-key)"
+  type        = string
+  default     = ""
+}

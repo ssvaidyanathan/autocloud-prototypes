@@ -9,3 +9,6 @@ image_tag    = "latest"
 
 github_app_id      = "123456"
 bridge_service_url = "https://gdi-bridge-xyz-uc.a.run.app"
+
+# Optional secret ID override (defaults to gdi-github-app-private-key):
+# github_app_private_key_secret_id = "gdi-github-app-private-key"

@@ -27,9 +27,84 @@ Before beginning deployment, ensure you have:
 
 ---
 
-## 2. Step 1: Replicate and Provision Secrets
+## 2. Step 1: Secret Provisioning & Adoption
 
-The prototype requires Secret Manager secrets for GitHub webhooks, GitHub App private keys, and ServiceNow credentials. Use `scripts/copy-secrets.sh` to copy values from existing prototype secrets without exposing values on stdout:
+The prototype requires Secret Manager secrets for GitHub webhooks, GitHub App private keys, and ServiceNow credentials.
+
+### Scenario A: Adopting Pre-Existing Secrets (e.g. Created via GCP Console)
+If you or your platform administrator have already created Secret Manager secrets (such as in project `cloud-assist-fde-7` per AMENDMENT 8), a standard `terraform apply` will fail with an HTTP 409 Conflict ("Resource already exists").
+
+You can adopt these pre-existing secrets into Terraform state seamlessly using either the automated adoption script or manual `terraform import` commands:
+
+#### Option 1: Automated Secret Adoption (Recommended)
+Run the adoption helper script after running `terraform init` in each stack:
+```bash
+cd gha-deploy-investigator
+
+# Initialize Terraform state in both stacks
+terraform -chdir=agent/infra/terraform init
+terraform -chdir=bridge/infra/terraform init
+
+# Run adoption helper (auto-detects existing secrets in GCP and imports them into state)
+./scripts/import-secrets.sh --project-id "${PROJECT_ID}" --name-prefix "${NAME_PREFIX}"
+```
+
+#### Option 2: Manual `terraform import` Commands
+Alternatively, import each secret resource into the appropriate Terraform stack state:
+
+```bash
+# Agent Stack Secrets
+terraform -chdir=agent/infra/terraform import \
+    -var="project_id=${PROJECT_ID}" \
+    -var="name_prefix=${NAME_PREFIX}" \
+    google_secret_manager_secret.github_app_private_key \
+    "projects/${PROJECT_ID}/secrets/${NAME_PREFIX}-github-app-private-key"
+
+# Bridge Stack Secrets (Standard Naming: gdi-servicenow-*)
+terraform -chdir=bridge/infra/terraform import \
+    -var="project_id=${PROJECT_ID}" \
+    -var="name_prefix=${NAME_PREFIX}" \
+    google_secret_manager_secret.github_webhook_secret \
+    "projects/${PROJECT_ID}/secrets/${NAME_PREFIX}-github-webhook-secret"
+
+terraform -chdir=bridge/infra/terraform import \
+    -var="project_id=${PROJECT_ID}" \
+    -var="name_prefix=${NAME_PREFIX}" \
+    google_secret_manager_secret.servicenow_password \
+    "projects/${PROJECT_ID}/secrets/${NAME_PREFIX}-servicenow-password"
+
+terraform -chdir=bridge/infra/terraform import \
+    -var="project_id=${PROJECT_ID}" \
+    -var="name_prefix=${NAME_PREFIX}" \
+    google_secret_manager_secret.servicenow_webhook_token \
+    "projects/${PROJECT_ID}/secrets/${NAME_PREFIX}-servicenow-webhook-token"
+
+# Bridge Stack Secrets (Console Naming with gdi-bridge-servicenow-* and username secret)
+# If using gdi-bridge-servicenow-*, specify the variable overrides during import:
+terraform -chdir=bridge/infra/terraform import \
+    -var="project_id=${PROJECT_ID}" \
+    -var="name_prefix=${NAME_PREFIX}" \
+    -var="servicenow_password_secret_id=${NAME_PREFIX}-bridge-servicenow-password" \
+    google_secret_manager_secret.servicenow_password \
+    "projects/${PROJECT_ID}/secrets/${NAME_PREFIX}-bridge-servicenow-password"
+
+terraform -chdir=bridge/infra/terraform import \
+    -var="project_id=${PROJECT_ID}" \
+    -var="name_prefix=${NAME_PREFIX}" \
+    -var="servicenow_webhook_token_secret_id=${NAME_PREFIX}-bridge-servicenow-webhook-token" \
+    google_secret_manager_secret.servicenow_webhook_token \
+    "projects/${PROJECT_ID}/secrets/${NAME_PREFIX}-bridge-servicenow-webhook-token"
+
+terraform -chdir=bridge/infra/terraform import \
+    -var="project_id=${PROJECT_ID}" \
+    -var="name_prefix=${NAME_PREFIX}" \
+    -var="servicenow_username_secret_id=${NAME_PREFIX}-bridge-servicenow-username" \
+    'google_secret_manager_secret.servicenow_username[0]' \
+    "projects/${PROJECT_ID}/secrets/${NAME_PREFIX}-bridge-servicenow-username"
+```
+
+### Scenario B: Greenfield Secret Provisioning & Replication (Optional)
+If provisioning from scratch in an environment where secrets do not yet exist, you can copy values from an existing `incident-sre-agent` deployment using `scripts/copy-secrets.sh` (this script checks for existing versions and will never overwrite active values):
 
 ```bash
 cd gha-deploy-investigator
@@ -37,7 +112,7 @@ cd gha-deploy-investigator
 # Copy existing ServiceNow secrets from incident-sre-agent (isa- prefix) to gdi- prefix:
 ./scripts/copy-secrets.sh --project-id "${PROJECT_ID}" --source-prefix isa --target-prefix "${NAME_PREFIX}"
 
-# Add GitHub credentials to Secret Manager:
+# Add GitHub credentials:
 gcloud secrets versions add "${NAME_PREFIX}-github-webhook-secret" \
     --data-file=<(printf "%s" "your-github-webhook-secret-token") \
     --project="${PROJECT_ID}"
@@ -87,6 +162,7 @@ cd agent/infra/terraform
 
 terraform init
 
+# If secrets were pre-created, ensure you imported them first (Step 1)
 terraform apply \
     -var="project_id=${PROJECT_ID}" \
     -var="region=${REGION}" \
@@ -112,6 +188,7 @@ cd bridge/infra/terraform
 
 terraform init
 
+# If secrets were pre-created, ensure you imported them first (Step 1)
 terraform apply \
     -var="project_id=${PROJECT_ID}" \
     -var="region=${REGION}" \
@@ -121,6 +198,11 @@ terraform apply \
     -var="tasks_invoker_service_account_email=${TASKS_INVOKER_SA}" \
     -var="servicenow_instance_url=https://your-instance.service-now.com" \
     -var="servicenow_username=gdi_integration_user"
+
+# Note: If your project uses gdi-bridge-servicenow-* secret names, pass:
+#   -var="servicenow_password_secret_id=${NAME_PREFIX}-bridge-servicenow-password" \
+#   -var="servicenow_webhook_token_secret_id=${NAME_PREFIX}-bridge-servicenow-webhook-token" \
+#   -var="servicenow_username_secret_id=${NAME_PREFIX}-bridge-servicenow-username"
 
 # Capture Bridge public endpoint URL:
 BRIDGE_URL=$(terraform output -raw bridge_url)
