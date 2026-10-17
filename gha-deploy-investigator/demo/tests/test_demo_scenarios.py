@@ -1,8 +1,6 @@
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,15 +58,14 @@ def test_pristine_demo_app_functionality(demo_client: TestClient) -> None:
     assert get_resp.json()["order_id"] == created_id
 
 
-def test_scenario_1_lint_failure_lifecycle(demo_app_path: Path) -> None:
+def test_scenario_1_lint_failure_lifecycle(isolated_demo_app: Path, scenarios_dir: Path) -> None:
     """Verify Scenario 1 injection, ruff failure, specialist diagnosis, and clean reset."""
-    scenarios_dir = demo_app_path.parent / "scenarios"
-    main_py = demo_app_path / "app" / "main.py"
+    main_py = isolated_demo_app / "app" / "main.py"
 
     try:
-        # 1. Trigger lint fault
+        # 1. Trigger lint fault in isolated copy
         res = subprocess.run(
-            ["bash", str(scenarios_dir / "trigger-lint-failure.sh"), str(demo_app_path)],
+            ["bash", str(scenarios_dir / "trigger-lint-failure.sh"), str(isolated_demo_app)],
             capture_output=True,
             text=True,
             check=True,
@@ -111,9 +108,9 @@ def test_scenario_1_lint_failure_lifecycle(demo_app_path: Path) -> None:
         assert len(diag.annotations) > 0
 
     finally:
-        # 3. Reset scenario
+        # 3. Reset scenario in isolated copy
         subprocess.run(
-            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(demo_app_path)],
+            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(isolated_demo_app)],
             capture_output=True,
             text=True,
             check=True,
@@ -127,15 +124,14 @@ def test_scenario_1_lint_failure_lifecycle(demo_app_path: Path) -> None:
         assert clean_check.returncode == 0
 
 
-def test_scenario_2_test_failure_lifecycle(demo_app_path: Path) -> None:
+def test_scenario_2_test_failure_lifecycle(isolated_demo_app: Path, scenarios_dir: Path) -> None:
     """Verify Scenario 2 injection, pytest failure, specialist diagnosis, and clean reset."""
-    scenarios_dir = demo_app_path.parent / "scenarios"
-    test_main_py = demo_app_path / "tests" / "test_main.py"
+    test_main_py = isolated_demo_app / "tests" / "test_main.py"
 
     try:
-        # 1. Trigger test fault
+        # 1. Trigger test fault in isolated copy
         res = subprocess.run(
-            ["bash", str(scenarios_dir / "trigger-test-failure.sh"), str(demo_app_path)],
+            ["bash", str(scenarios_dir / "trigger-test-failure.sh"), str(isolated_demo_app)],
             capture_output=True,
             text=True,
             check=True,
@@ -147,7 +143,7 @@ def test_scenario_2_test_failure_lifecycle(demo_app_path: Path) -> None:
             [PYTEST_BIN, str(test_main_py)],
             capture_output=True,
             text=True,
-            cwd=str(demo_app_path),
+            cwd=str(isolated_demo_app),
         )
         assert pytest_res.returncode != 0
         assert "FAILED" in pytest_res.stdout or "AssertionError" in pytest_res.stdout
@@ -178,9 +174,9 @@ def test_scenario_2_test_failure_lifecycle(demo_app_path: Path) -> None:
         assert "test_customer_tier_discount_calculation" in diag.probable_cause
 
     finally:
-        # 3. Reset scenario
+        # 3. Reset scenario in isolated copy
         subprocess.run(
-            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(demo_app_path)],
+            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(isolated_demo_app)],
             capture_output=True,
             text=True,
             check=True,
@@ -189,20 +185,19 @@ def test_scenario_2_test_failure_lifecycle(demo_app_path: Path) -> None:
             [PYTEST_BIN, str(test_main_py)],
             capture_output=True,
             text=True,
-            cwd=str(demo_app_path),
+            cwd=str(isolated_demo_app),
         )
         assert clean_pytest.returncode == 0
 
 
-def test_scenario_3_build_failure_lifecycle(demo_app_path: Path) -> None:
+def test_scenario_3_build_failure_lifecycle(isolated_demo_app: Path, scenarios_dir: Path) -> None:
     """Verify Scenario 3 injection, Dockerfile modification, specialist diagnosis, and reset."""
-    scenarios_dir = demo_app_path.parent / "scenarios"
-    dockerfile = demo_app_path / "Dockerfile"
+    dockerfile = isolated_demo_app / "Dockerfile"
 
     try:
-        # 1. Trigger build fault
+        # 1. Trigger build fault in isolated copy
         res = subprocess.run(
-            ["bash", str(scenarios_dir / "trigger-build-failure.sh"), str(demo_app_path)],
+            ["bash", str(scenarios_dir / "trigger-build-failure.sh"), str(isolated_demo_app)],
             capture_output=True,
             text=True,
             check=True,
@@ -242,9 +237,9 @@ def test_scenario_3_build_failure_lifecycle(demo_app_path: Path) -> None:
         assert "COPY failed" in diag.probable_cause or "cache-warmup" in diag.probable_cause
 
     finally:
-        # 3. Reset scenario
+        # 3. Reset scenario in isolated copy
         subprocess.run(
-            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(demo_app_path)],
+            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(isolated_demo_app)],
             capture_output=True,
             text=True,
             check=True,
@@ -252,14 +247,14 @@ def test_scenario_3_build_failure_lifecycle(demo_app_path: Path) -> None:
         assert "cache-warmup.json" not in dockerfile.read_text()
 
 
-def test_scenario_4_deploy_failure_lifecycle(demo_app_path: Path) -> None:
+def test_scenario_4_deploy_failure_lifecycle(
+    isolated_demo_app: Path, scenarios_dir: Path, tmp_path: Path
+) -> None:
     """Verify Scenario 4 injection, deploy.sh execution, specialist diagnosis, and reset."""
-    scenarios_dir = demo_app_path.parent / "scenarios"
-    deploy_sh = demo_app_path / "scripts" / "deploy.sh"
+    deploy_sh = isolated_demo_app / "scripts" / "deploy.sh"
     reset_runtime_state()
 
-    mock_gcloud_dir = Path(tempfile.mkdtemp(prefix="test-gcloud-"))
-    mock_gcloud = mock_gcloud_dir / "mock_gcloud"
+    mock_gcloud = tmp_path / "mock_gcloud"
 
     try:
         # Create mock gcloud tool simulating Cloud Run deployment
@@ -275,9 +270,9 @@ def test_scenario_4_deploy_failure_lifecycle(demo_app_path: Path) -> None:
         )
         mock_gcloud.chmod(0o755)
 
-        # 1. Trigger deploy fault
+        # 1. Trigger deploy fault in isolated copy
         res = subprocess.run(
-            ["bash", str(scenarios_dir / "trigger-deploy-failure.sh"), str(demo_app_path)],
+            ["bash", str(scenarios_dir / "trigger-deploy-failure.sh"), str(isolated_demo_app)],
             capture_output=True,
             text=True,
             check=True,
@@ -347,10 +342,9 @@ def test_scenario_4_deploy_failure_lifecycle(demo_app_path: Path) -> None:
         assert any("--memory 1Gi" in act for act in diag.remediation_actions)
 
     finally:
-        shutil.rmtree(mock_gcloud_dir, ignore_errors=True)
-        # 3. Reset scenario
+        # 3. Reset scenario in isolated copy
         subprocess.run(
-            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(demo_app_path)],
+            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(isolated_demo_app)],
             capture_output=True,
             text=True,
             check=True,
@@ -369,101 +363,94 @@ def test_stage_classification_for_demo_pipeline_jobs() -> None:
     assert classify_stage("Deploy to Cloud Run", "Deploy to Cloud Run") == "deploy"
 
 
-def test_seed_demo_repo_script(demo_app_path: Path) -> None:
+def test_seed_demo_repo_script(demo_app_path: Path, tmp_path: Path) -> None:
     """Verify seed-demo-repo.sh creates a pristine repo without leaked scenarios."""
     seed_script = demo_app_path.parent / "seed-demo-repo.sh"
-    target_dir = Path(tempfile.mkdtemp(prefix="test-gdi-seed-"))
+    target_dir = tmp_path / "seeded-demo-repo"
 
-    try:
-        # Execute seed script
-        res = subprocess.run(
-            ["bash", str(seed_script), str(target_dir)],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert "SUCCESS: Standalone demo repository seeded" in res.stdout
+    # Execute seed script
+    res = subprocess.run(
+        ["bash", str(seed_script), str(target_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "SUCCESS: Standalone demo repository seeded" in res.stdout
 
-        # Verify git repository created
-        git_verify = subprocess.run(
-            ["git", "-C", str(target_dir), "status"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert "On branch main" in git_verify.stdout
+    # Verify git repository created
+    git_verify = subprocess.run(
+        ["git", "-C", str(target_dir), "status"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "On branch main" in git_verify.stdout
 
-        # Verify key pipeline files exist in seeded repository
-        assert (target_dir / ".github" / "workflows" / "pipeline.yml").exists()
-        assert (target_dir / "app" / "main.py").exists()
-        assert (target_dir / "app" / "config.py").exists()
-        assert (target_dir / "tests" / "test_main.py").exists()
-        assert (target_dir / "Dockerfile").exists()
-        assert (target_dir / "scripts" / "deploy.sh").exists()
-        assert (target_dir / ".gitignore").exists()
+    # Verify key pipeline files exist in seeded repository
+    assert (target_dir / ".github" / "workflows" / "pipeline.yml").exists()
+    assert (target_dir / "app" / "main.py").exists()
+    assert (target_dir / "app" / "config.py").exists()
+    assert (target_dir / "tests" / "test_main.py").exists()
+    assert (target_dir / "Dockerfile").exists()
+    assert (target_dir / "scripts" / "deploy.sh").exists()
+    assert (target_dir / ".gitignore").exists()
 
-        # CRITICAL INVARIANT: scenarios and seed script MUST NOT leak into customer repo
-        assert not (target_dir / "scenarios").exists()
-        assert not (target_dir / "seed-demo-repo.sh").exists()
+    # CRITICAL INVARIANT: scenarios and seed script MUST NOT leak into customer repo
+    assert not (target_dir / "scenarios").exists()
+    assert not (target_dir / "seed-demo-repo.sh").exists()
 
-        # Verify no backup or temporary files leak into the seeded repo
-        assert len(list(target_dir.glob("**/*.bak"))) == 0
-        assert len(list(target_dir.glob("**/*.orig"))) == 0
-
-    finally:
-        shutil.rmtree(target_dir, ignore_errors=True)
+    # Verify no backup or temporary files leak into the seeded repo
+    assert len(list(target_dir.glob("**/*.bak"))) == 0
+    assert len(list(target_dir.glob("**/*.orig"))) == 0
 
 
-def test_scenario_commit_and_revert_workflow(demo_app_path: Path) -> None:
+def test_scenario_commit_and_revert_workflow(
+    demo_app_path: Path, scenarios_dir: Path, tmp_path: Path
+) -> None:
     """Verify scenarios run with --commit produce commits and reset reverts them."""
     seed_script = demo_app_path.parent / "seed-demo-repo.sh"
-    scenarios_dir = demo_app_path.parent / "scenarios"
-    target_dir = Path(tempfile.mkdtemp(prefix="test-gdi-commit-"))
+    target_dir = tmp_path / "committed-demo-repo"
 
-    try:
-        # Seed fresh git repository
-        subprocess.run(
-            ["bash", str(seed_script), str(target_dir)],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+    # Seed fresh git repository
+    subprocess.run(
+        ["bash", str(seed_script), str(target_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
 
-        # Trigger Scenario 4 with --commit
-        res = subprocess.run(
-            ["bash", str(scenarios_dir / "trigger-deploy-failure.sh"), str(target_dir), "--commit"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert "Created git commit" in res.stdout
+    # Trigger Scenario 4 with --commit
+    res = subprocess.run(
+        ["bash", str(scenarios_dir / "trigger-deploy-failure.sh"), str(target_dir), "--commit"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "Created git commit" in res.stdout
 
-        # Verify git commit log shows realistic message
-        log_res = subprocess.run(
-            ["git", "-C", str(target_dir), "log", "-1", "--pretty=%s"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert "feat(cache): pre-warm order history cache on startup" in log_res.stdout
+    # Verify git commit log shows realistic message
+    log_res = subprocess.run(
+        ["git", "-C", str(target_dir), "log", "-1", "--pretty=%s"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "feat(cache): pre-warm order history cache on startup" in log_res.stdout
 
-        # Reset with --commit flag
-        reset_res = subprocess.run(
-            ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(target_dir), "--commit"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert "SUCCESS: Demo app restored to clean pristine state" in reset_res.stdout
+    # Reset with --commit flag
+    reset_res = subprocess.run(
+        ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(target_dir), "--commit"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "SUCCESS: Demo app restored to clean pristine state" in reset_res.stdout
 
-        # Check git status is clean
-        status_res = subprocess.run(
-            ["git", "-C", str(target_dir), "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert status_res.stdout.strip() == ""
-
-    finally:
-        shutil.rmtree(target_dir, ignore_errors=True)
+    # Check git status is clean
+    status_res = subprocess.run(
+        ["git", "-C", str(target_dir), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status_res.stdout.strip() == ""

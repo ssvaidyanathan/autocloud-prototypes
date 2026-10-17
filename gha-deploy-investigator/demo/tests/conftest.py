@@ -1,4 +1,5 @@
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 from typing import Generator
@@ -8,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 DEMO_APP_PATH = Path(__file__).resolve().parent.parent / "sample-pipeline-app"
+SCENARIOS_DIR = Path(__file__).resolve().parent.parent / "scenarios"
 
 
 def load_demo_app() -> FastAPI:
@@ -44,5 +46,23 @@ def demo_client() -> Generator[TestClient, None, None]:
 
 @pytest.fixture
 def demo_app_path() -> Path:
-    """Path to sample-pipeline-app directory."""
+    """Path to sample-pipeline-app directory (read-only reference)."""
     return DEMO_APP_PATH
+
+
+@pytest.fixture
+def scenarios_dir() -> Path:
+    """Path to demo/scenarios directory."""
+    return SCENARIOS_DIR
+
+
+@pytest.fixture
+def isolated_demo_app(tmp_path: Path) -> Path:
+    """Creates isolated temporary copy of sample-pipeline-app to prevent mutating files."""
+    sandbox = tmp_path / "sample-pipeline-app"
+    shutil.copytree(
+        DEMO_APP_PATH,
+        sandbox,
+        ignore=shutil.ignore_patterns(".pytest_cache", ".ruff_cache", "__pycache__", "*.pyc"),
+    )
+    return sandbox

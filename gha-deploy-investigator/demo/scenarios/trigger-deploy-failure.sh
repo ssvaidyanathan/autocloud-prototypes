@@ -45,4 +45,4 @@ if [[ "${DO_COMMIT}" == "true" ]]; then
     fi
 fi
 
-echo "Run 'CI_SIMULATION=true ./scripts/deploy.sh' in ${APP_DIR} to verify deploy failure."
+echo "Run './scripts/deploy.sh' in ${APP_DIR} to verify deploy failure."

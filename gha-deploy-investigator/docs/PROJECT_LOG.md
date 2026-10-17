@@ -375,8 +375,40 @@ Per direct requirement from human user via `gha-em`:
 - Contracts check: `SUCCESS: Contracts are byte-identical.`
 - AST static guard: `Zero post-LLM root cause template overrides found.`
 - Pytest suite: `50 passed in 3.25s` (offline).
-- Demo microservice suite: `5 passed in 0.05s`.
-- Linter: `All checks passed!`
+
+
+## 2026-10-17 - Phase 3 Round 1 Review Findings Resolution
+- **Author**: `gha-dev-1`
+- **Role**: Developer
+- **Supervisor**: `gha-em`
+- **Reviewer**: `gha-rev-5`
+- **Branch**: `feat/gha-deploy-investigator`
+- **Status**: Completed
+
+### 1. Findings Resolved
+Resolved all 5 review findings from `phase3-round1-review.md`:
+1. **Finding 1 (Blocking) - Reset Leading Blank Lines in `app/main.py`**:
+   - Stripped the 14 accumulated leading blank lines from `demo/sample-pipeline-app/app/main.py`.
+   - In `demo/scenarios/reset-scenarios.sh`, updated the python cleanup block to write `f.write(''.join(clean).lstrip())` to prevent future blank line accumulation.
+2. **Finding 2 (Blocking) - Integration Tests Mutating Tracked Files**:
+   - Added `isolated_demo_app` fixture in `demo/tests/conftest.py` using `tmp_path` to copy `sample-pipeline-app` to an isolated sandbox.
+   - Added `scenarios_dir` fixture in `demo/tests/conftest.py`.
+   - Updated all 4 lifecycle tests in `demo/tests/test_demo_scenarios.py` to run against `isolated_demo_app` instead of tracked files.
+   - Verified running `pytest` leaves the active git work tree completely clean (`git status` shows 0 modified files).
+3. **Finding 3 (Non-Blocking) - Git Worktree Robustness in `reset-scenarios.sh`**:
+   - Replaced `[[ -d "${APP_DIR}/.git" ]]` with `git -C "${APP_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1` to support worktrees where `.git` is a file.
+4. **Finding 4 (Non-Blocking) - Stale Simulation Echo in `trigger-deploy-failure.sh`**:
+   - Updated echo message in `trigger-deploy-failure.sh` from `CI_SIMULATION=true ./scripts/deploy.sh` to `./scripts/deploy.sh`.
+5. **Finding 5 (Non-Blocking) - Simplified `git revert` Command**:
+   - Simplified git revert in `reset-scenarios.sh` to `git -C "${APP_DIR}" revert HEAD --no-edit 2>/dev/null || true`.
+
+### 2. Verification
+- Contracts check: `scripts/check-contracts.sh` -> byte-identical.
+- AST static guard: `check-no-rootcause-overrides.py` -> 0 violations.
+- Ruff linter: `ruff check gha-deploy-investigator` -> All checks passed.
+- Full pytest suite: `50 passed in 3.24s` (offline).
+- Git work tree clean invariant: `git status` clean after test execution.
+
 
 
 

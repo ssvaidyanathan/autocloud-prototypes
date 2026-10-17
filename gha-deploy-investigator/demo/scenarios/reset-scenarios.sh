@@ -22,13 +22,13 @@ echo "Resetting Demo Scenarios to Pristine Baseline State"
 echo "Target App Directory: ${APP_DIR}"
 echo "=================================================="
 
-# 1. If inside a standalone git repository, handle git revert / checkout
-if [[ -d "${APP_DIR}/.git" ]]; then
+# 1. If inside a git repository / worktree, handle git revert / checkout
+if git -C "${APP_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     # If the user committed scenarios, check if HEAD is a scenario commit
     if [[ "${DO_COMMIT}" == "true" ]]; then
         commit_msg="$(git -C "${APP_DIR}" log -1 --pretty=%B 2>/dev/null || true)"
         if [[ "${commit_msg}" =~ (refactor\(orders\)|feat\(pricing\)|chore\(deps\)|feat\(cache\)) ]]; then
-            git -C "${APP_DIR}" revert HEAD --no-edit -m 1 2>/dev/null || git -C "${APP_DIR}" revert HEAD --no-edit 2>/dev/null || true
+            git -C "${APP_DIR}" revert HEAD --no-edit 2>/dev/null || true
             echo "Reverted scenario commit in ${APP_DIR}."
         fi
     fi
@@ -97,7 +97,7 @@ clean = [
     and 'import non_existent_module' not in l
 ]
 with open(p, 'w') as f:
-    f.writelines(clean)
+    f.write(''.join(clean).lstrip())
 " "${MAIN_PY}" 2>/dev/null || true
 fi
 
