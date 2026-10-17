@@ -205,6 +205,9 @@ class Dispatcher(BaseAgent):
                 log_text=log_text,
                 client=self._github_client,
                 config=self.config,
+                repo=repo,
+                head_sha=incident.github_head_sha,
+                job_id=job_id,
             )
 
             # 5. Synthesize final Report

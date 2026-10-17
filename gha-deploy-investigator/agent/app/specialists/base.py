@@ -1,3 +1,5 @@
+import asyncio
+import concurrent.futures
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -13,6 +15,17 @@ from ..contracts.report import CheckRunAnnotation
 from ..tools.registry import default_registry
 
 logger = logging.getLogger(__name__)
+
+
+def run_sync(coro: Any) -> Any:
+    """Execute an async coroutine synchronously, supporting existing event loops."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 @dataclass
@@ -174,7 +187,8 @@ class SkillTracker:
                 if cleaned and cleaned not in self.skills_used:
                     self.skills_used.append(cleaned)
         elif tool_name != "set_model_response":
-            q_str = f"{tool_name}({', '.join(f'{k}={v!r}' for k, v in sorted(args.items()))})"
+            clean_args = {k: v for k, v in args.items() if k not in ("client", "config")}
+            q_str = f"{tool_name}({', '.join(f'{k}={v!r}' for k, v in sorted(clean_args.items()))})"
             if q_str not in self.queries_run:
                 self.queries_run.append(q_str)
 
@@ -244,8 +258,181 @@ class BaseSpecialist(ABC):
         self.skill_tracker = skill_tracker or SkillTracker()
         self.llm_agent = llm_agent
 
+        if self.llm_agent is not None:
+            self.llm_agent.after_tool_callback = self.skill_tracker.after_tool_callback
+            self.llm_agent.before_tool_callback = self.skill_tracker.before_tool_callback
+            self.llm_agent.on_tool_error_callback = self.skill_tracker.on_tool_error_callback
+            self.skill_tracker.agent = self.llm_agent
+
         # Enforce strictly read-only tools
         default_registry.assert_all_readonly()
+
+    def tracked_tool_call(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        fn: Any,
+    ) -> Any:
+        """Execute a tool function with authentic before/after tool callback tracking."""
+        self.skill_tracker.before_tool_callback(tool_name, tool_args=tool_args)
+        try:
+            result = fn()
+            self.skill_tracker.after_tool_callback(
+                tool_name, tool_args=tool_args, tool_output=result
+            )
+            return result
+        except Exception as exc:
+            self.skill_tracker.on_tool_error_callback(tool_name, args=tool_args, error=exc)
+            self.skill_tracker.after_tool_callback(
+                tool_name, tool_args=tool_args, tool_output={"error": str(exc)}
+            )
+            raise
+
+    def _is_llm_available(self) -> bool:
+        """Check if LLM execution is possible via API credentials or stubbed test model."""
+        if self.llm_agent is not None:
+            model_obj = getattr(self.llm_agent, "model", None)
+            if model_obj and not isinstance(model_obj, str):
+                return True
+            if model_obj and isinstance(model_obj, str) and model_obj not in ("", "default"):
+                return self._has_credentials()
+
+        if self.model and isinstance(self.model, str) and self.model not in ("", "default"):
+            return self._has_credentials()
+
+        return False
+
+    @staticmethod
+    def _has_credentials() -> bool:
+        import os
+
+        return bool(
+            os.getenv("GOOGLE_API_KEY", "").strip()
+            or os.getenv("GEMINI_API_KEY", "").strip()
+            or os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+            or (
+                (
+                    os.getenv("GCP_PROJECT", "").strip()
+                    or os.getenv("PROJECT_ID", "").strip()
+                    or os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+                )
+                and (
+                    os.getenv("GOOGLE_GENAI_USE_ENTERPRISE", "").lower() in ("true", "1")
+                    or os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("true", "1")
+                    or os.getenv("APP_ENV") == "production"
+                )
+            )
+        )
+
+    @staticmethod
+    def _parse_llm_findings(text: str) -> Findings:
+        """Parse structured Findings from LLM text response."""
+        import re
+
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        try:
+            data = json.loads(cleaned)
+            if isinstance(data, dict):
+                return Findings.model_validate(data)
+        except Exception:
+            pass
+
+        return Findings(
+            summary=cleaned,
+            confidence=0.75,
+            evidence=[],
+            anomalies=[],
+            queries_run=[],
+        )
+
+    async def _execute_adk_runner(
+        self,
+        agent: Any,
+        prompt_text: str,
+        user_id: str = "gdi_agent",
+    ) -> Optional[Findings]:
+        """Execute multi-turn agentic investigation using Google ADK Runner."""
+        from google.adk.agents import RunConfig
+        from google.adk.runners import Runner
+        from google.adk.sessions import InMemorySessionService
+        from google.genai import types
+
+        agent.before_tool_callback = self.skill_tracker.before_tool_callback
+        agent.after_tool_callback = self.skill_tracker.after_tool_callback
+        agent.on_tool_error_callback = self.skill_tracker.on_tool_error_callback
+        self.skill_tracker.agent = agent
+
+        session_service = InMemorySessionService()
+        session = await session_service.create_session(
+            app_name=self.name,
+            user_id=user_id,
+        )
+        runner = Runner(
+            agent=agent,
+            app_name=self.name,
+            session_service=session_service,
+            auto_create_session=True,
+        )
+        max_llm = (
+            getattr(self.config, "specialist_max_llm_calls", None)
+            or getattr(self.config, "specialist_max_tool_calls", None)
+            or 5
+        )
+        run_config = RunConfig(max_llm_calls=max_llm)
+        user_content = types.Content(
+            role="user",
+            parts=[types.Part(text=prompt_text)],
+        )
+
+        final_text: Optional[str] = None
+        final_output: Optional[Any] = None
+
+        try:
+            async for event in runner.run_async(
+                user_id=user_id,
+                session_id=session.id,
+                new_message=user_content,
+                run_config=run_config,
+            ):
+                if event.output is not None:
+                    final_output = event.output
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        t = getattr(part, "text", None)
+                        if t:
+                            final_text = t
+        except Exception as exc:
+            logger.info("%s runner.run_async ended with exception: %s", self.name, exc)
+
+        if isinstance(final_output, Findings):
+            return final_output
+        if isinstance(final_output, dict):
+            return Findings.model_validate(final_output)
+
+        if final_text:
+            try:
+                return self._parse_llm_findings(final_text)
+            except Exception:
+                pass
+
+        if self.skill_tracker.skill_first and (
+            len(self.skill_tracker.queries_run) >= 1 or self.skill_tracker.tool_call_count >= 2
+        ):
+            return Findings(
+                summary=(
+                    f"{self.name} completed diagnostic investigation across "
+                    f"{len(self.skill_tracker.queries_run)} queries."
+                ),
+                queries_run=list(self.skill_tracker.queries_run),
+                confidence=0.75,
+                skills_used=list(self.skill_tracker.skills_used),
+                skill_first=True,
+            )
+
+        return None
 
     @property
     def tools(self) -> List[Any]:

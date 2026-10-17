@@ -55,6 +55,9 @@ class TestSpecialists:
         assert res.annotations[0].path == "app/main.py"
         assert res.annotations[0].start_line == 42
         assert any("ruff check --fix" in act for act in res.remediation_actions)
+        assert res.skill_first is True
+        assert "lint-troubleshooting" in res.skills_used
+        assert any("get_commit_diff" in q for q in res.queries_run)
 
     def test_pipeline_logs_specialist_structured_linter_parsing_mixed_errors(
         self, monkeypatch: pytest.MonkeyPatch
@@ -97,6 +100,9 @@ class TestSpecialists:
         assert "potentially in other files" not in res.probable_cause
         assert len(res.annotations) == 9
         assert any(e.kind == "linter_breakdown" for e in res.evidence_items)
+        assert res.skill_first is True
+        assert "lint-troubleshooting" in res.skills_used
+        assert any("get_commit_diff" in q for q in res.queries_run)
 
     def test_pipeline_logs_specialist_pytest_failure(self) -> None:
         specialist = PipelineLogsSpecialist()
@@ -119,6 +125,9 @@ class TestSpecialists:
         assert "AssertionError" in res.probable_cause or "401 == 200" in res.probable_cause
         assert len(res.evidence_items) >= 1
         assert any("pytest" in act for act in res.remediation_actions)
+        assert res.skill_first is True
+        assert "test-failure-triage" in res.skills_used
+        assert any("get_commit_diff" in q for q in res.queries_run)
 
     def test_pipeline_logs_specialist_build_failure(self) -> None:
         specialist = PipelineLogsSpecialist()
@@ -139,6 +148,9 @@ class TestSpecialists:
         assert any(
             ".dockerignore" in act or "Dockerfile" in act for act in res.remediation_actions
         )
+        assert res.skill_first is True
+        assert "container-build-troubleshooting" in res.skills_used
+        assert any("get_commit_diff" in q for q in res.queries_run)
 
     def test_runtime_health_specialist_oom_exit_137(self) -> None:
         reset_runtime_state()
@@ -187,6 +199,10 @@ class TestSpecialists:
         )
         assert any("--memory 1Gi" in act for act in res.remediation_actions)
         assert len(res.evidence_items) >= 2
+        assert res.skill_first is True
+        assert "cloudrun-deploy-troubleshooting" in res.skills_used
+        assert any("describe_service" in q for q in res.queries_run)
+        assert any("describe_cloud_run_revision" in q for q in res.queries_run)
 
     def test_runtime_health_specialist_cloud_logging_correlation(self) -> None:
         reset_runtime_state()
@@ -220,6 +236,10 @@ class TestSpecialists:
         assert res.stage == "deploy"
         assert "ModuleNotFoundError" in res.probable_cause
         assert any(e.kind == "cloud_logging" for e in res.evidence_items)
+        assert res.skill_first is True
+        assert "cloudrun-deploy-troubleshooting" in res.skills_used
+        assert any("describe_service" in q for q in res.queries_run)
+        assert any("query_cloud_logging" in q for q in res.queries_run)
 
     def test_iac_config_specialist_terraform_error(self) -> None:
         specialist = IaCConfigSpecialist()
@@ -237,6 +257,9 @@ class TestSpecialists:
         assert res.stage == "iac_config"
         assert "main.tf:45" in res.probable_cause or "main.tf" in res.probable_cause
         assert any("terraform validate" in act for act in res.remediation_actions)
+        assert res.skill_first is True
+        assert "cloudrun-deploy-troubleshooting" in res.skills_used
+        assert any("get_commit_diff" in q for q in res.queries_run)
 
     def test_runtime_health_specialist_iam_actas_error(self) -> None:
         reset_runtime_state()
@@ -257,6 +280,8 @@ class TestSpecialists:
         assert "-00001-deploy" not in res.probable_cause
         assert "sample-app" in res.summary
         assert "cloudrun-deploy-troubleshooting" in res.skills_used
+        assert res.skill_first is True
+        assert any("describe_service" in q for q in res.queries_run)
         # Verbatim error line excerpt in evidence
         assert any("PERMISSION_DENIED" in e.excerpt for e in res.evidence_items)
         # IAM actAs remediation recommended
@@ -280,6 +305,9 @@ class TestSpecialists:
         assert res.stage == "deploy"
         assert "-00001-deploy" not in res.probable_cause
         assert "-00001-deploy" not in res.summary
+        assert res.skill_first is True
+        assert "cloudrun-deploy-troubleshooting" in res.skills_used
+        assert any("describe_service" in q for q in res.queries_run)
         # Must not produce remediation command asking to describe non-existent revision
         assert not any("revisions describe" in a for a in res.remediation_actions)
         assert any("services describe" in a for a in res.remediation_actions)

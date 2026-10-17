@@ -1,3 +1,4 @@
+import functools
 import logging
 import re
 from datetime import datetime, timezone
@@ -83,9 +84,122 @@ class PipelineLogsSpecialist(BaseSpecialist):
             tools=self.adk_tools,
             output_schema=Findings,
         )
+        if self.llm_agent is not None:
+            self.llm_agent.before_tool_callback = self.skill_tracker.before_tool_callback
+            self.llm_agent.after_tool_callback = self.skill_tracker.after_tool_callback
+            self.llm_agent.on_tool_error_callback = self.skill_tracker.on_tool_error_callback
+            self.skill_tracker.agent = self.llm_agent
 
     def get_tools(self) -> list[Any]:
         return list(self.adk_tools)
+
+    def _build_agent(
+        self,
+        skill_name: str,
+        client: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
+    ) -> LlmAgent:
+        from ..skills_loader import get_skill_toolset_for_target
+
+        skill_toolset = get_skill_toolset_for_target("pipeline_logs")
+
+        @functools.wraps(fetch_job_logs)
+        def _bound_fetch_job_logs(repo: str, job_id: int) -> str:
+            return fetch_job_logs(repo=repo, job_id=job_id, client=client, config=config)
+
+        @functools.wraps(get_commit_diff)
+        def _bound_get_commit_diff(repo: str, head_sha: str) -> dict[str, Any]:
+            return get_commit_diff(repo=repo, head_sha=head_sha, client=client, config=config)
+
+        bound_tools = [
+            skill_toolset,
+            FunctionTool(_bound_fetch_job_logs),
+            FunctionTool(_bound_get_commit_diff),
+        ]
+        instruction = (
+            "You are a CI/CD pipeline logs diagnostic specialist.\n\n"
+            "CRITICAL WORKFLOW REQUIREMENT:\n"
+            f"1. On Turn 1, invoke 'load_skill' exactly once with skill_name='{skill_name}'. "
+            "Do NOT invoke list_skills or load other skills.\n"
+            "2. On Turn 2, invoke at least one read-only data tool ('get_commit_diff' or "
+            "'fetch_job_logs') to inspect repository changes or execution logs.\n"
+            "3. On Turn 3, conclude immediately by invoking 'set_model_response' with your "
+            "structured Findings report. Incorporate the data tool output directly into your "
+            "findings."
+        )
+        model_to_use = (
+            getattr(self.llm_agent, "model", None)
+            if self.llm_agent
+            else (self.model or "default")
+        )
+        agent = LlmAgent(
+            name="pipeline_logs_specialist",
+            model=model_to_use,
+            instruction=instruction,
+            tools=bound_tools,
+            output_schema=Findings,
+            before_tool_callback=self.skill_tracker.before_tool_callback,
+            after_tool_callback=self.skill_tracker.after_tool_callback,
+            on_tool_error_callback=self.skill_tracker.on_tool_error_callback,
+        )
+        self.skill_tracker.agent = agent
+        return agent
+
+    def _findings_to_diagnostic_result(
+        self,
+        findings: Findings,
+        incident: Incident,
+        failing_job: dict[str, Any],
+        failing_step: dict[str, Any],
+        log_text: str,
+        sub_stage: str,
+    ) -> DiagnosticResult:
+        annotations: list[CheckRunAnnotation] = []
+        if sub_stage == "lint":
+            matches = list(LINT_PATTERN.finditer(log_text))
+            for match in matches[:50]:
+                raw_path = match.group("file").strip()
+                f_path = re.sub(r"^\.?/", "", raw_path)
+                line_str = match.group("line")
+                line = int(line_str) if line_str else 1
+                code = (match.group("code") or "").strip()
+                msg = match.group("msg").strip()
+                msg = re.sub(r"^\[\*\]\s*", "", msg).strip().replace("`", "")
+                annotations.append(
+                    CheckRunAnnotation(
+                        path=f_path,
+                        start_line=line,
+                        end_line=line,
+                        annotation_level="failure",
+                        title=f"Linter Violation: {code}" if code else "Linter Violation",
+                        message=msg,
+                    )
+                )
+
+        evidence_items = list(findings.evidence)
+        if not evidence_items:
+            evidence_items.append(
+                EvidenceItem(
+                    kind="github_runner_log",
+                    excerpt=log_text[:1000],
+                    timestamp=datetime.now(timezone.utc),
+                    console_url=incident.external_url,
+                )
+            )
+
+        diag = DiagnosticResult(
+            stage=sub_stage,
+            specialist_name=self.name,
+            summary=findings.summary,
+            probable_cause=findings.summary,
+            confidence=findings.confidence,
+            evidence_items=evidence_items,
+            annotations=annotations,
+            skills_used=list(self.skill_tracker.skills_used),
+            queries_run=list(self.skill_tracker.queries_run),
+            skill_first=self.skill_tracker.skill_first,
+        )
+        return self.skill_tracker.populate_diagnostic_result(diag)
 
     def diagnose(
         self,
@@ -95,6 +209,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
         log_text: str,
         client: Optional[Any] = None,
         config: Optional[AgentConfig] = None,
+        **kwargs: Any,
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Unknown Step")
         job_name = failing_job.get("name", "Unknown Job")
@@ -110,25 +225,102 @@ class PipelineLogsSpecialist(BaseSpecialist):
             sub_stage = "build"
 
         skill = STAGE_TO_SKILL.get(sub_stage, "container-build-troubleshooting")
+        repo = kwargs.get("repo") or incident.github_repo or incident.service_hint or ""
+        head_sha = kwargs.get("head_sha") or incident.github_head_sha or ""
+        job_id = kwargs.get("job_id") or int(failing_job.get("id", 0) or 0)
+
+        # Attempt Pass 1: ADK Runner execution if LLM is available
+        if self._is_llm_available():
+            try:
+                from .base import run_sync
+
+                agent = self._build_agent(skill, client=client, config=config)
+                prompt_lines = [
+                    f"Investigate pipeline failure for incident {incident.id}: {incident.title}",
+                    f"Job: {job_name} (ID: {job_id}), Step: {step_name}",
+                    f"Repository: {repo}, Head SHA: {head_sha}",
+                    f"Failing Step Sub-Stage: {sub_stage}",
+                    f"Error log excerpt:\n{log_text[:2000]}",
+                    "",
+                    "CRITICAL INSTRUCTIONS:",
+                    f"1. Turn 1: Invoke load_skill exactly once with skill_name='{skill}'.",
+                    (
+                        "2. Turn 2: Invoke get_commit_diff (or fetch_job_logs) to inspect "
+                        "diff or logs."
+                    ),
+                    "3. Turn 3: Conclude immediately by invoking set_model_response with Findings.",
+                ]
+                findings = run_sync(self._execute_adk_runner(agent, "\n".join(prompt_lines)))
+                if findings and (self.skill_tracker.queries_run or findings.queries_run):
+                    return self._findings_to_diagnostic_result(
+                        findings, incident, failing_job, failing_step, log_text, sub_stage
+                    )
+            except Exception as exc:
+                logger.info("PipelineLogsSpecialist ADK runner pass skipped/failed: %s", exc)
+
+        # Pass 2 Fallback: Deterministic tool execution through authentic tracking callbacks
         self.skill_tracker.after_tool_callback("load_skill", {"skill_name": skill})
+
+        diff_data: Optional[dict[str, Any]] = None
+        if repo and head_sha:
+            try:
+                diff_data = self.tracked_tool_call(
+                    "get_commit_diff",
+                    {"repo": repo, "head_sha": head_sha},
+                    lambda: get_commit_diff(
+                        repo=repo, head_sha=head_sha, client=client, config=config
+                    ),
+                )
+            except Exception as exc:
+                logger.debug("Could not fetch commit diff: %s", exc)
+        elif repo and job_id:
+            try:
+                self.tracked_tool_call(
+                    "fetch_job_logs",
+                    {"repo": repo, "job_id": job_id},
+                    lambda: fetch_job_logs(
+                        repo=repo, job_id=job_id, client=client, config=config
+                    ),
+                )
+            except Exception as exc:
+                logger.debug("Could not fetch job logs: %s", exc)
 
         if sub_stage == "lint":
             res = self._diagnose_lint(
-                incident, failing_job, failing_step, log_text, client, config
+                incident,
+                failing_job,
+                failing_step,
+                log_text,
+                client,
+                config,
+                diff_data=diff_data,
             )
         elif sub_stage == "test":
             res = self._diagnose_test(
-                incident, failing_job, failing_step, log_text, client, config
+                incident,
+                failing_job,
+                failing_step,
+                log_text,
+                client,
+                config,
+                diff_data=diff_data,
             )
         elif sub_stage == "build":
             res = self._diagnose_build(
-                incident, failing_job, failing_step, log_text, client, config
+                incident,
+                failing_job,
+                failing_step,
+                log_text,
+                client,
+                config,
+                diff_data=diff_data,
             )
         else:
-            res = self._diagnose_generic(incident, failing_job, failing_step, log_text)
+            res = self._diagnose_generic(
+                incident, failing_job, failing_step, log_text, diff_data=diff_data
+            )
 
         return self.skill_tracker.populate_diagnostic_result(res)
-
 
     def _diagnose_lint(
         self,
@@ -138,6 +330,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
         log_text: str,
         client: Optional[Any] = None,
         config: Optional[AgentConfig] = None,
+        diff_data: Optional[dict[str, Any]] = None,
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Lint Step")
         matches = list(LINT_PATTERN.finditer(log_text))
@@ -208,22 +401,39 @@ class PipelineLogsSpecialist(BaseSpecialist):
         # Correlate with commit diff if available
         diff_info = ""
         changed_files: list[str] = []
-        if incident.github_repo and incident.github_head_sha:
+        if diff_data is None and incident.github_repo and incident.github_head_sha:
             try:
-                diff_data = get_commit_diff(
-                    repo=incident.github_repo,
-                    head_sha=incident.github_head_sha,
-                    client=client,
-                    config=config,
+                diff_data = self.tracked_tool_call(
+                    "get_commit_diff",
+                    {"repo": incident.github_repo, "head_sha": incident.github_head_sha},
+                    lambda: get_commit_diff(
+                        repo=incident.github_repo,
+                        head_sha=incident.github_head_sha,
+                        client=client,
+                        config=config,
+                    ),
                 )
-                if diff_data and "files" in diff_data:
-                    changed_files = [
-                        re.sub(r"^\.?/", "", f.get("filename", ""))
-                        for f in diff_data["files"]
-                        if f.get("filename")
-                    ]
             except Exception as exc:
                 logger.debug("Could not fetch commit diff: %s", exc)
+
+        if diff_data and "files" in diff_data:
+            changed_files = [
+                re.sub(r"^\.?/", "", f.get("filename", ""))
+                for f in diff_data["files"]
+                if f.get("filename")
+            ]
+            if changed_files:
+                evidence_items.append(
+                    EvidenceItem(
+                        kind="git_diff",
+                        excerpt=(
+                            f"Commit diff touched {len(changed_files)} file(s): "
+                            f"{', '.join(changed_files)}"
+                        ),
+                        timestamp=now,
+                        console_url=incident.external_url,
+                    )
+                )
 
         violating_files = list(files_map.keys())
         confirmed_files = [f for f in violating_files if f in changed_files]
@@ -330,6 +540,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
         log_text: str,
         client: Optional[Any] = None,
         config: Optional[AgentConfig] = None,
+        diff_data: Optional[dict[str, Any]] = None,
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Test Step")
         test_matches = list(PYTEST_FAILURE_PATTERN.finditer(log_text))
@@ -355,6 +566,25 @@ class PipelineLogsSpecialist(BaseSpecialist):
                 console_url=incident.external_url,
             )
         )
+
+        if diff_data and "files" in diff_data:
+            changed_files = [
+                re.sub(r"^\.?/", "", f.get("filename", ""))
+                for f in diff_data["files"]
+                if f.get("filename")
+            ]
+            if changed_files:
+                evidence_items.append(
+                    EvidenceItem(
+                        kind="git_diff",
+                        excerpt=(
+                            f"Commit diff touched {len(changed_files)} file(s): "
+                            f"{', '.join(changed_files)}"
+                        ),
+                        timestamp=now,
+                        console_url=incident.external_url,
+                    )
+                )
 
         summary = (
             f"Unit/Integration test failure in step '{step_name}': "
@@ -387,6 +617,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
         log_text: str,
         client: Optional[Any] = None,
         config: Optional[AgentConfig] = None,
+        diff_data: Optional[dict[str, Any]] = None,
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Build Step")
         now = datetime.now(timezone.utc)
@@ -438,6 +669,25 @@ class PipelineLogsSpecialist(BaseSpecialist):
             )
         )
 
+        if diff_data and "files" in diff_data:
+            changed_files = [
+                re.sub(r"^\.?/", "", f.get("filename", ""))
+                for f in diff_data["files"]
+                if f.get("filename")
+            ]
+            if changed_files:
+                evidence_items.append(
+                    EvidenceItem(
+                        kind="git_diff",
+                        excerpt=(
+                            f"Commit diff touched {len(changed_files)} file(s): "
+                            f"{', '.join(changed_files)}"
+                        ),
+                        timestamp=now,
+                        console_url=incident.external_url,
+                    )
+                )
+
         return DiagnosticResult(
             stage="build",
             specialist_name=self.name,
@@ -455,6 +705,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
         failing_job: dict[str, Any],
         failing_step: dict[str, Any],
         log_text: str,
+        diff_data: Optional[dict[str, Any]] = None,
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Unknown Step")
         lines = [line.strip() for line in log_text.splitlines() if line.strip()]
@@ -478,6 +729,25 @@ class PipelineLogsSpecialist(BaseSpecialist):
                 console_url=incident.external_url,
             )
         ]
+
+        if diff_data and "files" in diff_data:
+            changed_files = [
+                re.sub(r"^\.?/", "", f.get("filename", ""))
+                for f in diff_data["files"]
+                if f.get("filename")
+            ]
+            if changed_files:
+                evidence_items.append(
+                    EvidenceItem(
+                        kind="git_diff",
+                        excerpt=(
+                            f"Commit diff touched {len(changed_files)} file(s): "
+                            f"{', '.join(changed_files)}"
+                        ),
+                        timestamp=now,
+                        console_url=incident.external_url,
+                    )
+                )
 
         return DiagnosticResult(
             stage="pipeline_logs",
