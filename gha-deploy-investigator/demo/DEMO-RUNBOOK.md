@@ -149,7 +149,7 @@ git push origin main
 
 #### Step 5: What a Good Diagnosis Looks Like
 - **Root Cause**: Identifies that `test_customer_tier_discount_calculation` in `tests/test_main.py` failed assertion comparing expected `$100.00` against `$75.50`.
-- **QF-1 Diff-Grounded Rule**: Because the commit diff touches **only test files**, the causal remediation strictly targets correcting the test logic or assertion, **never** recommending changes to application business logic.
+- **Diff-Grounded Remediation Rule**: Because the commit diff touches **only test files**, the causal remediation strictly targets correcting the test logic or assertion, **never** recommending changes to application business logic.
 - **Warning Segregation**: Non-fatal runtime warnings (e.g., deprecation warnings from test frameworks) appear strictly under **Unrelated Observations**, never in causal remediation.
 
 #### Step 6: Reset
