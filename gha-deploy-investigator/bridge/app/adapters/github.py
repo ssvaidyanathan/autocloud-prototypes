@@ -106,6 +106,7 @@ class GitHubAdapter(BaseAdapter):
         pr_number = prs[0].get("number") if prs and isinstance(prs[0], dict) else None
         actor = run.get("actor", {}).get("login", "github-actions")
         opened_at = parse_utc_datetime(run.get("updated_at") or run.get("run_started_at"))
+        run_attempt = run.get("run_attempt", 1)
 
         severity: Literal["P1", "P2", "P3", "P4"] = (
             "P2" if branch in ("main", "master", "release") else "P3"
@@ -133,6 +134,7 @@ class GitHubAdapter(BaseAdapter):
             github_branch=branch,
             github_pr_number=pr_number,
             github_failing_stage=None,
+            github_run_attempt=run_attempt,
         )
 
     def post_report_link(self, incident: Incident, report: Report, ref: IncidentRef) -> None:

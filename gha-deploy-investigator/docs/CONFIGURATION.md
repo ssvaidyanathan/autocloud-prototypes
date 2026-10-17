@@ -29,6 +29,7 @@ This document provides a comprehensive configuration reference for `gha-deploy-i
 | `SERVICENOW_PASSWORD` | String (Secret) | `None` | ServiceNow integration user password (mounted from Secret Manager secret `gdi-servicenow-password`) |
 | `SERVICENOW_WEBHOOK_TOKEN` | String (Secret) | `None` | Optional token for ServiceNow inbound webhooks (mounted from Secret Manager secret `gdi-servicenow-webhook-token`) |
 | `SERVICENOW_IN_PROGRESS_STATE` | String | `"2"` | State integer value assigned to newly created incidents |
+| `SERVICENOW_CORRELATION_DISPLAY` | String | `"gha-deploy-investigator"` | Identifier string set on created ServiceNow incidents (`correlation_display`) |
 
 ### 1.2 GDI Agent (`agent`)
 
@@ -124,6 +125,8 @@ The integration user specified in `SERVICENOW_USERNAME` must possess the followi
 - **Category**: `Software`
 - **Subcategory**: `CI/CD Pipeline`
 - **State**: `2` (In Progress)
+- **Correlation Display**: `gha-deploy-investigator` (identifies GDI-created tickets for downstream automation)
+- **Correlation ID**: `gdi:<owner>/<repo>:<run_id>:<run_attempt>` (ensures create-before-query idempotency)
 - **Work Notes**: Formatted markdown analysis with probable root cause, evidence table, and suggested remediation commands.
 - **Attachment**: `investigation-report.html` containing interactive styling, failure timeline, and specialist telemetry breakdown.
 

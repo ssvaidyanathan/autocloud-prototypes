@@ -73,6 +73,12 @@ class TestGitHubAdapter:
         assert incident.github_repo == "my-org/sample-app"
         assert incident.github_pr_number == 42
         assert incident.reporter == "octocat"
+        assert incident.github_run_attempt == 1
+
+        # Explicit run_attempt
+        payload["workflow_run"]["run_attempt"] = 3
+        incident_attempt_3 = adapter.to_incident(payload)
+        assert incident_attempt_3.github_run_attempt == 3
 
     def test_to_incident_branch_severity_p3(self, bridge_settings: BridgeConfig) -> None:
         adapter = GitHubAdapter(config=bridge_settings)

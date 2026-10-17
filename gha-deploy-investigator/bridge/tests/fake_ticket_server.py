@@ -72,6 +72,20 @@ def reset_state() -> dict[str, str]:
     return {"status": "reset"}
 
 
+@app.get("/api/now/table/incident")
+def query_servicenow_incidents(request: Request) -> dict[str, Any]:
+    sysparm_query = request.query_params.get("sysparm_query", "")
+    results = []
+    if "correlation_id=" in sysparm_query:
+        target_corr_id = sysparm_query.split("correlation_id=", 1)[1].split("^")[0]
+        for inc in state.servicenow_incidents.values():
+            if inc.get("correlation_id") == target_corr_id:
+                results.append(inc)
+    elif not sysparm_query:
+        results = list(state.servicenow_incidents.values())
+    return {"result": results}
+
+
 @app.post("/api/now/table/incident", status_code=status.HTTP_201_CREATED)
 async def create_servicenow_incident(request: Request) -> dict[str, Any]:
     body = await request.json()

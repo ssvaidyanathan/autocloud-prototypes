@@ -127,6 +127,11 @@ class TestE2EReverseFlow:
             in created_sn_ticket["short_description"]
         )
         assert created_sn_ticket["category"] == "DevOps"
+        assert created_sn_ticket["correlation_display"] == "gha-deploy-investigator"
+        assert (
+            created_sn_ticket["correlation_id"]
+            == "gdi:my-org/sample-app:1849201948:1"
+        )
         assert len(ticket_state.servicenow_attachments) == 1
 
         # 5. Step 4: Verify developer-facing GitHub Check Run was posted
@@ -136,7 +141,7 @@ class TestE2EReverseFlow:
         assert check_run["head_sha"] == "e4b2a8d39c1234567890abcdef1234567890abcd"
         assert cb_data["servicenow_ticket"] in check_run["output"]["summary"]
 
-        # 6. Step 5: Duplicate callback report is ignored
+        # 6. Step 5: Duplicate callback report is ignored by memory dedup
         dup_cb_response = client.post(
             "/callback/report",
             json=result.model_dump(mode="json"),
@@ -144,6 +149,19 @@ class TestE2EReverseFlow:
         )
         assert dup_cb_response.status_code == 200
         assert dup_cb_response.json()["status"] == "duplicate_ignored"
+
+        # 7. Step 6: Test ServiceNow-level idempotency query path (e.g. after service restart)
+        get_dedup_registry().clear()
+        retry_cb_response = client.post(
+            "/callback/report",
+            json=result.model_dump(mode="json"),
+            headers={"Authorization": "Bearer mock-oidc-token-for-testing"},
+        )
+        assert retry_cb_response.status_code == 200
+        assert retry_cb_response.json()["status"] == "ok"
+        assert retry_cb_response.json()["servicenow_ticket"] == cb_data["servicenow_ticket"]
+        assert len(ticket_state.servicenow_incidents) == 1
+        assert len(ticket_state.servicenow_attachments) == 2
 
     def test_non_failure_webhook_ignored_with_http_200(
         self,

@@ -111,49 +111,115 @@ class ServiceNowAdapter(BaseAdapter):
         )
 
     def create_incident_with_report(self, incident: Incident, report: Report) -> IncidentRef:
-        """Create a new ServiceNow incident ticket with findings and HTML attachment."""
+        """Create a ServiceNow ticket or update an existing one using correlation_id."""
         base_url = (
             self.config.servicenow_instance_url or "https://example.service-now.com"
         ).rstrip("/")
         table_endpoint = f"{base_url}/api/now/table/incident"
 
-        short_description = (
-            f"[gdi-demo] [CI/CD Failure] {incident.github_repo or incident.title} "
-            f"({incident.github_failing_stage or 'Pipeline'})"
+        repo_full = incident.github_repo or incident.service_hint or "unknown"
+        run_id = (
+            incident.github_run_id if incident.github_run_id is not None else incident.external_id
         )
-
-        root_cause_text = (
-            report.probable_root_cause.text if report.probable_root_cause else report.summary
+        run_attempt = (
+            incident.github_run_attempt if incident.github_run_attempt is not None else 1
         )
-
-        description_lines = [
-            f"Repository: {incident.github_repo or 'N/A'}",
-            f"Branch: {incident.github_branch or 'N/A'}",
-            f"Commit SHA: {incident.github_head_sha or 'N/A'}",
-            f"Reporter: {incident.reporter or 'N/A'}",
-            "",
-            "Root Cause:",
-            root_cause_text,
-        ]
-        description = "\n".join(description_lines)
-
-        sev_to_num = {"P1": "1", "P2": "2", "P3": "3", "P4": "4"}
-        urgency = sev_to_num.get(incident.severity, "3")
-        impact = sev_to_num.get(incident.severity, "3")
-
-        rendered_html = render_servicenow_html(report)
-        work_notes = chunk_servicenow_work_note(rendered_html, max_chars=12000)[0]
-
-        incident_body = {
-            "short_description": short_description,
-            "description": description,
-            "category": "DevOps",
-            "urgency": urgency,
-            "impact": impact,
-            "work_notes": work_notes,
-        }
+        correlation_id = f"gdi:{repo_full}:{run_id}:{run_attempt}"
+        correlation_display = getattr(
+            self.config, "servicenow_correlation_display", "gha-deploy-investigator"
+        )
 
         with self._get_client() as client:
+            # Query before create: idempotency check using correlation_id
+            query_resp = client.get(
+                table_endpoint,
+                params={"sysparm_query": f"correlation_id={correlation_id}"},
+            )
+            query_resp.raise_for_status()
+            existing_records = query_resp.json().get("result", [])
+
+            existing_incident = None
+            if isinstance(existing_records, list) and existing_records:
+                existing_incident = existing_records[0]
+            elif isinstance(existing_records, dict) and existing_records.get("sys_id"):
+                existing_incident = existing_records
+
+            rendered_html = render_servicenow_html(report)
+            work_notes = chunk_servicenow_work_note(rendered_html, max_chars=12000)[0]
+
+            if existing_incident:
+                sys_id = existing_incident.get("sys_id", "mock-sys-id")
+                number = existing_incident.get("number", sys_id)
+
+                patch_endpoint = f"{table_endpoint}/{sys_id}"
+                patch_resp = client.patch(patch_endpoint, json={"work_notes": work_notes})
+                patch_resp.raise_for_status()
+
+                # Upload standalone report as attachment
+                attachment_endpoint = (
+                    f"{base_url}/api/now/attachment/file"
+                    f"?table_name=incident&table_sys_id={sys_id}"
+                    f"&file_name=ci_cd_investigation_report_{number}.html"
+                )
+                standalone_html = render_standalone_html(report)
+                att_resp = client.post(
+                    attachment_endpoint,
+                    content=standalone_html.encode("utf-8"),
+                    headers={"Content-Type": "text/html"},
+                )
+                att_resp.raise_for_status()
+
+                logger.info(
+                    "Found existing ServiceNow incident %s (%s) for correlation_id=%s; "
+                    "patched work notes and attached report",
+                    number,
+                    sys_id,
+                    correlation_id,
+                )
+
+                return IncidentRef(
+                    id=f"sn-{sys_id}",
+                    source="servicenow",
+                    external_id=sys_id,
+                    external_key=number,
+                    external_url=f"{base_url}/nav_to.do?uri=incident.do?sys_id={sys_id}",
+                )
+
+            short_description = (
+                f"[gdi-demo] [CI/CD Failure] {incident.github_repo or incident.title} "
+                f"({incident.github_failing_stage or 'Pipeline'})"
+            )
+
+            root_cause_text = (
+                report.probable_root_cause.text if report.probable_root_cause else report.summary
+            )
+
+            description_lines = [
+                f"Repository: {incident.github_repo or 'N/A'}",
+                f"Branch: {incident.github_branch or 'N/A'}",
+                f"Commit SHA: {incident.github_head_sha or 'N/A'}",
+                f"Reporter: {incident.reporter or 'N/A'}",
+                "",
+                "Root Cause:",
+                root_cause_text,
+            ]
+            description = "\n".join(description_lines)
+
+            sev_to_num = {"P1": "1", "P2": "2", "P3": "3", "P4": "4"}
+            urgency = sev_to_num.get(incident.severity, "3")
+            impact = sev_to_num.get(incident.severity, "3")
+
+            incident_body = {
+                "short_description": short_description,
+                "description": description,
+                "category": "DevOps",
+                "urgency": urgency,
+                "impact": impact,
+                "work_notes": work_notes,
+                "correlation_display": correlation_display,
+                "correlation_id": correlation_id,
+            }
+
             resp = client.post(table_endpoint, json=incident_body)
             resp.raise_for_status()
             res_json = resp.json().get("result", {})
