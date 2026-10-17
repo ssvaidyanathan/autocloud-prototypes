@@ -89,7 +89,8 @@ def render_servicenow_html(report: Report) -> str:
         )
 
     # Recommended Actions
-    if report.recommended_actions:
+    remediation_actions = report.causal_remediation or report.recommended_actions
+    if remediation_actions:
         lines.extend(
             [
                 '    <div style="margin-bottom: 12px;">',
@@ -100,12 +101,34 @@ def render_servicenow_html(report: Report) -> str:
                 '      <ol style="margin: 0; padding-left: 20px;">',
             ]
         )
-        for action in report.recommended_actions[:10]:
+        for action in remediation_actions[:10]:
             action_text = action[:300] + "..." if len(action) > 300 else action
             lines.append(f"        <li>{html.escape(action_text)}</li>")
         lines.extend(
             [
                 "      </ol>",
+                "    </div>",
+            ]
+        )
+
+    # Unrelated Observations
+    if report.unrelated_observations:
+        lines.extend(
+            [
+                '    <div style="margin-bottom: 12px;">',
+                (
+                    '      <div style="font-weight: 600; color: #57606a; margin-bottom: 4px;">'
+                    "Unrelated Observations</div>"
+                ),
+                '      <ul style="margin: 0; padding-left: 20px;">',
+            ]
+        )
+        for obs in report.unrelated_observations[:10]:
+            obs_text = obs[:300] + "..." if len(obs) > 300 else obs
+            lines.append(f"        <li>{html.escape(obs_text)}</li>")
+        lines.extend(
+            [
+                "      </ul>",
                 "    </div>",
             ]
         )
@@ -160,13 +183,24 @@ def render_standalone_html(report: Report, incident_ref: Optional[Any] = None) -
         </div>
         """
 
+    remediation_actions = report.causal_remediation or report.recommended_actions
     actions_html = ""
-    if report.recommended_actions:
-        items = "\n".join(f"<li>{html.escape(a)}</li>" for a in report.recommended_actions)
+    if remediation_actions:
+        items = "\n".join(f"<li>{html.escape(a)}</li>" for a in remediation_actions)
         actions_html = f"""
         <div class="section">
             <h2>Recommended Remediation Actions</h2>
             <ol>{items}</ol>
+        </div>
+        """
+
+    unrelated_html = ""
+    if report.unrelated_observations:
+        items = "\n".join(f"<li>{html.escape(o)}</li>" for o in report.unrelated_observations)
+        unrelated_html = f"""
+        <div class="section">
+            <h2>Unrelated Observations</h2>
+            <ul>{items}</ul>
         </div>
         """
 
@@ -246,6 +280,7 @@ def render_standalone_html(report: Report, incident_ref: Optional[Any] = None) -
         {root_cause_html}
         {timeline_html}
         {actions_html}
+        {unrelated_html}
     </div>
 </body>
 </html>

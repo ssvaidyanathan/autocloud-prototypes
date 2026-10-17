@@ -236,20 +236,30 @@ class SynthesizerAgent:
                 )
             )
 
-        recommended_actions: list[str] = []
-        if llm_result and llm_result.get("remediation_actions"):
-            recommended_actions.extend(llm_result["remediation_actions"])
-        if diagnostic_result and diagnostic_result.remediation_actions:
+        causal_remediation: list[str] = []
+        unrelated_observations: list[str] = []
+
+        if llm_result:
+            if llm_result.get("causal_remediation"):
+                causal_remediation.extend(llm_result["causal_remediation"])
+            elif llm_result.get("remediation_actions"):
+                causal_remediation.extend(llm_result["remediation_actions"])
+
+            if llm_result.get("unrelated_observations"):
+                unrelated_observations.extend(llm_result["unrelated_observations"])
+
+        if not causal_remediation and diagnostic_result and diagnostic_result.remediation_actions:
             for act in diagnostic_result.remediation_actions:
-                if act not in recommended_actions:
-                    recommended_actions.append(act)
+                if act not in causal_remediation:
+                    causal_remediation.append(act)
 
-
-        if not recommended_actions:
-            recommended_actions.append(
+        if not causal_remediation:
+            causal_remediation.append(
                 f"Inspect failure in step '{step_name}' of workflow '{incident.github_repo}'"
             )
-            recommended_actions.append(f"Review culprit log output: {primary_error}")
+            causal_remediation.append(f"Review culprit log output: {primary_error}")
+
+        recommended_actions = list(causal_remediation)
 
         spec_name = (
             diagnostic_result.specialist_name
@@ -291,6 +301,8 @@ class SynthesizerAgent:
             probable_root_cause=probable_root_cause,
             recent_changes=[],
             recommended_actions=recommended_actions,
+            causal_remediation=causal_remediation,
+            unrelated_observations=unrelated_observations,
             specialists_status=specialists_status,
             skills_used=skills_used,
             caveats=[],

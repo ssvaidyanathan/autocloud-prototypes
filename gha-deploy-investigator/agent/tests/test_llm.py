@@ -499,3 +499,178 @@ class TestVertexAIGemini:
         assert "Diff Hunks:" in res
         assert "--- scripts/deploy.sh\n+++ scripts/deploy.sh\n@@ -1,2 +1,2 @@\n-old\n+new" in res
 
+    def test_generate_gemini_synthesis_prompt_rules_and_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = AgentConfig(
+            app_env="production",
+            gcp_project="test-proj-123",
+            vertex_ai_location="us-central1",
+            gemini_model="test-gemini-model",
+        )
+
+        class MockCreds:
+            valid = True
+            token = "mock-vertex-bearer-token"
+
+            def refresh(self, req: Any) -> None:
+                pass
+
+        monkeypatch.setattr("google.auth.default", lambda scopes: (MockCreds(), "test-proj-123"))
+
+        captured_request: dict[str, Any] = {}
+
+        def mock_post(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            nonlocal captured_request
+            captured_request = kwargs.get("json", {})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": (
+                                            '{"root_cause": "Test logic error", '
+                                            '"causal_remediation": ["Fix test assertion"], '
+                                            '"unrelated_observations": ["Library warning"], '
+                                            '"confidence": 0.95}'
+                                        )
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = httpx.Client()
+        client.post = mock_post  # type: ignore[method-assign]
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "test"},
+            failing_step={"name": "Run unit tests"},
+            log_text="FAILED tests/test_calc.py::test_calc - AssertionError: 10 != 20",
+            config=cfg,
+            client=client,
+        )
+
+        assert res is not None
+        prompt_text = captured_request["contents"][0]["parts"][0]["text"]
+
+        # Assert structured JSON keys in prompt
+        assert "'root_cause' (string)" in prompt_text
+        assert "'causal_remediation' (list of strings)" in prompt_text
+        assert "'unrelated_observations' (list of strings)" in prompt_text
+
+        # Assert generic test-only diff rule in prompt
+        assert (
+            "When the commit diff touches only test files and no application code changed, "
+            "causal remediation must target the test"
+        ) in prompt_text
+        assert (
+            "Put non-causal warnings (e.g. deprecation or runtime warnings not on the fatal path) "
+            "into unrelated_observations, NEVER into causal_remediation"
+        ) in prompt_text
+
+        # Assert parser extracts both fields
+        assert res["causal_remediation"] == ["Fix test assertion"]
+        assert res["unrelated_observations"] == ["Library warning"]
+        assert res["remediation_actions"] == ["Fix test assertion"]
+
+    def test_generate_gemini_synthesis_parses_legacy_remediation_actions_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = AgentConfig(
+            app_env="production",
+            gcp_project="test-proj-123",
+            vertex_ai_location="us-central1",
+            gemini_model="test-gemini-model",
+        )
+
+        class MockCreds:
+            valid = True
+            token = "mock-vertex-bearer-token"
+
+            def refresh(self, req: Any) -> None:
+                pass
+
+        monkeypatch.setattr("google.auth.default", lambda scopes: (MockCreds(), "test-proj-123"))
+
+        def mock_post(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": (
+                                            '{"root_cause": "Legacy response", '
+                                            '"remediation_actions": ["Legacy action 1"], '
+                                            '"confidence": 0.88}'
+                                        )
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = httpx.Client()
+        client.post = mock_post  # type: ignore[method-assign]
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "deploy"},
+            failing_step={"name": "deploy"},
+            log_text="error",
+            config=cfg,
+            client=client,
+        )
+
+        assert res is not None
+        assert res["causal_remediation"] == ["Legacy action 1"]
+        assert res["remediation_actions"] == ["Legacy action 1"]
+        assert res["unrelated_observations"] == []
+
+    def test_synthesizer_populates_causal_remediation_and_unrelated_observations(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        incident = Incident(
+            id="inc-structured",
+            source="github",
+            external_id="42",
+            external_key="repo#42",
+            title="Test failure",
+            description="Failed test",
+            severity="P3",
+            opened_at="2026-10-17T00:00:00Z",
+            github_repo="owner/app",
+        )
+
+        monkeypatch.setattr(
+            "agent.app.llm.generate_gemini_synthesis",
+            lambda **kwargs: {
+                "root_cause": "Test assertion mismatched expected value.",
+                "causal_remediation": ["Correct assertion in test_calc.py."],
+                "unrelated_observations": ["Warning: module xyz deprecated."],
+                "confidence": 0.97,
+            },
+        )
+
+        report = synthesize_report(
+            incident=incident,
+            failed_job={"name": "test-job"},
+            failed_step={"name": "test-step"},
+            log_text="AssertionError: 10 != 20",
+        )
+
+        assert report.causal_remediation == ["Correct assertion in test_calc.py."]
+        assert report.unrelated_observations == ["Warning: module xyz deprecated."]
+        assert report.recommended_actions == ["Correct assertion in test_calc.py."]
+

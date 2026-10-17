@@ -73,6 +73,8 @@ class Report(BaseModel):
     probable_root_cause: Optional[ProbableRootCause] = None
     recent_changes: list[RecentChangeItem] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)
+    causal_remediation: list[str] = Field(default_factory=list)
+    unrelated_observations: list[str] = Field(default_factory=list)
     specialists_status: list[SpecialistStatus] = Field(default_factory=list)
     skills_used: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)

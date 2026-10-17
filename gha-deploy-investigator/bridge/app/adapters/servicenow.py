@@ -280,9 +280,14 @@ class ServiceNowAdapter(BaseAdapter):
                     "Root Cause:",
                     root_cause_text,
                 ]
-                if report.recommended_actions:
+                remediation_items = (
+                    report.causal_remediation
+                    if report.causal_remediation
+                    else report.recommended_actions
+                )
+                if remediation_items:
                     description_lines.extend(["", "Recommended Remediation:"])
-                    for action in report.recommended_actions:
+                    for action in remediation_items:
                         if isinstance(action, str):
                             description_lines.append(f"- {action}")
                         elif hasattr(action, "title") and not callable(getattr(action, "title")):
@@ -305,6 +310,11 @@ class ServiceNowAdapter(BaseAdapter):
                             description_lines.append(f"- {title_val}")
                         else:
                             description_lines.append(f"- {action}")
+
+                if report.unrelated_observations:
+                    description_lines.extend(["", "Unrelated Observations:"])
+                    for obs in report.unrelated_observations:
+                        description_lines.append(f"- {obs}")
                 description = "\n".join(description_lines)
 
                 if existing_incident:

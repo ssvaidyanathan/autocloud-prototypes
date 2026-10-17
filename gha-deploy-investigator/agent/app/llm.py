@@ -120,11 +120,13 @@ def generate_gemini_synthesis(
         "was modified in diff without app changes), the primary remediation MUST lead directly "
         "with test code correction (fixing the test logic or correcting the assertion), NOT "
         "advise investigating application business logic when the diff proves the test itself "
-        "is defective. Avoid hedging ('likely introduced by') when the diff is conclusive.\n"
-        "5. Warning segregation: Put log warnings that are not causally linked to the failing step "
-        "(for example, deprecation or runtime warnings not on the failing step's fatal error path) "
-        "under 'Unrelated Observations' rather than primary remediation actions. Do not treat "
-        "un-linked warnings as the primary root cause.\n"
+        "is defective. Avoid hedging ('likely introduced by') when the diff is conclusive. "
+        "When the commit diff touches only test files and no application code changed, causal "
+        "remediation must target the test and must not recommend changing application code unless "
+        "tool evidence shows an application defect.\n"
+        "5. Warning segregation: Put non-causal warnings (e.g. deprecation or runtime warnings "
+        "not on the fatal path) into unrelated_observations, NEVER into causal_remediation. "
+        "Do not treat un-linked warnings as the primary root cause.\n"
         "6. Deploy & runtime failure correlation: When container logs or runtime "
         "telemetry indicate termination (e.g. out of memory / exit code 137, signal 9, or "
         "health probe failure), the root cause MUST quote the exact decisive log line(s) before "
@@ -136,7 +138,8 @@ def generate_gemini_synthesis(
         "projects not in the logs.\n"
         "8. Provide actionable remediation steps addressing each distinct violation directly.\n"
         "9. Respond with valid JSON with keys: 'root_cause' (string), "
-        "'remediation_actions' (list of strings), 'confidence' (float between 0.0 and 1.0).\n"
+        "'causal_remediation' (list of strings), 'unrelated_observations' (list of strings), "
+        "'confidence' (float between 0.0 and 1.0).\n"
     )
 
     request_body = {
@@ -193,11 +196,20 @@ def generate_gemini_synthesis(
         try:
             parsed = json.loads(clean_text)
             if isinstance(parsed, dict) and "root_cause" in parsed:
+                causal = parsed.get("causal_remediation")
+                if causal is None:
+                    causal = parsed.get("remediation_actions", [])
+                causal_list = [str(a).strip() for a in (causal or []) if str(a).strip()]
+                unrelated_list = [
+                    str(o).strip()
+                    for o in parsed.get("unrelated_observations", [])
+                    if str(o).strip()
+                ]
                 return {
                     "root_cause": str(parsed["root_cause"]).strip(),
-                    "remediation_actions": [
-                        str(a).strip() for a in parsed.get("remediation_actions", [])
-                    ],
+                    "causal_remediation": causal_list,
+                    "unrelated_observations": unrelated_list,
+                    "remediation_actions": causal_list,
                     "confidence": float(parsed.get("confidence", 0.95)),
                 }
         except Exception:
@@ -207,11 +219,20 @@ def generate_gemini_synthesis(
                 try:
                     parsed = json.loads(m.group(1))
                     if isinstance(parsed, dict) and "root_cause" in parsed:
+                        causal = parsed.get("causal_remediation")
+                        if causal is None:
+                            causal = parsed.get("remediation_actions", [])
+                        causal_list = [str(a).strip() for a in (causal or []) if str(a).strip()]
+                        unrelated_list = [
+                            str(o).strip()
+                            for o in parsed.get("unrelated_observations", [])
+                            if str(o).strip()
+                        ]
                         return {
                             "root_cause": str(parsed["root_cause"]).strip(),
-                            "remediation_actions": [
-                                str(a).strip() for a in parsed.get("remediation_actions", [])
-                            ],
+                            "causal_remediation": causal_list,
+                            "unrelated_observations": unrelated_list,
+                            "remediation_actions": causal_list,
                             "confidence": float(parsed.get("confidence", 0.95)),
                         }
                 except Exception:
@@ -228,22 +249,38 @@ def generate_gemini_synthesis(
             # Strip brackets, braces, and JSON keys to obtain clean prose
             cleaned_prose = re.sub(r"^\{\s*\"root_cause\"\s*:\s*\"?", "", clean_text)
             cleaned_prose = re.sub(
-                r"\"?\s*,?\s*\"remediation_actions\".*$", "", cleaned_prose, flags=re.DOTALL
+                r"\"?\s*,?\s*\"(?:causal_remediation|remediation_actions|unrelated_observations)\".*$",
+                "",
+                cleaned_prose,
+                flags=re.DOTALL,
             )
             cleaned_prose = re.sub(r"\"?\s*\}\s*$", "", cleaned_prose)
             extracted_cause = cleaned_prose.strip(' \t\n\r"{}')
 
         extracted_actions = []
-        rem_match = re.search(r'"remediation_actions"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL)
+        rem_match = re.search(r'"causal_remediation"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL)
+        if not rem_match:
+            rem_match = re.search(r'"remediation_actions"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL)
         if rem_match:
             actions_raw = rem_match.group(1)
             for act in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', actions_raw):
                 extracted_actions.append(act.replace(r"\"", '"').strip())
 
+        extracted_unrelated = []
+        unrelated_match = re.search(
+            r'"unrelated_observations"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL
+        )
+        if unrelated_match:
+            unrelated_raw = unrelated_match.group(1)
+            for obs in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', unrelated_raw):
+                extracted_unrelated.append(obs.replace(r"\"", '"').strip())
+
         return {
             "root_cause": (
                 extracted_cause or "Automated diagnosis identified deployment failure."
             ),
+            "causal_remediation": extracted_actions,
+            "unrelated_observations": extracted_unrelated,
             "remediation_actions": extracted_actions,
             "confidence": 0.90,
         }
