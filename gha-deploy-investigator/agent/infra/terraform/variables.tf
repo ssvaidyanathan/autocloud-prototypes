@@ -73,3 +73,16 @@ variable "cloud_run_memory" {
   type        = string
   default     = "2Gi"
 }
+
+variable "gemini_model" {
+  description = "Gemini model name for analytical synthesis"
+  type        = string
+  default     = "gemini-2.5-flash"
+}
+
+variable "vertex_ai_location" {
+  description = "Vertex AI location for Gemini API calls"
+  type        = string
+  default     = "us-central1"
+}
+

@@ -3,11 +3,18 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from google.adk.agents import LlmAgent
+from google.adk.tools.function_tool import FunctionTool
+
 from ..config import AgentConfig
-from ..contracts.findings import EvidenceItem
+from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
-from ..specialists.base import BaseSpecialist, DiagnosticResult
-from ..tools.runtime_tools import describe_cloud_run_revision, query_cloud_logging
+from ..specialists.base import BaseSpecialist, DiagnosticResult, SkillTracker
+from ..tools.runtime_tools import (
+    describe_cloud_run_revision,
+    describe_service,
+    query_cloud_logging,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +37,39 @@ class RuntimeHealthSpecialist(BaseSpecialist):
     Cloud Logging telemetry.
     """
 
-    def __init__(self) -> None:
-        super().__init__(name="runtime_health_specialist", stage="deploy")
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        llm_agent: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
+        skill_tracker: Optional[SkillTracker] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            name="runtime_health_specialist",
+            stage="deploy",
+            model=model,
+            config=config,
+            skill_tracker=skill_tracker,
+            **kwargs,
+        )
+        self.adk_tools = [
+            FunctionTool(describe_cloud_run_revision),
+            FunctionTool(query_cloud_logging),
+            FunctionTool(describe_service),
+        ]
+        self.llm_agent = llm_agent or LlmAgent(
+            name="runtime_health_specialist",
+            model=self.model or "default",
+            instruction=(
+                "You are a specialist investigating Cloud Run deployment and runtime health."
+            ),
+            tools=self.adk_tools,
+            output_schema=Findings,
+        )
+
+    def get_tools(self) -> list[Any]:
+        return list(self.adk_tools)
 
     def diagnose(
         self,
@@ -45,6 +83,10 @@ class RuntimeHealthSpecialist(BaseSpecialist):
         step_name = failing_step.get("name", "Deploy Step")
         now = datetime.now(timezone.utc)
         evidence_items: list[EvidenceItem] = []
+
+        self.skill_tracker.after_tool_callback(
+            "load_skill", {"skill_name": "cloudrun-deploy-troubleshooting"}
+        )
 
         # 1. Extract deployment target coordinates
         service_name = self._extract_service_name(incident, log_text)
@@ -64,88 +106,31 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             )
         )
 
-        # Check for IAM / permission errors first
-        is_iam_denied = any(
-            token in log_text.lower()
-            for token in (
-                "iam.serviceaccounts.actas",
-                "permission_denied",
-                "permission denied",
-                "caller does not have required permission",
-                "does not have permission",
-            )
-        )
-        if is_iam_denied:
-            iam_lines = [
-                line.strip()
-                for line in log_text.splitlines()
-                if any(
-                    t in line.lower()
-                    for t in (
-                        "iam.serviceaccounts.actas",
-                        "permission_denied",
-                        "permission denied",
-                        "caller does not have required permission",
-                        "does not have permission",
-                    )
-                )
-            ]
-            culprit = iam_lines[0] if iam_lines else "IAM permission denied on service account"
-            if "iam.serviceaccounts.actas" in culprit.lower():
-                probable_cause = (
-                    f"Deployment step '{step_name}' failed due to missing IAM permission "
-                    f"'iam.serviceaccounts.actAs' on Cloud Run runtime service account: {culprit}"
-                )
-            else:
-                probable_cause = (
-                    f"Deployment step '{step_name}' failed due to IAM permission denial: {culprit}"
-                )
-            confidence = 0.95
-            remediation = [
-                (
-                    "Grant 'roles/iam.serviceAccountUser' (actAs) to the deploying identity "
-                    "on the Cloud Run runtime service account"
-                ),
-                (
-                    "Ensure deployment service account has 'roles/run.admin' or "
-                    "'roles/run.developer' on project or target Cloud Run service"
-                ),
-                "Verify GitHub Actions Workload Identity Federation role bindings "
-                "and impersonation",
-            ]
-            evidence_items.append(
-                EvidenceItem(
-                    kind="github_runner_log",
-                    excerpt=f"IAM permission denial: {culprit}",
-                    timestamp=now,
-                )
-            )
-            rev_summary = f" (revision '{revision_name}')" if revision_name else ""
-            summary = (
-                f"Deployment failure in step '{step_name}' for Cloud Run service '{service_name}'"
-                f"{rev_summary}. Root cause: {probable_cause}"
-            )
-            return DiagnosticResult(
-                stage="deploy",
-                specialist_name=self.name,
-                summary=summary,
-                probable_cause=probable_cause,
-                confidence=confidence,
-                evidence_items=evidence_items,
-                remediation_actions=remediation,
-                suggested_fix=f"Grant required IAM permissions for {service_name}",
-            )
-
         # 2. Query Cloud Run Revision conditions
         rev_info: dict[str, Any] = {}
         if revision_name:
+            call_args = {
+                "service_name": service_name,
+                "revision_name": revision_name,
+                "region": region,
+            }
             try:
+                self.skill_tracker.before_tool_callback(
+                    "describe_cloud_run_revision",
+                    call_args,
+                )
                 rev_info = describe_cloud_run_revision(
                     service_name=service_name,
                     revision_name=revision_name,
                     region=region,
                     config=config,
                 )
+                self.skill_tracker.after_tool_callback(
+                    "describe_cloud_run_revision",
+                    call_args,
+                    tool_output=rev_info,
+                )
+
             except Exception as exc:
                 logger.warning("Failed to describe Cloud Run revision: %s", exc)
 
@@ -153,12 +138,19 @@ class RuntimeHealthSpecialist(BaseSpecialist):
         log_entries: list[dict[str, Any]] = []
         if revision_name:
             try:
+                filter_q = f'resource.type="cloud_run_revision" revision_name="{revision_name}"'
+                self.skill_tracker.before_tool_callback(
+                    "query_cloud_logging", {"filter_query": filter_q}
+                )
                 log_entries = query_cloud_logging(
-                    filter_query=(
-                        f'resource.type="cloud_run_revision" revision_name="{revision_name}"'
-                    ),
+                    filter_query=filter_q,
                     limit=20,
                     config=config,
+                )
+                self.skill_tracker.after_tool_callback(
+                    "query_cloud_logging",
+                    {"filter_query": filter_q},
+                    tool_output=log_entries,
                 )
             except Exception as exc:
                 logger.warning("Failed to query Cloud Logging: %s", exc)
@@ -296,7 +288,7 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             f"{rev_summary}. Root cause: {probable_cause}"
         )
 
-        return DiagnosticResult(
+        diag = DiagnosticResult(
             stage="deploy",
             specialist_name=self.name,
             summary=summary,
@@ -306,6 +298,7 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             remediation_actions=remediation,
             suggested_fix=f"Resolve deployment health failure for {service_name}",
         )
+        return self.skill_tracker.populate_diagnostic_result(diag)
 
     def _extract_service_name(self, incident: Incident, log_text: str) -> str:
         match = SERVICE_PATTERN.search(log_text)

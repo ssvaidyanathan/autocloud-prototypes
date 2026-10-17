@@ -114,12 +114,12 @@ def generate_gemini_synthesis(
         if not raw_text:
             return None
 
-        clean_text = raw_text
-        if clean_text.startswith("```"):
-            clean_text = clean_text.split("\n", 1)[-1]
-            if clean_text.endswith("```"):
-                clean_text = clean_text.rsplit("```", 1)[0]
-            clean_text = clean_text.strip()
+        import re
+
+        clean_text = raw_text.strip()
+        clean_text = re.sub(r"^```(?:json)?\s*", "", clean_text, flags=re.IGNORECASE)
+        clean_text = re.sub(r"\s*```$", "", clean_text)
+        clean_text = clean_text.strip()
 
         try:
             parsed = json.loads(clean_text)
@@ -130,10 +130,24 @@ def generate_gemini_synthesis(
                     "confidence": float(parsed.get("confidence", 0.95)),
                 }
         except Exception:
-            pass
+            # Fallback: search for first { and last }
+            m = re.search(r"(\{.*\})", clean_text, re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group(1))
+                    if isinstance(parsed, dict) and "root_cause" in parsed:
+                        return {
+                            "root_cause": str(parsed["root_cause"]),
+                            "remediation_actions": [
+                                str(a) for a in parsed.get("remediation_actions", [])
+                            ],
+                            "confidence": float(parsed.get("confidence", 0.95)),
+                        }
+                except Exception:
+                    pass
 
         return {
-            "root_cause": raw_text,
+            "root_cause": clean_text,
             "remediation_actions": [],
             "confidence": 0.90,
         }

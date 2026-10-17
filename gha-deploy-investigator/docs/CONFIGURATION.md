@@ -44,6 +44,9 @@ This document provides a comprehensive configuration reference for `gha-deploy-i
 | `GITHUB_APP_ID` | String | `None` | Numerical GitHub App ID |
 | `GITHUB_APP_PRIVATE_KEY` | String (Secret) | `None` | PEM-encoded RSA private key for GitHub App authentication |
 | `GITHUB_TOKEN` | String (Secret) | `None` | Optional fallback personal access token |
+| `GEMINI_MODEL` | String | `gemini-2.5-flash` | Gemini model name for analytical synthesis |
+| `VERTEX_AI_LOCATION` | String | `us-central1` | GCP region for Vertex AI Gemini API endpoint |
+
 
 ---
 

@@ -15,6 +15,13 @@ from agent.app.tools.runtime_tools import reset_runtime_state, set_mock_revision
 from bridge.tests.fake_github_server import state as github_state
 
 
+@pytest.fixture(autouse=True)
+def mock_gemini_synthesis_autouse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetic unit tests: prevent live external Vertex AI Gemini network calls."""
+    import agent.app.llm
+    monkeypatch.setattr(agent.app.llm, "generate_gemini_synthesis", lambda **kwargs: None)
+
+
 class TestInvestigationDispatcher:
     def test_dispatcher_investigates_and_delivers_callback(
         self,
@@ -411,5 +418,46 @@ class TestInvestigationDispatcher:
 
         with pytest.raises(RuntimeError, match="Callback delivery failed:"):
             dispatcher.investigate(sample_request)
+
+    def test_production_configuration_does_not_silently_select_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify production configuration with LLM synthesis does not silently select fallback."""
+        from datetime import datetime, timezone
+
+        import agent.app.llm
+
+        def fake_gemini(**kwargs: Any) -> dict[str, Any]:
+            return {
+                "root_cause": "Grounded causal explanation from Vertex AI Gemini",
+                "remediation_actions": ["Deploy bugfix"],
+                "confidence": 0.98,
+            }
+
+        monkeypatch.setattr(agent.app.llm, "generate_gemini_synthesis", fake_gemini)
+        from agent.app.contracts.incident import Incident
+        from agent.app.synthesizer import SynthesizerAgent
+
+        synth = SynthesizerAgent()
+        incident = Incident(
+            id="inc-test",
+            source="github",
+            external_id="123",
+            external_key="123",
+            title="Production failure",
+            description="Pipeline failure",
+            severity="P1",
+            opened_at=datetime.now(timezone.utc),
+        )
+        report = synth.synthesize(
+            incident=incident,
+            failed_job={"name": "build"},
+            failed_step={"name": "docker"},
+            log_text="build error",
+        )
+        assert synth.synthesizer_mode == "llm"
+        assert report.metadata.get("synthesizer_mode") == "llm"
+        assert "Grounded causal explanation" in report.probable_root_cause.text
 
 

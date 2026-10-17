@@ -109,6 +109,14 @@ resource "google_cloud_run_v2_service" "agent" {
         name  = "GITHUB_APP_ID"
         value = var.github_app_id
       }
+      env {
+        name  = "GEMINI_MODEL"
+        value = var.gemini_model
+      }
+      env {
+        name  = "VERTEX_AI_LOCATION"
+        value = var.vertex_ai_location
+      }
 
       env {
         name = "GITHUB_APP_PRIVATE_KEY"

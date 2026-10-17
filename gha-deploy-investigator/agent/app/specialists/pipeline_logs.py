@@ -3,15 +3,24 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from google.adk.agents import LlmAgent
+from google.adk.tools.function_tool import FunctionTool
+
 from ..config import AgentConfig
-from ..contracts.findings import EvidenceItem
+from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
 from ..contracts.report import CheckRunAnnotation
-from ..specialists.base import BaseSpecialist, DiagnosticResult
-from ..tools.github_tools import get_commit_diff
+from ..specialists.base import BaseSpecialist, DiagnosticResult, SkillTracker
+from ..tools.github_tools import fetch_job_logs, get_commit_diff
 
 logger = logging.getLogger(__name__)
 
+STAGE_TO_SKILL = {
+    "lint": "lint-troubleshooting",
+    "test": "test-failure-triage",
+    "build": "container-build-troubleshooting",
+    "pipeline_logs": "container-build-troubleshooting",
+}
 # Lint error pattern: file:line:col: CODE message
 LINT_PATTERN = re.compile(
     r"^(?:.*?)(?P<file>[a-zA-Z0-9_\-\./\\]+\.(?:py|js|ts|jsx|tsx|go|java|rs)):(?P<line>\d+)(?::(?P<col>\d+))?:\s*(?:(?P<code>[A-Z]\d{2,4}|[A-Z0-9_]+)\s+)?(?P<msg>.+)$",
@@ -44,12 +53,39 @@ DOCKER_RUN_FAILED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-
 class PipelineLogsSpecialist(BaseSpecialist):
     """Diagnoses lint, test, and container packaging failures from CI logs and git diffs."""
 
-    def __init__(self) -> None:
-        super().__init__(name="pipeline_logs_specialist", stage="pipeline_logs")
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        llm_agent: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
+        skill_tracker: Optional[SkillTracker] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            name="pipeline_logs_specialist",
+            stage="pipeline_logs",
+            model=model,
+            config=config,
+            skill_tracker=skill_tracker,
+            **kwargs,
+        )
+        self.adk_tools = [
+            FunctionTool(fetch_job_logs),
+            FunctionTool(get_commit_diff),
+        ]
+        self.llm_agent = llm_agent or LlmAgent(
+            name="pipeline_logs_specialist",
+            model=self.model or "default",
+            instruction="You are a specialist investigating CI pipeline logs (lint, test, build).",
+            tools=self.adk_tools,
+            output_schema=Findings,
+        )
+
+    def get_tools(self) -> list[Any]:
+        return list(self.adk_tools)
 
     def diagnose(
         self,
@@ -65,21 +101,34 @@ class PipelineLogsSpecialist(BaseSpecialist):
         combined_label = f"{job_name} / {step_name}".lower()
 
         # Determine sub-stage
+        sub_stage = "pipeline_logs"
         if any(k in combined_label for k in ("lint", "ruff", "flake8", "mypy", "eslint", "fmt")):
-            return self._diagnose_lint(
-                incident, failing_job, failing_step, log_text, client, config
-            )
+            sub_stage = "lint"
         elif any(k in combined_label for k in ("test", "pytest", "jest", "unit", "integration")):
-            return self._diagnose_test(
-                incident, failing_job, failing_step, log_text, client, config
-            )
+            sub_stage = "test"
         elif any(k in combined_label for k in ("build", "docker", "image", "package", "container")):
-            return self._diagnose_build(
+            sub_stage = "build"
+
+        skill = STAGE_TO_SKILL.get(sub_stage, "container-build-troubleshooting")
+        self.skill_tracker.after_tool_callback("load_skill", {"skill_name": skill})
+
+        if sub_stage == "lint":
+            res = self._diagnose_lint(
                 incident, failing_job, failing_step, log_text, client, config
             )
+        elif sub_stage == "test":
+            res = self._diagnose_test(
+                incident, failing_job, failing_step, log_text, client, config
+            )
+        elif sub_stage == "build":
+            res = self._diagnose_build(
+                incident, failing_job, failing_step, log_text, client, config
+            )
+        else:
+            res = self._diagnose_generic(incident, failing_job, failing_step, log_text)
 
-        # Fallback to general log diagnosis
-        return self._diagnose_generic(incident, failing_job, failing_step, log_text)
+        return self.skill_tracker.populate_diagnostic_result(res)
+
 
     def _diagnose_lint(
         self,

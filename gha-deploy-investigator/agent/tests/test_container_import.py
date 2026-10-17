@@ -39,3 +39,19 @@ def test_container_import_without_agent_top_level_module() -> None:
     msg = f"Subprocess import failed:\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}"
     assert res.returncode == 0, msg
     assert "CONTAINER_IMPORT_OK" in res.stdout
+
+
+def test_runtime_dependencies_import() -> None:
+    """Verify all container runtime dependencies can be imported cleanly."""
+    import cryptography
+    import google.adk
+    import jwt
+    from agent.app.github.auth import GitHubAppAuth
+    from agent.app.skills_loader import SkillsLoader
+
+    assert jwt is not None
+    assert cryptography is not None
+    assert google.adk is not None
+    assert GitHubAppAuth is not None
+    assert SkillsLoader is not None
+

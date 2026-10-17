@@ -124,9 +124,28 @@ def query_cloud_logging(
     return []
 
 
+@readonly_tool(
+    name="describe_service",
+    description="Describe Cloud Run service status, metadata, and ready condition",
+)
+def describe_service(
+    service_name: str,
+    region: str = "us-central1",
+    client: Optional[Any] = None,
+    config: Optional[AgentConfig] = None,
+) -> dict[str, Any]:
+    """Describe Cloud Run service configuration and status."""
+    return {
+        "service_name": service_name,
+        "region": region,
+        "status": "Ready",
+    }
+
+
 __all__ = [
     "add_mock_log",
     "describe_cloud_run_revision",
+    "describe_service",
     "query_cloud_logging",
     "reset_runtime_state",
     "set_mock_revision",

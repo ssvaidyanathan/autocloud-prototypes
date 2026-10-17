@@ -3,10 +3,14 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from google.adk.agents import LlmAgent
+from google.adk.tools.function_tool import FunctionTool
+
 from ..config import AgentConfig
-from ..contracts.findings import EvidenceItem
+from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
-from ..specialists.base import BaseSpecialist, DiagnosticResult
+from ..specialists.base import BaseSpecialist, DiagnosticResult, SkillTracker
+from ..tools.github_tools import fetch_job_logs, get_commit_diff
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +24,39 @@ TERRAFORM_ERROR_PATTERN = re.compile(
 class IaCConfigSpecialist(BaseSpecialist):
     """Diagnoses Infrastructure-as-Code (Terraform, YAML manifests) errors."""
 
-    def __init__(self) -> None:
-        super().__init__(name="iac_config_specialist", stage="iac_config")
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        llm_agent: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
+        skill_tracker: Optional[SkillTracker] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            name="iac_config_specialist",
+            stage="iac_config",
+            model=model,
+            config=config,
+            skill_tracker=skill_tracker,
+            **kwargs,
+        )
+        self.adk_tools = [
+            FunctionTool(get_commit_diff),
+            FunctionTool(fetch_job_logs),
+        ]
+        self.llm_agent = llm_agent or LlmAgent(
+            name="iac_config_specialist",
+            model=self.model or "default",
+            instruction=(
+                "You are a specialist diagnosing Infrastructure-as-Code "
+                "(Terraform, YAML manifests) errors."
+            ),
+            tools=self.adk_tools,
+            output_schema=Findings,
+        )
+
+    def get_tools(self) -> list[Any]:
+        return list(self.adk_tools)
 
     def diagnose(
         self,
@@ -35,6 +70,10 @@ class IaCConfigSpecialist(BaseSpecialist):
         step_name = failing_step.get("name", "IaC Step")
         now = datetime.now(timezone.utc)
         evidence_items: list[EvidenceItem] = []
+
+        self.skill_tracker.after_tool_callback(
+            "load_skill", {"skill_name": "cloudrun-deploy-troubleshooting"}
+        )
 
         tf_match = TERRAFORM_ERROR_PATTERN.search(log_text)
         if tf_match:
@@ -70,7 +109,7 @@ class IaCConfigSpecialist(BaseSpecialist):
             )
         )
 
-        return DiagnosticResult(
+        diag = DiagnosticResult(
             stage="iac_config",
             specialist_name=self.name,
             summary=f"IaC / Configuration error in step '{step_name}': {probable_cause}",
@@ -80,3 +119,4 @@ class IaCConfigSpecialist(BaseSpecialist):
             remediation_actions=remediation,
             suggested_fix="Correct Terraform definition or YAML schema configuration",
         )
+        return self.skill_tracker.populate_diagnostic_result(diag)
