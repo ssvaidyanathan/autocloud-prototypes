@@ -16,9 +16,14 @@ echo "Image:       ${IMAGE_NAME}"
 echo "Memory:      ${MEMORY}"
 echo "=================================================="
 
-ENV_FLAGS=""
+ENV_ARGS=()
 if [[ -n "${EXTRA_ENV_VARS}" ]]; then
-    ENV_FLAGS="--set-env-vars ${EXTRA_ENV_VARS}"
+    ENV_ARGS=("--set-env-vars" "${EXTRA_ENV_VARS}")
+fi
+
+PROJECT_ARGS=()
+if [[ -n "${PROJECT_ID:-}" ]]; then
+    PROJECT_ARGS=("--project" "${PROJECT_ID}")
 fi
 
 if [[ "${DRY_RUN:-false}" == "true" ]]; then
@@ -33,4 +38,5 @@ fi
     --allow-unauthenticated \
     --memory="${MEMORY}" \
     --cpu="${CPU}" \
-    ${ENV_FLAGS}
+    "${PROJECT_ARGS[@]}" \
+    "${ENV_ARGS[@]}"

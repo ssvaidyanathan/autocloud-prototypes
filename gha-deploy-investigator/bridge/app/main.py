@@ -66,6 +66,15 @@ async def _process_webhook(
             detail="Webhook authentication failed",
         )
 
+    # Handle GitHub webhook ping event
+    if request.headers.get("X-GitHub-Event", "").lower() == "ping":
+        logger.info("Received GitHub webhook ping event")
+        response.status_code = status.HTTP_200_OK
+        return {
+            "status": "pong",
+            "message": "GitHub webhook ping received successfully",
+        }
+
     # 2. Parse payload and normalize to Incident contract
     try:
         json_payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}

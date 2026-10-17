@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  id-token: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -56,11 +60,29 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ secrets.GAR_LOCATION || 'us-central1-docker.pkg.dev' }} --quiet
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build Container Image
-        run: docker build -t sample-pipeline-app:${{ github.sha }} .
+        run: |
+          docker build -t ${{ secrets.GAR_REPOSITORY }}/sample-pipeline-app:${{ github.sha }} .
+
+      - name: Push Container Image
+        run: |
+          docker push ${{ secrets.GAR_REPOSITORY }}/sample-pipeline-app:${{ github.sha }}
 
   deploy-cloudrun:
     name: Deploy to Cloud Run
@@ -70,12 +92,19 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        if: env.PROJECT_ID != ''
 
       - name: Deploy to Cloud Run
         env:
           SERVICE_NAME: sample-pipeline-app
-          IMAGE_TAG: ${{ github.sha }}
+          REGION: us-central1
+          IMAGE_NAME: ${{ secrets.GAR_REPOSITORY }}/sample-pipeline-app:${{ github.sha }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: ./scripts/deploy.sh

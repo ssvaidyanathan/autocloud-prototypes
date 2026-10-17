@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import json
 from datetime import timezone
 
 import pytest
@@ -8,7 +11,7 @@ from bridge.app.adapters import (
     get_adapter,
 )
 from bridge.app.adapters.base import parse_utc_datetime
-from bridge.app.config import BridgeConfig
+from bridge.app.config import BridgeConfig, get_settings
 from bridge.app.contracts.incident import Incident
 from bridge.app.contracts.report import Report
 from bridge.app.contracts.result import InvestigationResult
@@ -68,3 +71,43 @@ class TestAdapters:
 
         now = parse_utc_datetime(None)
         assert now.tzinfo == timezone.utc
+
+    def test_github_webhook_ping_event(self, bridge_settings: BridgeConfig) -> None:
+        """Verify that a signed GitHub ping event returns 200 pong."""
+        from bridge.app.main import app
+        from starlette.testclient import TestClient
+
+        app.dependency_overrides[get_settings] = lambda: bridge_settings
+
+        client = TestClient(app)
+        payload = {"zen": "Keep it logically awesome.", "hook_id": 12345}
+        body_bytes = json.dumps(payload).encode("utf-8")
+        secret = bridge_settings.github_webhook_secret or ""
+        valid_sig = "sha256=" + hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
+
+        # 1. Unauthenticated ping rejected
+        unauth_resp = client.post(
+            "/webhook/github",
+            content=body_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "ping",
+                "X-Hub-Signature-256": "sha256=invalidhexsig",
+            },
+        )
+        assert unauth_resp.status_code == 401
+
+        # 2. Authenticated ping returns 200 pong
+        resp = client.post(
+            "/webhook/github",
+            content=body_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "ping",
+                "X-Hub-Signature-256": valid_sig,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "pong"
+        assert "ping received successfully" in data["message"]

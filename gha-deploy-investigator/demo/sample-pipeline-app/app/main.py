@@ -1,5 +1,4 @@
 import logging
-import sys
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 from uuid import uuid4
@@ -64,18 +63,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Prewarm order history cache if configured
     if cfg.cache_prewarm_buffer_mb > 0:
         logger.info("Pre-warming in-memory cache buffer (%d MB)...", cfg.cache_prewarm_buffer_mb)
-        if cfg.cache_prewarm_buffer_mb > 512:
-            logger.fatal(
-                "FATAL: Memory limit exceeded during cache prewarm (%d MB requested). "
-                "Exceeds container cgroup memory limits.",
-                cfg.cache_prewarm_buffer_mb,
-            )
-            sys.stderr.write(
-                f"Container killed by cgroups OOM killer: attempted to allocate "
-                f"{cfg.cache_prewarm_buffer_mb}MB buffer exceeding container limit "
-                "(exit code 137)\n"
-            )
-            sys.exit(137)
+        _ = bytearray(cfg.cache_prewarm_buffer_mb * 1024 * 1024)
 
     yield
     logger.info("Shutting down sample-pipeline-app...")
