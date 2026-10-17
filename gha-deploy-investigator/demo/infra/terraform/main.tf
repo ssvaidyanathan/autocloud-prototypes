@@ -14,6 +14,13 @@ resource "google_service_account" "demo_deployer_sa" {
   display_name = "GDI Demo Deployer Service Account"
 }
 
+# Dedicated Service Account for Demo App Cloud Run Runtime
+resource "google_service_account" "demo_app_sa" {
+  project      = var.project_id
+  account_id   = "${var.name_prefix}-demo-app-sa"
+  display_name = "GDI Demo App Runtime Service Account"
+}
+
 # IAM role: Cloud Run Admin for deploying demo revisions
 resource "google_project_iam_member" "demo_deployer_run_admin" {
   project = var.project_id
@@ -23,7 +30,7 @@ resource "google_project_iam_member" "demo_deployer_run_admin" {
 
 # IAM role: Artifact Registry Writer to push built container images
 resource "google_artifact_registry_repository_iam_member" "demo_deployer_ar_writer" {
-  project    = var.project_id
+  project    = var.region != "" ? var.project_id : var.project_id
   location   = var.region
   repository = google_artifact_registry_repository.demo_repo.name
   role       = "roles/artifactregistry.writer"
@@ -33,6 +40,13 @@ resource "google_artifact_registry_repository_iam_member" "demo_deployer_ar_writ
 # IAM role: Service Account User on itself to run Cloud Run as the service account
 resource "google_service_account_iam_member" "demo_deployer_sa_user" {
   service_account_id = google_service_account.demo_deployer_sa.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.demo_deployer_sa.email}"
+}
+
+# IAM role: Service Account User on demo_app_sa so deployer can deploy Cloud Run with runtime SA
+resource "google_service_account_iam_member" "demo_deployer_app_sa_user" {
+  service_account_id = google_service_account.demo_app_sa.name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${google_service_account.demo_deployer_sa.email}"
 }

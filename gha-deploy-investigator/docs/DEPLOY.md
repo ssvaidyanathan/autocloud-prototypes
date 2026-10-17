@@ -265,7 +265,8 @@ terraform apply \
 
 The WIF stack provisions:
 - Artifact Registry repo: `us-central1-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-demo-app`
-- Service Account: `${NAME_PREFIX}-demo-deployer-sa@${PROJECT_ID}.iam.gserviceaccount.com`
+- Deployer Service Account: `${NAME_PREFIX}-demo-deployer-sa@${PROJECT_ID}.iam.gserviceaccount.com`
+- App Runtime Service Account: `${NAME_PREFIX}-demo-app-sa@${PROJECT_ID}.iam.gserviceaccount.com` (least-privilege runtime SA for Cloud Run)
 - Workload Identity Pool: `${NAME_PREFIX}-demo-pool`
 - Workload Identity Provider: `${NAME_PREFIX}-demo-gh-provider`
 - **Attribute Condition**: Strictly restricted to:
@@ -277,12 +278,13 @@ The WIF stack provisions:
 > **Project Number Requirement**: Workload Identity Federation provider resource names require the **numeric Google Cloud Project Number** in their path (e.g. `projects/123456789012/locations/global/workloadIdentityPools/...`). Do not use the string project ID in the provider path.
 
 ### 2. Configure GitHub Repository Secrets
-Because GitHub repository variables (`vars.*`) are not masked in public repository logs, configure the following **5 repository secrets** on your demo GitHub repository:
+Because GitHub repository variables (`vars.*`) are not masked in public repository logs, configure the following **6 repository secrets** on your demo GitHub repository:
 
 ```bash
 gh secret set GCP_PROJECT_ID --body "${PROJECT_ID}" --repo "${GITHUB_OWNER}/${DEMO_REPO_NAME}"
 gh secret set GCP_WIF_PROVIDER --body "$(terraform output -raw wif_provider_name)" --repo "${GITHUB_OWNER}/${DEMO_REPO_NAME}"
 gh secret set GCP_SA_EMAIL --body "$(terraform output -raw service_account_email)" --repo "${GITHUB_OWNER}/${DEMO_REPO_NAME}"
+gh secret set GCP_APP_SA_EMAIL --body "$(terraform output -raw app_service_account_email)" --repo "${GITHUB_OWNER}/${DEMO_REPO_NAME}"
 gh secret set GAR_REPOSITORY --body "$(terraform output -raw artifact_registry_repo)" --repo "${GITHUB_OWNER}/${DEMO_REPO_NAME}"
 gh secret set GAR_LOCATION --body "${REGION}-docker.pkg.dev" --repo "${GITHUB_OWNER}/${DEMO_REPO_NAME}"
 ```
