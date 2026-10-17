@@ -1,0 +1,11 @@
+# Example terraform.tfvars for GDI Agent
+# Copy to terraform.tfvars and populate with environment-specific values.
+
+name_prefix  = "gdi"
+project_id   = "your-gcp-project-id"
+region       = "us-central1"
+environment  = "production"
+image_tag    = "latest"
+
+github_app_id      = "123456"
+bridge_service_url = "https://gdi-bridge-xyz-uc.a.run.app"

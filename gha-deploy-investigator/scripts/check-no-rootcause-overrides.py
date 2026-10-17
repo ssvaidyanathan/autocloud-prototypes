@@ -141,9 +141,13 @@ def check_no_regex_incident_classifiers(file_path: Path) -> List[Tuple[int, str]
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
-    files_to_check = [
-        repo_root / "agent" / "app" / "synthesizer.py",
-    ]
+    if len(sys.argv) > 1:
+        files_to_check = [Path(arg).resolve() for arg in sys.argv[1:]]
+    else:
+        files_to_check = [
+            repo_root / "agent" / "app" / "synthesizer.py",
+            repo_root / "agent" / "app" / "dispatcher.py",
+        ]
 
     all_violations: List[str] = []
 

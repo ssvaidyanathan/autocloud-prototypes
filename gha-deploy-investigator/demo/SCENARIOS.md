@@ -81,12 +81,20 @@ The reset script idempotently:
 
 ---
 
-## Seeding a Standalone Customer Repository
+## Seeding Standalone Repository: `ssvaidyanathan/gdi-sample-pipeline-app`
 
-To create a clean, standalone Git repository suitable for publishing to GitHub for live end-to-end evaluation:
+To seed the standalone customer demo repository (`ssvaidyanathan/gdi-sample-pipeline-app`) for live end-to-end evaluation:
 
 ```bash
+# 1. Seed demo app to temporary directory or dedicated worktree
 ./demo/seed-demo-repo.sh /tmp/gdi-sample-pipeline-app
+
+# 2. Push to GitHub remote (conducted by coordinator / deployment administrator)
+cd /tmp/gdi-sample-pipeline-app
+git remote add origin https://github.com/ssvaidyanathan/gdi-sample-pipeline-app.git
+git branch -M main
+# git push -u origin main
 ```
 
-The seeded directory contains exclusively the customer-facing microservice (`sample-pipeline-app/`) with zero scenario triggers or leaked evaluation answers.
+The seeded repository contains exclusively the customer-facing microservice (`sample-pipeline-app/`) with its complete multi-stage CI/CD pipeline (`.github/workflows/pipeline.yml`), Docker packaging, tests, and deployment scripts, with zero fault injection tooling or leaked evaluation answers.
+

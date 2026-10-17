@@ -414,3 +414,41 @@ Resolved all 5 review findings from `phase3-round1-review.md`:
 
 
 
+
+
+## 2026-10-17 - Phase 4: Guardrails, Infrastructure, Documentation & Packaging
+- **Author**: `gha-dev-1` (Developer Agent)
+- **Role**: Developer
+- **Supervisor**: `gha-em`
+- **Branch**: `feat/gha-deploy-investigator`
+- **Status**: Completed
+
+### 1. Overview & Objectives
+Implemented Phase 4: Guardrails, Infrastructure, Documentation & Packaging per `design.md` Section 6 and Amendments 5, 6, and 7:
+1. **CI Guardrail Scripts**: Ported and adapted all required guardrails in `gha-deploy-investigator/scripts/`:
+   - `scripts/check-contracts.sh`: Enforces byte-identical synchronization between `bridge/app/contracts/` and `agent/app/contracts/`.
+   - `scripts/check-no-literal-projects.sh`: Enforces zero forbidden environment-specific identifiers (via `FORBIDDEN_LITERALS`), zero un-externalized Gemini model literals in code, valid CI workflow badge URLs, and invokes markdown link verification.
+   - `scripts/check-markdown-links.py`: Verifies all relative links across repository markdown files resolve to existing files.
+   - `scripts/check-no-rootcause-overrides.py`: Enforces AST static checks on `synthesizer.py` and `dispatcher.py` to prevent post-LLM root cause template overrides or regex classifiers outside labeled automated fallback paths.
+   - `scripts/check-no-demo-overfit.sh`: Enforces that no scenario numbers, demo identifiers, or canned answers exist in `agent/app/`.
+   - `scripts/copy-secrets.sh`: Helper script to replicate Secret Manager secrets at deploy time from existing `incident-sre-agent` secrets to `gdi-` secrets without committing secret values or echoing them to stdout.
+2. **Dedicated Terraform Stacks**:
+   - `bridge/infra/terraform/`: Self-contained, parameterized Terraform manifests (`main.tf`, `variables.tf`, `outputs.tf`, `terraform.tfvars.example`) defining `gdi-bridge` Cloud Run service, `gdi-tasks-queue` Cloud Tasks queue, Secret Manager secrets (`gdi-github-webhook-secret`, `gdi-servicenow-password`, `gdi-servicenow-webhook-token`), and IAM bindings. Parameterized with `variable "project_id"`, `variable "region"`, `variable "environment"`. Zero hardcoded project IDs or secrets!
+   - `agent/infra/terraform/`: Parameterized Terraform manifests defining `gdi-agent` Cloud Run service with internal ingress (`INGRESS_TRAFFIC_INTERNAL_ONLY`), service accounts (`gdi-agent-sa`, `gdi-tasks-invoker-sa`), IAM roles (`roles/aiplatform.user`, `roles/logging.viewer`, `roles/run.viewer`, `roles/run.invoker`), and Secret Manager secret (`gdi-github-app-private-key`).
+3. **Comprehensive Documentation**:
+   - `gha-deploy-investigator/README.md`: Project overview, capabilities, architecture diagram, local testing, scenario catalog, configuration, deployment, and documentation index.
+   - `gha-deploy-investigator/docs/ARCHITECTURE.md`: Full system architecture detailing inbound webhook verification, canonical normalization, Cloud Tasks dispatch, multi-stage diagnostic engine, reverse ServiceNow incident flow, and asynchronous GitHub Check Run / PR write-back.
+   - `gha-deploy-investigator/docs/CONFIGURATION.md`: Complete environment variable reference, personal GitHub App setup guide and App Manifest YAML (for user-owned personal GitHub App for `ssvaidyanathan` per Amendment 7), and ServiceNow integration settings.
+   - `gha-deploy-investigator/docs/DEPLOY.md`: Step-by-step deployment guide using Terraform, Secret Manager, and `copy-secrets.sh`.
+   - `gha-deploy-investigator/demo/SCENARIOS.md`: Updated runbook detailing all 4 stages, external fault triggers, commit & revert workflow, and seeding to standalone repo `ssvaidyanathan/gdi-sample-pipeline-app`.
+   - Root `README.md`: Updated to list `gha-deploy-investigator` alongside `incident-sre-agent`.
+   - `.github/workflows/gha-deploy-investigator-ci.yml`: Added GitHub Actions CI workflow covering contracts check, no-literals check, de-overfit guards, ruff linter, unit & component tests, and Terraform formatting & validation.
+
+### 2. Verification Gates
+- **Contracts Sync Check**: `bash scripts/check-contracts.sh` -> SUCCESS: Contracts are byte-identical.
+- **De-overfit Guard Check**: `bash scripts/check-no-demo-overfit.sh` -> SUCCESS: De-overfit guard check passed cleanly.
+- **Root Cause AST Check**: `python3 scripts/check-no-rootcause-overrides.py` -> SUCCESS: Root cause guard check passed cleanly.
+- **No Literal Projects & Link Check**: `bash scripts/check-no-literal-projects.sh` -> SUCCESS: All literal, repository URL, and link checks passed cleanly (verified 11 markdown links, zero forbidden literals).
+- **Offline Hermetic Test Suite**: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/pytest` -> 50 passed in 3.08s (100% offline).
+- **Ruff Linter**: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator` -> All checks passed!
+- **Working Tree Cleanliness**: Verified `git status` clean after test suite runs.
