@@ -80,12 +80,6 @@ variable "servicenow_instance_url" {
   default     = ""
 }
 
-variable "servicenow_username" {
-  description = "ServiceNow integration username"
-  type        = string
-  default     = ""
-}
-
 variable "cloud_run_timeout_seconds" {
   description = "Cloud Run timeout in seconds for GDI Bridge"
   type        = number

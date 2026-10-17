@@ -462,7 +462,7 @@ Implemented Phase 4: Guardrails, Infrastructure, Documentation & Packaging per `
 - **Status**: Completed
 
 ### 1. Overview & Objectives
-Implemented AMENDMENT 9 per coordinator guidance following deletion of pre-existing console secrets in `cloud-assist-fde-7`:
+Implemented AMENDMENT 9 per coordinator guidance following deletion of pre-existing console secrets in the target GCP project:
 1. **Revert Secret Adoption Logic**:
    - Reverted commit `4d8d329` via `git revert 4d8d329 --no-edit` (`ce29ec8`).
    - Removed `scripts/import-secrets.sh` and complex adoption overrides.
@@ -488,4 +488,38 @@ Implemented AMENDMENT 9 per coordinator guidance following deletion of pre-exist
 - **No Literal Projects & Link Check**: `bash scripts/check-no-literal-projects.sh` -> SUCCESS.
 - **Markdown Links Check**: `python3 scripts/check-markdown-links.py` -> Scanned 11 markdown files, 11 links verified [PASS].
 - **Offline Hermetic Pytest Suite**: `pytest` -> 50 passed in 3.20s (100% offline).
+- **Ruff Linter**: `ruff check .` -> All checks passed!
+
+
+## 2026-10-17 - Amendment 10: ServiceNow Username Secret in Terraform & Sanitization
+- **Author**: `gha-dev-1` (Developer Agent)
+- **Role**: Developer
+- **Supervisor**: `gha-em`
+- **Branch**: `feat/gha-deploy-investigator`
+- **Status**: Completed
+
+### 1. Overview & Objectives
+Implemented AMENDMENT 10 per coordinator instructions:
+1. **ServiceNow Username Secret in Bridge Terraform**:
+   - Added `google_secret_manager_secret.servicenow_username` (`${var.name_prefix}-servicenow-username`) to `bridge/infra/terraform/main.tf`.
+   - Added `google_secret_manager_secret_iam_member.bridge_snow_username_access` granting `roles/secretmanager.secretAccessor` to `bridge_sa`.
+   - Updated `google_cloud_run_v2_service.bridge` container env: mounted `SERVICENOW_USERNAME` via secret reference to `servicenow_username.secret_id` (version "latest").
+   - Added `bridge_snow_username_access` to `depends_on`.
+   - Removed `variable "servicenow_username"` from `bridge/infra/terraform/variables.tf` and removed `servicenow_username = "..."` from `terraform.tfvars.example`.
+2. **Canonical 5-Secret Architecture Confirmed**:
+   - Agent stack: `${name_prefix}-github-app-private-key`
+   - Bridge stack: `${name_prefix}-github-webhook-secret`, `${name_prefix}-servicenow-username`, `${name_prefix}-servicenow-password`, `${name_prefix}-servicenow-webhook-token`
+3. **Replication Script (`scripts/copy-secrets.sh`)**:
+   - Included `${SOURCE_PREFIX}-servicenow-username` in replication mapping to `${TARGET_PREFIX}-servicenow-username`, with alternative source name checking.
+4. **Documentation Updates**:
+   - Updated `docs/DEPLOY.md` and `docs/CONFIGURATION.md` to reflect all 5 secrets and the updated staged deployment walkthrough.
+   - Sanitized line 465 of `docs/PROJECT_LOG.md` to replace the literal project ID with a generic descriptor.
+
+### 2. Verification Gates
+- **Contracts Sync Check**: `bash scripts/check-contracts.sh` -> SUCCESS: Contracts are byte-identical.
+- **De-overfit Guard Check**: `bash scripts/check-no-demo-overfit.sh` -> SUCCESS.
+- **Root Cause AST Check**: `python3 scripts/check-no-rootcause-overrides.py` -> SUCCESS.
+- **No Literal Projects & Link Check**: `FORBIDDEN_LITERALS="cloud-assist-fde-7" bash scripts/check-no-literal-projects.sh` -> SUCCESS.
+- **Markdown Links Check**: `python3 scripts/check-markdown-links.py` -> Scanned 11 markdown files, 11 links verified [PASS].
+- **Offline Hermetic Pytest Suite**: `pytest` -> 50 passed in 3.30s (100% offline).
 - **Ruff Linter**: `ruff check .` -> All checks passed!

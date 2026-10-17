@@ -71,10 +71,14 @@ copy_secret() {
             --replication-policy="automatic"
     fi
 
-    # Check if source secret exists with source prefix or without
+    # Check if source secret exists with source prefix, bridge infix, or without
     local actual_source=""
     if gcloud secrets describe "${source_secret}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
         actual_source="${source_secret}"
+    elif gcloud secrets describe "${source_secret/${SOURCE_PREFIX}-/${SOURCE_PREFIX}-bridge-}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+        actual_source="${source_secret/${SOURCE_PREFIX}-/${SOURCE_PREFIX}-bridge-}"
+    elif gcloud secrets describe "bridge-${source_secret#${SOURCE_PREFIX}-}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+        actual_source="bridge-${source_secret#${SOURCE_PREFIX}-}"
     elif gcloud secrets describe "${source_secret#${SOURCE_PREFIX}-}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
         actual_source="${source_secret#${SOURCE_PREFIX}-}"
     fi
@@ -95,6 +99,7 @@ copy_secret() {
 }
 
 # 1. Copy ServiceNow credentials
+copy_secret "${SOURCE_PREFIX}-servicenow-username" "${TARGET_PREFIX}-servicenow-username"
 copy_secret "${SOURCE_PREFIX}-servicenow-password" "${TARGET_PREFIX}-servicenow-password"
 copy_secret "${SOURCE_PREFIX}-servicenow-webhook-token" "${TARGET_PREFIX}-servicenow-webhook-token"
 

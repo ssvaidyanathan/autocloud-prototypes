@@ -35,7 +35,7 @@ Before beginning deployment, ensure you have:
 > To maintain the **Zero Secret Values in Git/Terraform State** invariant, Terraform manages only the Secret Manager resource definitions and IAM role bindings. It never manages versions or payload values.
 > 
 > Therefore, deployment must proceed in three strictly sequenced stages:
-> 1. **Stage A**: Terraform provisions the Secret Manager secret resources, IAM accessors, and Cloud Tasks queue.
+> 1. **Stage A**: Terraform provisions the 5 Secret Manager secret resources, IAM accessors, and Cloud Tasks queue.
 > 2. **Stage B**: The administrator populates secret values/versions using `gcloud secrets versions add` or the GCP Console.
 > 3. **Stage C**: Container images are published and Cloud Run services are deployed.
 
@@ -43,9 +43,13 @@ Before beginning deployment, ensure you have:
 
 ## 3. Stage A: Provision Secret Resources & IAM via Terraform
 
-The standard deployment defines 4 Secret Manager secret resources across the two stacks:
-- **Agent Stack**: `${NAME_PREFIX}-github-app-private-key`
-- **Bridge Stack**: `${NAME_PREFIX}-github-webhook-secret`, `${NAME_PREFIX}-servicenow-password`, `${NAME_PREFIX}-servicenow-webhook-token`
+The standard deployment defines 5 Secret Manager secret resources across the two stacks:
+- **Agent Stack (1 secret)**: `${NAME_PREFIX}-github-app-private-key`
+- **Bridge Stack (4 secrets)**:
+  - `${NAME_PREFIX}-github-webhook-secret`
+  - `${NAME_PREFIX}-servicenow-username`
+  - `${NAME_PREFIX}-servicenow-password`
+  - `${NAME_PREFIX}-servicenow-webhook-token`
 
 To provision these secret resources and their IAM permissions before deploying Cloud Run:
 
@@ -75,12 +79,14 @@ terraform -chdir=bridge/infra/terraform apply \
     -var="region=${REGION}" \
     -var="name_prefix=${NAME_PREFIX}" \
     -target=google_secret_manager_secret.github_webhook_secret \
+    -target=google_secret_manager_secret.servicenow_username \
     -target=google_secret_manager_secret.servicenow_password \
     -target=google_secret_manager_secret.servicenow_webhook_token \
     -target=google_service_account.bridge_sa \
     -target=google_cloud_tasks_queue.tasks_queue \
     -target=google_cloud_tasks_queue_iam_member.bridge_task_enqueuer \
     -target=google_secret_manager_secret_iam_member.bridge_gh_secret_access \
+    -target=google_secret_manager_secret_iam_member.bridge_snow_username_access \
     -target=google_secret_manager_secret_iam_member.bridge_snow_pwd_access \
     -target=google_secret_manager_secret_iam_member.bridge_snow_token_access
 ```
@@ -89,7 +95,7 @@ terraform -chdir=bridge/infra/terraform apply \
 
 ## 4. Stage B: Populate Secret Values
 
-Once the secret resources exist in Secret Manager, populate enabled versions for all 4 secrets. Secret values are never entered into Terraform or committed to source control.
+Once the secret resources exist in Secret Manager, populate enabled versions for all 5 secrets. Secret values are never entered into Terraform or committed to source control.
 
 ### Option 1: Populate via `gcloud` CLI
 ```bash
@@ -103,12 +109,17 @@ gcloud secrets versions add "${NAME_PREFIX}-github-webhook-secret" \
     --data-file=<(printf "%s" "your-github-webhook-secret-token") \
     --project="${PROJECT_ID}"
 
-# 3. ServiceNow Password (Bridge)
+# 3. ServiceNow Username (Bridge)
+gcloud secrets versions add "${NAME_PREFIX}-servicenow-username" \
+    --data-file=<(printf "%s" "your-servicenow-username") \
+    --project="${PROJECT_ID}"
+
+# 4. ServiceNow Password (Bridge)
 gcloud secrets versions add "${NAME_PREFIX}-servicenow-password" \
     --data-file=<(printf "%s" "your-servicenow-password") \
     --project="${PROJECT_ID}"
 
-# 4. ServiceNow Webhook Token (Bridge)
+# 5. ServiceNow Webhook Token (Bridge)
 gcloud secrets versions add "${NAME_PREFIX}-servicenow-webhook-token" \
     --data-file=<(printf "%s" "your-servicenow-token") \
     --project="${PROJECT_ID}"
@@ -184,8 +195,7 @@ terraform apply \
     -var="agent_service_url=${AGENT_URL}" \
     -var="agent_service_account_email=${AGENT_SA}" \
     -var="tasks_invoker_service_account_email=${TASKS_INVOKER_SA}" \
-    -var="servicenow_instance_url=https://your-instance.service-now.com" \
-    -var="servicenow_username=gdi_integration_user"
+    -var="servicenow_instance_url=https://your-instance.service-now.com"
 
 # Capture Bridge public endpoint URL:
 BRIDGE_URL=$(terraform output -raw bridge_url)

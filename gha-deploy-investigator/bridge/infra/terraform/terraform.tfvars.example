@@ -8,7 +8,9 @@ environment  = "production"
 image_tag    = "latest"
 
 servicenow_instance_url = "https://your-instance.service-now.com"
-servicenow_username     = "gdi_bridge_user"
+
+# Note: ServiceNow username is managed as Secret Manager secret '${name_prefix}-servicenow-username'
+# and populated at deploy time alongside password and webhook token.
 
 # Values populated after agent deployment:
 agent_service_url                   = "https://gdi-agent-xyz-uc.a.run.app"

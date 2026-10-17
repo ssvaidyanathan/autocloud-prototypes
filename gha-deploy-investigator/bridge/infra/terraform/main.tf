@@ -56,6 +56,16 @@ resource "google_secret_manager_secret" "github_webhook_secret" {
   }
 }
 
+resource "google_secret_manager_secret" "servicenow_username" {
+  project   = var.project_id
+  secret_id = "${var.name_prefix}-servicenow-username"
+  labels    = local.common_labels
+
+  replication {
+    auto {}
+  }
+}
+
 resource "google_secret_manager_secret" "servicenow_password" {
   project   = var.project_id
   secret_id = "${var.name_prefix}-servicenow-password"
@@ -80,6 +90,13 @@ resource "google_secret_manager_secret" "servicenow_webhook_token" {
 resource "google_secret_manager_secret_iam_member" "bridge_gh_secret_access" {
   project   = var.project_id
   secret_id = google_secret_manager_secret.github_webhook_secret.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.bridge_sa.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "bridge_snow_username_access" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.servicenow_username.secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.bridge_sa.email}"
 }
@@ -156,11 +173,16 @@ resource "google_cloud_run_v2_service" "bridge" {
         name  = "SERVICENOW_INSTANCE_URL"
         value = var.servicenow_instance_url
       }
-      env {
-        name  = "SERVICENOW_USERNAME"
-        value = var.servicenow_username
-      }
 
+      env {
+        name = "SERVICENOW_USERNAME"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.servicenow_username.secret_id
+            version = "latest"
+          }
+        }
+      }
       env {
         name = "GITHUB_WEBHOOK_SECRET"
         value_source {
@@ -193,6 +215,7 @@ resource "google_cloud_run_v2_service" "bridge" {
 
   depends_on = [
     google_secret_manager_secret_iam_member.bridge_gh_secret_access,
+    google_secret_manager_secret_iam_member.bridge_snow_username_access,
     google_secret_manager_secret_iam_member.bridge_snow_pwd_access,
     google_secret_manager_secret_iam_member.bridge_snow_token_access,
   ]

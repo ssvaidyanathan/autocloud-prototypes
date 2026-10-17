@@ -25,9 +25,9 @@ This document provides a comprehensive configuration reference for `gha-deploy-i
 | `GITHUB_API_URL` | String | `https://api.github.com` | Base URL of the GitHub REST API |
 | `ENABLE_GITHUB_WRITEBACK` | Boolean | `true` | Whether to create/update GitHub Check Runs and PR comments |
 | `SERVICENOW_INSTANCE_URL` | String | `None` | ServiceNow base URL (e.g. `https://dev12345.service-now.com`) |
-| `SERVICENOW_USERNAME` | String | `None` | ServiceNow integration user account |
-| `SERVICENOW_PASSWORD` | String (Secret) | `None` | ServiceNow integration user password |
-| `SERVICENOW_WEBHOOK_TOKEN` | String (Secret) | `None` | Optional token for ServiceNow inbound webhooks |
+| `SERVICENOW_USERNAME` | String (Secret) | `None` | ServiceNow integration username (mounted from Secret Manager secret `gdi-servicenow-username`) |
+| `SERVICENOW_PASSWORD` | String (Secret) | `None` | ServiceNow integration user password (mounted from Secret Manager secret `gdi-servicenow-password`) |
+| `SERVICENOW_WEBHOOK_TOKEN` | String (Secret) | `None` | Optional token for ServiceNow inbound webhooks (mounted from Secret Manager secret `gdi-servicenow-webhook-token`) |
 | `SERVICENOW_IN_PROGRESS_STATE` | String | `"2"` | State integer value assigned to newly created incidents |
 
 ### 1.2 GDI Agent (`agent`)
@@ -108,7 +108,9 @@ Populate the ServiceNow integration credentials into Secret Manager:
 ./scripts/copy-secrets.sh --project-id "${PROJECT_ID}" --source-prefix isa --target-prefix gdi
 
 # Or set directly:
+gcloud secrets versions add gdi-servicenow-username --data-file=<(printf "%s" "YOUR_SERVICENOW_USERNAME") --project="${PROJECT_ID}"
 gcloud secrets versions add gdi-servicenow-password --data-file=<(printf "%s" "YOUR_SERVICENOW_PASSWORD") --project="${PROJECT_ID}"
+gcloud secrets versions add gdi-servicenow-webhook-token --data-file=<(printf "%s" "YOUR_SERVICENOW_TOKEN") --project="${PROJECT_ID}"
 ```
 
 ### 3.2 Required ServiceNow User Roles
@@ -124,3 +126,17 @@ The integration user specified in `SERVICENOW_USERNAME` must possess the followi
 - **State**: `2` (In Progress)
 - **Work Notes**: Formatted markdown analysis with probable root cause, evidence table, and suggested remediation commands.
 - **Attachment**: `investigation-report.html` containing interactive styling, failure timeline, and specialist telemetry breakdown.
+
+---
+
+## 4. Terraform-Managed Secret Architecture (5 Secrets)
+
+Terraform manages resource definitions and IAM bindings for 5 canonical secrets across the Agent and Bridge stacks. Secret versions and payload values are never stored in Terraform state or source code.
+
+| Stack | Secret ID | Consumer | Purpose |
+|---|---|---|---|
+| **Agent** | `${name_prefix}-github-app-private-key` | `gdi-agent-sa` | RSA private key for GitHub App authentication and Check Run write-back |
+| **Bridge** | `${name_prefix}-github-webhook-secret` | `gdi-bridge-sa` | Shared secret for verifying `X-Hub-Signature-256` inbound webhook HMACs |
+| **Bridge** | `${name_prefix}-servicenow-username` | `gdi-bridge-sa` | Integration user for ServiceNow Table and Attachment REST APIs |
+| **Bridge** | `${name_prefix}-servicenow-password` | `gdi-bridge-sa` | Basic auth password for ServiceNow REST APIs |
+| **Bridge** | `${name_prefix}-servicenow-webhook-token` | `gdi-bridge-sa` | Bearer token for verifying inbound ServiceNow webhook callbacks |
