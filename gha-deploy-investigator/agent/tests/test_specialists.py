@@ -9,6 +9,7 @@ from agent.app.tools.runtime_tools import (
     add_mock_log,
     reset_runtime_state,
     set_mock_revision,
+    set_mock_service_revisions,
 )
 
 
@@ -336,3 +337,95 @@ class TestSpecialists:
         )
         assert match2 is not None
         assert match2.group("srv1") == "my-cool-service"
+
+    def test_runtime_health_case_a_no_revision_existed_at_failure_time(self) -> None:
+        """Case A: initial deploy failure where no revision existed at failure time.
+
+        Revisions list is either empty or revisions were created strictly after the failure window.
+        Must accurately state that no revision existed at failure time.
+        """
+        reset_runtime_state()
+        specialist = RuntimeHealthSpecialist()
+        incident = _make_incident("deploy")
+        # Failure occurred at 05:01:00 UTC
+        incident.opened_at = datetime(2026, 10, 17, 5, 1, 0, tzinfo=timezone.utc)
+        job = {"id": 101, "name": "deploy-cloudrun"}
+        step = {"name": "Deploy to Cloud Run", "conclusion": "failure"}
+        log_text = (
+            "Deploying container to Cloud Run service [sample-app] in region [us-central1]...\n"
+            "ERROR: (gcloud.run.deploy) PERMISSION_DENIED: Access denied.\n"
+        )
+
+        # Revisions were created later (e.g. 05:26:00 UTC)
+        set_mock_service_revisions(
+            "sample-app",
+            [
+                {
+                    "revision_name": "sample-app-00001-cwl",
+                    "create_time": "2026-10-17T05:26:00Z",
+                }
+            ],
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "deploy"
+        # Must dynamically compute that no revision existed at failure time
+        assert any(
+            "No revision existed at failure time" in e.excerpt
+            for e in res.evidence_items
+            if e.kind == "cloud_run_service"
+        )
+        assert not any(
+            "Active revision at failure time" in e.excerpt
+            for e in res.evidence_items
+        )
+        assert not any(
+            "Active revision from previous deployment" in e.excerpt
+            for e in res.evidence_items
+        )
+
+    def test_runtime_health_case_b_prior_revision_existed_at_failure_time(self) -> None:
+        """Case B: subsequent update deploy failure where a prior revision existed at failure time.
+
+        Revisions list contains a revision created before the failure window.
+        Must dynamically name that active revision at failure time.
+        """
+        reset_runtime_state()
+        specialist = RuntimeHealthSpecialist()
+        incident = _make_incident("deploy")
+        # Failure occurred at 06:00:00 UTC
+        incident.opened_at = datetime(2026, 10, 17, 6, 0, 0, tzinfo=timezone.utc)
+        job = {"id": 102, "name": "deploy-cloudrun"}
+        step = {"name": "Deploy to Cloud Run", "conclusion": "failure"}
+        log_text = (
+            "Deploying container to Cloud Run service [sample-app] in region [us-central1]...\n"
+            "ERROR: (gcloud.run.deploy) PERMISSION_DENIED: Access denied.\n"
+        )
+
+        # Prior revision existed at 05:26:00 UTC (before failure at 06:00:00 UTC)
+        set_mock_service_revisions(
+            "sample-app",
+            [
+                {
+                    "revision_name": "sample-app-00001-cwl",
+                    "create_time": "2026-10-17T05:26:00Z",
+                }
+            ],
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "deploy"
+        # Must dynamically identify the active prior revision by name
+        assert any(
+            "Active revision at failure time was sample-app-00001-cwl" in e.excerpt
+            for e in res.evidence_items
+            if e.kind == "cloud_run_service"
+        )
+        assert not any(
+            "No revision existed at failure time" in e.excerpt
+            for e in res.evidence_items
+        )
+        assert not any(
+            "Active revision from previous deployment" in e.excerpt
+            for e in res.evidence_items
+        )

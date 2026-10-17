@@ -3,24 +3,32 @@ import os
 from typing import Any, Optional
 
 from ..config import AgentConfig, get_settings
-from .registry import readonly_tool
+from .registry import default_query_cache, readonly_tool
 
 logger = logging.getLogger(__name__)
 
 # In-memory mock stores for offline test hermeticity
 _mock_revisions: dict[str, dict[str, Any]] = {}
+_mock_service_revisions: dict[str, list[dict[str, Any]]] = {}
 _mock_logs: list[dict[str, Any]] = []
 
 
 def reset_runtime_state() -> None:
     """Reset simulated runtime telemetry state."""
     _mock_revisions.clear()
+    _mock_service_revisions.clear()
     _mock_logs.clear()
+    default_query_cache.clear()
 
 
 def set_mock_revision(revision_name: str, data: dict[str, Any]) -> None:
     """Register simulated Cloud Run revision data for hermetic tests."""
     _mock_revisions[revision_name] = data
+
+
+def set_mock_service_revisions(service_name: str, revisions: list[dict[str, Any]]) -> None:
+    """Register simulated Cloud Run revisions for a service."""
+    _mock_service_revisions[service_name] = revisions
 
 
 def add_mock_log(entry: dict[str, Any]) -> None:
@@ -142,11 +150,49 @@ def describe_service(
     }
 
 
+@readonly_tool(
+    name="list_service_revisions",
+    description="List Cloud Run revisions for a service with creation timestamps and status",
+)
+def list_service_revisions(
+    service_name: str,
+    region: str = "us-central1",
+    client: Optional[Any] = None,
+    config: Optional[AgentConfig] = None,
+) -> list[dict[str, Any]]:
+    """List Cloud Run revisions for a service."""
+    cfg = config or get_settings()
+
+    if service_name in _mock_service_revisions:
+        return _mock_service_revisions[service_name]
+
+    matching = [
+        dict(rev, revision_name=rev_name)
+        for rev_name, rev in _mock_revisions.items()
+        if rev.get("service_name") == service_name or service_name in rev_name
+    ]
+    if matching:
+        return matching
+
+    if client is not None and hasattr(client, "list_revisions"):
+        try:
+            return list(client.list_revisions(service_name=service_name, region=region))
+        except Exception as exc:
+            logger.warning("Error querying client for revisions of %s: %s", service_name, exc)
+
+    if getattr(cfg, "is_local", False) or os.environ.get("APP_ENV") in ("local", "test", "dev"):
+        return []
+
+    return []
+
+
 __all__ = [
     "add_mock_log",
     "describe_cloud_run_revision",
     "describe_service",
+    "list_service_revisions",
     "query_cloud_logging",
     "reset_runtime_state",
     "set_mock_revision",
+    "set_mock_service_revisions",
 ]

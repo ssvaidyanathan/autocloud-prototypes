@@ -27,10 +27,14 @@ class InvestigationDeduplicator:
 
     Prevents duplicate Cloud Tasks dispatches or concurrent retries from
     running parallel multi-agent LLM pipelines or causing duplicate write-backs.
+    Note: Cloud Tasks task-name deduplication and ServiceNow correlation_id
+    remain the primary production guards; this in-memory monitor acts as a
+    fast-path guard against concurrent in-flight retries.
     """
 
-    def __init__(self, ttl_seconds: float = 300.0) -> None:
+    def __init__(self, ttl_seconds: float = 300.0, max_entries: int = 100) -> None:
         self.ttl_seconds = ttl_seconds
+        self.max_entries = max_entries
         self._lock = threading.Lock()
         self._inflight: dict[str, tuple[threading.Condition, list[Any]]] = {}
         self._results: dict[str, tuple[float, InvestigationResult]] = {}
@@ -42,6 +46,12 @@ class InvestigationDeduplicator:
         ]
         for k in expired_keys:
             del self._results[k]
+
+        # Keep cache small and clean: purge oldest entries if exceeding max_entries
+        if len(self._results) > self.max_entries:
+            sorted_by_age = sorted(self._results.items(), key=lambda item: item[1][0])
+            for k, _ in sorted_by_age[: len(self._results) - self.max_entries]:
+                del self._results[k]
 
     def deduplicate(
         self,

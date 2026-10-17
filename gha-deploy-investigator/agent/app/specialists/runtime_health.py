@@ -20,6 +20,7 @@ from ..tools.github_tools import (
 from ..tools.runtime_tools import (
     describe_cloud_run_revision,
     describe_service,
+    list_service_revisions,
     query_cloud_logging,
 )
 
@@ -37,6 +38,74 @@ REGION_PATTERN = re.compile(
     r"(?:region\s+\[(?P<reg1>[a-zA-Z0-9_\-]+)\]|--region(?:=|\s+)(?P<reg2>[a-zA-Z0-9_\-]+))",
     re.IGNORECASE,
 )
+
+
+def compute_revision_context(
+    revisions: list[dict[str, Any]],
+    failure_time: datetime,
+    srv_status: str = "Ready",
+    region: str = "us-central1",
+) -> str:
+    """Dynamically compute temporal revision context relative to workflow run failure window.
+
+    - If no revisions existed at or before failure_time:
+      Dynamically state that no revision existed at failure time.
+    - If prior revision(s) existed at or before failure_time:
+      Dynamically name the active revision at failure time.
+    """
+    if failure_time.tzinfo is None:
+        failure_time = failure_time.replace(tzinfo=timezone.utc)
+    else:
+        failure_time = failure_time.astimezone(timezone.utc)
+
+    prior_revisions: list[tuple[str, datetime]] = []
+
+    for rev in revisions:
+        rev_name = (
+            rev.get("revision_name")
+            or rev.get("name")
+            or rev.get("metadata", {}).get("name")
+            or ""
+        )
+        ct_raw = (
+            rev.get("create_time")
+            or rev.get("createTime")
+            or rev.get("created_at")
+            or rev.get("metadata", {}).get("creationTimestamp")
+        )
+        if not ct_raw:
+            continue
+
+        ct: Optional[datetime] = None
+        if isinstance(ct_raw, datetime):
+            ct = ct_raw if ct_raw.tzinfo else ct_raw.replace(tzinfo=timezone.utc)
+        elif isinstance(ct_raw, str):
+            try:
+                ct = datetime.fromisoformat(ct_raw.replace("Z", "+00:00"))
+                if ct.tzinfo is None:
+                    ct = ct.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+
+        if ct and ct <= failure_time and rev_name:
+            prior_revisions.append((rev_name, ct))
+
+    # Sort prior revisions by creation timestamp descending (newest first)
+    prior_revisions.sort(key=lambda item: item[1], reverse=True)
+
+    if prior_revisions:
+        active_prior_rev = prior_revisions[0][0]
+        return (
+            f"Live Service Status: {srv_status} (Active revision at failure time was "
+            f"{active_prior_rev}; current deployment failed before new revision could be "
+            f"created; region: '{region}')"
+        )
+
+    return (
+        f"Live Service Status: {srv_status} (Note: No revision existed at failure time; "
+        "deployment failed prior to initial revision creation. Current status reflects "
+        "revisions created subsequent to the failure event.)"
+    )
 
 
 class RuntimeHealthSpecialist(BaseSpecialist):
@@ -67,6 +136,7 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             FunctionTool(describe_cloud_run_revision),
             FunctionTool(query_cloud_logging),
             FunctionTool(describe_service),
+            FunctionTool(list_service_revisions),
         ]
         self.llm_agent = llm_agent or LlmAgent(
             name="runtime_health_specialist",
@@ -118,6 +188,14 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                 service_name=service_name, region=region, client=client, config=config
             )
 
+        @functools.wraps(list_service_revisions)
+        def _bound_list_service_revisions(
+            service_name: str, region: str = "us-central1"
+        ) -> list[dict[str, Any]]:
+            return list_service_revisions(
+                service_name=service_name, region=region, client=client, config=config
+            )
+
         @functools.wraps(describe_cloud_run_revision)
         def _bound_describe_revision(
             service_name: str, revision_name: str, region: str = "us-central1"
@@ -144,6 +222,7 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             FunctionTool(_bound_fetch_workflow_run_jobs),
             FunctionTool(_bound_get_commit_diff),
             FunctionTool(_bound_describe_service),
+            FunctionTool(_bound_list_service_revisions),
             FunctionTool(_bound_describe_revision),
             FunctionTool(_bound_query_logging),
         ]
@@ -156,13 +235,15 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             "   - Invoke 'fetch_job_logs' (repo, job_id) to inspect the deployment step runner "
             "logs containing the decisive failure error (e.g. IAM actAs permissions, gcloud "
             "deployment errors).\n"
-            "   - And/or invoke 'describe_service' or 'describe_cloud_run_revision' to inspect "
-            "runtime telemetry.\n"
-            "   NOTE ON LIVE STATE: 'describe_service' reports live cluster state. If a "
-            "deployment failed before an initial revision could be created (e.g. IAM permission "
-            "error), note that no revision existed at failure time and current status reflects "
-            "revisions created subsequent to the failure event; do NOT present current health as "
-            "success of the failed deployment.\n"
+            "   - And/or invoke 'describe_service', 'list_service_revisions', or "
+            "'describe_cloud_run_revision' to inspect runtime telemetry and revision history.\n"
+            "   NOTE ON LIVE STATE: 'describe_service' reports live cluster state. "
+            "Compare revision creation timestamps from 'list_service_revisions' against the "
+            "run failure window. If no revision existed at failure time, note that no revision "
+            "existed at failure time and current status reflects revisions created subsequent "
+            "to the failure event. If a prior revision existed at failure time, dynamically note "
+            "the active revision name at failure time. Do NOT present current health as success "
+            "of the failed deployment.\n"
             "3. On Turn 3, conclude immediately by invoking 'set_model_response' with your "
             "structured Findings report citing the tool outputs."
         )
@@ -194,19 +275,42 @@ class RuntimeHealthSpecialist(BaseSpecialist):
         revision_name: Optional[str],
         region: str,
         log_text: str = "",
+        service_revisions: Optional[list[dict[str, Any]]] = None,
+        client: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Deploy Step")
         evidence_items = list(findings.evidence)
+        if not revision_name and service_revisions is None:
+            try:
+                service_revisions = list_service_revisions(
+                    service_name=service_name,
+                    region=region,
+                    client=client,
+                    config=config,
+                )
+            except Exception:
+                service_revisions = []
+
         # Ensure live state in cloud_run_service items is clearly contextualized
         for i, ev in enumerate(evidence_items):
             if ev.kind == "cloud_run_service" and not revision_name:
-                if "No revision existed at failure time" not in ev.excerpt:
+                if (
+                    "No revision existed at failure time" not in ev.excerpt
+                    and "Active revision at failure time" not in ev.excerpt
+                ):
+                    rev_ctx = compute_revision_context(
+                        revisions=service_revisions or [],
+                        failure_time=incident.opened_at,
+                        srv_status="Ready",
+                        region=region,
+                    )
                     evidence_items[i] = EvidenceItem(
                         kind="cloud_run_service",
                         excerpt=(
-                            f"{ev.excerpt} (Note: No revision existed at failure time; "
-                            "deployment failed prior to initial revision creation. Current "
-                            "status reflects revisions created subsequent to the failure event.)"
+                            rev_ctx
+                            if ev.excerpt.startswith("Live Service Status:")
+                            else f"{ev.excerpt} ({rev_ctx})"
                         ),
                         timestamp=ev.timestamp,
                         console_url=ev.console_url,
@@ -322,6 +426,8 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                         revision_name,
                         region,
                         log_text=log_text,
+                        client=client,
+                        config=config,
                     )
             except Exception as exc:
                 logger.info("RuntimeHealthSpecialist ADK runner pass skipped/failed: %s", exc)
@@ -349,7 +455,8 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             except Exception as exc:
                 logger.warning("Failed to fetch job logs in RuntimeHealthSpecialist: %s", exc)
 
-        # 2. Always describe service with temporal context
+        # 2. Always describe service and query revisions with temporal context
+        srv_status = "Ready"
         try:
             service_info = self.tracked_tool_call(
                 "describe_service",
@@ -362,27 +469,44 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                 ),
             )
             srv_status = service_info.get("status", "Ready")
-            if not revision_name:
-                srv_excerpt = (
-                    f"Live Service Status: {srv_status} (Note: No revision existed at failure "
-                    "time; deployment failed prior to initial revision creation. Current status "
-                    "reflects revisions created subsequent to the failure event.)"
-                )
-            else:
-                srv_excerpt = (
-                    f"Live Service Status: {srv_status} (region: '{region}', "
-                    f"target revision: '{revision_name}')"
-                )
-            evidence_items.append(
-                EvidenceItem(
-                    kind="cloud_run_service",
-                    excerpt=srv_excerpt,
-                    timestamp=now,
-                    console_url=incident.external_url,
-                )
-            )
         except Exception as exc:
             logger.warning("Failed to describe Cloud Run service: %s", exc)
+
+        service_revisions: list[dict[str, Any]] = []
+        try:
+            service_revisions = self.tracked_tool_call(
+                "list_service_revisions",
+                {"service_name": service_name, "region": region},
+                lambda: list_service_revisions(
+                    service_name=service_name,
+                    region=region,
+                    client=client,
+                    config=config,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Failed to list service revisions: %s", exc)
+
+        if not revision_name:
+            srv_excerpt = compute_revision_context(
+                revisions=service_revisions,
+                failure_time=incident.opened_at,
+                srv_status=srv_status,
+                region=region,
+            )
+        else:
+            srv_excerpt = (
+                f"Live Service Status: {srv_status} (region: '{region}', "
+                f"target revision: '{revision_name}')"
+            )
+        evidence_items.append(
+            EvidenceItem(
+                kind="cloud_run_service",
+                excerpt=srv_excerpt,
+                timestamp=now,
+                console_url=incident.external_url,
+            )
+        )
 
         err_lines = extract_error_lines(log_text)
         if err_lines:

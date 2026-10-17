@@ -90,6 +90,7 @@ def test_specialists_tool_segregation_and_readonly_allowlist() -> None:
         "describe_cloud_run_revision",
         "query_cloud_logging",
         "describe_service",
+        "list_service_revisions",
     }
     for t in runtime_spec.get_tools():
         assert isinstance(t, FunctionTool)
