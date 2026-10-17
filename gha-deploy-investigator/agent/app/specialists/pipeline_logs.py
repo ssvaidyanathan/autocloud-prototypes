@@ -143,38 +143,63 @@ class PipelineLogsSpecialist(BaseSpecialist):
         matches = list(LINT_PATTERN.finditer(log_text))
         annotations: list[CheckRunAnnotation] = []
         evidence_items: list[EvidenceItem] = []
-
         now = datetime.now(timezone.utc)
-        culprit_file = "codebase"
-        culprit_rule = "Lint Rule"
-        culprit_msg = "Static analysis check failed"
 
-        for match in matches[:5]:
+        parsed_items: list[dict[str, Any]] = []
+        for match in matches:
             raw_path = match.group("file").strip()
             f_path = re.sub(r"^\.?/", "", raw_path)
             line_str = match.group("line")
             line = int(line_str) if line_str else 1
             code = (match.group("code") or "").strip()
             msg = match.group("msg").strip()
-            culprit_file = f_path
-            culprit_rule = code or "Syntax/Rule Error"
-            culprit_msg = msg
+            msg = re.sub(r"^\[\*\]\s*", "", msg).strip()
+            clean_msg = msg.replace("`", "")
+            parsed_items.append(
+                {
+                    "file": f_path,
+                    "line": line,
+                    "code": code,
+                    "msg": clean_msg,
+                    "raw_match": match.group(0).strip(),
+                }
+            )
 
+        total_errors = len(parsed_items)
+        if total_errors == 0:
+            return self._diagnose_generic(incident, failing_job, failing_step, log_text)
+
+        # Group by file
+        files_map: dict[str, list[dict[str, Any]]] = {}
+        for item in parsed_items:
+            files_map.setdefault(item["file"], []).append(item)
+
+        # Build annotations (up to 50)
+        for item in parsed_items[:50]:
             annotations.append(
                 CheckRunAnnotation(
-                    path=f_path,
-                    start_line=line,
-                    end_line=line,
+                    path=item["file"],
+                    start_line=item["line"],
+                    end_line=item["line"],
                     annotation_level="failure",
-                    title=f"Linter Violation: {code}" if code else "Linter Violation",
-                    message=msg,
+                    title=(
+                        f"Linter Violation: {item['code']}"
+                        if item["code"]
+                        else "Linter Violation"
+                    ),
+                    message=item["msg"],
                 )
             )
 
+        # Add sample runner log lines to evidence_items
+        for item in parsed_items[:5]:
             evidence_items.append(
                 EvidenceItem(
                     kind="github_runner_log",
-                    excerpt=f"[{code or 'LINT'}] {f_path}:{line}: {msg}\n{match.group(0).strip()}",
+                    excerpt=(
+                        f"[{item['code'] or 'LINT'}] {item['file']}:{item['line']}: "
+                        f"{item['msg']}\n{item['raw_match']}"
+                    ),
                     timestamp=now,
                     console_url=incident.external_url,
                 )
@@ -182,6 +207,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
 
         # Correlate with commit diff if available
         diff_info = ""
+        changed_files: list[str] = []
         if incident.github_repo and incident.github_head_sha:
             try:
                 diff_data = get_commit_diff(
@@ -191,29 +217,96 @@ class PipelineLogsSpecialist(BaseSpecialist):
                     config=config,
                 )
                 if diff_data and "files" in diff_data:
-                    changed_files = [f.get("filename") for f in diff_data["files"]]
-                    if culprit_file in changed_files:
-                        diff_info = (
-                            f" Confirmed: culprit file '{culprit_file}' "
-                            "was modified in this commit."
-                        )
+                    changed_files = [
+                        re.sub(r"^\.?/", "", f.get("filename", ""))
+                        for f in diff_data["files"]
+                        if f.get("filename")
+                    ]
             except Exception as exc:
                 logger.debug("Could not fetch commit diff: %s", exc)
 
-        summary = (
-            f"Linter failed on step '{step_name}'. Rule '{culprit_rule}' violated in "
-            f"'{culprit_file}': {culprit_msg}.{diff_info}"
-        )
-        probable_cause = (
-            f"Static analysis rule violation '{culprit_rule}' in '{culprit_file}': {culprit_msg}."
+        violating_files = list(files_map.keys())
+        confirmed_files = [f for f in violating_files if f in changed_files]
+        if confirmed_files and len(confirmed_files) == len(violating_files):
+            files_str = ", ".join(f"'{f}'" for f in confirmed_files)
+            diff_info = (
+                f" Confirmed: all {total_errors} errors are in {files_str} "
+                "modified in this commit."
+            )
+        elif confirmed_files:
+            files_str = ", ".join(f"'{f}'" for f in confirmed_files)
+            diff_info = f" Confirmed: violations in {files_str} modified in this commit."
+
+        # Construct structured breakdown per file
+        file_breakdowns: list[str] = []
+        primary_file = violating_files[0]
+        for f_path, items in files_map.items():
+            code_counts: dict[str, int] = {}
+            code_examples: dict[str, str] = {}
+            for it in items:
+                c = it["code"] or "LINT"
+                code_counts[c] = code_counts.get(c, 0) + 1
+                if c not in code_examples and it["msg"]:
+                    code_examples[c] = it["msg"]
+
+            sorted_codes = sorted(code_counts.keys(), key=lambda k: (-code_counts[k], k))
+            parts = []
+            for c in sorted_codes:
+                cnt = code_counts[c]
+                msg_example = code_examples.get(c, "")
+                if msg_example:
+                    parts.append(f"{cnt}x {c} ({msg_example})")
+                else:
+                    parts.append(f"{cnt}x {c}")
+            file_breakdowns.append(f"{f_path}: " + ", ".join(parts))
+
+        if len(files_map) == 1:
+            code_counts = {}
+            code_examples = {}
+            for it in files_map[primary_file]:
+                c = it["code"] or "LINT"
+                code_counts[c] = code_counts.get(c, 0) + 1
+                if c not in code_examples and it["msg"]:
+                    code_examples[c] = it["msg"]
+            sorted_codes = sorted(code_counts.keys(), key=lambda k: (-code_counts[k], k))
+            breakdown_parts = []
+            for c in sorted_codes:
+                cnt = code_counts[c]
+                msg_example = code_examples.get(c, "")
+                if msg_example:
+                    breakdown_parts.append(f"{cnt}x {c} ({msg_example})")
+                else:
+                    breakdown_parts.append(f"{cnt}x {c}")
+            breakdown = ", ".join(breakdown_parts)
+            probable_cause = (
+                f"Linter detected {total_errors} errors in '{primary_file}': {breakdown}."
+            )
+        else:
+            breakdown = "; ".join(file_breakdowns)
+            probable_cause = (
+                f"Linter detected {total_errors} errors across {len(files_map)} files: "
+                f"{breakdown}."
+            )
+
+        summary = f"Linter failed on step '{step_name}'. {probable_cause}{diff_info}"
+
+        evidence_items.insert(
+            0,
+            EvidenceItem(
+                kind="linter_breakdown",
+                excerpt=(
+                    f"Found {total_errors} linter error(s) in {len(files_map)} file(s).\n"
+                    f"Breakdown:\n{breakdown}\n"
+                    + (f"{diff_info.strip()}\n" if diff_info else "")
+                ),
+                timestamp=now,
+                console_url=incident.external_url,
+            ),
         )
 
         remediation = [
-            (
-                f"Run linter locally to inspect and auto-fix: ruff check --fix {culprit_file} "
-                "(or npm run lint -- --fix)"
-            ),
-            f"Fix code rule violation '{culprit_rule}' in {culprit_file}",
+            f"Run linter locally to inspect and auto-fix: ruff check --fix {primary_file}",
+            f"Fix code rule violations in {primary_file}: {breakdown}",
             "Commit and push corrected code to trigger pipeline re-evaluation",
         ]
 
@@ -225,7 +318,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
             confidence=0.95 if matches else 0.80,
             evidence_items=evidence_items,
             remediation_actions=remediation,
-            suggested_fix=f"Resolve '{culprit_rule}' in {culprit_file}",
+            suggested_fix=f"Resolve linter errors in {primary_file}",
             annotations=annotations,
         )
 

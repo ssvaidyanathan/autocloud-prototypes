@@ -60,7 +60,7 @@ class TestInvestigationDispatcher:
         assert "unused_token" in result.report.probable_root_cause.text
         assert "Automated fallback" not in result.report.probable_root_cause.text
         assert result.report.probable_root_cause.confidence > 0.8
-        assert len(result.report.evidence_by_area.get("logs", [])) == 1
+        assert len(result.report.evidence_by_area.get("logs", [])) >= 1
 
         # Validate that incident had its failing stage updated
         assert sample_request.incident.github_failing_stage == "lint"

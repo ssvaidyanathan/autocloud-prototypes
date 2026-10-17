@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import pytest
 from agent.app.contracts.incident import Incident
 from agent.app.specialists.iac_config import IaCConfigSpecialist
 from agent.app.specialists.pipeline_logs import PipelineLogsSpecialist
@@ -54,6 +55,48 @@ class TestSpecialists:
         assert res.annotations[0].path == "app/main.py"
         assert res.annotations[0].start_line == 42
         assert any("ruff check --fix" in act for act in res.remediation_actions)
+
+    def test_pipeline_logs_specialist_structured_linter_parsing_mixed_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        specialist = PipelineLogsSpecialist()
+        incident = _make_incident("lint")
+        job = {"id": 10, "name": "lint"}
+        step = {"name": "Run Ruff Lint", "conclusion": "failure"}
+
+        log_text = (
+            "app/main.py:4:1: F401 [*] `math` imported but unused\n"
+            "app/main.py:6:1: E402 Module level import not at top of file\n"
+            "app/main.py:7:1: E402 Module level import not at top of file\n"
+            "app/main.py:8:1: E402 Module level import not at top of file\n"
+            "app/main.py:9:1: E402 Module level import not at top of file\n"
+            "app/main.py:10:1: E402 Module level import not at top of file\n"
+            "app/main.py:11:1: E402 Module level import not at top of file\n"
+            "app/main.py:12:1: E402 Module level import not at top of file\n"
+            "app/main.py:15:10: E702 Multiple statements on one line (semicolon)\n"
+            "Found 9 errors.\n"
+        )
+
+        monkeypatch.setattr(
+            "agent.app.specialists.pipeline_logs.get_commit_diff",
+            lambda **kwargs: {"files": [{"filename": "app/main.py"}]},
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "lint"
+        assert res.confidence >= 0.90
+        assert "Linter detected 9 errors in 'app/main.py'" in res.probable_cause
+        assert "7x E402" in res.probable_cause
+        assert "1x E702" in res.probable_cause
+        assert "1x F401" in res.probable_cause
+        assert (
+            "Confirmed: all 9 errors are in 'app/main.py' modified in this commit."
+            in res.summary
+        )
+        assert "potentially in other files" not in res.summary
+        assert "potentially in other files" not in res.probable_cause
+        assert len(res.annotations) == 9
+        assert any(e.kind == "linter_breakdown" for e in res.evidence_items)
 
     def test_pipeline_logs_specialist_pytest_failure(self) -> None:
         specialist = PipelineLogsSpecialist()

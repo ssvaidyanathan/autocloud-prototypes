@@ -218,3 +218,74 @@ class TestVertexAIGemini:
         assert not res["root_cause"].startswith("{")
         assert '"root_cause"' not in res["root_cause"]
         assert "The deployment failed because permission was denied to actAs" in res["root_cause"]
+
+    def test_generate_gemini_synthesis_includes_structured_specialist_findings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = AgentConfig(
+            app_env="production",
+            gcp_project="test-proj-123",
+            vertex_ai_location="us-central1",
+            gemini_model="test-gemini-model",
+        )
+
+        class MockCreds:
+            valid = True
+            token = "mock-vertex-bearer-token"
+
+            def refresh(self, req: Any) -> None:
+                pass
+
+        monkeypatch.setattr("google.auth.default", lambda scopes: (MockCreds(), "test-proj-123"))
+
+        captured_request: dict[str, Any] = {}
+
+        def mock_post(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            nonlocal captured_request
+            captured_request = kwargs.get("json", {})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": (
+                                            '{"root_cause": "Linter error", '
+                                            '"remediation_actions": [], "confidence": 0.95}'
+                                        )
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = httpx.Client()
+        client.post = mock_post  # type: ignore[method-assign]
+
+        specialist_findings = {
+            "probable_cause": "Linter detected 9 errors in 'main.py': 7x E402, 1x E702, 1x F401",
+            "findings": ["Error 1", "Error 2"],
+        }
+        diagnostic_summary = "Specialist diagnostic summary text"
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "test"},
+            failing_step={"name": "Run linter"},
+            log_text="Linter output...",
+            config=cfg,
+            client=client,
+            specialist_findings=specialist_findings,
+            diagnostic_summary=diagnostic_summary,
+        )
+
+        assert res is not None
+        prompt_text = captured_request["contents"][0]["parts"][0]["text"]
+        assert "Specialist Analysis & Findings:" in prompt_text
+        assert "7x E402, 1x E702, 1x F401" in prompt_text
+        assert "Diagnostic Summary: Specialist diagnostic summary text" in prompt_text
+        assert "Do NOT guess, approximate, or misattribute error counts" in prompt_text

@@ -9,8 +9,8 @@ from google.adk.tools.function_tool import FunctionTool
 from ..config import AgentConfig
 from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
+from ..log_utils import extract_error_lines
 from ..specialists.base import BaseSpecialist, DiagnosticResult, SkillTracker
-from ..synthesizer import extract_error_lines
 from ..tools.runtime_tools import (
     describe_cloud_run_revision,
     describe_service,

@@ -17,6 +17,8 @@ def generate_gemini_synthesis(
     log_text: str,
     config: Optional[AgentConfig] = None,
     client: Optional[httpx.Client] = None,
+    specialist_findings: Optional[dict[str, Any]] = None,
+    diagnostic_summary: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Generate grounded causal diagnosis using Vertex AI Gemini via REST API."""
     cfg = config or get_settings()
@@ -56,18 +58,41 @@ def generate_gemini_synthesis(
     step_name = failing_step.get("name", "execution")
     log_excerpt = log_text[-4000:] if len(log_text) > 4000 else log_text
 
+    findings_parts = []
+    if diagnostic_summary:
+        findings_parts.append(f"Diagnostic Summary: {diagnostic_summary}")
+    if specialist_findings:
+        cause = specialist_findings.get("probable_cause")
+        if cause:
+            findings_parts.append(f"Probable Cause: {cause}")
+        sumry = specialist_findings.get("summary")
+        if sumry and sumry != diagnostic_summary:
+            findings_parts.append(f"Summary: {sumry}")
+        findings_list = specialist_findings.get("findings")
+        if findings_list:
+            findings_parts.append("Findings:\n" + "\n".join(f"- {f}" for f in findings_list))
+
+    findings_context = ""
+    if findings_parts:
+        findings_context = "\nSpecialist Analysis & Findings:\n" + "\n".join(findings_parts) + "\n"
+
     prompt = (
         "You are an automated Site Reliability Engineering diagnostic assistant.\n"
         "Analyze the following failed GitHub Actions CI/CD pipeline step and raw runner logs:\n\n"
         f"Job: {job_name}\n"
         f"Step: {step_name}\n"
+        f"{findings_context}\n"
         f"Runner Logs:\n```\n{log_excerpt}\n```\n\n"
         "Instructions:\n"
-        "1. Identify the exact root cause grounded strictly in the provided runner log text.\n"
-        "2. Do NOT invent or hallucinate revision numbers, resource names, or "
+        "1. Identify the exact root cause grounded strictly in the provided runner log text and "
+        "specialist findings.\n"
+        "2. Incorporate the specialist's structured findings and exact error counts/codes. "
+        "Do NOT guess, approximate, or misattribute error counts, codes, or files. "
+        "If 7x E402, 1x E702, and 1x F401 were found, cite all codes and counts accurately.\n"
+        "3. Do NOT invent or hallucinate revision numbers, resource names, or "
         "projects not in the logs.\n"
-        "3. Provide actionable remediation steps to fix the root cause.\n"
-        "4. Respond with valid JSON with keys: 'root_cause' (string), "
+        "4. Provide actionable remediation steps to fix the root cause.\n"
+        "5. Respond with valid JSON with keys: 'root_cause' (string), "
         "'remediation_actions' (list of strings), 'confidence' (float between 0.0 and 1.0).\n"
     )
 
