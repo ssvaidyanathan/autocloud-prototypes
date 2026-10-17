@@ -89,7 +89,7 @@ To seed the standalone customer demo repository (`ssvaidyanathan/gdi-sample-pipe
 # 1. Seed demo app to temporary directory or dedicated worktree
 ./demo/seed-demo-repo.sh /tmp/gdi-sample-pipeline-app
 
-# 2. Push to GitHub remote (conducted by coordinator / deployment administrator)
+# 2. Push to GitHub remote (conducted by deployment administrator)
 cd /tmp/gdi-sample-pipeline-app
 git remote add origin https://github.com/ssvaidyanathan/gdi-sample-pipeline-app.git
 git branch -M main

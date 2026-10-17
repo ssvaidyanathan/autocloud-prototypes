@@ -48,7 +48,7 @@ This document provides a comprehensive configuration reference for `gha-deploy-i
 
 ## 2. GitHub App Setup Guide (Personal App for `ssvaidyanathan`)
 
-Per project architecture (Amendment 7), the GitHub integration runs via a personal GitHub App owned by user `ssvaidyanathan`.
+Per project architecture, the GitHub integration runs via a personal GitHub App owned by user `ssvaidyanathan`.
 
 ### 2.1 App Manifest YAML
 

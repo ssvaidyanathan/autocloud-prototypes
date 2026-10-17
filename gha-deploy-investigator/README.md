@@ -143,4 +143,3 @@ Infrastructure is provisioned using dedicated, parameterized Terraform manifests
 - [Configuration Reference](docs/CONFIGURATION.md)
 - [Deployment Guide](docs/DEPLOY.md)
 - [Pipeline Scenarios Runbook](demo/SCENARIOS.md)
-- [Project Activity Log](docs/PROJECT_LOG.md)
