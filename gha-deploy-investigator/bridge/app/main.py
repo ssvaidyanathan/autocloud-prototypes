@@ -39,6 +39,7 @@ def set_task_dispatcher(dispatcher: Optional[TaskDispatcher]) -> None:
 
 
 @app.get("/health")
+@app.get("/healthz")
 def health(settings: BridgeConfig = Depends(get_settings)) -> dict[str, str]:
     """Health check probe."""
     return {"status": "healthy", "service": settings.service_name}

@@ -138,6 +138,7 @@ def set_dispatcher(dispatcher: Optional[InvestigationDispatcher]) -> None:
 
 
 @app.get("/health")
+@app.get("/healthz")
 def health(settings: AgentConfig = Depends(get_settings)) -> dict[str, str]:
     return {"status": "healthy", "service": settings.service_name}
 
