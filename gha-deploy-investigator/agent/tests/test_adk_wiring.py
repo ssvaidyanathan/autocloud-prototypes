@@ -75,6 +75,7 @@ def test_specialists_tool_segregation_and_readonly_allowlist() -> None:
     logs_tool_names = [t.name for t in logs_spec.get_tools()]
     assert set(logs_tool_names) == {
         "fetch_job_logs",
+        "fetch_workflow_run_jobs",
         "get_commit_diff",
     }
     for t in logs_spec.get_tools():
@@ -83,6 +84,9 @@ def test_specialists_tool_segregation_and_readonly_allowlist() -> None:
     # 2. Runtime Health Specialist tools
     runtime_tool_names = [t.name for t in runtime_spec.get_tools()]
     assert set(runtime_tool_names) == {
+        "fetch_job_logs",
+        "fetch_workflow_run_jobs",
+        "get_commit_diff",
         "describe_cloud_run_revision",
         "query_cloud_logging",
         "describe_service",
@@ -93,8 +97,9 @@ def test_specialists_tool_segregation_and_readonly_allowlist() -> None:
     # 3. IaC Config Specialist tools
     iac_tool_names = [t.name for t in iac_spec.get_tools()]
     assert set(iac_tool_names) == {
-        "get_commit_diff",
         "fetch_job_logs",
+        "fetch_workflow_run_jobs",
+        "get_commit_diff",
     }
     for t in iac_spec.get_tools():
         assert isinstance(t, FunctionTool)

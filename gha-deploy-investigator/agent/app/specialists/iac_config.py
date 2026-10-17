@@ -11,7 +11,11 @@ from ..config import AgentConfig
 from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
 from ..specialists.base import BaseSpecialist, DiagnosticResult, SkillTracker
-from ..tools.github_tools import fetch_job_logs, get_commit_diff
+from ..tools.github_tools import (
+    fetch_job_logs,
+    fetch_workflow_run_jobs,
+    get_commit_diff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +46,9 @@ class IaCConfigSpecialist(BaseSpecialist):
             **kwargs,
         )
         self.adk_tools = [
-            FunctionTool(get_commit_diff),
             FunctionTool(fetch_job_logs),
+            FunctionTool(fetch_workflow_run_jobs),
+            FunctionTool(get_commit_diff),
         ]
         self.llm_agent = llm_agent or LlmAgent(
             name="iac_config_specialist",
@@ -73,18 +78,26 @@ class IaCConfigSpecialist(BaseSpecialist):
 
         skill_toolset = get_skill_toolset_for_target("iac_config")
 
-        @functools.wraps(get_commit_diff)
-        def _bound_get_commit_diff(repo: str, head_sha: str) -> dict[str, Any]:
-            return get_commit_diff(repo=repo, head_sha=head_sha, client=client, config=config)
-
         @functools.wraps(fetch_job_logs)
         def _bound_fetch_job_logs(repo: str, job_id: int) -> str:
             return fetch_job_logs(repo=repo, job_id=job_id, client=client, config=config)
 
+        @functools.wraps(fetch_workflow_run_jobs)
+        def _bound_fetch_workflow_run_jobs(repo: str, run_id: int) -> dict[str, Any]:
+            return fetch_workflow_run_jobs(repo=repo, run_id=run_id, client=client, config=config)
+
+        @functools.wraps(get_commit_diff)
+        def _bound_get_commit_diff(
+            repo: str, head_sha: str = "", commit_sha: str = ""
+        ) -> dict[str, Any]:
+            target_sha = commit_sha or head_sha
+            return get_commit_diff(repo=repo, head_sha=target_sha, client=client, config=config)
+
         bound_tools = [
             skill_toolset,
-            FunctionTool(_bound_get_commit_diff),
             FunctionTool(_bound_fetch_job_logs),
+            FunctionTool(_bound_fetch_workflow_run_jobs),
+            FunctionTool(_bound_get_commit_diff),
         ]
         instruction = (
             "You are an Infrastructure-as-Code (Terraform, YAML manifests) diagnostic "
@@ -168,6 +181,7 @@ class IaCConfigSpecialist(BaseSpecialist):
         repo = kwargs.get("repo") or incident.github_repo or incident.service_hint or ""
         head_sha = kwargs.get("head_sha") or incident.github_head_sha or ""
         job_id = kwargs.get("job_id") or int(failing_job.get("id", 0) or 0)
+        run_id = kwargs.get("run_id") or incident.github_run_id or 0
 
         # Attempt Pass 1: ADK Runner execution if LLM is available
         if self._is_llm_available():
@@ -178,7 +192,7 @@ class IaCConfigSpecialist(BaseSpecialist):
                 prompt_lines = [
                     f"Investigate IaC failure for incident {incident.id}: {incident.title}",
                     f"Job: {failing_job.get('name', 'iac')}, Step: {step_name}",
-                    f"Repository: {repo}, Head SHA: {head_sha}",
+                    f"Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}",
                     f"Log Excerpt:\n{log_text[:2000]}",
                     "",
                     "CRITICAL INSTRUCTIONS:",
@@ -186,7 +200,7 @@ class IaCConfigSpecialist(BaseSpecialist):
                         "1. Turn 1: Invoke load_skill exactly once with "
                         "skill_name='cloudrun-deploy-troubleshooting'."
                     ),
-                    "2. Turn 2: Invoke get_commit_diff (or fetch_job_logs) to inspect IaC changes.",
+                    "2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect IaC changes.",
                     (
                         "3. Turn 3: Conclude immediately by invoking set_model_response "
                         "with your Findings report."
@@ -217,7 +231,8 @@ class IaCConfigSpecialist(BaseSpecialist):
                 )
             except Exception as exc:
                 logger.debug("Could not fetch commit diff: %s", exc)
-        elif repo and job_id:
+
+        if repo and job_id:
             try:
                 self.tracked_tool_call(
                     "fetch_job_logs",

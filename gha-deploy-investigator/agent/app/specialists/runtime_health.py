@@ -1,7 +1,7 @@
 import functools
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from google.adk.agents import LlmAgent
@@ -12,6 +12,11 @@ from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
 from ..log_utils import extract_error_lines
 from ..specialists.base import BaseSpecialist, DiagnosticResult, SkillTracker
+from ..tools.github_tools import (
+    fetch_job_logs,
+    fetch_workflow_run_jobs,
+    get_commit_diff,
+)
 from ..tools.runtime_tools import (
     describe_cloud_run_revision,
     describe_service,
@@ -56,6 +61,9 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             **kwargs,
         )
         self.adk_tools = [
+            FunctionTool(fetch_job_logs),
+            FunctionTool(fetch_workflow_run_jobs),
+            FunctionTool(get_commit_diff),
             FunctionTool(describe_cloud_run_revision),
             FunctionTool(query_cloud_logging),
             FunctionTool(describe_service),
@@ -87,6 +95,21 @@ class RuntimeHealthSpecialist(BaseSpecialist):
 
         skill_toolset = get_skill_toolset_for_target("runtime_health")
 
+        @functools.wraps(fetch_job_logs)
+        def _bound_fetch_job_logs(repo: str, job_id: int) -> str:
+            return fetch_job_logs(repo=repo, job_id=job_id, client=client, config=config)
+
+        @functools.wraps(fetch_workflow_run_jobs)
+        def _bound_fetch_workflow_run_jobs(repo: str, run_id: int) -> dict[str, Any]:
+            return fetch_workflow_run_jobs(repo=repo, run_id=run_id, client=client, config=config)
+
+        @functools.wraps(get_commit_diff)
+        def _bound_get_commit_diff(
+            repo: str, head_sha: str = "", commit_sha: str = ""
+        ) -> dict[str, Any]:
+            target_sha = commit_sha or head_sha
+            return get_commit_diff(repo=repo, head_sha=target_sha, client=client, config=config)
+
         @functools.wraps(describe_service)
         def _bound_describe_service(
             service_name: str, region: str = "us-central1"
@@ -117,6 +140,9 @@ class RuntimeHealthSpecialist(BaseSpecialist):
 
         bound_tools = [
             skill_toolset,
+            FunctionTool(_bound_fetch_job_logs),
+            FunctionTool(_bound_fetch_workflow_run_jobs),
+            FunctionTool(_bound_get_commit_diff),
             FunctionTool(_bound_describe_service),
             FunctionTool(_bound_describe_revision),
             FunctionTool(_bound_query_logging),
@@ -126,12 +152,19 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             "CRITICAL WORKFLOW REQUIREMENT:\n"
             "1. On Turn 1, invoke 'load_skill' exactly once with "
             "skill_name='cloudrun-deploy-troubleshooting'. Do NOT invoke other skills.\n"
-            "2. On Turn 2, invoke at least one read-only data tool ('describe_service' or\n"
-            "'describe_cloud_run_revision') to inspect deployment status and container "
-            "conditions.\n"
+            "2. On Turn 2, invoke decisive read-only diagnostic data tools for the failure:\n"
+            "   - Invoke 'fetch_job_logs' (repo, job_id) to inspect the deployment step runner "
+            "logs containing the decisive failure error (e.g. IAM actAs permissions, gcloud "
+            "deployment errors).\n"
+            "   - And/or invoke 'describe_service' or 'describe_cloud_run_revision' to inspect "
+            "runtime telemetry.\n"
+            "   NOTE ON LIVE STATE: 'describe_service' reports live cluster state. If a "
+            "deployment failed before a new revision could be created (e.g. IAM permission "
+            "error), the live service status may report 'Ready' for the pre-existing revision; "
+            "this must be contextualized as prior revision health, NOT as success of the "
+            "failed deployment.\n"
             "3. On Turn 3, conclude immediately by invoking 'set_model_response' with your "
-            "structured Findings report. Incorporate service telemetry conditions into your "
-            "findings."
+            "structured Findings report citing the tool outputs."
         )
         model_to_use = (
             getattr(self.llm_agent, "model", None)
@@ -160,22 +193,49 @@ class RuntimeHealthSpecialist(BaseSpecialist):
         service_name: str,
         revision_name: Optional[str],
         region: str,
+        log_text: str = "",
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Deploy Step")
         evidence_items = list(findings.evidence)
-        if not evidence_items:
-            rev_label = f" (revision: '{revision_name}')" if revision_name else ""
-            evidence_items.append(
-                EvidenceItem(
-                    kind="github_runner_log",
-                    excerpt=(
-                        f"Deploy step '{step_name}' failed for service '{service_name}'"
-                        f"{rev_label} (region: '{region}')."
-                    ),
-                    timestamp=datetime.now(timezone.utc),
-                    console_url=incident.external_url,
+        # Ensure live state in cloud_run_service items is clearly contextualized
+        for i, ev in enumerate(evidence_items):
+            if ev.kind == "cloud_run_service" and not revision_name:
+                if "Active revision from previous deployment" not in ev.excerpt:
+                    evidence_items[i] = EvidenceItem(
+                        kind="cloud_run_service",
+                        excerpt=(
+                            f"{ev.excerpt} (Active revision from previous deployment; "
+                            "current deployment failed before new revision could be created)"
+                        ),
+                        timestamp=ev.timestamp,
+                        console_url=ev.console_url,
+                    )
+        # Ensure decisive runner log error lines are included in evidence
+        has_runner_log = any(e.kind == "github_runner_log" for e in evidence_items)
+        if not has_runner_log:
+            err_lines = extract_error_lines(log_text) if log_text else []
+            if err_lines:
+                evidence_items.append(
+                    EvidenceItem(
+                        kind="github_runner_log",
+                        excerpt="\n".join(err_lines[:5]),
+                        timestamp=datetime.now(timezone.utc),
+                        console_url=incident.external_url,
+                    )
                 )
-            )
+            else:
+                rev_label = f" (revision: '{revision_name}')" if revision_name else ""
+                evidence_items.append(
+                    EvidenceItem(
+                        kind="github_runner_log",
+                        excerpt=(
+                            f"Deploy step '{step_name}' failed for service '{service_name}'"
+                            f"{rev_label} (region: '{region}')."
+                        ),
+                        timestamp=datetime.now(timezone.utc),
+                        console_url=incident.external_url,
+                    )
+                )
 
         diag = DiagnosticResult(
             stage="deploy",
@@ -208,6 +268,11 @@ class RuntimeHealthSpecialist(BaseSpecialist):
         now = datetime.now(timezone.utc)
         evidence_items: list[EvidenceItem] = []
 
+        repo = kwargs.get("repo") or incident.github_repo or ""
+        job_id = kwargs.get("job_id") or failing_job.get("id") or 0
+        run_id = kwargs.get("run_id") or incident.github_run_id or 0
+        head_sha = kwargs.get("head_sha") or incident.github_head_sha or ""
+
         # 1. Extract deployment target coordinates
         service_name = self._extract_service_name(incident, log_text)
         revision_name = self._extract_revision_name(service_name, log_text)
@@ -224,7 +289,8 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                         f"Investigate Cloud Run deploy failure for incident {incident.id}: "
                         f"{incident.title}"
                     ),
-                    f"Job: {failing_job.get('name', 'deploy')}, Step: {step_name}",
+                    f"Job: {failing_job.get('name', 'deploy')} (ID: {job_id}), Step: {step_name}",
+                    f"Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}",
                     f"Target Service: {service_name}, Region: {region}",
                     f"Revision: {revision_name or 'None (failed pre-revision)'}",
                     f"Runner Log Excerpt:\n{log_text[:2000]}",
@@ -235,8 +301,9 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                         "skill_name='cloudrun-deploy-troubleshooting'."
                     ),
                     (
-                        "2. Turn 2: Invoke describe_service (or describe_cloud_run_revision) to "
-                        "inspect runtime telemetry."
+                        "2. Turn 2: Invoke fetch_job_logs(repo, job_id) to inspect the deployment "
+                        "runner logs containing the decisive failure error, and/or "
+                        "describe_service / describe_cloud_run_revision for runtime telemetry."
                     ),
                     (
                         "3. Turn 3: Conclude immediately by invoking set_model_response "
@@ -253,6 +320,7 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                         service_name,
                         revision_name,
                         region,
+                        log_text=log_text,
                     )
             except Exception as exc:
                 logger.info("RuntimeHealthSpecialist ADK runner pass skipped/failed: %s", exc)
@@ -262,7 +330,25 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             "load_skill", {"skill_name": "cloudrun-deploy-troubleshooting"}
         )
 
-        # 2. Always describe service
+        # 1. Fetch deployment job logs if job_id and repo are available
+        if repo and job_id:
+            try:
+                fetched_logs = self.tracked_tool_call(
+                    "fetch_job_logs",
+                    {"repo": repo, "job_id": job_id},
+                    lambda: fetch_job_logs(
+                        repo=repo,
+                        job_id=job_id,
+                        client=client,
+                        config=config,
+                    ),
+                )
+                if fetched_logs and not log_text:
+                    log_text = fetched_logs
+            except Exception as exc:
+                logger.warning("Failed to fetch job logs in RuntimeHealthSpecialist: %s", exc)
+
+        # 2. Always describe service with temporal context
         try:
             service_info = self.tracked_tool_call(
                 "describe_service",
@@ -274,13 +360,22 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                     config=config,
                 ),
             )
+            srv_status = service_info.get("status", "Ready")
+            if not revision_name:
+                srv_excerpt = (
+                    f"Live Service Status: {srv_status} (Active revision from previous "
+                    "deployment; current deployment failed before new revision could be "
+                    f"created; region: '{region}')"
+                )
+            else:
+                srv_excerpt = (
+                    f"Live Service Status: {srv_status} (region: '{region}', "
+                    f"target revision: '{revision_name}')"
+                )
             evidence_items.append(
                 EvidenceItem(
                     kind="cloud_run_service",
-                    excerpt=(
-                        f"Cloud Run service '{service_name}' status: "
-                        f"{service_info.get('status', 'Ready')} (region: '{region}')"
-                    ),
+                    excerpt=srv_excerpt,
                     timestamp=now,
                     console_url=incident.external_url,
                 )
@@ -334,11 +429,17 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             except Exception as exc:
                 logger.warning("Failed to describe Cloud Run revision: %s", exc)
 
-        # 4. Query Cloud Logging for container stderr
+        # 4. Query Cloud Logging for container stderr scoped to failure window (±15 min)
         log_entries: list[dict[str, Any]] = []
         if revision_name:
+            opened_at = incident.opened_at or now
+            t_start = (opened_at - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            t_end = (opened_at + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            filter_q = (
+                f'resource.type="cloud_run_revision" revision_name="{revision_name}" '
+                f'timestamp>="{t_start}" timestamp<="{t_end}"'
+            )
             try:
-                filter_q = f'resource.type="cloud_run_revision" revision_name="{revision_name}"'
                 log_entries = self.tracked_tool_call(
                     "query_cloud_logging",
                     {"filter_query": filter_q},

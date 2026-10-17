@@ -208,6 +208,7 @@ class Dispatcher(BaseAgent):
                 repo=repo,
                 head_sha=incident.github_head_sha,
                 job_id=job_id,
+                run_id=incident.github_run_id,
             )
 
             # 5. Synthesize final Report

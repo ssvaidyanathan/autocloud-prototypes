@@ -120,10 +120,10 @@ class RuntimeHealthSuccessLlm(BaseLlm):
                     role="model",
                     parts=[
                         types.Part.from_function_call(
-                            name="describe_service",
+                            name="fetch_job_logs",
                             args={
-                                "service_name": "sample-app",
-                                "region": "us-central1",
+                                "repo": "my-org/sample-app",
+                                "job_id": 102,
                             },
                         )
                     ],
@@ -131,11 +131,12 @@ class RuntimeHealthSuccessLlm(BaseLlm):
             )
         else:
             json_text = (
-                '{"summary": "RuntimeHealth agentic pass verified Cloud Run service status.", '
-                '"confidence": 0.90, '
-                '"anomalies": ["Service healthy but container failed deployment probe"], '
-                '"evidence": [{"kind": "cloud_run_service", '
-                '"excerpt": "Service sample-app Ready in us-central1", '
+                '{"summary": "RuntimeHealth agentic pass diagnosed deploy failure '
+                'from runner logs.", '
+                '"confidence": 0.95, '
+                '"anomalies": ["iam.serviceaccounts.actAs denied on runtime SA"], '
+                '"evidence": [{"kind": "github_runner_log", '
+                '"excerpt": "Permission iam.serviceaccounts.actAs denied", '
                 '"timestamp": "2026-10-17T08:00:00Z"}]}'
             )
             yield LlmResponse(
@@ -241,11 +242,12 @@ def test_runtime_health_specialist_multi_turn_runner() -> None:
 
     res = specialist.diagnose(incident, job, step, log_text)
     assert res.stage == "deploy"
-    assert "RuntimeHealth agentic pass verified Cloud Run service status" in res.summary
+    assert "RuntimeHealth agentic pass" in res.summary
     assert res.skill_first is True
     assert "cloudrun-deploy-troubleshooting" in res.skills_used
     assert len(res.queries_run) >= 1
-    assert any("describe_service" in q for q in res.queries_run)
+    assert any("fetch_job_logs" in q for q in res.queries_run)
+    assert any("actAs" in e.excerpt for e in res.evidence_items)
 
 
 def test_iac_config_specialist_multi_turn_runner() -> None:

@@ -281,7 +281,14 @@ class TestSpecialists:
         assert "sample-app" in res.summary
         assert "cloudrun-deploy-troubleshooting" in res.skills_used
         assert res.skill_first is True
+        assert any("fetch_job_logs" in q for q in res.queries_run)
         assert any("describe_service" in q for q in res.queries_run)
+        # Live status contextualized with caveat that revision was not created
+        assert any(
+            "Active revision from previous deployment" in e.excerpt
+            for e in res.evidence_items
+            if e.kind == "cloud_run_service"
+        )
         # Verbatim error line excerpt in evidence
         assert any("PERMISSION_DENIED" in e.excerpt for e in res.evidence_items)
         # IAM actAs remediation recommended
@@ -307,6 +314,7 @@ class TestSpecialists:
         assert "-00001-deploy" not in res.summary
         assert res.skill_first is True
         assert "cloudrun-deploy-troubleshooting" in res.skills_used
+        assert any("fetch_job_logs" in q for q in res.queries_run)
         assert any("describe_service" in q for q in res.queries_run)
         # Must not produce remediation command asking to describe non-existent revision
         assert not any("revisions describe" in a for a in res.remediation_actions)
