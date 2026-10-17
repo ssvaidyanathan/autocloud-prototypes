@@ -452,3 +452,40 @@ Implemented Phase 4: Guardrails, Infrastructure, Documentation & Packaging per `
 - **Offline Hermetic Test Suite**: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/pytest` -> 50 passed in 3.08s (100% offline).
 - **Ruff Linter**: `/scion-volumes/scratchpad/projects/gha-deploy-investigator/.venv/bin/ruff check gha-deploy-investigator` -> All checks passed!
 - **Working Tree Cleanliness**: Verified `git status` clean after test suite runs.
+
+
+## 2026-10-17 - Amendment 9: Revert Adoption Logic & Document Deployment Sequencing
+- **Author**: `gha-dev-1` (Developer Agent)
+- **Role**: Developer
+- **Supervisor**: `gha-em`
+- **Branch**: `feat/gha-deploy-investigator`
+- **Status**: Completed
+
+### 1. Overview & Objectives
+Implemented AMENDMENT 9 per coordinator guidance following deletion of pre-existing console secrets in `cloud-assist-fde-7`:
+1. **Revert Secret Adoption Logic**:
+   - Reverted commit `4d8d329` via `git revert 4d8d329 --no-edit` (`ce29ec8`).
+   - Removed `scripts/import-secrets.sh` and complex adoption overrides.
+2. **Standard 4-Secret Architecture**:
+   - Confirmed both stacks cleanly manage definitions and IAM for the 4 canonical secrets with zero versions/values in git or Terraform state:
+     - `${NAME_PREFIX}-github-app-private-key` (Agent stack)
+     - `${NAME_PREFIX}-github-webhook-secret` (Bridge stack)
+     - `${NAME_PREFIX}-servicenow-password` (Bridge stack)
+     - `${NAME_PREFIX}-servicenow-webhook-token` (Bridge stack)
+3. **Deployment Sequencing Documentation (`docs/DEPLOY.md`)**:
+   - Documented the GCP Cloud Run dependency lifecycle: Cloud Run services mounting secrets via `secret_key_ref` require enabled secret versions at deploy time.
+   - Structured deployment into sequenced stages:
+     - Stage A: Terraform provisions Secret Manager secret resources, IAM role bindings, and Cloud Tasks queue.
+     - Stage B: Administrator populates secret values/versions via `gcloud` or console.
+     - Stage C: Container images are published to Artifact Registry.
+     - Stage D: Full Terraform apply deploys Cloud Run services.
+     - Stage E & F: Webhook wiring and post-deploy smoke verification.
+
+### 2. Verification Gates
+- **Contracts Sync Check**: `bash scripts/check-contracts.sh` -> SUCCESS: Contracts are byte-identical.
+- **De-overfit Guard Check**: `bash scripts/check-no-demo-overfit.sh` -> SUCCESS.
+- **Root Cause AST Check**: `python3 scripts/check-no-rootcause-overrides.py` -> SUCCESS.
+- **No Literal Projects & Link Check**: `bash scripts/check-no-literal-projects.sh` -> SUCCESS.
+- **Markdown Links Check**: `python3 scripts/check-markdown-links.py` -> Scanned 11 markdown files, 11 links verified [PASS].
+- **Offline Hermetic Pytest Suite**: `pytest` -> 50 passed in 3.20s (100% offline).
+- **Ruff Linter**: `ruff check .` -> All checks passed!
