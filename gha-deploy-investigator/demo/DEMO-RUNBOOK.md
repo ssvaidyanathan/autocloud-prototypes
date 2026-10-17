@@ -32,50 +32,95 @@ When a GitHub Actions workflow run fails, the autonomous diagnostic bridge and i
 
 ## 2. Prerequisites & Setup
 
-Before running the scenarios, ensure you have:
-1. **GitHub Repository Access**: Write/admin permissions to a sample pipeline repository (e.g., `your-org/sample-pipeline-app` seeded from `demo/seed-demo-repo.sh`).
-2. **Investigation Services Running**:
-   - The **Bridge Service** (`gdi-bridge`) listening for GitHub webhooks.
-   - The **Agent Service** (`gdi-agent`) accessible to the bridge.
-3. **ServiceNow Instance**: Active developer or production instance with credentials and table API access configured on the bridge.
-4. **Local Environment**:
-   - Git CLI configured with push access to the repository.
-   - Bash shell (Linux/macOS) with standard utilities (`sed`, `grep`, `mktemp`).
-   - Python 3.11+ virtual environment with `pytest` and `ruff`.
+### A. GitHub Authentication & Access
+- Ensure you have write/admin access to the sample pipeline repository: `https://github.com/ssvaidyanathan/gdi-sample-pipeline-app`.
+- Ensure GitHub CLI (`gh`) is installed and authenticated:
+  ```bash
+  gh auth status
+  # If not authenticated, run:
+  gh auth login
+  ```
+
+### B. Clone Both Repositories Side-by-Side
+The defect injection scripts are maintained in the prototype repository (`autocloud-prototypes`) to prevent leaking scenario hints or test harnesses into the target pipeline codebase.
+
+Create a dedicated workspace directory and clone both repositories side by side:
+
+```bash
+mkdir -p ~/demo-workspace && cd ~/demo-workspace
+
+# 1. Clone the prototype repository (contains scenario injection scripts)
+git clone https://github.com/ssvaidyanathan/autocloud-prototypes.git
+cd autocloud-prototypes
+git checkout feat/gha-deploy-investigator   # PR branch until merged into main
+cd ..
+
+# 2. Clone the target demo pipeline repository
+git clone https://github.com/ssvaidyanathan/gdi-sample-pipeline-app.git
+cd gdi-sample-pipeline-app
+```
+
+Your directory structure should resemble:
+```
+demo-workspace/
+├── autocloud-prototypes/
+│   └── gha-deploy-investigator/
+│       └── demo/
+│           └── scenarios/
+│               ├── trigger-lint-failure.sh
+│               ├── trigger-test-failure.sh
+│               ├── trigger-build-failure.sh
+│               ├── trigger-deploy-failure.sh
+│               └── reset-scenarios.sh
+└── gdi-sample-pipeline-app/
+    ├── app/
+    │   ├── __init__.py
+    │   ├── config.py
+    │   └── main.py
+    ├── tests/
+    │   └── test_main.py
+    ├── Dockerfile
+    └── scripts/
+        └── deploy.sh
+```
+
+### C. Services & Monitoring Links
+- **Investigation Services**: Live `gdi-bridge` and `gdi-agent` services deployed in Cloud Run receive webhooks automatically upon workflow completion.
+- **ServiceNow Console**: Access incidents at `https://dev377204.service-now.com` (Filter: `correlation_display=gha-deploy-investigator`).
+- **GitHub Actions Console**: Track workflow runs at `https://github.com/ssvaidyanathan/gdi-sample-pipeline-app/actions`.
 
 ---
 
 ## 3. Scenario Execution Walkthrough
 
-The demo repository includes deterministic injection scripts in `demo/scenarios/` that inject realistic defects into the sample application.
-
-Each scenario follows the same operational cycle:
-1. **Trigger & Push**: Run the injection script with `--commit` and push to your main branch.
-2. **Pipeline Concludes**: GitHub Actions runs the workflow and fails at the target stage.
-3. **Autonomous Investigation**: Bridge ingests the failure webhook, creates/updates ServiceNow incident, runs agent investigation, and posts dual write-back.
-4. **Verify Findings**: Verify ServiceNow incident state, work notes, attachment, GitHub Check Run, and GitHub commit comment.
-5. **Reset & Restore**: Revert the commit, push to main, and confirm the pipeline returns to green.
+Each scenario follows a standardized operational cycle:
+1. `cd gdi-sample-pipeline-app`
+2. `git pull origin main` to ensure a pristine local branch.
+3. Inject defect and commit: `../autocloud-prototypes/gha-deploy-investigator/demo/scenarios/trigger-<scenario>-failure.sh . --commit && git push origin main`
+4. Observe the pipeline failure and autonomous investigation on ServiceNow and GitHub.
+5. Reset: `git revert HEAD --no-edit && git push origin main`
+6. Confirm the pipeline completes with all jobs green before moving to the next scenario.
 
 ---
 
 ### Scenario 1: Lint & Code Style Violation
 
 #### Injected Defect
-Introduces unused imports (`F401`) and multiple statements on a single line (`E702`) in `app/main.py`.
+Introduces an unused import (`F401`) and multiple statements on a single line (`E702`) into `app/main.py`.
 
 #### Step 1: Inject & Push
-From the root of your cloned sample pipeline repository:
+From within `gdi-sample-pipeline-app`:
 ```bash
-# Inject the lint violation and create a conventional commit
-./demo/scenarios/trigger-lint-failure.sh . --commit
+cd gdi-sample-pipeline-app
+git pull origin main
 
-# Push commit to trigger the pipeline
-git push origin main
+# Inject lint violation, commit, and push
+../autocloud-prototypes/gha-deploy-investigator/demo/scenarios/trigger-lint-failure.sh . --commit && git push origin main
 ```
 
 #### Step 2: Pipeline Stage Failure & Timing
 - **Failing Job/Step**: `lint` job -> `Run Ruff Lint` step.
-- **Expected Duration**: Fails in approximately 15–30 seconds.
+- **Expected Duration**: Workflow fails in approximately 15–30 seconds.
 - **Log Snippet**:
   ```
   app/main.py:1:8: F401 [*] `math` imported but never used
@@ -84,18 +129,18 @@ git push origin main
   ```
 
 #### Step 3: Expected ServiceNow Write-Back
-- **Incident State**: Automatically created in state `New`, immediately transitioned to `In Progress (2)`.
-- **Short Description**: `[CI/CD Failure] your-org/sample-pipeline-app (lint)`
-- **Work Notes**: Formatted HTML summarizing the linter error breakdown.
-- **Attachment**: `ci_cd_investigation_report_INC00XXXXX.html` containing full audit details.
+- **Incident State**: Automatically created in state `New (1)` and updated to `In Progress (2)`.
+- **Short Description**: `[CI/CD Failure] ssvaidyanathan/gdi-sample-pipeline-app (lint)`
+- **Work Notes**: HTML summary detailing violations with file:line coordinates.
+- **Attachment**: Downloadable HTML investigation report `ci_cd_investigation_report_INC00XXXXX.html`.
 
 #### Step 4: Expected GitHub Write-Back
-- **Check Run**: `Autocloud / ServiceNow Incident Link` (conclusion: `neutral`) linking to the incident.
-- **Check Run Annotations**: Direct line annotations on `app/main.py` lines 1 and 5 highlighting `F401` and `E702`.
-- **Commit Comment**: Collapsible diagnostic sections detailing root cause, violation counts, and remediation.
+- **Check Run**: `Autocloud / ServiceNow Incident Link` (conclusion: `neutral`) linking to ServiceNow ticket.
+- **Annotations**: Inline check run annotations on `app/main.py` lines 1 and 5.
+- **Commit Comment**: Collapsible breakdown with root cause, log evidence, and suggested fix.
 
 #### Step 5: What a Good Diagnosis Looks Like
-- **Root Cause**: Explicitly cites the 2 linter violations (`F401` unused import `math` and `E702` semicolon multiple statements) in `app/main.py`.
+- **Root Cause**: Explicitly cites the 2 linter violations (`F401` unused import `math` and `E702` multiple statements) in `app/main.py`.
 - **Evidence Quote**: Exact runner log excerpt citing file paths, line numbers, and error codes.
 - **Causal Remediation**:
   - Remove unused import `math` from `app/main.py`.
@@ -104,31 +149,31 @@ git push origin main
 
 #### Step 6: Reset
 ```bash
-# Revert the scenario commit and push to main
-git revert HEAD --no-edit
-git push origin main
+cd gdi-sample-pipeline-app
+git revert HEAD --no-edit && git push origin main
 ```
-*Verify that the pipeline runs to completion (100% green).*
+*Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 ---
 
 ### Scenario 2: Broken Unit Test Assertion
 
 #### Injected Defect
-Appends a failing test `test_customer_tier_discount_calculation` in `tests/test_main.py` where an expected total does not match the hardcoded actual value. **No application source code is modified in the git diff.**
+Appends a failing test `test_customer_tier_discount_calculation` in `tests/test_main.py` where an expected total does not match the actual calculation. **No application source code is modified in the git diff.**
 
 #### Step 1: Inject & Push
+From within `gdi-sample-pipeline-app`:
 ```bash
-# Inject test failure and commit
-./demo/scenarios/trigger-test-failure.sh . --commit
+cd gdi-sample-pipeline-app
+git pull origin main
 
-# Push commit to trigger the pipeline
-git push origin main
+# Inject test assertion defect, commit, and push
+../autocloud-prototypes/gha-deploy-investigator/demo/scenarios/trigger-test-failure.sh . --commit && git push origin main
 ```
 
 #### Step 2: Pipeline Stage Failure & Timing
 - **Failing Job/Step**: `test` job -> `Run Pytest` step.
-- **Expected Duration**: Fails in approximately 20–40 seconds.
+- **Expected Duration**: Workflow fails in approximately 20–40 seconds.
 - **Log Snippet**:
   ```
   FAILED tests/test_main.py::test_customer_tier_discount_calculation - AssertionError: Order discount tier mismatch: expected $100.00, got $75.50
@@ -137,7 +182,7 @@ git push origin main
 
 #### Step 3: Expected ServiceNow Write-Back
 - **Incident State**: Transitioned to `In Progress (2)`.
-- **Work Notes**: Notes the failing assertion, diff context showing changes isolated to `tests/test_main.py`.
+- **Work Notes**: Cites the failing test assertion and diff context confirming modifications are isolated to `tests/test_main.py`.
 - **Description**: Contains separate `Recommended Remediation:` and `Unrelated Observations:` sections.
 
 #### Step 4: Expected GitHub Write-Back
@@ -154,10 +199,10 @@ git push origin main
 
 #### Step 6: Reset
 ```bash
-git revert HEAD --no-edit
-git push origin main
+cd gdi-sample-pipeline-app
+git revert HEAD --no-edit && git push origin main
 ```
-*Verify all tests pass and main is green.*
+*Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 ---
 
@@ -167,17 +212,18 @@ git push origin main
 Appends an invalid `COPY config/cache-warmup.json /app/config/cache-warmup.json` instruction to `Dockerfile` referencing a non-existent configuration file.
 
 #### Step 1: Inject & Push
+From within `gdi-sample-pipeline-app`:
 ```bash
-# Inject Dockerfile defect and commit
-./demo/scenarios/trigger-build-failure.sh . --commit
+cd gdi-sample-pipeline-app
+git pull origin main
 
-# Push commit to trigger the pipeline
-git push origin main
+# Inject Dockerfile defect, commit, and push
+../autocloud-prototypes/gha-deploy-investigator/demo/scenarios/trigger-build-failure.sh . --commit && git push origin main
 ```
 
 #### Step 2: Pipeline Stage Failure & Timing
 - **Failing Job/Step**: `build` job -> `Build and push container image` step.
-- **Expected Duration**: Fails in approximately 45–90 seconds.
+- **Expected Duration**: Workflow fails in approximately 45–90 seconds.
 - **Log Snippet**:
   ```
   ERROR: failed to solve: failed to compute cache key: failed to calculate checksum of ref ... "/config/cache-warmup.json": not found
@@ -201,10 +247,10 @@ git push origin main
 
 #### Step 6: Reset
 ```bash
-git revert HEAD --no-edit
-git push origin main
+cd gdi-sample-pipeline-app
+git revert HEAD --no-edit && git push origin main
 ```
-*Verify container build succeeds and main is green.*
+*Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 ---
 
@@ -214,17 +260,18 @@ git push origin main
 Alters `scripts/deploy.sh` to lower container memory to `256Mi` while configuring `EXTRA_ENV_VARS="CACHE_PREWARM_BUFFER_MB=2048"`. During startup, the application attempts to allocate memory exceeding the limit, triggering exit code 137 (OOM).
 
 #### Step 1: Inject & Push
+From within `gdi-sample-pipeline-app`:
 ```bash
-# Inject deploy OOM regression and commit
-./demo/scenarios/trigger-deploy-failure.sh . --commit
+cd gdi-sample-pipeline-app
+git pull origin main
 
-# Push commit to trigger the pipeline
-git push origin main
+# Inject deploy OOM regression, commit, and push
+../autocloud-prototypes/gha-deploy-investigator/demo/scenarios/trigger-deploy-failure.sh . --commit && git push origin main
 ```
 
 #### Step 2: Pipeline Stage Failure & Timing
 - **Failing Job/Step**: `deploy` job -> `Deploy to Cloud Run` step.
-- **Expected Duration**: Fails in approximately 2–4 minutes (container startup probe timeout).
+- **Expected Duration**: Workflow fails in approximately 2–4 minutes (container startup probe timeout).
 - **Log Snippet**:
   ```
   ERROR: (gcloud.run.deploy) Container failed to start. Failed to start and then listen on the port defined by the PORT environment variable.
@@ -250,8 +297,8 @@ git push origin main
 
 #### Step 6: Reset
 ```bash
-git revert HEAD --no-edit
-git push origin main
+cd gdi-sample-pipeline-app
+git revert HEAD --no-edit && git push origin main
 ```
 
 #### Note on Declarative Deployment Invariant
@@ -264,14 +311,13 @@ git push origin main
 If you injected defects locally or need an immediate clean slate across all files:
 
 ```bash
+cd gdi-sample-pipeline-app
+
 # Automated local reset script:
-./demo/scenarios/reset-scenarios.sh .
+../autocloud-prototypes/gha-deploy-investigator/demo/scenarios/reset-scenarios.sh .
 
 # If you committed changes:
-./demo/scenarios/reset-scenarios.sh . --commit
-
-# Push clean main branch to remote:
-git push origin main
+../autocloud-prototypes/gha-deploy-investigator/demo/scenarios/reset-scenarios.sh . --commit && git push origin main
 ```
 
 The reset script idempotently:
