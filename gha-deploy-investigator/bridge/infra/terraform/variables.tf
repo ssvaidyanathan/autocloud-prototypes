@@ -97,3 +97,9 @@ variable "cloud_run_memory" {
   type        = string
   default     = "512Mi"
 }
+
+variable "github_app_id" {
+  description = "GitHub App ID for authenticating write-backs"
+  type        = string
+  default     = ""
+}

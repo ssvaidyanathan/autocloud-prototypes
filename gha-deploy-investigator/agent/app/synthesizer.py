@@ -1,3 +1,4 @@
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -72,22 +73,38 @@ def synthesize_report(
     step_name = failed_step.get("name", "execution")
     now_utc = datetime.now(timezone.utc)
 
+    # Attempt Vertex AI Gemini synthesis
+    llm_result: Optional[dict[str, Any]] = None
+    try:
+        from .llm import generate_gemini_synthesis
+        llm_result = generate_gemini_synthesis(
+            failing_job=failed_job,
+            failing_step=failed_step,
+            log_text=log_text,
+        )
+    except Exception as llm_exc:
+        logger.info("Vertex AI Gemini synthesis not available or failed: %s", llm_exc)
+
     error_lines = extract_error_lines(log_text)
-    if diagnostic_result and diagnostic_result.probable_cause:
-        primary_error = diagnostic_result.probable_cause
+    if llm_result and llm_result.get("root_cause"):
+        root_cause_text = str(llm_result["root_cause"])
+        confidence_val = float(llm_result.get("confidence", 0.95))
+        primary_error = root_cause_text
+    elif diagnostic_result and diagnostic_result.probable_cause:
+        root_cause_text = diagnostic_result.probable_cause
         confidence_val = diagnostic_result.confidence
+        primary_error = diagnostic_result.probable_cause
     elif error_lines:
         primary_error = error_lines[0]
+        root_cause_text = f"Pipeline step '{step_name}' in job '{job_name}' failed: {primary_error}"
         confidence_val = 0.92
     else:
         primary_error = f"Step '{step_name}' exited with failure"
+        root_cause_text = f"Pipeline step '{step_name}' in job '{job_name}' failed: {primary_error}"
         confidence_val = 0.75
 
     probable_root_cause = ProbableRootCause(
-        text=(
-            f"Automated fallback (LLM unavailable): Pipeline step '{step_name}' in job "
-            f"'{job_name}' failed: {primary_error}"
-        ),
+        text=root_cause_text,
         confidence=confidence_val,
     )
 
@@ -123,9 +140,13 @@ def synthesize_report(
         )
 
     recommended_actions: list[str] = []
+    if llm_result and llm_result.get("remediation_actions"):
+        recommended_actions.extend(llm_result["remediation_actions"])
     if diagnostic_result and diagnostic_result.remediation_actions:
-        recommended_actions.extend(diagnostic_result.remediation_actions)
-    else:
+        for act in diagnostic_result.remediation_actions:
+            if act not in recommended_actions:
+                recommended_actions.append(act)
+    if not recommended_actions:
         recommended_actions.append(
             f"Inspect failure in step '{step_name}' of workflow '{incident.github_repo}'"
         )
@@ -172,3 +193,5 @@ __all__ = [
     "extract_error_lines",
     "synthesize_report",
 ]
+
+logger = logging.getLogger(__name__)

@@ -1,5 +1,7 @@
 import hashlib
 import hmac
+import logging
+from typing import Any
 
 import httpx
 import pytest
@@ -204,3 +206,70 @@ class TestGitHubAdapter:
         assert annotations[0]["path"] == "agent/app/main.py"
         assert annotations[1]["path"] == "agent/app/models.py"
 
+
+    def test_post_report_link_uses_github_app_auth(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_github_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = bridge_settings.model_copy(
+            update={
+                "github_token": None,
+                "github_app_id": "12345",
+                "github_app_private_key": "mock-pem-key",
+            }
+        )
+        adapter = GitHubAdapter(config=cfg, http_client=fake_github_client)
+        assert adapter._auth is not None
+
+        monkeypatch.setattr(
+            adapter._auth,
+            "get_installation_token_for_repo",
+            lambda repo, client=None, base_url=None: "ghs_test_minted_installation_token",
+        )
+
+        ref = IncidentRef(
+            id="sn-sys_app_auth",
+            source="servicenow",
+            external_id="sys_app_auth",
+            external_key="INC0019485",
+        )
+        github_state.check_runs.clear()
+
+        adapter.post_report_link(sample_incident, sample_report, ref)
+        assert len(github_state.check_runs) == 1
+
+    def test_post_report_link_error_logged_at_error_level_with_response_body(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_github_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        def reject_check_run(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            req = httpx.Request("POST", str(url))
+            return httpx.Response(
+                403,
+                request=req,
+                text='{"message": "Resource not accessible by integration"}',
+            )
+
+        fake_github_client.post = reject_check_run  # type: ignore[method-assign]
+        adapter = GitHubAdapter(config=bridge_settings, http_client=fake_github_client)
+        ref = IncidentRef(
+            id="sn-sys_err",
+            source="servicenow",
+            external_id="sys_err",
+            external_key="INC0019486",
+        )
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(httpx.HTTPStatusError):
+                adapter.post_report_link(sample_incident, sample_report, ref)
+
+        assert "GitHub write-back failed for" in caplog.text
+        assert "Resource not accessible by integration" in caplog.text

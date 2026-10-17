@@ -194,3 +194,39 @@ class TestSpecialists:
         assert res.stage == "iac_config"
         assert "main.tf:45" in res.probable_cause or "main.tf" in res.probable_cause
         assert any("terraform validate" in act for act in res.remediation_actions)
+
+    def test_runtime_health_specialist_iam_actas_error(self) -> None:
+        reset_runtime_state()
+        specialist = RuntimeHealthSpecialist()
+        incident = _make_incident("deploy")
+        job = {"id": 7, "name": "deploy-cloudrun"}
+        step = {"name": "Deploy to Cloud Run", "conclusion": "failure"}
+        log_text = (
+            "Deploying container to Cloud Run service [sample-app] in region [us-central1]...\n"
+            "ERROR: (gcloud.run.deploy) PERMISSION_DENIED: The caller does not have permission\n"
+            "ERROR: Access denied. Service account requires iam.serviceaccounts.actAs on the "
+            "runtime service account [sample-app-sa@example.iam.gserviceaccount.com].\n"
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "deploy"
+        assert res.confidence >= 0.90
+        assert "iam.serviceaccounts.actAs" in res.probable_cause or "IAM" in res.probable_cause
+        assert "-00001-deploy" not in res.probable_cause
+        assert any("roles/iam.serviceAccountUser" in act for act in res.remediation_actions)
+
+    def test_runtime_health_specialist_no_hallucinated_revision(self) -> None:
+        reset_runtime_state()
+        specialist = RuntimeHealthSpecialist()
+        incident = _make_incident("deploy")
+        job = {"id": 8, "name": "deploy-cloudrun"}
+        step = {"name": "Deploy to Cloud Run", "conclusion": "failure"}
+        log_text = (
+            "Deploying container to Cloud Run service [sample-app] in region [us-central1]...\n"
+            "Deployment failed before creating revision.\n"
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "deploy"
+        assert "-00001-deploy" not in res.probable_cause
+        assert "-00001-deploy" not in res.summary

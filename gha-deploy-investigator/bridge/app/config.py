@@ -73,6 +73,8 @@ class BridgeConfig(BaseSettings):
     github_token: Optional[str] = None
     github_api_url: str = "https://api.github.com"
     enable_github_writeback: bool = True
+    github_app_id: Optional[str] = None
+    github_app_private_key: Optional[str] = None
 
     @property
     def is_local(self) -> bool:

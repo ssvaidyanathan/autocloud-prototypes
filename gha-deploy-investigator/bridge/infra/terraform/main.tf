@@ -83,6 +83,24 @@ resource "google_secret_manager_secret" "servicenow_password" {
   }
 }
 
+# Secret Definition for GitHub App Private Key
+resource "google_secret_manager_secret" "github_app_private_key" {
+  project   = var.project_id
+  secret_id = "${var.name_prefix}-github-app-private-key"
+  labels    = local.common_labels
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_iam_member" "bridge_gh_key_access" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.github_app_private_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.bridge_sa.email}"
+}
+
 resource "google_secret_manager_secret" "servicenow_webhook_token" {
   project   = var.project_id
   secret_id = "${var.name_prefix}-servicenow-webhook-token"
@@ -180,6 +198,19 @@ resource "google_cloud_run_v2_service" "bridge" {
         name  = "SERVICENOW_INSTANCE_URL"
         value = var.servicenow_instance_url
       }
+      env {
+        name  = "GITHUB_APP_ID"
+        value = var.github_app_id
+      }
+      env {
+        name = "GITHUB_APP_PRIVATE_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.github_app_private_key.secret_id
+            version = "latest"
+          }
+        }
+      }
 
       env {
         name = "SERVICENOW_USERNAME"
@@ -225,6 +256,7 @@ resource "google_cloud_run_v2_service" "bridge" {
     google_secret_manager_secret_iam_member.bridge_snow_username_access,
     google_secret_manager_secret_iam_member.bridge_snow_pwd_access,
     google_secret_manager_secret_iam_member.bridge_snow_token_access,
+    google_secret_manager_secret_iam_member.bridge_gh_key_access,
   ]
 }
 

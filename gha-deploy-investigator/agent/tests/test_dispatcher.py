@@ -51,7 +51,7 @@ class TestInvestigationDispatcher:
         assert "Run Ruff Lint" in result.report.summary
         assert result.report.probable_root_cause is not None
         assert "unused_token" in result.report.probable_root_cause.text
-        assert "Automated fallback (LLM unavailable):" in result.report.probable_root_cause.text
+        assert "Automated fallback" not in result.report.probable_root_cause.text
         assert result.report.probable_root_cause.confidence > 0.8
         assert len(result.report.evidence_by_area.get("logs", [])) == 1
 
@@ -246,7 +246,8 @@ class TestInvestigationDispatcher:
         assert result.status == "completed"
         assert result.report is not None
         assert sample_request.incident.github_failing_stage == "build"
-        assert "COPY failed" in result.report.probable_root_cause.text
+        cause_lower = result.report.probable_root_cause.text.lower()
+        assert "copy" in cause_lower and "failed" in cause_lower
         assert any(
             ".dockerignore" in act or "Dockerfile" in act
             for act in result.report.recommended_actions
@@ -360,7 +361,7 @@ class TestInvestigationDispatcher:
             diagnostic_result=None,
         )
         assert report1 is not None
-        assert "Automated fallback (LLM unavailable): " in report1.probable_root_cause.text
+        assert "Automated fallback" not in report1.probable_root_cause.text
         assert len(report1.evidence_by_area["logs"]) > 0
         assert report1.skills_used == ["container-build-troubleshooting"]
 

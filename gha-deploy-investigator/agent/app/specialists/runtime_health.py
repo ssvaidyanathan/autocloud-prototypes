@@ -51,40 +51,117 @@ class RuntimeHealthSpecialist(BaseSpecialist):
         revision_name = self._extract_revision_name(service_name, log_text)
         region = self._extract_region(log_text)
 
+        rev_desc = f" (revision: '{revision_name}')" if revision_name else ""
         evidence_items.append(
             EvidenceItem(
                 kind="github_runner_log",
                 excerpt=(
-                    f"Deploy step '{step_name}' failed for service '{service_name}' "
-                    f"(revision: '{revision_name}', region: '{region}')."
+                    f"Deploy step '{step_name}' failed for service '{service_name}'"
+                    f"{rev_desc} (region: '{region}')."
                 ),
                 timestamp=now,
                 console_url=incident.external_url,
             )
         )
 
+        # Check for IAM / permission errors first
+        is_iam_denied = any(
+            token in log_text.lower()
+            for token in (
+                "iam.serviceaccounts.actas",
+                "permission_denied",
+                "permission denied",
+                "caller does not have required permission",
+                "does not have permission",
+            )
+        )
+        if is_iam_denied:
+            iam_lines = [
+                line.strip()
+                for line in log_text.splitlines()
+                if any(
+                    t in line.lower()
+                    for t in (
+                        "iam.serviceaccounts.actas",
+                        "permission_denied",
+                        "permission denied",
+                        "caller does not have required permission",
+                        "does not have permission",
+                    )
+                )
+            ]
+            culprit = iam_lines[0] if iam_lines else "IAM permission denied on service account"
+            if "iam.serviceaccounts.actas" in culprit.lower():
+                probable_cause = (
+                    f"Deployment step '{step_name}' failed due to missing IAM permission "
+                    f"'iam.serviceaccounts.actAs' on Cloud Run runtime service account: {culprit}"
+                )
+            else:
+                probable_cause = (
+                    f"Deployment step '{step_name}' failed due to IAM permission denial: {culprit}"
+                )
+            confidence = 0.95
+            remediation = [
+                (
+                    "Grant 'roles/iam.serviceAccountUser' (actAs) to the deploying identity "
+                    "on the Cloud Run runtime service account"
+                ),
+                (
+                    "Ensure deployment service account has 'roles/run.admin' or "
+                    "'roles/run.developer' on project or target Cloud Run service"
+                ),
+                "Verify GitHub Actions Workload Identity Federation role bindings "
+                "and impersonation",
+            ]
+            evidence_items.append(
+                EvidenceItem(
+                    kind="github_runner_log",
+                    excerpt=f"IAM permission denial: {culprit}",
+                    timestamp=now,
+                )
+            )
+            rev_summary = f" (revision '{revision_name}')" if revision_name else ""
+            summary = (
+                f"Deployment failure in step '{step_name}' for Cloud Run service '{service_name}'"
+                f"{rev_summary}. Root cause: {probable_cause}"
+            )
+            return DiagnosticResult(
+                stage="deploy",
+                specialist_name=self.name,
+                summary=summary,
+                probable_cause=probable_cause,
+                confidence=confidence,
+                evidence_items=evidence_items,
+                remediation_actions=remediation,
+                suggested_fix=f"Grant required IAM permissions for {service_name}",
+            )
+
         # 2. Query Cloud Run Revision conditions
         rev_info: dict[str, Any] = {}
-        try:
-            rev_info = describe_cloud_run_revision(
-                service_name=service_name,
-                revision_name=revision_name,
-                region=region,
-                config=config,
-            )
-        except Exception as exc:
-            logger.warning("Failed to describe Cloud Run revision: %s", exc)
+        if revision_name:
+            try:
+                rev_info = describe_cloud_run_revision(
+                    service_name=service_name,
+                    revision_name=revision_name,
+                    region=region,
+                    config=config,
+                )
+            except Exception as exc:
+                logger.warning("Failed to describe Cloud Run revision: %s", exc)
 
         # 3. Query Cloud Logging for container stderr
         log_entries: list[dict[str, Any]] = []
-        try:
-            log_entries = query_cloud_logging(
-                filter_query=f'resource.type="cloud_run_revision" revision_name="{revision_name}"',
-                limit=20,
-                config=config,
-            )
-        except Exception as exc:
-            logger.warning("Failed to query Cloud Logging: %s", exc)
+        if revision_name:
+            try:
+                log_entries = query_cloud_logging(
+                    filter_query=(
+                        f'resource.type="cloud_run_revision" revision_name="{revision_name}"'
+                    ),
+                    limit=20,
+                    config=config,
+                )
+            except Exception as exc:
+                logger.warning("Failed to query Cloud Logging: %s", exc)
 
         # 4. Analyze conditions and exit codes
         is_oom = False
@@ -197,22 +274,26 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                 )
             )
         else:
+            rev_label = f" of Cloud Run revision '{revision_name}'" if revision_name else ""
             probable_cause = (
-                f"Deployment step '{step_name}' failed during rollout of Cloud Run revision "
-                f"'{revision_name}' for service '{service_name}'."
+                f"Deployment step '{step_name}' failed during rollout{rev_label} "
+                f"for service '{service_name}'."
             )
             confidence = 0.75
+            rev_cmd = (
+                f"gcloud run revisions describe {revision_name} --region {region}"
+                if revision_name
+                else f"gcloud run revisions list --service {service_name} --region {region}"
+            )
             remediation = [
-                (
-                    f"Check Cloud Run service revision health: gcloud run revisions describe "
-                    f"{revision_name} --region {region}"
-                ),
+                f"Check Cloud Run service revision health: {rev_cmd}",
                 "Review deployment pipeline IAM permissions and Cloud Run deployment configuration",
             ]
 
+        rev_summary = f" (revision '{revision_name}')" if revision_name else ""
         summary = (
-            f"Deployment failure in step '{step_name}' for Cloud Run service '{service_name}' "
-            f"(revision '{revision_name}'). Root cause: {probable_cause}"
+            f"Deployment failure in step '{step_name}' for Cloud Run service '{service_name}'"
+            f"{rev_summary}. Root cause: {probable_cause}"
         )
 
         return DiagnosticResult(
@@ -238,13 +319,13 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             return incident.github_repo.split("/")[-1]
         return "sample-app"
 
-    def _extract_revision_name(self, service_name: str, log_text: str) -> str:
+    def _extract_revision_name(self, service_name: str, log_text: str) -> Optional[str]:
         match = REVISION_PATTERN.search(log_text)
         if match:
             for g in ("rev1", "rev2", "rev3"):
                 if match.group(g):
                     return match.group(g).strip()
-        return f"{service_name}-00001-deploy"
+        return None
 
     def _extract_region(self, log_text: str) -> str:
         match = REGION_PATTERN.search(log_text)
