@@ -49,7 +49,6 @@ resource "google_iam_workload_identity_pool_provider" "provider" {
   project                            = var.project_id
   workload_identity_pool_id          = google_iam_workload_identity_pool.pool.workload_identity_pool_id
   workload_identity_pool_provider_id = "${var.name_prefix}-demo-gh-provider"
-  issuer_uri                         = "https://token.actions.githubusercontent.com"
   attribute_mapping = {
     "google.subject"             = "assertion.sub"
     "attribute.actor"            = "assertion.actor"
@@ -57,6 +56,10 @@ resource "google_iam_workload_identity_pool_provider" "provider" {
     "attribute.repository_owner" = "assertion.repository_owner"
   }
   attribute_condition = "assertion.repository == 'ssvaidyanathan/gdi-sample-pipeline-app'"
+
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
 }
 
 # IAM member allowing GitHub Actions OIDC to impersonate demo_deployer_sa

@@ -118,7 +118,7 @@ class ServiceNowAdapter(BaseAdapter):
         table_endpoint = f"{base_url}/api/now/table/incident"
 
         short_description = (
-            f"[CI/CD Failure] {incident.github_repo or incident.title} "
+            f"[gdi-demo] [CI/CD Failure] {incident.github_repo or incident.title} "
             f"({incident.github_failing_stage or 'Pipeline'})"
         )
 
