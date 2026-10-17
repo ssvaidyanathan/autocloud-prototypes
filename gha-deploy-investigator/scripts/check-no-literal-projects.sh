@@ -83,6 +83,36 @@ fi
 echo "[PASS] Zero un-externalized Gemini model literals found."
 
 echo "========================================================"
+echo "Checking for non-placeholder ServiceNow instance URLs..."
+echo "========================================================"
+
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    SN_MATCHES=$(git grep -nE "https?://[^/]*service-now\.com" -- \
+        ':!scripts/check-no-literal-projects.sh' || true)
+else
+    SN_MATCHES=$(grep -rnE "https?://[^/]*service-now\.com" . \
+        --exclude="check-no-literal-projects.sh" \
+        --exclude-dir=".git" \
+        --exclude-dir=".venv" \
+        --exclude-dir="__pycache__" \
+        --exclude-dir=".pytest_cache" \
+        --exclude-dir=".ruff_cache" \
+        --exclude-dir=".mypy_cache" \
+        --exclude-dir=".terraform" || true)
+fi
+
+NON_PLACEHOLDER_SN=$(echo "${SN_MATCHES}" | grep -v -E "(\/|<)(your-instance|<your-instance>|instance|<instance>|example|dev12345)\.service-now\.com" || true)
+
+if [ -n "${NON_PLACEHOLDER_SN}" ]; then
+    echo "ERROR: Non-placeholder ServiceNow instance URL found in files:" >&2
+    echo "${NON_PLACEHOLDER_SN}" >&2
+    echo "Sanitize with generic placeholders (e.g. 'https://<your-instance>.service-now.com')." >&2
+    exit 1
+fi
+
+echo "[PASS] Zero non-placeholder ServiceNow instance URLs found."
+
+echo "========================================================"
 echo "Checking repository URLs, badges, and markdown links..."
 echo "========================================================"
 

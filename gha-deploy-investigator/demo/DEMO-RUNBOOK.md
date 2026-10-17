@@ -86,7 +86,7 @@ demo-workspace/
 
 ### C. Services & Monitoring Links
 - **Investigation Services**: Live `gdi-bridge` and `gdi-agent` services deployed in Cloud Run receive webhooks automatically upon workflow completion.
-- **ServiceNow Console**: Access incidents at `https://dev377204.service-now.com` (Filter: `correlation_display=gha-deploy-investigator`).
+- **ServiceNow Console**: Access incidents at `https://<your-instance>.service-now.com` (Filter: `correlation_display=gha-deploy-investigator`).
 - **GitHub Actions Console**: Track workflow runs at `https://github.com/ssvaidyanathan/gdi-sample-pipeline-app/actions`.
 
 ---
