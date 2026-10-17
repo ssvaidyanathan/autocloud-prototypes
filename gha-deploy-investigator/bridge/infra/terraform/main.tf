@@ -45,6 +45,13 @@ resource "google_cloud_tasks_queue_iam_member" "bridge_task_enqueuer" {
   member   = "serviceAccount:${google_service_account.bridge_sa.email}"
 }
 
+# Allow Bridge SA to impersonate/actAs the Tasks Invoker SA when generating Cloud Tasks OIDC tokens
+resource "google_service_account_iam_member" "bridge_tasks_invoker_user" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${var.tasks_invoker_service_account_email}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.bridge_sa.email}"
+}
+
 # Secret Definitions in Secret Manager
 resource "google_secret_manager_secret" "github_webhook_secret" {
   project   = var.project_id
