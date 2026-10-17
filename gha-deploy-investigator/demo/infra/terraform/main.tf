@@ -54,8 +54,9 @@ resource "google_iam_workload_identity_pool_provider" "provider" {
     "attribute.actor"            = "assertion.actor"
     "attribute.repository"       = "assertion.repository"
     "attribute.repository_owner" = "assertion.repository_owner"
+    "attribute.ref"              = "assertion.ref"
   }
-  attribute_condition = "assertion.repository == 'ssvaidyanathan/gdi-sample-pipeline-app'"
+  attribute_condition = "assertion.repository == 'ssvaidyanathan/gdi-sample-pipeline-app' && assertion.ref == 'refs/heads/main'"
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
