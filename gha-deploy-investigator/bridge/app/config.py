@@ -64,6 +64,8 @@ class BridgeConfig(BaseSettings):
     servicenow_webhook_token: Optional[str] = None
     servicenow_in_progress_state: str = "2"
     servicenow_correlation_display: str = "gha-deploy-investigator"
+    servicenow_caller: Optional[str] = "admin"
+    servicenow_assignment_group: Optional[str] = None
 
     # GitHub Configuration
     github_webhook_secret: Optional[str] = None

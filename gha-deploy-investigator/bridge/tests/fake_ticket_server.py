@@ -118,6 +118,10 @@ async def patch_servicenow_incident(sys_id: str, request: Request) -> dict[str, 
 
     if "state" in body:
         incident["state"] = str(body["state"])
+    if "caller_id" in body:
+        incident["caller_id"] = str(body["caller_id"])
+    if "assignment_group" in body:
+        incident["assignment_group"] = str(body["assignment_group"])
     if "work_notes" in body:
         if isinstance(incident.get("work_notes"), list):
             incident["work_notes"].append(body["work_notes"])
@@ -125,6 +129,22 @@ async def patch_servicenow_incident(sys_id: str, request: Request) -> dict[str, 
             incident["work_notes"] = [body["work_notes"]]
 
     return {"result": incident}
+
+
+@app.get("/api/now/table/sys_user")
+def query_sys_user(request: Request) -> dict[str, Any]:
+    sysparm_query = request.query_params.get("sysparm_query", "")
+    if "admin" in sysparm_query:
+        return {
+            "result": [
+                {
+                    "sys_id": "6816f79cc0a8016401c5a33be04be441",
+                    "user_name": "admin",
+                    "email": "admin@example.com",
+                }
+            ]
+        }
+    return {"result": []}
 
 
 @app.get("/api/now/table/incident/{sys_id}")

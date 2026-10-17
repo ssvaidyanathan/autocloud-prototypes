@@ -45,6 +45,48 @@ class ServiceNowAdapter(BaseAdapter):
     ) -> None:
         self.config = config or get_settings()
         self._http_client = http_client
+        self._caller_cache: dict[str, str] = {}
+
+    def _resolve_caller_sys_id(
+        self,
+        client: Any,
+        caller: Optional[str],
+    ) -> Optional[str]:
+        """Resolve ServiceNow caller username or email to sys_id via sys_user table."""
+        if not caller:
+            return None
+        if caller in self._caller_cache:
+            return self._caller_cache[caller]
+
+        admin_sys_id = "6816f79cc0a8016401c5a33be04be441"
+        base_url = (
+            self.config.servicenow_instance_url or "https://example.service-now.com"
+        ).rstrip("/")
+        sys_user_endpoint = f"{base_url}/api/now/table/sys_user"
+
+        try:
+            query = f"user_name={caller}^ORemail={caller}"
+            resp = client.get(sys_user_endpoint, params={"sysparm_query": query})
+            if resp.status_code == 200:
+                data = resp.json().get("result", [])
+                if isinstance(data, list) and data:
+                    sys_id = data[0].get("sys_id")
+                    if sys_id:
+                        self._caller_cache[caller] = str(sys_id)
+                        return str(sys_id)
+                elif isinstance(data, dict) and data.get("sys_id"):
+                    sys_id = str(data["sys_id"])
+                    self._caller_cache[caller] = sys_id
+                    return sys_id
+        except Exception as exc:
+            logger.warning("Failed to resolve caller '%s' in sys_user: %s", caller, exc)
+
+        if caller == "admin":
+            self._caller_cache[caller] = admin_sys_id
+            return admin_sys_id
+
+        self._caller_cache[caller] = caller
+        return caller
 
     def _get_client(self) -> Any:
         if self._http_client is not None:
@@ -181,12 +223,21 @@ class ServiceNowAdapter(BaseAdapter):
                 rendered_html = render_servicenow_html(report)
                 work_notes = chunk_servicenow_work_note(rendered_html, max_chars=12000)[0]
 
+                caller_id = self._resolve_caller_sys_id(client, self.config.servicenow_caller)
+                assignment_group = self.config.servicenow_assignment_group
+
                 if existing_incident:
                     sys_id = existing_incident.get("sys_id", "mock-sys-id")
                     number = existing_incident.get("number", sys_id)
 
                     patch_endpoint = f"{table_endpoint}/{sys_id}"
-                    patch_resp = client.patch(patch_endpoint, json={"work_notes": work_notes})
+                    patch_body: dict[str, Any] = {"work_notes": work_notes}
+                    if caller_id:
+                        patch_body["caller_id"] = caller_id
+                    if assignment_group:
+                        patch_body["assignment_group"] = assignment_group
+
+                    patch_resp = client.patch(patch_endpoint, json=patch_body)
                     patch_resp.raise_for_status()
 
                     # Upload standalone report as attachment
@@ -205,7 +256,7 @@ class ServiceNowAdapter(BaseAdapter):
 
                     logger.info(
                         "Found existing ServiceNow incident %s (%s) for correlation_id=%s; "
-                        "patched work notes and attached report",
+                        "patched work notes, caller, and attached report",
                         number,
                         sys_id,
                         correlation_id,
@@ -234,6 +285,8 @@ class ServiceNowAdapter(BaseAdapter):
                     f"Repository: {incident.github_repo or 'N/A'}",
                     f"Branch: {incident.github_branch or 'N/A'}",
                     f"Commit SHA: {incident.github_head_sha or 'N/A'}",
+                    f"GitHub Actor: {incident.reporter or 'N/A'}",
+                    f"Commit Author: {incident.reporter or 'N/A'}",
                     f"Reporter: {incident.reporter or 'N/A'}",
                     "",
                     "Root Cause:",
@@ -255,6 +308,10 @@ class ServiceNowAdapter(BaseAdapter):
                     "correlation_display": correlation_display,
                     "correlation_id": correlation_id,
                 }
+                if caller_id:
+                    incident_body["caller_id"] = caller_id
+                if assignment_group:
+                    incident_body["assignment_group"] = assignment_group
 
                 resp = client.post(table_endpoint, json=incident_body)
                 resp.raise_for_status()

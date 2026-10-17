@@ -104,20 +104,23 @@ class TestServiceNowReverse:
         adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
 
         attempts = 0
+        incident_query_attempts = 0
         original_get = fake_ticket_client.get
 
-        def flaky_get(*args: Any, **kwargs: Any) -> httpx.Response:
-            nonlocal attempts
+        def flaky_get(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            nonlocal attempts, incident_query_attempts
             attempts += 1
-            if attempts == 1:
-                raise httpx.ConnectTimeout("Transient connection timeout")
-            return original_get(*args, **kwargs)
+            if "/table/incident" in str(url):
+                incident_query_attempts += 1
+                if incident_query_attempts == 1:
+                    raise httpx.ConnectTimeout("Transient connection timeout")
+            return original_get(url, *args, **kwargs)
 
         monkeypatch.setattr(fake_ticket_client, "get", flaky_get)
         monkeypatch.setattr("time.sleep", lambda s: None)
 
         ref = adapter.create_incident_with_report(sample_incident, sample_report)
-        assert attempts == 2
+        assert incident_query_attempts == 2
         assert ref.external_key.startswith("INC001")
 
     def test_create_incident_raises_after_exhausting_retries(
@@ -138,4 +141,62 @@ class TestServiceNowReverse:
 
         with pytest.raises(httpx.NetworkError, match="Persistent network outage"):
             adapter.create_incident_with_report(sample_incident, sample_report)
+
+    def test_create_incident_with_caller_id_and_assignment_group(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        cfg = bridge_settings.model_copy(
+            update={
+                "servicenow_caller": "admin",
+                "servicenow_assignment_group": "Platform-SRE",
+            }
+        )
+        adapter = ServiceNowAdapter(config=cfg, http_client=fake_ticket_client)
+
+        ref = adapter.create_incident_with_report(sample_incident, sample_report)
+        ticket = ticket_state.servicenow_incidents[ref.external_id]
+
+        assert ticket["caller_id"] == "6816f79cc0a8016401c5a33be04be441"
+        assert ticket["assignment_group"] == "Platform-SRE"
+        assert "GitHub Actor: octocat" in ticket["description"]
+        assert "Commit Author: octocat" in ticket["description"]
+
+    def test_idempotent_retry_patches_caller_id_on_existing_incident(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        # Pre-seed existing incident without caller_id
+        corr_id = f"gdi:{sample_incident.github_repo}:{sample_incident.github_run_id}:1"
+        ticket_state.servicenow_incidents["sys_999999"] = {
+            "sys_id": "sys_999999",
+            "number": "INC0010074",
+            "correlation_id": corr_id,
+            "correlation_display": "gha-deploy-investigator",
+            "work_notes": [],
+        }
+
+        cfg = bridge_settings.model_copy(
+            update={
+                "servicenow_caller": "admin",
+                "servicenow_assignment_group": "Cloud-Operations",
+            }
+        )
+        adapter = ServiceNowAdapter(config=cfg, http_client=fake_ticket_client)
+
+        ref = adapter.create_incident_with_report(sample_incident, sample_report)
+        assert ref.external_id == "sys_999999"
+        assert ref.external_key == "INC0010074"
+
+        # Verify existing incident was patched with caller_id and assignment_group
+        patched = ticket_state.servicenow_incidents["sys_999999"]
+        assert patched["caller_id"] == "6816f79cc0a8016401c5a33be04be441"
+        assert patched["assignment_group"] == "Cloud-Operations"
+
 
