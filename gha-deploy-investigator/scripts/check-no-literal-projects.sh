@@ -14,7 +14,7 @@ echo "========================================================"
 if [ -z "${FORBIDDEN_LITERALS:-}" ]; then
     echo "[NOTICE] FORBIDDEN_LITERALS is unset; skipping environment-specific identifier scan."
 else
-    if [ -d ".git" ]; then
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         LITERAL_MATCHES=$(git grep -E "${FORBIDDEN_LITERALS}" -- ':!scripts/check-no-literal-projects.sh' || true)
     else
         LITERAL_MATCHES=$(grep -rnE "${FORBIDDEN_LITERALS}" . \
@@ -43,7 +43,7 @@ echo "========================================================"
 
 # Check Python source files, excluding config.py, test files, examples, and documentation.
 # Model names must only appear in config.py, .env.example, tfvars examples, and documentation.
-if [ -d ".git" ]; then
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     GEMINI_MATCHES=$(git grep -E "gemini-[0-9]" -- \
         ':!*config.py' \
         ':!*.env.example' \
