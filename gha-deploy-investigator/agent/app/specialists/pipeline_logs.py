@@ -3,12 +3,12 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from agent.app.config import AgentConfig
-from agent.app.contracts.findings import EvidenceItem
-from agent.app.contracts.incident import Incident
-from agent.app.contracts.report import CheckRunAnnotation
-from agent.app.specialists.base import BaseSpecialist, DiagnosticResult
-from agent.app.tools.github_tools import get_commit_diff
+from ..config import AgentConfig
+from ..contracts.findings import EvidenceItem
+from ..contracts.incident import Incident
+from ..contracts.report import CheckRunAnnotation
+from ..specialists.base import BaseSpecialist, DiagnosticResult
+from ..tools.github_tools import get_commit_diff
 
 logger = logging.getLogger(__name__)
 

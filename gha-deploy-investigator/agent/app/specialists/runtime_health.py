@@ -3,11 +3,11 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from agent.app.config import AgentConfig
-from agent.app.contracts.findings import EvidenceItem
-from agent.app.contracts.incident import Incident
-from agent.app.specialists.base import BaseSpecialist, DiagnosticResult
-from agent.app.tools.runtime_tools import describe_cloud_run_revision, query_cloud_logging
+from ..config import AgentConfig
+from ..contracts.findings import EvidenceItem
+from ..contracts.incident import Incident
+from ..specialists.base import BaseSpecialist, DiagnosticResult
+from ..tools.runtime_tools import describe_cloud_run_revision, query_cloud_logging
 
 logger = logging.getLogger(__name__)
 

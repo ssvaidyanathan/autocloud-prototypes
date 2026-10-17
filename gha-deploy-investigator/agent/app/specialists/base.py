@@ -2,10 +2,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from agent.app.config import AgentConfig
-from agent.app.contracts.findings import EvidenceItem
-from agent.app.contracts.incident import Incident
-from agent.app.contracts.report import CheckRunAnnotation
+from ..config import AgentConfig
+from ..contracts.findings import EvidenceItem
+from ..contracts.incident import Incident
+from ..contracts.report import CheckRunAnnotation
 
 
 @dataclass

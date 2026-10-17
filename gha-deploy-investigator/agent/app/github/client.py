@@ -3,8 +3,9 @@ import logging
 from typing import Any, Optional
 
 import httpx
-from agent.app.config import AgentConfig, get_settings
-from agent.app.github.auth import GitHubAppAuth
+
+from ..config import AgentConfig, get_settings
+from ..github.auth import GitHubAppAuth
 
 logger = logging.getLogger(__name__)
 

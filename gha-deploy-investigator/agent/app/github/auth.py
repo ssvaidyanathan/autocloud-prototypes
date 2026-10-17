@@ -4,7 +4,8 @@ from typing import Optional
 
 import httpx
 import jwt
-from agent.app.config import AgentConfig, get_settings
+
+from ..config import AgentConfig, get_settings
 
 logger = logging.getLogger(__name__)
 

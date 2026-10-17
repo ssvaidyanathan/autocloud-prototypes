@@ -2,8 +2,6 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from agent.app.specialists.base import DiagnosticResult
-
 from .contracts.findings import EvidenceItem
 from .contracts.incident import Incident
 from .contracts.report import (
@@ -12,6 +10,7 @@ from .contracts.report import (
     SpecialistStatus,
     TimelineItem,
 )
+from .specialists.base import DiagnosticResult
 
 
 def extract_error_lines(log_text: str) -> list[str]:
