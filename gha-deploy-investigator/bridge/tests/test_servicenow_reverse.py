@@ -1,4 +1,7 @@
+from typing import Any
+
 import httpx
+import pytest
 from bridge.app.adapters.servicenow import ServiceNowAdapter
 from bridge.app.config import BridgeConfig
 from bridge.app.contracts.incident import Incident
@@ -78,3 +81,61 @@ class TestServiceNowReverse:
         # Verify attachment was uploaded to existing ticket
         assert len(ticket_state.servicenow_attachments) == 2
         assert ticket_state.servicenow_attachments[1]["table_sys_id"] == ref1.external_id
+
+    def test_servicenow_timeout_configuration(self) -> None:
+        cfg = BridgeConfig(
+            adapter_timeout_seconds=60.0,
+            servicenow_username="admin",
+            servicenow_password="secret",
+        )
+        adapter = ServiceNowAdapter(config=cfg)
+        client = adapter._get_client()
+        assert client.timeout.read == 60.0
+        assert client.timeout.connect == 10.0
+
+    def test_create_incident_retries_transient_network_error(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        attempts = 0
+        original_get = fake_ticket_client.get
+
+        def flaky_get(*args: Any, **kwargs: Any) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ConnectTimeout("Transient connection timeout")
+            return original_get(*args, **kwargs)
+
+        monkeypatch.setattr(fake_ticket_client, "get", flaky_get)
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+        ref = adapter.create_incident_with_report(sample_incident, sample_report)
+        assert attempts == 2
+        assert ref.external_key.startswith("INC001")
+
+    def test_create_incident_raises_after_exhausting_retries(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        def always_failing_get(*args: Any, **kwargs: Any) -> httpx.Response:
+            raise httpx.NetworkError("Persistent network outage")
+
+        monkeypatch.setattr(fake_ticket_client, "get", always_failing_get)
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+        with pytest.raises(httpx.NetworkError, match="Persistent network outage"):
+            adapter.create_incident_with_report(sample_incident, sample_report)
+

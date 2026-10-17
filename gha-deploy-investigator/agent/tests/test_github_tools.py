@@ -2,6 +2,7 @@ import httpx
 from agent.app.config import AgentConfig
 from agent.app.tools import runtime_tools  # noqa: F401
 from agent.app.tools.github_tools import (
+    _build_client,
     fetch_job_logs,
     fetch_workflow_run_jobs,
     get_commit_diff,
@@ -106,3 +107,47 @@ class TestGitHubTools:
         )
         assert len(github_state.recorded_requests) == req_count_before + 1
         assert res1 == res2
+
+    def test_build_client_resolves_installation_token_when_github_token_unset(
+        self,
+    ) -> None:
+        cfg = AgentConfig(
+            app_env="local",
+            github_token=None,
+            github_app_id="12345",
+        )
+        c, owns = _build_client(config=cfg, repo="my-org/sample-app")
+        try:
+            assert owns is True
+            assert "Authorization" in c.headers
+            assert "ghs_mock_installation_token" in c.headers["Authorization"]
+        finally:
+            c.close()
+
+    def test_fetch_job_logs_follows_redirects(
+        self,
+        agent_settings: AgentConfig,
+    ) -> None:
+        default_query_cache.clear()
+
+        def redirect_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/repos/my-org/sample-app/actions/jobs/777/logs":
+                return httpx.Response(
+                    302,
+                    headers={"Location": "https://blob-storage.local/raw-logs/job-777.txt"},
+                )
+            if request.url.path == "/raw-logs/job-777.txt":
+                return httpx.Response(200, text="Runner execution logs from blob storage")
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(redirect_handler)
+        mock_client = httpx.Client(transport=transport, follow_redirects=True)
+
+        logs = fetch_job_logs(
+            repo="my-org/sample-app",
+            job_id=777,
+            client=mock_client,
+            config=agent_settings,
+        )
+        assert logs == "Runner execution logs from blob storage"
+

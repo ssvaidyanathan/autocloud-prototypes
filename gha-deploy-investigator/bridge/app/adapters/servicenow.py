@@ -1,6 +1,7 @@
 import hmac
 import logging
-from typing import Any, Optional
+import time
+from typing import Any, Callable, Optional
 
 import httpx
 from fastapi import Request
@@ -54,8 +55,40 @@ class ServiceNowAdapter(BaseAdapter):
                 self.config.servicenow_username,
                 self.config.servicenow_password,
             )
-        timeout = getattr(self.config, "adapter_timeout_seconds", 30.0)
+        timeout_seconds = getattr(self.config, "adapter_timeout_seconds", 60.0)
+        timeout = httpx.Timeout(timeout_seconds, connect=10.0)
         return httpx.Client(auth=auth, timeout=timeout)
+
+    def _execute_with_retry(
+        self,
+        func: Callable[[], Any],
+        max_retries: int = 2,
+        backoff_seconds: float = 1.0,
+    ) -> Any:
+        """Execute a ServiceNow operation with retry and backoff
+        for transient timeouts and connection errors.
+        """
+        for attempt in range(max_retries + 1):
+            try:
+                return func()
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                if attempt < max_retries:
+                    sleep_time = backoff_seconds * (2**attempt)
+                    logger.warning(
+                        "ServiceNow API call failed with %s (attempt %d/%d). Retrying in %.1fs...",
+                        type(exc).__name__,
+                        attempt + 1,
+                        max_retries + 1,
+                        sleep_time,
+                    )
+                    time.sleep(sleep_time)
+                else:
+                    logger.error(
+                        "ServiceNow API call failed after %d retries: %s",
+                        max_retries,
+                        exc,
+                    )
+                    raise
 
     def verify(self, request: Request, payload: bytes) -> bool:
         """Verify inbound webhook Bearer token."""
@@ -129,31 +162,105 @@ class ServiceNowAdapter(BaseAdapter):
             self.config, "servicenow_correlation_display", "gha-deploy-investigator"
         )
 
-        with self._get_client() as client:
-            # Query before create: idempotency check using correlation_id
-            query_resp = client.get(
-                table_endpoint,
-                params={"sysparm_query": f"correlation_id={correlation_id}"},
-            )
-            query_resp.raise_for_status()
-            existing_records = query_resp.json().get("result", [])
+        def _do_create_or_patch() -> IncidentRef:
+            with self._get_client() as client:
+                # Query before create: idempotency check using correlation_id
+                query_resp = client.get(
+                    table_endpoint,
+                    params={"sysparm_query": f"correlation_id={correlation_id}"},
+                )
+                query_resp.raise_for_status()
+                existing_records = query_resp.json().get("result", [])
 
-            existing_incident = None
-            if isinstance(existing_records, list) and existing_records:
-                existing_incident = existing_records[0]
-            elif isinstance(existing_records, dict) and existing_records.get("sys_id"):
-                existing_incident = existing_records
+                existing_incident = None
+                if isinstance(existing_records, list) and existing_records:
+                    existing_incident = existing_records[0]
+                elif isinstance(existing_records, dict) and existing_records.get("sys_id"):
+                    existing_incident = existing_records
 
-            rendered_html = render_servicenow_html(report)
-            work_notes = chunk_servicenow_work_note(rendered_html, max_chars=12000)[0]
+                rendered_html = render_servicenow_html(report)
+                work_notes = chunk_servicenow_work_note(rendered_html, max_chars=12000)[0]
 
-            if existing_incident:
-                sys_id = existing_incident.get("sys_id", "mock-sys-id")
-                number = existing_incident.get("number", sys_id)
+                if existing_incident:
+                    sys_id = existing_incident.get("sys_id", "mock-sys-id")
+                    number = existing_incident.get("number", sys_id)
 
-                patch_endpoint = f"{table_endpoint}/{sys_id}"
-                patch_resp = client.patch(patch_endpoint, json={"work_notes": work_notes})
-                patch_resp.raise_for_status()
+                    patch_endpoint = f"{table_endpoint}/{sys_id}"
+                    patch_resp = client.patch(patch_endpoint, json={"work_notes": work_notes})
+                    patch_resp.raise_for_status()
+
+                    # Upload standalone report as attachment
+                    attachment_endpoint = (
+                        f"{base_url}/api/now/attachment/file"
+                        f"?table_name=incident&table_sys_id={sys_id}"
+                        f"&file_name=ci_cd_investigation_report_{number}.html"
+                    )
+                    standalone_html = render_standalone_html(report)
+                    att_resp = client.post(
+                        attachment_endpoint,
+                        content=standalone_html.encode("utf-8"),
+                        headers={"Content-Type": "text/html"},
+                    )
+                    att_resp.raise_for_status()
+
+                    logger.info(
+                        "Found existing ServiceNow incident %s (%s) for correlation_id=%s; "
+                        "patched work notes and attached report",
+                        number,
+                        sys_id,
+                        correlation_id,
+                    )
+
+                    return IncidentRef(
+                        id=f"sn-{sys_id}",
+                        source="servicenow",
+                        external_id=sys_id,
+                        external_key=number,
+                        external_url=f"{base_url}/nav_to.do?uri=incident.do?sys_id={sys_id}",
+                    )
+
+                short_description = (
+                    f"[gdi-demo] [CI/CD Failure] {incident.github_repo or incident.title} "
+                    f"({incident.github_failing_stage or 'Pipeline'})"
+                )
+
+                root_cause_text = (
+                    report.probable_root_cause.text
+                    if report.probable_root_cause
+                    else report.summary
+                )
+
+                description_lines = [
+                    f"Repository: {incident.github_repo or 'N/A'}",
+                    f"Branch: {incident.github_branch or 'N/A'}",
+                    f"Commit SHA: {incident.github_head_sha or 'N/A'}",
+                    f"Reporter: {incident.reporter or 'N/A'}",
+                    "",
+                    "Root Cause:",
+                    root_cause_text,
+                ]
+                description = "\n".join(description_lines)
+
+                sev_to_num = {"P1": "1", "P2": "2", "P3": "3", "P4": "4"}
+                urgency = sev_to_num.get(incident.severity, "3")
+                impact = sev_to_num.get(incident.severity, "3")
+
+                incident_body = {
+                    "short_description": short_description,
+                    "description": description,
+                    "category": "DevOps",
+                    "urgency": urgency,
+                    "impact": impact,
+                    "work_notes": work_notes,
+                    "correlation_display": correlation_display,
+                    "correlation_id": correlation_id,
+                }
+
+                resp = client.post(table_endpoint, json=incident_body)
+                resp.raise_for_status()
+                res_json = resp.json().get("result", {})
+                sys_id = res_json.get("sys_id", "mock-sys-id")
+                number = res_json.get("number", "INC0019482")
 
                 # Upload standalone report as attachment
                 attachment_endpoint = (
@@ -170,11 +277,7 @@ class ServiceNowAdapter(BaseAdapter):
                 att_resp.raise_for_status()
 
                 logger.info(
-                    "Found existing ServiceNow incident %s (%s) for correlation_id=%s; "
-                    "patched work notes and attached report",
-                    number,
-                    sys_id,
-                    correlation_id,
+                    "Created ServiceNow incident %s (%s) with report attachment", number, sys_id
                 )
 
                 return IncidentRef(
@@ -185,72 +288,7 @@ class ServiceNowAdapter(BaseAdapter):
                     external_url=f"{base_url}/nav_to.do?uri=incident.do?sys_id={sys_id}",
                 )
 
-            short_description = (
-                f"[gdi-demo] [CI/CD Failure] {incident.github_repo or incident.title} "
-                f"({incident.github_failing_stage or 'Pipeline'})"
-            )
-
-            root_cause_text = (
-                report.probable_root_cause.text if report.probable_root_cause else report.summary
-            )
-
-            description_lines = [
-                f"Repository: {incident.github_repo or 'N/A'}",
-                f"Branch: {incident.github_branch or 'N/A'}",
-                f"Commit SHA: {incident.github_head_sha or 'N/A'}",
-                f"Reporter: {incident.reporter or 'N/A'}",
-                "",
-                "Root Cause:",
-                root_cause_text,
-            ]
-            description = "\n".join(description_lines)
-
-            sev_to_num = {"P1": "1", "P2": "2", "P3": "3", "P4": "4"}
-            urgency = sev_to_num.get(incident.severity, "3")
-            impact = sev_to_num.get(incident.severity, "3")
-
-            incident_body = {
-                "short_description": short_description,
-                "description": description,
-                "category": "DevOps",
-                "urgency": urgency,
-                "impact": impact,
-                "work_notes": work_notes,
-                "correlation_display": correlation_display,
-                "correlation_id": correlation_id,
-            }
-
-            resp = client.post(table_endpoint, json=incident_body)
-            resp.raise_for_status()
-            res_json = resp.json().get("result", {})
-            sys_id = res_json.get("sys_id", "mock-sys-id")
-            number = res_json.get("number", "INC0019482")
-
-            # Upload standalone report as attachment
-            attachment_endpoint = (
-                f"{base_url}/api/now/attachment/file"
-                f"?table_name=incident&table_sys_id={sys_id}"
-                f"&file_name=ci_cd_investigation_report_{number}.html"
-            )
-            standalone_html = render_standalone_html(report)
-            att_resp = client.post(
-                attachment_endpoint,
-                content=standalone_html.encode("utf-8"),
-                headers={"Content-Type": "text/html"},
-            )
-            att_resp.raise_for_status()
-
-            logger.info(
-                "Created ServiceNow incident %s (%s) with report attachment", number, sys_id
-            )
-
-            return IncidentRef(
-                id=f"sn-{sys_id}",
-                source="servicenow",
-                external_id=sys_id,
-                external_key=number,
-                external_url=f"{base_url}/nav_to.do?uri=incident.do?sys_id={sys_id}",
-            )
+        return self._execute_with_retry(_do_create_or_patch)
 
     def post_ack(self, ref: IncidentRef) -> None:
         """Update ticket state to in-progress."""
@@ -258,14 +296,19 @@ class ServiceNowAdapter(BaseAdapter):
         if not base_url:
             return
         endpoint = f"{base_url}/api/now/table/incident/{ref.external_id}"
-        with self._get_client() as client:
-            try:
-                client.patch(
+
+        def _do_ack() -> None:
+            with self._get_client() as client:
+                resp = client.patch(
                     endpoint,
                     json={"state": self.config.servicenow_in_progress_state},
                 )
-            except Exception as exc:
-                logger.warning("Failed to post ack to ServiceNow: %s", exc)
+                resp.raise_for_status()
+
+        try:
+            self._execute_with_retry(_do_ack)
+        except Exception as exc:
+            logger.warning("Failed to post ack to ServiceNow: %s", exc)
 
     def post_report(self, ref: IncidentRef, report: Report) -> None:
         """Update ticket with report work notes and attachment."""
@@ -275,8 +318,13 @@ class ServiceNowAdapter(BaseAdapter):
         endpoint = f"{base_url}/api/now/table/incident/{ref.external_id}"
         rendered_html = render_servicenow_html(report)
         work_notes = chunk_servicenow_work_note(rendered_html, max_chars=12000)[0]
-        with self._get_client() as client:
-            client.patch(endpoint, json={"work_notes": work_notes})
+
+        def _do_report() -> None:
+            with self._get_client() as client:
+                resp = client.patch(endpoint, json={"work_notes": work_notes})
+                resp.raise_for_status()
+
+        self._execute_with_retry(_do_report)
 
     def post_failure(self, ref: IncidentRef, error: str) -> None:
         """Post failure note to ServiceNow."""
@@ -284,8 +332,13 @@ class ServiceNowAdapter(BaseAdapter):
         if not base_url:
             return
         endpoint = f"{base_url}/api/now/table/incident/{ref.external_id}"
-        with self._get_client() as client:
-            client.patch(
-                endpoint,
-                json={"work_notes": f"[code]<b>Investigation failed:</b> {error}[/code]"},
-            )
+
+        def _do_failure() -> None:
+            with self._get_client() as client:
+                resp = client.patch(
+                    endpoint,
+                    json={"work_notes": f"[code]<b>Investigation failed:</b> {error}[/code]"},
+                )
+                resp.raise_for_status()
+
+        self._execute_with_retry(_do_failure)

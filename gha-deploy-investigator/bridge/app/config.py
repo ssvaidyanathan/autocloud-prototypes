@@ -55,7 +55,7 @@ class BridgeConfig(BaseSettings):
     agent_service_url: str = ""
     agent_sa: str = ""
     callback_url: str = ""
-    adapter_timeout_seconds: float = 30.0
+    adapter_timeout_seconds: float = 60.0
 
     # ServiceNow Configuration
     servicenow_instance_url: Optional[str] = None

@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 def _build_client(
     client: Optional[httpx.Client] = None,
     config: Optional[AgentConfig] = None,
+    repo: Optional[str] = None,
 ) -> tuple[httpx.Client, bool]:
     if client is not None:
         return client, False
@@ -19,9 +20,19 @@ def _build_client(
     headers = {
         "Accept": "application/vnd.github+json",
     }
-    if cfg.github_token:
-        headers["Authorization"] = f"Bearer {cfg.github_token}"
-    return httpx.Client(headers=headers, timeout=30.0), True
+    token = cfg.github_token
+    if not token and repo:
+        try:
+            from ..github.auth import GitHubAppAuth
+
+            auth = GitHubAppAuth(config=cfg)
+            token = auth.get_installation_token_for_repo(repo)
+        except Exception as exc:
+            logger.warning("Failed to obtain installation token for repo %s: %s", repo, exc)
+
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return httpx.Client(headers=headers, timeout=30.0, follow_redirects=True), True
 
 
 @readonly_tool(
@@ -39,7 +50,7 @@ def fetch_workflow_run_jobs(
     api_url = cfg.github_api_url.rstrip("/")
     endpoint = f"{api_url}/repos/{repo}/actions/runs/{run_id}/jobs"
 
-    c, owns_client = _build_client(client, config)
+    c, owns_client = _build_client(client, config, repo=repo)
     try:
         resp = c.get(endpoint)
         resp.raise_for_status()
@@ -64,9 +75,9 @@ def fetch_job_logs(
     api_url = cfg.github_api_url.rstrip("/")
     endpoint = f"{api_url}/repos/{repo}/actions/jobs/{job_id}/logs"
 
-    c, owns_client = _build_client(client, config)
+    c, owns_client = _build_client(client, config, repo=repo)
     try:
-        resp = c.get(endpoint)
+        resp = c.get(endpoint, follow_redirects=True)
         resp.raise_for_status()
         return resp.text
     finally:
@@ -89,7 +100,7 @@ def get_commit_diff(
     api_url = cfg.github_api_url.rstrip("/")
     endpoint = f"{api_url}/repos/{repo}/commits/{head_sha}"
 
-    c, owns_client = _build_client(client, config)
+    c, owns_client = _build_client(client, config, repo=repo)
     try:
         resp = c.get(endpoint)
         resp.raise_for_status()
@@ -117,7 +128,7 @@ def get_file_content(
     api_url = cfg.github_api_url.rstrip("/")
     endpoint = f"{api_url}/repos/{repo}/contents/{path}"
 
-    c, owns_client = _build_client(client, config)
+    c, owns_client = _build_client(client, config, repo=repo)
     try:
         resp = c.get(endpoint, params={"ref": ref})
         resp.raise_for_status()

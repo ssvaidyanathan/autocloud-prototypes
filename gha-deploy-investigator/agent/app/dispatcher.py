@@ -181,24 +181,9 @@ class InvestigationDispatcher:
                 report=report,
                 incident=incident,
             )
-
-            # 7. Deliver callback to bridge
-            if request.callback_url:
-                try:
-                    send_callback_report(
-                        result=result,
-                        callback_url=request.callback_url,
-                        client=self._callback_client,
-                        config=self.config,
-                    )
-                except Exception as cb_exc:
-                    logger.error("Failed to deliver callback report: %s", cb_exc)
-
-            return result
-
         except Exception as exc:
             logger.exception("Investigation failed for incident %s: %s", incident.id, exc)
-            failed_result = InvestigationResult(
+            result = InvestigationResult(
                 investigation_id=f"inv-{uuid.uuid4().hex[:12]}",
                 incident_id=incident.id,
                 incident_source=incident.source,
@@ -208,17 +193,21 @@ class InvestigationDispatcher:
                 error=str(exc),
                 incident=incident,
             )
-            if request.callback_url:
-                try:
-                    send_callback_report(
-                        result=failed_result,
-                        callback_url=request.callback_url,
-                        client=self._callback_client,
-                        config=self.config,
-                    )
-                except Exception:
-                    pass
-            return failed_result
+
+        # 7. Deliver callback to bridge
+        if request.callback_url:
+            try:
+                send_callback_report(
+                    result=result,
+                    callback_url=request.callback_url,
+                    client=self._callback_client,
+                    config=self.config,
+                )
+            except Exception as cb_exc:
+                logger.error("Failed to deliver callback report: %s", cb_exc)
+                raise RuntimeError(f"Callback delivery failed: {cb_exc}") from cb_exc
+
+        return result
 
 
 __all__ = [

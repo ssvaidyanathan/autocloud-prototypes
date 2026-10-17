@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Generator
 
+import httpx
 import pytest
 from agent.app.config import AgentConfig
 from agent.app.contracts.incident import Incident
@@ -63,3 +64,12 @@ def sample_request(sample_incident: Incident) -> InvestigationRequest:
         callback_url="http://testbridge.local/callback/report",
         requested_at=datetime(2026, 10, 16, 21, 0, 0, tzinfo=timezone.utc),
     )
+
+
+@pytest.fixture
+def mock_callback_client() -> Generator[httpx.Client, None, None]:
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"status": "ok"}))
+    )
+    yield client
+    client.close()

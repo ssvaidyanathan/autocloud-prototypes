@@ -69,6 +69,7 @@ class TestInvestigationDispatcher:
         self,
         agent_settings: AgentConfig,
         sample_request: InvestigationRequest,
+        mock_callback_client: httpx.Client,
     ) -> None:
         default_query_cache.clear()
 
@@ -81,6 +82,7 @@ class TestInvestigationDispatcher:
         dispatcher = InvestigationDispatcher(
             config=agent_settings,
             github_client=err_client,
+            callback_client=mock_callback_client,
         )
 
         result = dispatcher.investigate(sample_request)
@@ -160,6 +162,7 @@ class TestInvestigationDispatcher:
         agent_settings: AgentConfig,
         fake_github_client: httpx.Client,
         sample_request: InvestigationRequest,
+        mock_callback_client: httpx.Client,
     ) -> None:
         default_query_cache.clear()
         run_id = sample_request.incident.github_run_id or 1849201948
@@ -191,6 +194,7 @@ class TestInvestigationDispatcher:
         dispatcher = InvestigationDispatcher(
             config=agent_settings,
             github_client=fake_github_client,
+            callback_client=mock_callback_client,
         )
         result = dispatcher.investigate(sample_request)
 
@@ -205,6 +209,7 @@ class TestInvestigationDispatcher:
         agent_settings: AgentConfig,
         fake_github_client: httpx.Client,
         sample_request: InvestigationRequest,
+        mock_callback_client: httpx.Client,
     ) -> None:
         default_query_cache.clear()
         run_id = sample_request.incident.github_run_id or 1849201948
@@ -234,6 +239,7 @@ class TestInvestigationDispatcher:
         dispatcher = InvestigationDispatcher(
             config=agent_settings,
             github_client=fake_github_client,
+            callback_client=mock_callback_client,
         )
         result = dispatcher.investigate(sample_request)
 
@@ -251,6 +257,7 @@ class TestInvestigationDispatcher:
         agent_settings: AgentConfig,
         fake_github_client: httpx.Client,
         sample_request: InvestigationRequest,
+        mock_callback_client: httpx.Client,
     ) -> None:
         default_query_cache.clear()
         reset_runtime_state()
@@ -305,6 +312,7 @@ class TestInvestigationDispatcher:
         dispatcher = InvestigationDispatcher(
             config=agent_settings,
             github_client=fake_github_client,
+            callback_client=mock_callback_client,
         )
         result = dispatcher.investigate(sample_request)
 
@@ -378,4 +386,29 @@ class TestInvestigationDispatcher:
         assert report2 is not None
         assert len(report2.evidence_by_area["logs"]) > 0
         assert report2.skills_used == [STAGE_TO_SKILL["lint"]]
+
+    def test_dispatcher_callback_failure_raises_runtime_error(
+        self,
+        agent_settings: AgentConfig,
+        fake_github_client: httpx.Client,
+        sample_request: InvestigationRequest,
+    ) -> None:
+        """Verify that when callback delivery fails, dispatcher.investigate() raises RuntimeError
+        so that the FastAPI /investigate endpoint returns HTTP 500 to Cloud Tasks.
+        """
+        default_query_cache.clear()
+
+        def mock_failing_callback(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, text="Bridge Service Unavailable")
+
+        callback_client = httpx.Client(transport=httpx.MockTransport(mock_failing_callback))
+        dispatcher = InvestigationDispatcher(
+            config=agent_settings,
+            github_client=fake_github_client,
+            callback_client=callback_client,
+        )
+
+        with pytest.raises(RuntimeError, match="Callback delivery failed:"):
+            dispatcher.investigate(sample_request)
+
 

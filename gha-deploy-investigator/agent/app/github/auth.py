@@ -25,6 +25,7 @@ class GitHubAppAuth:
             self.config, "github_app_private_key", None
         )
         self._token_cache: dict[int, tuple[str, float]] = {}
+        self._repo_installation_cache: dict[str, int] = {}
 
     def generate_jwt(self, expiration_seconds: int = 600) -> str:
         """Generate RS256 JWT signed with App Private Key (or test mock in local mode)."""
@@ -94,3 +95,55 @@ class GitHubAppAuth:
         finally:
             if owns_client:
                 c.close()
+
+    def get_installation_token_for_repo(
+        self,
+        repo: str,
+        client: Optional[httpx.Client] = None,
+        base_url: Optional[str] = None,
+    ) -> str:
+        """Fetch installation access token for a specific repository (e.g. 'owner/repo')."""
+        if repo in self._repo_installation_cache:
+            installation_id = self._repo_installation_cache[repo]
+            return self.get_installation_token(installation_id, client=client, base_url=base_url)
+
+        if getattr(self.config, "is_local", False) and not self.private_key_pem:
+            token = self.config.github_token or "ghs_mock_installation_token"
+            return token
+
+        api_url = (base_url or self.config.github_api_url or "https://api.github.com").rstrip("/")
+        app_jwt = self.generate_jwt()
+        headers = {
+            "Authorization": f"Bearer {app_jwt}",
+            "Accept": "application/vnd.github+json",
+        }
+        endpoint = f"{api_url}/repos/{repo}/installation"
+
+        owns_client = client is None
+        c = client or httpx.Client(timeout=10.0, follow_redirects=True)
+        try:
+            resp = c.get(endpoint, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                installation_id = int(data.get("id", 12345))
+                self._repo_installation_cache[repo] = installation_id
+                return self.get_installation_token(
+                    installation_id, client=client, base_url=base_url
+                )
+            elif getattr(self.config, "is_local", False):
+                token = self.config.github_token or "ghs_mock_installation_token"
+                return token
+            resp.raise_for_status()
+            raise RuntimeError(
+                f"Unexpected response fetching installation for repo {repo}: {resp.status_code}"
+            )
+        except Exception as exc:
+            if getattr(self.config, "is_local", False):
+                token = self.config.github_token or "ghs_mock_installation_token"
+                return token
+            logger.error("Failed to get installation for repo %s: %s", repo, exc)
+            raise
+        finally:
+            if owns_client:
+                c.close()
+

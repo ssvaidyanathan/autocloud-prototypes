@@ -96,3 +96,27 @@ class TestGitHubApp:
 
         content = rest_client.get_file_content(repo="my-org/sample-app", path="app/main.py")
         assert "Content for app/main.py" in content
+
+    def test_get_installation_token_for_repo(
+        self,
+        fake_github_client: TestClient,
+    ) -> None:
+        auth = GitHubAppAuth(
+            app_id="12345",
+            config=AgentConfig(app_env="production"),
+        )
+        token1 = auth.get_installation_token_for_repo(
+            repo="my-org/sample-app",
+            client=fake_github_client,
+            base_url="https://api.github.com",
+        )
+        assert token1 == "ghs_fake_token_for_inst_12345"
+
+        # Verify repo installation caching
+        token2 = auth.get_installation_token_for_repo(
+            repo="my-org/sample-app",
+            client=fake_github_client,
+            base_url="https://api.github.com",
+        )
+        assert token2 == token1
+

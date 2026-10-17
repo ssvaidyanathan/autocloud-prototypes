@@ -79,7 +79,7 @@ def send_callback_report(
     }
 
     owns_client = client is None
-    c = client or httpx.Client(timeout=30.0)
+    c = client or httpx.Client(timeout=httpx.Timeout(75.0, connect=10.0))
     try:
         resp = c.post(callback_url, json=payload, headers=headers)
         resp.raise_for_status()

@@ -81,6 +81,16 @@ def reset_state() -> dict[str, str]:
     return {"status": "reset"}
 
 
+@app.get("/repos/{owner}/{repo}/installation")
+def get_repo_installation(owner: str, repo: str) -> dict[str, Any]:
+    return {
+        "id": 12345,
+        "app_id": 67890,
+        "target_type": "Repository",
+        "permissions": {"actions": "read", "contents": "read", "checks": "write"},
+    }
+
+
 @app.post("/app/installations/{installation_id}/access_tokens", status_code=status.HTTP_201_CREATED)
 def post_installation_access_token(installation_id: int) -> dict[str, Any]:
     return {
