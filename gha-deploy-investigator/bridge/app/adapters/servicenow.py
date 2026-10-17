@@ -132,6 +132,36 @@ class ServiceNowAdapter(BaseAdapter):
                     )
                     raise
 
+    def _transition_incident_state(
+        self, client: Any, table_endpoint: str, sys_id: str, number: str
+    ) -> None:
+        target_state = getattr(self.config, "servicenow_incident_state_after_report", "2")
+        if not target_state:
+            return
+        patch_endpoint = f"{table_endpoint}/{sys_id}"
+        try:
+            resp = client.patch(patch_endpoint, json={"state": target_state})
+            resp.raise_for_status()
+            logger.info("Transitioned incident %s (%s) to state '%s'", number, sys_id, target_state)
+        except httpx.HTTPStatusError as state_err:
+            error_body = state_err.response.text
+            logger.error(
+                "ServiceNow rejected transition to state '%s' for %s: %s (response: %s)",
+                target_state,
+                number,
+                state_err,
+                error_body,
+            )
+            raise
+        except Exception as state_exc:
+            logger.error(
+                "Failed to transition ServiceNow incident %s to state '%s': %s",
+                number,
+                target_state,
+                state_exc,
+            )
+            raise
+
     def verify(self, request: Request, payload: bytes) -> bool:
         """Verify inbound webhook Bearer token."""
         expected_token = self.config.servicenow_webhook_token
@@ -254,9 +284,11 @@ class ServiceNowAdapter(BaseAdapter):
                     )
                     att_resp.raise_for_status()
 
+                    self._transition_incident_state(client, table_endpoint, sys_id, number)
+
                     logger.info(
                         "Found existing ServiceNow incident %s (%s) for correlation_id=%s; "
-                        "patched work notes, caller, and attached report",
+                        "patched work notes, caller, state, and attached report",
                         number,
                         sys_id,
                         correlation_id,
@@ -332,6 +364,8 @@ class ServiceNowAdapter(BaseAdapter):
                     headers={"Content-Type": "text/html"},
                 )
                 att_resp.raise_for_status()
+
+                self._transition_incident_state(client, table_endpoint, sys_id, number)
 
                 logger.info(
                     "Created ServiceNow incident %s (%s) with report attachment", number, sys_id

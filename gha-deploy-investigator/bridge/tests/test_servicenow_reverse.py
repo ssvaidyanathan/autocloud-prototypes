@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 import httpx
@@ -162,6 +163,7 @@ class TestServiceNowReverse:
 
         assert ticket["caller_id"] == "6816f79cc0a8016401c5a33be04be441"
         assert ticket["assignment_group"] == "Platform-SRE"
+        assert ticket["state"] == "2"
         assert "GitHub Actor: octocat" in ticket["description"]
         assert "Commit Author: octocat" in ticket["description"]
 
@@ -198,5 +200,37 @@ class TestServiceNowReverse:
         patched = ticket_state.servicenow_incidents["sys_999999"]
         assert patched["caller_id"] == "6816f79cc0a8016401c5a33be04be441"
         assert patched["assignment_group"] == "Cloud-Operations"
+        assert patched["state"] == "2"
 
 
+
+    def test_state_transition_rejection_logs_error_and_raises(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        real_patch = fake_ticket_client.patch
+
+        def reject_state_patch(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            json_body = kwargs.get("json", {})
+            if "state" in json_body:
+                req = httpx.Request("PATCH", str(url))
+                return httpx.Response(
+                    400,
+                    request=req,
+                    text='{"error": {"message": "State transition rejected: mandatory field"}}',
+                )
+            return real_patch(url, *args, **kwargs)
+
+        fake_ticket_client.patch = reject_state_patch  # type: ignore[method-assign]
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(httpx.HTTPStatusError):
+                adapter.create_incident_with_report(sample_incident, sample_report)
+
+        assert "ServiceNow rejected transition to state '2'" in caplog.text
+        assert "State transition rejected: mandatory field" in caplog.text

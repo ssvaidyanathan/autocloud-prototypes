@@ -66,6 +66,7 @@ class BridgeConfig(BaseSettings):
     servicenow_correlation_display: str = "gha-deploy-investigator"
     servicenow_caller: Optional[str] = "admin"
     servicenow_assignment_group: Optional[str] = None
+    servicenow_incident_state_after_report: str = "2"
 
     # GitHub Configuration
     github_webhook_secret: Optional[str] = None
