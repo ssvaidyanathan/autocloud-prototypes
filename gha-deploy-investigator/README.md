@@ -130,10 +130,21 @@ Configuration is managed via environment variables and GCP Secret Manager.
 ## 6. Deployment
 
 Infrastructure is provisioned using dedicated, parameterized Terraform manifests with zero committed secrets:
-- Bridge stack: `bridge/infra/terraform/`
-- Agent stack: `agent/infra/terraform/`
-- Secret replication: `scripts/copy-secrets.sh`
-- Complete deployment walkthrough: [docs/DEPLOY.md](docs/DEPLOY.md)
+- **Bridge Stack**: `bridge/infra/terraform/` (Cloud Run, Cloud Tasks queue, Secret containers, IAM)
+- **Agent Stack**: `agent/infra/terraform/` (Cloud Run internal, Secret container, IAM)
+- **Demo WIF Stack**: `demo/infra/terraform/` (Workload Identity Pool, Provider, Demo Artifact Registry, Deployer SA)
+- **Secret Replication Tooling**: `scripts/copy-secrets.sh`
+
+### Key Deployment Invariants:
+1. **Deployer IAM Roles**: Newcomers require specific least-privilege roles derived from Terraform (`workloadIdentityPoolAdmin`, `artifactregistry.admin`, `run.admin`, `serviceAccountAdmin`, `serviceAccountUser`, `secretmanager.admin`, `cloudtasks.admin`, `projectIamAdmin`, `cloudbuild.builds.editor`, `serviceUsageAdmin`). Do not rely on `roles/editor`.
+2. **Strict 3-Stage Sequencing**:
+   - **Stage 1**: Terraform provisions Secret Manager secret containers & IAM bindings.
+   - **Stage 2**: Administrator populates secret values (Cloud Run requires at least one enabled version to deploy).
+   - **Stage 3**: Container images are published and Cloud Run services are deployed.
+3. **Demo WIF & Event Gating**: Demo pipeline authenticates keylessly via Workload Identity Federation scoped strictly to the demo repository on `refs/heads/main`.
+4. **ServiceNow Exclusion**: Outbound ServiceNow incidents carry `correlation_display = "gha-deploy-investigator"` for bi-directional exclusion.
+
+For the complete end-to-end deployment runbook, see [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ---
 
