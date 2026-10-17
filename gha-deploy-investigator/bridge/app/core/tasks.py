@@ -13,9 +13,12 @@ from .auth import _is_local_dev_env
 logger = logging.getLogger(__name__)
 
 
-def generate_task_id(source: str, external_id: str) -> str:
-    """Generate a deterministic task ID based on incident source and external ID."""
-    digest = hashlib.sha256(f"{source}:{external_id}".encode("utf-8")).hexdigest()[:48]
+def generate_task_id(source: str, external_id: str, run_attempt: Optional[int] = None) -> str:
+    """Generate a deterministic task ID based on incident source, external ID, and attempt."""
+    key = f"{source}:{external_id}"
+    if run_attempt is not None and run_attempt > 1:
+        key += f":att{run_attempt}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:48]
     return f"inv-{digest}"
 
 
@@ -58,7 +61,11 @@ class TaskDispatcher:
 
         Returns DispatchResult indicating whether task was created or deduplicated.
         """
-        task_id = generate_task_id(incident.source, incident.external_id)
+        task_id = generate_task_id(
+            incident.source,
+            incident.external_id,
+            getattr(incident, "github_run_attempt", None),
+        )
         task_name = self.get_task_name(task_id)
 
         target_callback = callback_url or self.config.callback_url
