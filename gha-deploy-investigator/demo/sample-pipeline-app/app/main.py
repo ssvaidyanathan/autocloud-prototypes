@@ -6,6 +6,12 @@
 
 
 
+
+
+
+
+
+
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -43,7 +49,7 @@ class Order(BaseModel):
     status: str = "confirmed"
 
 
-# In-memory orders store for demo purposes
+# In-memory store for confirmed customer orders
 ORDERS_DB: dict[str, Order] = {
     "ord-initial-001": Order(
         order_id="ord-initial-001",
@@ -90,8 +96,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(
-    title="Sample Pipeline App",
-    description="Demo microservice demonstrating multi-stage CI/CD failure investigation",
+    title="Order Processing Service",
+    description="High-throughput asynchronous customer order processing service",
     version="1.0.0",
     lifespan=lifespan,
 )

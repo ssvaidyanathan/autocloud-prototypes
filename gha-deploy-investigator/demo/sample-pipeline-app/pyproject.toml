@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sample-pipeline-app"
 version = "1.0.0"
-description = "Sample microservice for multi-stage GitHub Actions failure investigation"
-authors = [{ name = "Autocloud Team" }]
+description = "High-throughput asynchronous order processing microservice"
+authors = [{ name = "Engineering Team" }]
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

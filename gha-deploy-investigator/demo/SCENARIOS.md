@@ -27,8 +27,8 @@ This directory contains deterministic failure injection and reset tooling for te
 ### Scenario 1: Lint & Code Style Violation
 - **Stage**: `lint`
 - **Trigger**: `demo/scenarios/trigger-lint-failure.sh [TARGET_DIR] [--commit]`
-- **Injected Defect**: Unused imports (`F401`) and multiple statements on a single line (`E701`) in `app/main.py`.
-- **Commit Message**: `refactor(orders): add order export and audit formatting`
+- **Injected Defect**: Unused imports (`F401`) and multiple statements on a single line (`E702`) in `app/main.py`.
+- **Commit Message**: `refactor(orders): add order export and currency formatting helper`
 - **Verification**: `ruff check app/`
 - **Diagnosed By**: `PipelineLogsSpecialist`
 - **Expected Outcome**: Stage identified as `lint`, root cause pointing to `app/main.py` violations, structured annotations generated.
@@ -36,7 +36,7 @@ This directory contains deterministic failure injection and reset tooling for te
 ### Scenario 2: Broken Unit Test Assertion
 - **Stage**: `test`
 - **Trigger**: `demo/scenarios/trigger-test-failure.sh [TARGET_DIR] [--commit]`
-- **Injected Defect**: Regression in promotional discount calculation in `tests/test_main.py` (`test_order_discount_calculation_failure`).
+- **Injected Defect**: Regression in promotional discount calculation in `tests/test_main.py` (`test_customer_tier_discount_calculation`).
 - **Commit Message**: `feat(pricing): update order discount tier calculation`
 - **Verification**: `pytest tests/ -v`
 - **Diagnosed By**: `PipelineLogsSpecialist`
@@ -56,7 +56,7 @@ This directory contains deterministic failure injection and reset tooling for te
 - **Trigger**: `demo/scenarios/trigger-deploy-failure.sh [TARGET_DIR] [--commit]`
 - **Injected Defect**: Sets `EXTRA_ENV_VARS="CACHE_PREWARM_BUFFER_MB=2048"` and limits container memory to `256Mi` in `scripts/deploy.sh`.
 - **Commit Message**: `feat(cache): pre-warm order history cache on startup`
-- **Verification**: `CI_SIMULATION=true ./scripts/deploy.sh`
+- **Verification**: `./scripts/deploy.sh` (Cloud Run container startup OOM exit 137)
 - **Diagnosed By**: `RuntimeHealthSpecialist`
 - **Expected Outcome**: Stage identified as `deploy`, root cause diagnoses exit code 137 (OOM), recommends remediation action `--memory 1Gi`.
 

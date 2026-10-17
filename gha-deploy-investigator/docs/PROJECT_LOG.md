@@ -343,5 +343,42 @@ Incorporated architectural refinements for Phase 3 demo tooling and scenarios re
   - `ruff check gha-deploy-investigator` -> `All checks passed!`
 
 
+## 2026-10-16 - User Requirement: Zero Leaked Hints in Demo Repo & Zero Hardcoded Agent Answers
+- **Author**: `gha-dev-1`
+- **Role**: Developer
+- **Supervisor**: `gha-em`
+- **Branch**: `feat/gha-deploy-investigator`
+- **Status**: Completed
+
+### 1. Requirements Addressed
+Per direct requirement from human user via `gha-em`:
+- Complete elimination of any reference to failure injection, scenarios, testing hints, or investigator agent from `sample-pipeline-app/`.
+- Ensure `sample-pipeline-app/` looks 100% like a genuine customer production service.
+- Verification that zero hardcoded scenario answers or customer app strings exist in the agent repository.
+
+### 2. Actions & Refinements
+1. **Pristine Customer Production Service (`sample-pipeline-app/`)**:
+   - `README.md`: Completely rewritten as a realistic customer service document describing the Order Processing Service, API endpoints, setup, and running instructions with zero mentions of demo, injection, scenarios, or agent evaluation.
+   - `app/main.py`: Updated FastAPI service metadata (`title="Order Processing Service"`, `description="High-throughput asynchronous customer order processing service"`), removed demo comments.
+   - `pyproject.toml`: Updated package description and authorship to genuine production metadata.
+   - `scripts/deploy.sh`: Removed internal simulation logic and `CACHE_PREWARM_BUFFER_MB` error branching entirely; now a 100% genuine customer production Cloud Run deployment script.
+2. **Scenario Injections (`demo/scenarios/`)**:
+   - `trigger-lint-failure.sh`: Injects genuine currency formatting helper with style and unused import violations; zero `# INJECTED` comments.
+   - `trigger-test-failure.sh`: Injects realistic `test_customer_tier_discount_calculation` with calculation regression; zero hints or `_failure` function names.
+   - `trigger-build-failure.sh`: Injects realistic configuration asset packaging COPY line.
+   - `trigger-deploy-failure.sh`: Realistic memory constraint and cache buffer configuration.
+   - `reset-scenarios.sh`: Idempotent restoration and commit revert.
+3. **Agent Repo Cleanliness**:
+   - Verified with regex/grep sweeps: zero hardcoded code, zero hardcoded scenario answers, and zero references to `sample-pipeline-app` in `agent/` and `bridge/`.
+
+### 3. Verification
+- Contracts check: `SUCCESS: Contracts are byte-identical.`
+- AST static guard: `Zero post-LLM root cause template overrides found.`
+- Pytest suite: `50 passed in 3.25s` (offline).
+- Demo microservice suite: `5 passed in 0.05s`.
+- Linter: `All checks passed!`
+
+
+
 
 

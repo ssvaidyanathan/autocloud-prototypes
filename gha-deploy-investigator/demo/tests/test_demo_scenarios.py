@@ -73,7 +73,7 @@ def test_scenario_1_lint_failure_lifecycle(demo_app_path: Path) -> None:
             text=True,
             check=True,
         )
-        assert "Injected lint violations" in res.stdout
+        assert "Added currency formatting" in res.stdout
 
         # Verify ruff fails on app/main.py
         ruff_res = subprocess.run(
@@ -82,7 +82,7 @@ def test_scenario_1_lint_failure_lifecycle(demo_app_path: Path) -> None:
             text=True,
         )
         assert ruff_res.returncode != 0
-        assert "F401" in ruff_res.stdout or "E701" in ruff_res.stdout
+        assert "F401" in ruff_res.stdout or "E702" in ruff_res.stdout
 
         # 2. Verify PipelineLogsSpecialist diagnoses linter failure
         specialist = PipelineLogsSpecialist()
@@ -140,7 +140,7 @@ def test_scenario_2_test_failure_lifecycle(demo_app_path: Path) -> None:
             text=True,
             check=True,
         )
-        assert "Injected failing assertion" in res.stdout
+        assert "test_customer_tier_discount_calculation" in res.stdout
 
         # Verify pytest fails
         pytest_res = subprocess.run(
@@ -175,7 +175,7 @@ def test_scenario_2_test_failure_lifecycle(demo_app_path: Path) -> None:
             log_text=pytest_res.stdout,
         )
         assert diag.stage == "test"
-        assert "test_order_discount_calculation_failure" in diag.probable_cause
+        assert "test_customer_tier_discount_calculation" in diag.probable_cause
 
     finally:
         # 3. Reset scenario
@@ -253,12 +253,28 @@ def test_scenario_3_build_failure_lifecycle(demo_app_path: Path) -> None:
 
 
 def test_scenario_4_deploy_failure_lifecycle(demo_app_path: Path) -> None:
-    """Verify Scenario 4 injection, deploy.sh simulation, specialist diagnosis, and reset."""
+    """Verify Scenario 4 injection, deploy.sh execution, specialist diagnosis, and reset."""
     scenarios_dir = demo_app_path.parent / "scenarios"
     deploy_sh = demo_app_path / "scripts" / "deploy.sh"
     reset_runtime_state()
 
+    mock_gcloud_dir = Path(tempfile.mkdtemp(prefix="test-gcloud-"))
+    mock_gcloud = mock_gcloud_dir / "mock_gcloud"
+
     try:
+        # Create mock gcloud tool simulating Cloud Run deployment
+        mock_gcloud.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "echo 'Deploying revision sample-pipeline-app-00004-err...' >&2\n"
+            "echo 'ERROR: (gcloud.run.deploy) Container failed to start and listen ' "
+            "'on port 8080.' >&2\n"
+            "echo \"Revision 'sample-pipeline-app-00004-err' failed to become ready: "
+            "Container terminated due to memory limit (exit code 137: Out of Memory).\" >&2\n"
+            "exit 1\n"
+        )
+        mock_gcloud.chmod(0o755)
+
         # 1. Trigger deploy fault
         res = subprocess.run(
             ["bash", str(scenarios_dir / "trigger-deploy-failure.sh"), str(demo_app_path)],
@@ -270,12 +286,12 @@ def test_scenario_4_deploy_failure_lifecycle(demo_app_path: Path) -> None:
         deploy_content = deploy_sh.read_text()
         assert "CACHE_PREWARM_BUFFER_MB=2048" in deploy_content
 
-        # Execute deploy.sh simulation
+        # Execute deploy.sh using mock gcloud
         sim_res = subprocess.run(
             ["bash", str(deploy_sh)],
             capture_output=True,
             text=True,
-            env={**os.environ, "CI_SIMULATION": "true"},
+            env={**os.environ, "GCLOUD": str(mock_gcloud)},
         )
         assert sim_res.returncode == 1
         assert "exit code 137" in sim_res.stderr
@@ -331,6 +347,7 @@ def test_scenario_4_deploy_failure_lifecycle(demo_app_path: Path) -> None:
         assert any("--memory 1Gi" in act for act in diag.remediation_actions)
 
     finally:
+        shutil.rmtree(mock_gcloud_dir, ignore_errors=True)
         # 3. Reset scenario
         subprocess.run(
             ["bash", str(scenarios_dir / "reset-scenarios.sh"), str(demo_app_path)],

@@ -21,24 +21,12 @@ if [[ -n "${EXTRA_ENV_VARS}" ]]; then
     ENV_FLAGS="--set-env-vars ${EXTRA_ENV_VARS}"
 fi
 
-# In dry-run or local mode, simulate deployment
-if [[ "${DRY_RUN:-false}" == "true" || "${APP_ENV:-}" == "local" || "${CI_SIMULATION:-false}" == "true" ]]; then
-    echo "[SIMULATION] Running deploy verification for ${SERVICE_NAME}..."
-    if [[ "${EXTRA_ENV_VARS}" =~ CACHE_PREWARM_BUFFER_MB=([0-9]+) ]]; then
-        buffer_mb="${BASH_REMATCH[1]}"
-        if (( buffer_mb > 512 )); then
-            echo "Deploying revision ${SERVICE_NAME}-00004-err..."
-            echo "ERROR: (gcloud.run.deploy) Container failed to start and listen on port 8080." >&2
-            echo "Revision '${SERVICE_NAME}-00004-err' failed to become ready: Container terminated due to memory limit (exit code 137: Out of Memory)." >&2
-            exit 1
-        fi
-    fi
-    echo "Service ${SERVICE_NAME} successfully deployed to https://${SERVICE_NAME}-${REGION}.a.run.app"
+if [[ "${DRY_RUN:-false}" == "true" ]]; then
+    echo "Dry-run validation successful for ${SERVICE_NAME}."
     exit 0
 fi
 
-# Live gcloud deployment command
-gcloud run deploy "${SERVICE_NAME}" \
+"${GCLOUD:-gcloud}" run deploy "${SERVICE_NAME}" \
     --image="${IMAGE_NAME}" \
     --region="${REGION}" \
     --platform=managed \

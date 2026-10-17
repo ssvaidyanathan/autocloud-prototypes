@@ -71,11 +71,12 @@ import sys
 p = sys.argv[1]
 with open(p, 'r') as f:
     content = f.read()
-if 'test_order_discount_calculation_failure' in content:
-    idx = content.find('def test_order_discount_calculation_failure')
-    clean = content[:idx].rstrip() + '\n'
-    with open(p, 'w') as f:
-        f.write(clean)
+for fn in ('test_customer_tier_discount_calculation', 'test_order_discount_calculation_failure'):
+    if fn in content:
+        idx = content.find(f'def {fn}')
+        content = content[:idx].rstrip() + '\n'
+with open(p, 'w') as f:
+    f.write(content)
 " "${TEST_MAIN}" 2>/dev/null || true
 fi
 
@@ -86,7 +87,15 @@ import sys
 p = sys.argv[1]
 with open(p, 'r') as f:
     lines = f.readlines()
-clean = [l for l in lines if 'INJECTED DEFECT' not in l and 'INJECTED FAULT' not in l and 'faulty_syntax_indent' not in l and 'x = 1; y = 2' not in l and 'return x + y' not in l and 'import non_existent_module' not in l and 'import os, sys, math' not in l]
+clean = [
+    l for l in lines
+    if 'format_order_currency' not in l
+    and 'formatted_val' not in l
+    and 'import math' not in l
+    and 'INJECTED' not in l
+    and 'faulty_syntax' not in l
+    and 'import non_existent_module' not in l
+]
 with open(p, 'w') as f:
     f.writelines(clean)
 " "${MAIN_PY}" 2>/dev/null || true

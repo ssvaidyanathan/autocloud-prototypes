@@ -19,7 +19,7 @@ APP_DIR="${APP_DIR:-${DEFAULT_APP_DIR}}"
 TARGET_FILE="${APP_DIR}/tests/test_main.py"
 
 echo "=================================================="
-echo "Injecting Scenario 2: Broken Unit Test Assertion"
+echo "Injecting Scenario 2: Unit Test Calculation Regression"
 echo "Target File: ${TARGET_FILE}"
 echo "=================================================="
 
@@ -31,8 +31,8 @@ fi
 cat << 'EOF' >> "${TARGET_FILE}"
 
 
-def test_order_discount_calculation_failure(client) -> None:
-    """Validate promotional discount tiered calculations."""
+def test_customer_tier_discount_calculation(client) -> None:
+    """Validate customer volume discount tiered calculations."""
     expected_discounted_total = 100.00
     actual_calculated_total = 75.50
     assert actual_calculated_total == expected_discounted_total, (
@@ -41,7 +41,7 @@ def test_order_discount_calculation_failure(client) -> None:
     )
 EOF
 
-echo "Injected failing assertion 'test_order_discount_calculation_failure' into ${TARGET_FILE}."
+echo "Added 'test_customer_tier_discount_calculation' into ${TARGET_FILE}."
 
 if [[ "${DO_COMMIT}" == "true" ]]; then
     if git -C "${APP_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then

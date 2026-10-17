@@ -1,16 +1,13 @@
-# Sample Pipeline App
+# Order Processing Service
 
-A production-grade FastAPI microservice demonstrating multi-stage GitHub Actions CI/CD pipeline failure investigation by the `gha-deploy-investigator` autonomous agent.
+High-performance customer order intake and processing microservice built with FastAPI.
 
 ## Architecture & Features
 
-- **Framework**: FastAPI with Pydantic v2 configuration and schema validation.
-- **Functionality**: Customer order processing, health checks, and metadata endpoints.
-- **Pipeline Workflow**: `.github/workflows/pipeline.yml` featuring 4 sequenced stages:
-  1. `lint`: Code style, unused imports, and syntax verification with `ruff`.
-  2. `unit-test`: Isolated test suite verification with `pytest`.
-  3. `build-container`: Multi-stage Docker image packaging.
-  4. `deploy-cloudrun`: Deployment to Google Cloud Run with memory and environment configuration.
+- **Order Management**: Create, list, and query customer orders with itemized pricing.
+- **Health Probes**: Liveness and readiness endpoints for container orchestration.
+- **Type Safety**: Pydantic v2 data models and environment-based configuration.
+- **CI/CD Automation**: Multi-stage GitHub Actions workflow for linting, testing, container packaging, and deployment.
 
 ---
 
@@ -18,12 +15,14 @@ A production-grade FastAPI microservice demonstrating multi-stage GitHub Actions
 
 ### Prerequisites
 - Python 3.11+
-- Virtual environment with project dependencies:
-  ```bash
-  pip install -e .[test]
-  ```
+- Virtual environment
 
-### Running the Microservice Locally
+### Installation
+```bash
+pip install -e .[test]
+```
+
+### Running the Service Locally
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 ```
@@ -40,8 +39,10 @@ ruff check app/
 
 ---
 
-## Testing & Scenarios
+## API Endpoints
 
-Failure injection scenarios are located outside this application directory in `demo/scenarios/` to preserve a clean, realistic production repository without leaked testing artifacts:
-
-- See `demo/SCENARIOS.md` in the parent directory for complete details on triggering and resetting multi-stage pipeline failure scenarios.
+- `GET /`: Service metadata and runtime status
+- `GET /health`: Liveness and readiness probe endpoint
+- `GET /api/v1/orders`: List all confirmed customer orders
+- `POST /api/v1/orders`: Create a new customer order with itemized products
+- `GET /api/v1/orders/{order_id}`: Retrieve order details by ID

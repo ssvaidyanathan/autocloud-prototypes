@@ -30,27 +30,25 @@ fi
 
 TMP_FILE="$(mktemp)"
 cat << 'EOF' > "${TMP_FILE}"
-# INJECTED DEFECT: Unused imports and syntax violation for lint failure
-import non_existent_module  # noqa: F401
-import os, sys, math  # unused imports
+import math
 
-def faulty_syntax_indent():
-    x = 1; y = 2  # multiple statements on one line (E701)
-    return x + y
+
+def format_order_currency(value: float) -> str:
+    formatted_val = round(value, 2); return f"${formatted_val:.2f}"
 
 EOF
 cat "${TARGET_FILE}" >> "${TMP_FILE}"
 mv "${TMP_FILE}" "${TARGET_FILE}"
 
-echo "Injected lint violations into ${TARGET_FILE}:"
+echo "Added currency formatting function into ${TARGET_FILE} with style violations:"
 echo "  - Unused imports (F401)"
-echo "  - Multiple statements on single line (E701)"
+echo "  - Multiple statements on single line (E702)"
 
 if [[ "${DO_COMMIT}" == "true" ]]; then
     if git -C "${APP_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         git -C "${APP_DIR}" add app/main.py
-        git -C "${APP_DIR}" commit -m "refactor(orders): add order export and audit formatting"
-        echo "Created git commit in ${APP_DIR}: 'refactor(orders): add order export and audit formatting'"
+        git -C "${APP_DIR}" commit -m "refactor(orders): add order export and currency formatting helper"
+        echo "Created git commit in ${APP_DIR}: 'refactor(orders): add order export and currency formatting helper'"
     else
         echo "Warning: --commit requested but ${APP_DIR} is not a git repository."
     fi
