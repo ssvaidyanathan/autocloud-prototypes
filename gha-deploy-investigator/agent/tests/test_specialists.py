@@ -105,6 +105,71 @@ class TestSpecialists:
         assert "lint-troubleshooting" in res.skills_used
         assert any("get_commit_diff" in q for q in res.queries_run)
 
+    def test_pipeline_logs_specialist_multiline_ruff_with_timestamps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        specialist = PipelineLogsSpecialist()
+        incident = _make_incident("lint")
+        job = {"id": 11, "name": "lint"}
+        step = {"name": "Run Ruff Lint", "conclusion": "failure"}
+
+        log_text = (
+            "2026-10-17T10:09:06.5738347Z F401 [*] `math` imported but unused\n"
+            "2026-10-17T10:09:06.5738627Z  --> app/main.py:1:8\n"
+            "2026-10-17T10:09:06.5740168Z E702 Multiple statements on one line (semicolon)\n"
+            "2026-10-17T10:09:06.5740393Z  --> app/main.py:5:36\n"
+            "2026-10-17T10:09:06.5742056Z E402 Module level import not at top of file\n"
+            "2026-10-17T10:09:06.5742254Z  --> app/main.py:7:1\n"
+            "2026-10-17T10:09:06.5743000Z E402 Module level import not at top of file\n"
+            "2026-10-17T10:09:06.5743200Z  --> app/main.py:8:1\n"
+            "2026-10-17T10:09:06.5744000Z E402 Module level import not at top of file\n"
+            "2026-10-17T10:09:06.5744200Z  --> app/main.py:9:1\n"
+            "2026-10-17T10:09:06.5745000Z E402 Module level import not at top of file\n"
+            "2026-10-17T10:09:06.5745200Z  --> app/main.py:10:1\n"
+            "2026-10-17T10:09:06.5746000Z E402 Module level import not at top of file\n"
+            "2026-10-17T10:09:06.5746200Z  --> app/main.py:11:1\n"
+            "2026-10-17T10:09:06.5747000Z E402 Module level import not at top of file\n"
+            "2026-10-17T10:09:06.5747200Z  --> app/main.py:12:1\n"
+            "2026-10-17T10:09:06.5748000Z E402 Module level import not at top of file\n"
+            "2026-10-17T10:09:06.5748200Z  --> app/main.py:13:1\n"
+            "2026-10-17T10:09:06.5763858Z Found 9 errors.\n"
+        )
+
+        monkeypatch.setattr(
+            "agent.app.specialists.pipeline_logs.get_commit_diff",
+            lambda **kwargs: {"files": [{"filename": "app/main.py"}]},
+        )
+
+        res = specialist.diagnose(incident, job, step, log_text)
+        assert res.stage == "lint"
+        assert res.confidence >= 0.90
+        assert "Linter detected 9 errors in 'app/main.py'" in res.probable_cause
+        assert "7x E402" in res.probable_cause
+        assert "1x E702" in res.probable_cause
+        assert "1x F401" in res.probable_cause
+        assert "math imported but unused" in res.probable_cause
+        assert (
+            "Confirmed: all 9 errors are in 'app/main.py' modified in this commit."
+            in res.summary
+        )
+        assert len(res.annotations) == 9
+        f401_ann = next(a for a in res.annotations if a.title == "Linter Violation: F401")
+        assert f401_ann.path == "app/main.py"
+        assert f401_ann.start_line == 1
+        assert f401_ann.message == "math imported but unused"
+
+        e702_ann = next(a for a in res.annotations if a.title == "Linter Violation: E702")
+        assert e702_ann.path == "app/main.py"
+        assert e702_ann.start_line == 5
+
+        e402_anns = [a for a in res.annotations if a.title == "Linter Violation: E402"]
+        assert len(e402_anns) == 7
+        assert e402_anns[0].start_line == 7
+
+        assert any(e.kind == "linter_breakdown" for e in res.evidence_items)
+        assert res.skill_first is True
+        assert "lint-troubleshooting" in res.skills_used
+
     def test_pipeline_logs_specialist_pytest_failure(self) -> None:
         specialist = PipelineLogsSpecialist()
         incident = _make_incident("test")

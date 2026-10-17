@@ -32,6 +32,81 @@ LINT_PATTERN = re.compile(
     re.MULTILINE,
 )
 
+TIMESTAMP_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}T[^\s]+\s+")
+RUFF_HEADER_PATTERN = re.compile(
+    r"^(?P<code>[A-Z]\d{2,4}|[A-Z0-9_]+)\s+(?:\[\*\]\s+)?(?P<msg>.+)$"
+)
+RUFF_LOC_PATTERN = re.compile(
+    r"^-->\s+(?P<file>[a-zA-Z0-9_\-\./\\]+\.(?:py|js|ts|jsx|tsx|go|java|rs)):(?P<line>\d+)(?::(?P<col>\d+))?"
+)
+
+
+def parse_linter_errors(log_text: str) -> list[dict[str, Any]]:
+    """Parse linter errors from runner logs supporting multi-line and single-line formats."""
+    parsed: list[dict[str, Any]] = []
+    lines = log_text.splitlines()
+    pending_header: Optional[dict[str, str]] = None
+
+    for raw_line in lines:
+        cleaned = TIMESTAMP_PREFIX.sub("", raw_line).strip()
+        if not cleaned:
+            continue
+
+        loc_match = RUFF_LOC_PATTERN.match(cleaned)
+        if loc_match and pending_header:
+            file_path = re.sub(r"^\.?/", "", loc_match.group("file").strip())
+            line_num = int(loc_match.group("line"))
+            col_num = loc_match.group("col")
+            parsed.append(
+                {
+                    "file": file_path,
+                    "line": line_num,
+                    "col": int(col_num) if col_num else None,
+                    "code": pending_header["code"],
+                    "msg": pending_header["msg"],
+                    "raw_match": f"{pending_header['raw_line']}\n{cleaned}",
+                }
+            )
+            pending_header = None
+            continue
+
+        pending_header = None
+
+        single_match = LINT_PATTERN.match(cleaned)
+        if single_match:
+            raw_path = single_match.group("file").strip()
+            file_path = re.sub(r"^\.?/", "", raw_path)
+            line_str = single_match.group("line")
+            line_num = int(line_str) if line_str else 1
+            col_str = single_match.group("col")
+            code = (single_match.group("code") or "").strip()
+            msg = single_match.group("msg").strip()
+            msg = re.sub(r"^\[\*\]\s*", "", msg).strip().replace("`", "")
+            parsed.append(
+                {
+                    "file": file_path,
+                    "line": line_num,
+                    "col": int(col_str) if col_str else None,
+                    "code": code,
+                    "msg": msg,
+                    "raw_match": cleaned,
+                }
+            )
+            continue
+
+        hdr_match = RUFF_HEADER_PATTERN.match(cleaned)
+        if hdr_match:
+            code = hdr_match.group("code").strip()
+            msg = hdr_match.group("msg").strip()
+            msg = re.sub(r"^\[\*\]\s*", "", msg).strip().replace("`", "")
+            pending_header = {
+                "code": code,
+                "msg": msg,
+                "raw_line": cleaned,
+            }
+
+    return parsed
+
 # Pytest failure patterns
 PYTEST_FAILURE_PATTERN = re.compile(
     r"(?:FAILED|ERROR)\s+(?P<test>[a-zA-Z0-9_\-\./\\]+(?:::[a-zA-Z0-9_]+)+)\s*(?:-\s*(?P<msg>.+))?",
@@ -169,23 +244,17 @@ class PipelineLogsSpecialist(BaseSpecialist):
     ) -> DiagnosticResult:
         annotations: list[CheckRunAnnotation] = []
         if sub_stage == "lint":
-            matches = list(LINT_PATTERN.finditer(log_text))
-            for match in matches[:50]:
-                raw_path = match.group("file").strip()
-                f_path = re.sub(r"^\.?/", "", raw_path)
-                line_str = match.group("line")
-                line = int(line_str) if line_str else 1
-                code = (match.group("code") or "").strip()
-                msg = match.group("msg").strip()
-                msg = re.sub(r"^\[\*\]\s*", "", msg).strip().replace("`", "")
+            parsed_items = parse_linter_errors(log_text)
+            for item in parsed_items[:50]:
+                code = item["code"]
                 annotations.append(
                     CheckRunAnnotation(
-                        path=f_path,
-                        start_line=line,
-                        end_line=line,
+                        path=item["file"],
+                        start_line=item["line"],
+                        end_line=item["line"],
                         annotation_level="failure",
                         title=f"Linter Violation: {code}" if code else "Linter Violation",
-                        message=msg,
+                        message=item["msg"],
                     )
                 )
 
@@ -348,30 +417,10 @@ class PipelineLogsSpecialist(BaseSpecialist):
         diff_data: Optional[dict[str, Any]] = None,
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Lint Step")
-        matches = list(LINT_PATTERN.finditer(log_text))
+        parsed_items = parse_linter_errors(log_text)
         annotations: list[CheckRunAnnotation] = []
         evidence_items: list[EvidenceItem] = []
         now = datetime.now(timezone.utc)
-
-        parsed_items: list[dict[str, Any]] = []
-        for match in matches:
-            raw_path = match.group("file").strip()
-            f_path = re.sub(r"^\.?/", "", raw_path)
-            line_str = match.group("line")
-            line = int(line_str) if line_str else 1
-            code = (match.group("code") or "").strip()
-            msg = match.group("msg").strip()
-            msg = re.sub(r"^\[\*\]\s*", "", msg).strip()
-            clean_msg = msg.replace("`", "")
-            parsed_items.append(
-                {
-                    "file": f_path,
-                    "line": line,
-                    "code": code,
-                    "msg": clean_msg,
-                    "raw_match": match.group(0).strip(),
-                }
-            )
 
         total_errors = len(parsed_items)
         if total_errors == 0:
@@ -540,7 +589,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
             specialist_name=self.name,
             summary=summary,
             probable_cause=probable_cause,
-            confidence=0.95 if matches else 0.80,
+            confidence=0.95 if parsed_items else 0.80,
             evidence_items=evidence_items,
             remediation_actions=remediation,
             suggested_fix=f"Resolve linter errors in {primary_file}",
