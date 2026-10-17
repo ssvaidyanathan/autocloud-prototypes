@@ -159,10 +159,10 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             "   - And/or invoke 'describe_service' or 'describe_cloud_run_revision' to inspect "
             "runtime telemetry.\n"
             "   NOTE ON LIVE STATE: 'describe_service' reports live cluster state. If a "
-            "deployment failed before a new revision could be created (e.g. IAM permission "
-            "error), the live service status may report 'Ready' for the pre-existing revision; "
-            "this must be contextualized as prior revision health, NOT as success of the "
-            "failed deployment.\n"
+            "deployment failed before an initial revision could be created (e.g. IAM permission "
+            "error), note that no revision existed at failure time and current status reflects "
+            "revisions created subsequent to the failure event; do NOT present current health as "
+            "success of the failed deployment.\n"
             "3. On Turn 3, conclude immediately by invoking 'set_model_response' with your "
             "structured Findings report citing the tool outputs."
         )
@@ -200,12 +200,13 @@ class RuntimeHealthSpecialist(BaseSpecialist):
         # Ensure live state in cloud_run_service items is clearly contextualized
         for i, ev in enumerate(evidence_items):
             if ev.kind == "cloud_run_service" and not revision_name:
-                if "Active revision from previous deployment" not in ev.excerpt:
+                if "No revision existed at failure time" not in ev.excerpt:
                     evidence_items[i] = EvidenceItem(
                         kind="cloud_run_service",
                         excerpt=(
-                            f"{ev.excerpt} (Active revision from previous deployment; "
-                            "current deployment failed before new revision could be created)"
+                            f"{ev.excerpt} (Note: No revision existed at failure time; "
+                            "deployment failed prior to initial revision creation. Current "
+                            "status reflects revisions created subsequent to the failure event.)"
                         ),
                         timestamp=ev.timestamp,
                         console_url=ev.console_url,
@@ -363,9 +364,9 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             srv_status = service_info.get("status", "Ready")
             if not revision_name:
                 srv_excerpt = (
-                    f"Live Service Status: {srv_status} (Active revision from previous "
-                    "deployment; current deployment failed before new revision could be "
-                    f"created; region: '{region}')"
+                    f"Live Service Status: {srv_status} (Note: No revision existed at failure "
+                    "time; deployment failed prior to initial revision creation. Current status "
+                    "reflects revisions created subsequent to the failure event.)"
                 )
             else:
                 srv_excerpt = (

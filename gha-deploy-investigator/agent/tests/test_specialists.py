@@ -285,9 +285,13 @@ class TestSpecialists:
         assert any("describe_service" in q for q in res.queries_run)
         # Live status contextualized with caveat that revision was not created
         assert any(
-            "Active revision from previous deployment" in e.excerpt
+            "No revision existed at failure time" in e.excerpt
             for e in res.evidence_items
             if e.kind == "cloud_run_service"
+        )
+        assert not any(
+            "Active revision from previous deployment" in e.excerpt
+            for e in res.evidence_items
         )
         # Verbatim error line excerpt in evidence
         assert any("PERMISSION_DENIED" in e.excerpt for e in res.evidence_items)
