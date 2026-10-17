@@ -232,9 +232,11 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             "1. On Turn 1, invoke 'load_skill' exactly once with "
             "skill_name='cloudrun-deploy-troubleshooting'. Do NOT invoke other skills.\n"
             "2. On Turn 2, invoke decisive read-only diagnostic data tools for the failure:\n"
+            "   - Invoke 'get_commit_diff' (repo, head_sha) to inspect repository or deployment "
+            "configuration changes introduced by the commit (e.g. resource limits, "
+            "environment variables, configuration changes).\n"
             "   - Invoke 'fetch_job_logs' (repo, job_id) to inspect the deployment step runner "
-            "logs containing the decisive failure error (e.g. IAM actAs permissions, gcloud "
-            "deployment errors).\n"
+            "logs containing the decisive failure error.\n"
             "   - And/or invoke 'describe_service', 'list_service_revisions', or "
             "'describe_cloud_run_revision' to inspect runtime telemetry and revision history.\n"
             "   NOTE ON LIVE STATE: 'describe_service' reports live cluster state. "
@@ -406,9 +408,10 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                         "skill_name='cloudrun-deploy-troubleshooting'."
                     ),
                     (
-                        "2. Turn 2: Invoke fetch_job_logs(repo, job_id) to inspect the deployment "
-                        "runner logs containing the decisive failure error, and/or "
-                        "describe_service / describe_cloud_run_revision for runtime telemetry."
+                        "2. Turn 2: Invoke get_commit_diff(repo, head_sha) to inspect commit "
+                        "changes, fetch_job_logs(repo, job_id) to inspect deployment logs, "
+                        "and/or describe_service / describe_cloud_run_revision for "
+                        "runtime telemetry."
                     ),
                     (
                         "3. Turn 3: Conclude immediately by invoking set_model_response "
@@ -437,7 +440,39 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             "load_skill", {"skill_name": "cloudrun-deploy-troubleshooting"}
         )
 
-        # 1. Fetch deployment job logs if job_id and repo are available
+        # 1. Fetch commit diff if repo and head_sha are available
+        diff_data: Optional[dict[str, Any]] = None
+        if repo and head_sha:
+            try:
+                diff_data = self.tracked_tool_call(
+                    "get_commit_diff",
+                    {"repo": repo, "head_sha": head_sha},
+                    lambda: get_commit_diff(
+                        repo=repo, head_sha=head_sha, client=client, config=config
+                    ),
+                )
+                if diff_data and "files" in diff_data:
+                    changed_files = [
+                        re.sub(r"^\.?/", "", f.get("filename", ""))
+                        for f in diff_data["files"]
+                        if f.get("filename")
+                    ]
+                    if changed_files:
+                        evidence_items.append(
+                            EvidenceItem(
+                                kind="git_diff",
+                                excerpt=(
+                                    f"Commit diff touched {len(changed_files)} file(s): "
+                                    f"{', '.join(changed_files)}"
+                                ),
+                                timestamp=now,
+                                console_url=incident.external_url,
+                            )
+                        )
+            except Exception as exc:
+                logger.debug("Could not fetch commit diff in RuntimeHealthSpecialist: %s", exc)
+
+        # 2. Fetch deployment job logs if job_id and repo are available
         if repo and job_id:
             try:
                 fetched_logs = self.tracked_tool_call(
@@ -646,6 +681,25 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                     timestamp=now,
                 )
             )
+            # When query_cloud_logging returns container logs,
+            # extract the last N lines before termination as cloud_run_container_log
+            if log_entries:
+                container_lines = [
+                    str(e.get("text_payload") or e.get("json_payload") or "").strip()
+                    for e in log_entries
+                    if (e.get("text_payload") or e.get("json_payload"))
+                ]
+                last_lines = (
+                    container_lines[-5:] if len(container_lines) > 5 else container_lines
+                )
+                evidence_items.append(
+                    EvidenceItem(
+                        kind="cloud_run_container_log",
+                        excerpt="\n".join(last_lines),
+                        timestamp=now,
+                        console_url=incident.external_url,
+                    )
+                )
         elif is_probe_timeout:
             rev_str = f" in revision '{revision_name}'" if revision_name else ""
             probable_cause = (
@@ -701,12 +755,8 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             )
         else:
             rev_label = f" of Cloud Run revision '{revision_name}'" if revision_name else ""
-            has_iam_or_actas = any(
-                ("iam" in el.lower() or "permission" in el.lower() or "actas" in el.lower())
-                for el in (err_lines or [log_text])
-            )
-            if has_iam_or_actas and err_lines:
-                primary_err = err_lines[0]
+            primary_err = err_lines[0] if err_lines else ""
+            if primary_err:
                 probable_cause = (
                     f"Deployment step '{step_name}' failed for service '{service_name}': "
                     f"{primary_err}"
@@ -719,16 +769,10 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                 )
                 confidence = 0.75
 
-            remediation = []
-            if has_iam_or_actas:
-                remediation.append(
-                    "Grant 'roles/iam.serviceAccountUser' (iam.serviceaccounts.actAs permission) "
-                    "to the deployment service account on the Cloud Run runtime service account"
-                )
-                remediation.append(
-                    "Verify Workload Identity Federation or GitHub Actions service account "
-                    "impersonation bindings"
-                )
+            remediation = [
+                f"Review logs for deployment step '{step_name}' to resolve deployment error",
+                "Verify service configuration and required deployment permissions",
+            ]
 
             if revision_name:
                 remediation.append(

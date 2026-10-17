@@ -10,7 +10,7 @@ from starlette.testclient import TestClient
 
 @pytest.fixture
 def rsa_private_key_pem() -> str:
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
     pem = key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,

@@ -134,9 +134,9 @@ class RuntimeHealthSuccessLlm(BaseLlm):
                 '{"summary": "RuntimeHealth agentic pass diagnosed deploy failure '
                 'from runner logs.", '
                 '"confidence": 0.95, '
-                '"anomalies": ["iam.serviceaccounts.actAs denied on runtime SA"], '
+                '"anomalies": ["Missing required permission on target resource"], '
                 '"evidence": [{"kind": "github_runner_log", '
-                '"excerpt": "Permission iam.serviceaccounts.actAs denied", '
+                '"excerpt": "Permission compute.instances.create denied", '
                 '"timestamp": "2026-10-17T08:00:00Z"}]}'
             )
             yield LlmResponse(
@@ -247,7 +247,7 @@ def test_runtime_health_specialist_multi_turn_runner() -> None:
     assert "cloudrun-deploy-troubleshooting" in res.skills_used
     assert len(res.queries_run) >= 1
     assert any("fetch_job_logs" in q for q in res.queries_run)
-    assert any("actAs" in e.excerpt for e in res.evidence_items)
+    assert any("compute.instances.create" in e.excerpt for e in res.evidence_items)
 
 
 def test_iac_config_specialist_multi_turn_runner() -> None:

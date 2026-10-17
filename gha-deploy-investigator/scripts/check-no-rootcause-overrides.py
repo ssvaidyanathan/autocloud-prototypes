@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""AST static guard check to ensure no post-LLM root cause template overrides or
-regex incident classifiers exist in synthesizer.py.
+"""AST static guard check to ensure no post-LLM root cause template overrides,
+regex incident classifiers, or keyword-based remediation overrides exist in
+synthesizer.py, dispatcher.py, or specialists.
 
 Rules:
 1. ProbableRootCause must not be constructed or assigned with canned templates or f-strings
@@ -9,6 +10,8 @@ Rules:
 2. report.probable_root_cause.text must not be assigned f-strings or canned template strings.
 3. Neither synthesizer.py nor dispatcher.py may contain regex incident
    classifiers selecting templates.
+4. Remediation actions must not be appended, inserted, or overridden based on keyword matches
+   or hardcoded role/permission templates.
 """
 
 import ast
@@ -25,6 +28,18 @@ FORBIDDEN_CANNED_SUBSTRINGS = [
     "Database connection pool exhaustion",
     "Elevated request latency",
     "Regression introduced by recent change",
+]
+
+FORBIDDEN_REMEDIATION_SUBSTRINGS = [
+    "roles/iam",
+    "serviceaccounts.actas",
+    "serviceaccountuser",
+    "actas",
+    "cache_prewarm",
+    "256mi",
+    "memory=",
+    "pre-warm",
+    "cache-warmup",
 ]
 
 LABELED_FALLBACK_PREFIX = "Automated fallback (LLM unavailable):"
@@ -119,8 +134,45 @@ def check_file_ast(file_path: Path) -> List[Tuple[int, str]]:
     return violations
 
 
+def check_no_remediation_overrides(file_path: Path) -> List[Tuple[int, str]]:
+    """Scan file AST for keyword-matched remediation injection or overrides."""
+    violations: List[Tuple[int, str]] = []
+    content = file_path.read_text(encoding="utf-8")
+    tree = ast.parse(content, filename=str(file_path))
+
+    for node in ast.walk(tree):
+        # Check calls to .append() or .insert() on remediation lists
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            method_name = node.func.attr
+            if method_name in ("append", "insert"):
+                # Check target object name
+                caller_name = ""
+                if isinstance(node.func.value, ast.Name):
+                    caller_name = node.func.value.id
+                elif isinstance(node.func.value, ast.Attribute):
+                    caller_name = node.func.value.attr
+
+                if any(k in caller_name.lower() for k in ("remediation", "recommended_actions")):
+                    # Inspect all string constants in argument list
+                    for arg in node.args:
+                        for inner in ast.walk(arg):
+                            if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                                val_lower = inner.value.lower()
+                                for forbidden in FORBIDDEN_REMEDIATION_SUBSTRINGS:
+                                    if forbidden in val_lower:
+                                        violations.append(
+                                            (
+                                                inner.lineno,
+                                                "Hardcoded remediation override matching forbidden "
+                                                f"pattern '{forbidden}': {inner.value!r}",
+                                            )
+                                        )
+
+    return violations
+
+
 def check_no_regex_incident_classifiers(file_path: Path) -> List[Tuple[int, str]]:
-    """Scan file text for regex incident-type classifiers that exist to select canned templates."""
+    """Scan file text for regex incident-type classifiers and keyword override flags."""
     violations: List[Tuple[int, str]] = []
     forbidden_classifier_patterns = [
         (r"\bis_memory_saturation\b", "Regex incident classifier 'is_memory_saturation'"),
@@ -128,6 +180,8 @@ def check_no_regex_incident_classifiers(file_path: Path) -> List[Tuple[int, str]
         (r"\bis_dependency_failure\b", "Regex incident classifier 'is_dependency_failure'"),
         (r"\bis_db_conn_exhaustion\b", "Regex incident classifier 'is_db_conn_exhaustion'"),
         (r"\bis_latency_prominent\b", "Regex incident classifier 'is_latency_prominent'"),
+        (r"\bhas_iam_actas\b", "Keyword remediation flag 'has_iam_actas'"),
+        (r"\bhas_iam_or_actas\b", "Keyword remediation flag 'has_iam_or_actas'"),
     ]
 
     content = file_path.read_text(encoding="utf-8")
@@ -147,12 +201,13 @@ def main() -> int:
         files_to_check = [
             repo_root / "agent" / "app" / "synthesizer.py",
             repo_root / "agent" / "app" / "dispatcher.py",
+            repo_root / "agent" / "app" / "specialists" / "runtime_health.py",
         ]
 
     all_violations: List[str] = []
 
     print("========================================================")
-    print("Checking for post-LLM root cause template overrides...")
+    print("Checking for post-LLM root cause & remediation overrides...")
     print("========================================================")
 
     for path in files_to_check:
@@ -162,26 +217,32 @@ def main() -> int:
 
         rel_path = path.relative_to(repo_root)
 
-        # 1. AST check
+        # 1. AST check for root cause overrides
         ast_violations = check_file_ast(path)
         for line_no, msg in ast_violations:
             all_violations.append(f"{rel_path}:{line_no}: {msg}")
 
-        # 2. Classifier pattern check
+        # 2. AST check for remediation overrides
+        rem_violations = check_no_remediation_overrides(path)
+        for line_no, msg in rem_violations:
+            all_violations.append(f"{rel_path}:{line_no}: {msg}")
+
+        # 3. Classifier and keyword pattern check
         classifier_violations = check_no_regex_incident_classifiers(path)
         for line_no, msg in classifier_violations:
             all_violations.append(f"{rel_path}:{line_no}: {msg}")
 
     if all_violations:
         print(
-            "ERROR: Forbidden root cause template overrides or classifiers found:", file=sys.stderr
+            "ERROR: Forbidden root cause / remediation overrides or classifiers found:",
+            file=sys.stderr,
         )
         for v in all_violations:
             print(f"  {v}", file=sys.stderr)
         return 1
 
-    print("[PASS] Zero post-LLM root cause template overrides or regex classifiers found.")
-    print("SUCCESS: Root cause guard check passed cleanly.")
+    print("[PASS] Zero post-LLM root cause or remediation overrides found.")
+    print("SUCCESS: Root cause and remediation guard check passed cleanly.")
     return 0
 
 

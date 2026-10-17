@@ -69,37 +69,33 @@ class TestSpecialists:
         step = {"name": "Run Ruff Lint", "conclusion": "failure"}
 
         log_text = (
-            "app/main.py:4:1: F401 [*] `math` imported but unused\n"
-            "app/main.py:6:1: E402 Module level import not at top of file\n"
-            "app/main.py:7:1: E402 Module level import not at top of file\n"
-            "app/main.py:8:1: E402 Module level import not at top of file\n"
-            "app/main.py:9:1: E402 Module level import not at top of file\n"
-            "app/main.py:10:1: E402 Module level import not at top of file\n"
-            "app/main.py:11:1: E402 Module level import not at top of file\n"
-            "app/main.py:12:1: E402 Module level import not at top of file\n"
-            "app/main.py:15:10: E702 Multiple statements on one line (semicolon)\n"
-            "Found 9 errors.\n"
+            "src/service.py:4:1: B006 [*] Mutable argument defaults not allowed\n"
+            "src/service.py:6:1: E501 Line too long (88 > 79 characters)\n"
+            "src/service.py:7:1: E501 Line too long (88 > 79 characters)\n"
+            "src/service.py:8:1: E501 Line too long (88 > 79 characters)\n"
+            "src/service.py:15:10: W291 Trailing whitespace\n"
+            "Found 5 errors.\n"
         )
 
         monkeypatch.setattr(
             "agent.app.specialists.pipeline_logs.get_commit_diff",
-            lambda **kwargs: {"files": [{"filename": "app/main.py"}]},
+            lambda **kwargs: {"files": [{"filename": "src/service.py"}]},
         )
 
         res = specialist.diagnose(incident, job, step, log_text)
         assert res.stage == "lint"
         assert res.confidence >= 0.90
-        assert "Linter detected 9 errors in 'app/main.py'" in res.probable_cause
-        assert "7x E402" in res.probable_cause
-        assert "1x E702" in res.probable_cause
-        assert "1x F401" in res.probable_cause
+        assert "Linter detected 5 errors in 'src/service.py'" in res.probable_cause
+        assert "3x E501" in res.probable_cause
+        assert "1x W291" in res.probable_cause
+        assert "1x B006" in res.probable_cause
         assert (
-            "Confirmed: all 9 errors are in 'app/main.py' modified in this commit."
+            "Confirmed: all 5 errors are in 'src/service.py' modified in this commit."
             in res.summary
         )
         assert "potentially in other files" not in res.summary
         assert "potentially in other files" not in res.probable_cause
-        assert len(res.annotations) == 9
+        assert len(res.annotations) == 5
         assert any(e.kind == "linter_breakdown" for e in res.evidence_items)
         assert res.skill_first is True
         assert "lint-troubleshooting" in res.skills_used
@@ -114,57 +110,47 @@ class TestSpecialists:
         step = {"name": "Run Ruff Lint", "conclusion": "failure"}
 
         log_text = (
-            "2026-10-17T10:09:06.5738347Z F401 [*] `math` imported but unused\n"
-            "2026-10-17T10:09:06.5738627Z  --> app/main.py:1:8\n"
-            "2026-10-17T10:09:06.5740168Z E702 Multiple statements on one line (semicolon)\n"
-            "2026-10-17T10:09:06.5740393Z  --> app/main.py:5:36\n"
-            "2026-10-17T10:09:06.5742056Z E402 Module level import not at top of file\n"
-            "2026-10-17T10:09:06.5742254Z  --> app/main.py:7:1\n"
-            "2026-10-17T10:09:06.5743000Z E402 Module level import not at top of file\n"
-            "2026-10-17T10:09:06.5743200Z  --> app/main.py:8:1\n"
-            "2026-10-17T10:09:06.5744000Z E402 Module level import not at top of file\n"
-            "2026-10-17T10:09:06.5744200Z  --> app/main.py:9:1\n"
-            "2026-10-17T10:09:06.5745000Z E402 Module level import not at top of file\n"
-            "2026-10-17T10:09:06.5745200Z  --> app/main.py:10:1\n"
-            "2026-10-17T10:09:06.5746000Z E402 Module level import not at top of file\n"
-            "2026-10-17T10:09:06.5746200Z  --> app/main.py:11:1\n"
-            "2026-10-17T10:09:06.5747000Z E402 Module level import not at top of file\n"
-            "2026-10-17T10:09:06.5747200Z  --> app/main.py:12:1\n"
-            "2026-10-17T10:09:06.5748000Z E402 Module level import not at top of file\n"
-            "2026-10-17T10:09:06.5748200Z  --> app/main.py:13:1\n"
-            "2026-10-17T10:09:06.5763858Z Found 9 errors.\n"
+            "2026-10-17T10:09:06.5738347Z B006 [*] Do not use mutable default arguments\n"
+            "2026-10-17T10:09:06.5738627Z  --> src/service.py:1:8\n"
+            "2026-10-17T10:09:06.5740168Z W291 Trailing whitespace\n"
+            "2026-10-17T10:09:06.5740393Z  --> src/service.py:5:36\n"
+            "2026-10-17T10:09:06.5742056Z E501 Line too long\n"
+            "2026-10-17T10:09:06.5742254Z  --> src/service.py:7:1\n"
+            "2026-10-17T10:09:06.5743000Z E501 Line too long\n"
+            "2026-10-17T10:09:06.5743200Z  --> src/service.py:8:1\n"
+            "2026-10-17T10:09:06.5763858Z Found 4 errors.\n"
         )
 
         monkeypatch.setattr(
             "agent.app.specialists.pipeline_logs.get_commit_diff",
-            lambda **kwargs: {"files": [{"filename": "app/main.py"}]},
+            lambda **kwargs: {"files": [{"filename": "src/service.py"}]},
         )
 
         res = specialist.diagnose(incident, job, step, log_text)
         assert res.stage == "lint"
         assert res.confidence >= 0.90
-        assert "Linter detected 9 errors in 'app/main.py'" in res.probable_cause
-        assert "7x E402" in res.probable_cause
-        assert "1x E702" in res.probable_cause
-        assert "1x F401" in res.probable_cause
-        assert "math imported but unused" in res.probable_cause
+        assert "Linter detected 4 errors in 'src/service.py'" in res.probable_cause
+        assert "2x E501" in res.probable_cause
+        assert "1x W291" in res.probable_cause
+        assert "1x B006" in res.probable_cause
+        assert "mutable default arguments" in res.probable_cause
         assert (
-            "Confirmed: all 9 errors are in 'app/main.py' modified in this commit."
+            "Confirmed: all 4 errors are in 'src/service.py' modified in this commit."
             in res.summary
         )
-        assert len(res.annotations) == 9
-        f401_ann = next(a for a in res.annotations if a.title == "Linter Violation: F401")
-        assert f401_ann.path == "app/main.py"
-        assert f401_ann.start_line == 1
-        assert f401_ann.message == "math imported but unused"
+        assert len(res.annotations) == 4
+        b006_ann = next(a for a in res.annotations if a.title == "Linter Violation: B006")
+        assert b006_ann.path == "src/service.py"
+        assert b006_ann.start_line == 1
+        assert "mutable default arguments" in b006_ann.message
 
-        e702_ann = next(a for a in res.annotations if a.title == "Linter Violation: E702")
-        assert e702_ann.path == "app/main.py"
-        assert e702_ann.start_line == 5
+        w291_ann = next(a for a in res.annotations if a.title == "Linter Violation: W291")
+        assert w291_ann.path == "src/service.py"
+        assert w291_ann.start_line == 5
 
-        e402_anns = [a for a in res.annotations if a.title == "Linter Violation: E402"]
-        assert len(e402_anns) == 7
-        assert e402_anns[0].start_line == 7
+        e501_anns = [a for a in res.annotations if a.title == "Linter Violation: E501"]
+        assert len(e501_anns) == 2
+        assert e501_anns[0].start_line == 7
 
         assert any(e.kind == "linter_breakdown" for e in res.evidence_items)
         assert res.skill_first is True
@@ -255,6 +241,13 @@ class TestSpecialists:
             },
         )
 
+        add_mock_log(
+            {
+                "text_payload": "Allocating heap space for background processor...",
+                "severity": "INFO",
+            }
+        )
+
         res = specialist.diagnose(incident, job, step, log_text)
         assert res.stage == "deploy"
         assert res.confidence >= 0.90
@@ -269,6 +262,9 @@ class TestSpecialists:
         assert "cloudrun-deploy-troubleshooting" in res.skills_used
         assert any("describe_service" in q for q in res.queries_run)
         assert any("describe_cloud_run_revision" in q for q in res.queries_run)
+        assert any("get_commit_diff" in q for q in res.queries_run)
+        assert any(e.kind == "cloud_run_container_log" for e in res.evidence_items)
+        assert any("Allocating heap space" in e.excerpt for e in res.evidence_items)
 
     def test_runtime_health_specialist_cloud_logging_correlation(self) -> None:
         reset_runtime_state()
@@ -327,7 +323,7 @@ class TestSpecialists:
         assert "cloudrun-deploy-troubleshooting" in res.skills_used
         assert any("get_commit_diff" in q for q in res.queries_run)
 
-    def test_runtime_health_specialist_iam_actas_error(self) -> None:
+    def test_runtime_health_specialist_permission_denial_error(self) -> None:
         reset_runtime_state()
         specialist = RuntimeHealthSpecialist()
         incident = _make_incident("deploy")
@@ -336,8 +332,8 @@ class TestSpecialists:
         log_text = (
             "Deploying container to Cloud Run service [sample-app] in region [us-central1]...\n"
             "ERROR: (gcloud.run.deploy) PERMISSION_DENIED: The caller does not have permission\n"
-            "ERROR: Access denied. Service account requires iam.serviceaccounts.actAs on the "
-            "runtime service account [sample-app-sa@example.iam.gserviceaccount.com].\n"
+            "ERROR: Access denied. Service account requires roles/run.admin on the "
+            "target resource [projects/demo-proj/services/sample-app].\n"
         )
 
         res = specialist.diagnose(incident, job, step, log_text)
@@ -361,9 +357,8 @@ class TestSpecialists:
         )
         # Verbatim error line excerpt in evidence
         assert any("PERMISSION_DENIED" in e.excerpt for e in res.evidence_items)
-        # IAM actAs remediation recommended
         assert any(
-            "actAs" in a or "serviceAccountUser" in a
+            "permission" in a.lower() or "configuration" in a.lower()
             for a in res.remediation_actions
         )
 

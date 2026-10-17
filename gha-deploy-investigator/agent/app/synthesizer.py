@@ -226,25 +226,6 @@ class SynthesizerAgent:
                 if act not in recommended_actions:
                     recommended_actions.append(act)
 
-        has_iam_actas = any(
-            ("actas" in line.lower() or ("iam" in line.lower() and "permission" in line.lower()))
-            for line in error_lines
-        )
-        if not has_iam_actas and llm_result:
-            rc_low = str(llm_result.get("root_cause", "")).lower()
-            if "actas" in rc_low or ("iam" in rc_low and "permission" in rc_low):
-                has_iam_actas = True
-
-        if has_iam_actas:
-            iam_act = (
-                "Grant 'roles/iam.serviceAccountUser' (iam.serviceaccounts.actAs permission) "
-                "to the deployment service account on the Cloud Run runtime service account"
-            )
-            if not any(
-                "actas" in a.lower() or "serviceaccountuser" in a.lower()
-                for a in recommended_actions
-            ):
-                recommended_actions.insert(0, iam_act)
 
         if not recommended_actions:
             recommended_actions.append(

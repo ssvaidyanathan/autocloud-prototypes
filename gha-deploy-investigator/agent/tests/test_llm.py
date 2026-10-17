@@ -20,8 +20,8 @@ class TestVertexAIGemini:
         raw_json_text = (
             '```json\n'
             '{\n'
-            '  "root_cause": "Cloud Run container failed due to IAM actAs denial.",\n'
-            '  "remediation_actions": ["Grant roles/iam.serviceAccountUser to deployment SA."],\n'
+            '  "root_cause": "Cloud Run container failed due to missing storage permissions.",\n'
+            '  "remediation_actions": ["Grant storage.admin to worker SA."],\n'
             '  "confidence": 0.96\n'
             '}\n'
             '```'
@@ -69,7 +69,7 @@ class TestVertexAIGemini:
         )
 
         assert res is not None
-        assert "IAM actAs denial" in res["root_cause"]
+        assert "missing storage permissions" in res["root_cause"]
         assert len(res["remediation_actions"]) == 1
         assert res["confidence"] == 0.96
 
@@ -191,7 +191,7 @@ class TestVertexAIGemini:
 
         # Truncated JSON response simulating max token cutoff
         truncated_text = (
-            '{\n  "root_cause": "The deployment failed because permission was denied to actAs '
+            '{\n  "root_cause": "The deployment failed because permission was denied on '
             'the service account gha-creds-7b90aa6c361'
         )
 
@@ -217,7 +217,7 @@ class TestVertexAIGemini:
         # Root cause must be clean prose, not containing JSON syntax or unparsed brackets
         assert not res["root_cause"].startswith("{")
         assert '"root_cause"' not in res["root_cause"]
-        assert "The deployment failed because permission was denied to actAs" in res["root_cause"]
+        assert "The deployment failed because permission was denied on" in res["root_cause"]
 
     def test_generate_gemini_synthesis_includes_structured_specialist_findings(
         self, monkeypatch: pytest.MonkeyPatch
@@ -268,21 +268,21 @@ class TestVertexAIGemini:
         client.post = mock_post  # type: ignore[method-assign]
 
         specialist_findings = {
-            "probable_cause": "Linter detected 9 errors in 'main.py': 7x E402, 1x E702, 1x F401",
+            "probable_cause": "Linter detected 5 errors in 'service.py': 3x W291, 1x E501, 1x B006",
             "findings": ["Error 1", "Error 2"],
-            "diff_info": "Commit diff touched 1 file(s): app/main.py",
+            "diff_info": "Commit diff touched 1 file(s): src/service.py",
             "structured_errors": [
                 {
-                    "code": "F401",
-                    "file": "app/main.py",
+                    "code": "B006",
+                    "file": "src/service.py",
                     "line": 1,
-                    "message": "math imported but unused",
+                    "message": "Do not use mutable default arguments",
                 },
                 {
-                    "code": "E702",
-                    "file": "app/main.py",
+                    "code": "W291",
+                    "file": "src/service.py",
                     "line": 5,
-                    "message": "Multiple statements on one line",
+                    "message": "Trailing whitespace",
                 },
             ],
         }
@@ -301,10 +301,13 @@ class TestVertexAIGemini:
         assert res is not None
         prompt_text = captured_request["contents"][0]["parts"][0]["text"]
         assert "Specialist Analysis & Findings:" in prompt_text
-        assert "7x E402, 1x E702, 1x F401" in prompt_text
-        assert "Git Diff Context:\nCommit diff touched 1 file(s): app/main.py" in prompt_text
-        assert "[F401] app/main.py:1:" in prompt_text
+        assert "3x W291, 1x E501, 1x B006" in prompt_text
+        assert "Git Diff Context:\nCommit diff touched 1 file(s): src/service.py" in prompt_text
+        assert "[B006] src/service.py:1:" in prompt_text
         assert "Diagnostic Summary: Specialist diagnostic summary text" in prompt_text
         assert "Do NOT guess, approximate, or misattribute error counts" in prompt_text
         assert "Correlate findings with git diff hunks" in prompt_text
         assert "consequential violations" in prompt_text
+        assert "Diff-grounded test failure remediation" in prompt_text
+        assert "Warning segregation" in prompt_text
+        assert "Deploy & runtime failure correlation" in prompt_text
