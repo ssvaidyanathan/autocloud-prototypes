@@ -126,7 +126,16 @@ class GitHubAdapter(BaseAdapter):
         head_sha = run.get("head_sha", "")
         prs = run.get("pull_requests", [])
         pr_number = prs[0].get("number") if prs and isinstance(prs[0], dict) else None
-        actor = run.get("actor", {}).get("login", "github-actions")
+        raw_actor = run.get("actor")
+        actor = raw_actor.get("login", "unknown") if isinstance(raw_actor, dict) else "unknown"
+        head_commit = run.get("head_commit") or payload.get("head_commit") or {}
+        if not isinstance(head_commit, dict):
+            head_commit = {}
+        author_info = head_commit.get("author") or {}
+        if not isinstance(author_info, dict):
+            author_info = {}
+        author = author_info.get("name") or author_info.get("username") or actor
+
         opened_at = parse_utc_datetime(run.get("updated_at") or run.get("run_started_at"))
         run_attempt = run.get("run_attempt", 1)
 
@@ -157,6 +166,8 @@ class GitHubAdapter(BaseAdapter):
             github_pr_number=pr_number,
             github_failing_stage=None,
             github_run_attempt=run_attempt,
+            github_actor=actor,
+            github_commit_author=author,
         )
 
     def post_report_link(self, incident: Incident, report: Report, ref: IncidentRef) -> None:

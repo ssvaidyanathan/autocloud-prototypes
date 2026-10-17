@@ -74,6 +74,8 @@ def sample_incident() -> Incident:
         github_branch="main",
         github_pr_number=42,
         github_failing_stage="Run Ruff Lint",
+        github_actor="octocat",
+        github_commit_author="The Octocat",
     )
 
 

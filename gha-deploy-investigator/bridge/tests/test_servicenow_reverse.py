@@ -165,7 +165,7 @@ class TestServiceNowReverse:
         assert ticket["assignment_group"] == "Platform-SRE"
         assert ticket["state"] == "2"
         assert "GitHub Actor: octocat" in ticket["description"]
-        assert "Commit Author: octocat" in ticket["description"]
+        assert "Commit Author: The Octocat" in ticket["description"]
 
     def test_idempotent_retry_patches_caller_id_on_existing_incident(
         self,

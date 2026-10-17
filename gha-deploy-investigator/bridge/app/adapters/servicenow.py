@@ -267,13 +267,15 @@ class ServiceNowAdapter(BaseAdapter):
                     else report.summary
                 )
 
+                actor = incident.github_actor or incident.reporter or "N/A"
+                author = incident.github_commit_author or actor
                 description_lines = [
                     f"Repository: {incident.github_repo or 'N/A'}",
                     f"Branch: {incident.github_branch or 'N/A'}",
                     f"Commit SHA: {incident.github_head_sha or 'N/A'}",
-                    f"GitHub Actor: {incident.reporter or 'N/A'}",
-                    f"Commit Author: {incident.reporter or 'N/A'}",
-                    f"Reporter: {incident.reporter or 'N/A'}",
+                    f"GitHub Actor: {actor}",
+                    f"Commit Author: {author}",
+                    f"Reporter: {incident.reporter or actor}",
                     "",
                     "Root Cause:",
                     root_cause_text,

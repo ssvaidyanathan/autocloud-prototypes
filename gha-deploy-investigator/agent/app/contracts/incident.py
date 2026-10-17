@@ -28,6 +28,8 @@ class Incident(BaseModel):
     github_pr_number: Optional[int] = None
     github_failing_stage: Optional[str] = None
     github_run_attempt: Optional[int] = 1
+    github_actor: Optional[str] = None
+    github_commit_author: Optional[str] = None
 
     @field_validator("opened_at", mode="after")
     @classmethod

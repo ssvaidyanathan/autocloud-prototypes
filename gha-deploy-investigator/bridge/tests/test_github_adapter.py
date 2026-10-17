@@ -11,6 +11,7 @@ from bridge.app.config import BridgeConfig
 from bridge.app.contracts.incident import Incident
 from bridge.app.contracts.report import CheckRunAnnotation, Report
 from bridge.tests.fake_github_server import state as github_state
+from bridge.tests.fake_ticket_server import state as ticket_state
 from starlette.requests import Request
 
 
@@ -275,3 +276,59 @@ class TestGitHubAdapter:
 
         assert "GitHub write-back failed for" in caplog.text
         assert "Resource not accessible by integration" in caplog.text
+
+    def test_actor_author_separation_and_servicenow_caller(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_report: Report,
+    ) -> None:
+        from bridge.app.adapters.servicenow import ServiceNowAdapter
+
+        gh_adapter = GitHubAdapter(config=bridge_settings)
+        payload = {
+            "action": "completed",
+            "workflow_run": {
+                "id": 88812345,
+                "name": "Deploy Pipeline",
+                "conclusion": "failure",
+                "head_sha": "6f420bd5e1ad1e29d680e71d247dbf800fbf0f7b",
+                "head_branch": "main",
+                "actor": {"login": "ssvaidyanathan"},
+                "head_commit": {
+                    "id": "6f420bd5e1ad1e29d680e71d247dbf800fbf0f7b",
+                    "author": {"name": "Sai Saran Vaidyanathan"},
+                },
+            },
+            "repository": {
+                "name": "sample-app",
+                "full_name": "org/sample-app",
+            },
+        }
+
+        incident = gh_adapter.to_incident(payload)
+        assert incident.github_actor == "ssvaidyanathan"
+        assert incident.github_commit_author == "Sai Saran Vaidyanathan"
+        assert incident.reporter == "ssvaidyanathan"
+
+        sn_cfg = bridge_settings.model_copy(
+            update={
+                "servicenow_caller": "admin",
+                "servicenow_assignment_group": "Platform-SRE",
+            }
+        )
+        sn_adapter = ServiceNowAdapter(config=sn_cfg, http_client=fake_ticket_client)
+        ref = sn_adapter.create_incident_with_report(incident, sample_report)
+
+        created = ticket_state.servicenow_incidents[ref.external_id]
+        # Caller is the ServiceNow system caller sys_id
+        assert created["caller_id"] == "6816f79cc0a8016401c5a33be04be441"
+        assert created["assignment_group"] == "Platform-SRE"
+
+        desc = created["description"]
+        # Actor and author must reflect GitHub entities, NEVER ServiceNow caller 'admin'
+        assert "GitHub Actor: ssvaidyanathan" in desc
+        assert "Commit Author: Sai Saran Vaidyanathan" in desc
+        assert "Reporter: ssvaidyanathan" in desc
+        assert "GitHub Actor: admin" not in desc
+        assert "Commit Author: admin" not in desc
