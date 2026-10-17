@@ -519,7 +519,7 @@ Implemented AMENDMENT 10 per coordinator instructions:
 - **Contracts Sync Check**: `bash scripts/check-contracts.sh` -> SUCCESS: Contracts are byte-identical.
 - **De-overfit Guard Check**: `bash scripts/check-no-demo-overfit.sh` -> SUCCESS.
 - **Root Cause AST Check**: `python3 scripts/check-no-rootcause-overrides.py` -> SUCCESS.
-- **No Literal Projects & Link Check**: `FORBIDDEN_LITERALS="cloud-assist-fde-7" bash scripts/check-no-literal-projects.sh` -> SUCCESS.
+- **No Literal Projects & Link Check**: `FORBIDDEN_LITERALS="your-forbidden-project-id" bash scripts/check-no-literal-projects.sh` -> SUCCESS.
 - **Markdown Links Check**: `python3 scripts/check-markdown-links.py` -> Scanned 11 markdown files, 11 links verified [PASS].
 - **Offline Hermetic Pytest Suite**: `pytest` -> 50 passed in 3.30s (100% offline).
 - **Ruff Linter**: `ruff check .` -> All checks passed!
