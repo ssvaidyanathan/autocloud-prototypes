@@ -176,13 +176,33 @@ class GitHubAdapter(BaseAdapter):
         api_url = (self.config.github_api_url or "https://api.github.com").rstrip("/")
         check_run_endpoint = f"{api_url}/repos/{owner}/{repo_name}/check-runs"
 
-        root_cause_text = (
+        raw_cause = (
             report.probable_root_cause.text if report.probable_root_cause else report.summary
         )
+        clean_cause = raw_cause.strip()
+        clean_cause = re.sub(r"^```(?:json)?\s*", "", clean_cause, flags=re.IGNORECASE)
+        clean_cause = re.sub(r"\s*```$", "", clean_cause).strip()
+        if clean_cause.startswith("{") and '"root_cause"' in clean_cause:
+            m_rc = re.search(r'"root_cause"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"?', clean_cause)
+            if m_rc:
+                clean_cause = m_rc.group(1).replace(r"\"", '"').strip()
+        clean_cause = re.sub(r"^\{\s*\"root_cause\"\s*:\s*\"?", "", clean_cause)
+        clean_cause = re.sub(
+            r"\"?\s*,?\s*\"remediation_actions\".*$", "", clean_cause, flags=re.DOTALL
+        )
+        clean_cause = re.sub(r"\"?\s*\}\s*$", "", clean_cause).strip(' \t\n\r"{}')
+        root_cause_text = clean_cause or raw_cause
+
+        confidence_val = (
+            report.probable_root_cause.confidence if report.probable_root_cause else 0.90
+        )
+        confidence_str = f"{int(round(confidence_val * 100))}%"
+
         sn_link = f"[{ref.external_key}]({ref.external_url or '#'})"
         summary = (
             f"Autocloud investigated pipeline failure.\n\n"
             f"**ServiceNow Incident:** {sn_link}\n\n"
+            f"**Confidence:** {confidence_str}\n\n"
             f"**Root Cause:** {root_cause_text}"
         )
 
@@ -246,7 +266,7 @@ class GitHubAdapter(BaseAdapter):
                 comment_lines = [
                     "### 🚨 Autocloud Deployment Failure Diagnostic Report\n",
                     f"**Stage:** `{failing_stg}` | **Severity:** `{incident.severity}` | "
-                    f"**ServiceNow Incident:** {sn_md}\n",
+                    f"**Confidence:** `{confidence_str}` | **ServiceNow Incident:** {sn_md}\n",
                     "<details open>",
                     "<summary><strong>🔍 Probable Root Cause</strong></summary>\n",
                     f"> {root_cause_text}",

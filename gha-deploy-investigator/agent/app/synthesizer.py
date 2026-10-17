@@ -149,7 +149,14 @@ class SynthesizerAgent:
         error_lines = extract_error_lines(log_text)
         if llm_result and llm_result.get("root_cause"):
             self.synthesizer_mode = "llm"
-            root_cause_text = str(llm_result["root_cause"])
+            raw_rc = str(llm_result["root_cause"]).strip()
+            raw_rc = re.sub(r"^```(?:json)?\s*", "", raw_rc, flags=re.IGNORECASE)
+            raw_rc = re.sub(r"\s*```$", "", raw_rc).strip()
+            if raw_rc.startswith("{") and '"root_cause"' in raw_rc:
+                m_rc = re.search(r'"root_cause"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"?', raw_rc)
+                if m_rc:
+                    raw_rc = m_rc.group(1).replace(r"\"", '"').strip()
+            root_cause_text = raw_rc
             confidence_val = float(llm_result.get("confidence", 0.95))
             primary_error = root_cause_text
         elif diagnostic_result and diagnostic_result.probable_cause:
@@ -217,6 +224,27 @@ class SynthesizerAgent:
             for act in diagnostic_result.remediation_actions:
                 if act not in recommended_actions:
                     recommended_actions.append(act)
+
+        has_iam_actas = any(
+            ("actas" in line.lower() or ("iam" in line.lower() and "permission" in line.lower()))
+            for line in error_lines
+        )
+        if not has_iam_actas and llm_result:
+            rc_low = str(llm_result.get("root_cause", "")).lower()
+            if "actas" in rc_low or ("iam" in rc_low and "permission" in rc_low):
+                has_iam_actas = True
+
+        if has_iam_actas:
+            iam_act = (
+                "Grant 'roles/iam.serviceAccountUser' (iam.serviceaccounts.actAs permission) "
+                "to the deployment service account on the Cloud Run runtime service account"
+            )
+            if not any(
+                "actas" in a.lower() or "serviceaccountuser" in a.lower()
+                for a in recommended_actions
+            ):
+                recommended_actions.insert(0, iam_act)
+
         if not recommended_actions:
             recommended_actions.append(
                 f"Inspect failure in step '{step_name}' of workflow '{incident.github_repo}'"

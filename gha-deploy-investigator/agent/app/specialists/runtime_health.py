@@ -10,6 +10,7 @@ from ..config import AgentConfig
 from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
 from ..specialists.base import BaseSpecialist, DiagnosticResult, SkillTracker
+from ..synthesizer import extract_error_lines
 from ..tools.runtime_tools import (
     describe_cloud_run_revision,
     describe_service,
@@ -19,7 +20,7 @@ from ..tools.runtime_tools import (
 logger = logging.getLogger(__name__)
 
 SERVICE_PATTERN = re.compile(
-    r"(?:deploying.*service\s+\[(?P<srv1>[a-zA-Z0-9_\-]+)\]|--service(?:=|\s+)(?P<srv2>[a-zA-Z0-9_\-]+)|Service\s+name:\s*(?P<srv3>[a-zA-Z0-9_\-]+))",
+    r"(?:(?:gcloud\s+run\s+deploy|deploying.*service)\s+\[?(?P<srv1>[a-zA-Z0-9_\-]+)\]?|--service(?:=|\s+)(?P<srv2>[a-zA-Z0-9_\-]+)|Service\s+name:\s*(?P<srv3>[a-zA-Z0-9_\-]+))",
     re.IGNORECASE,
 )
 REVISION_PATTERN = re.compile(
@@ -93,18 +94,29 @@ class RuntimeHealthSpecialist(BaseSpecialist):
         revision_name = self._extract_revision_name(service_name, log_text)
         region = self._extract_region(log_text)
 
-        rev_desc = f" (revision: '{revision_name}')" if revision_name else ""
-        evidence_items.append(
-            EvidenceItem(
-                kind="github_runner_log",
-                excerpt=(
-                    f"Deploy step '{step_name}' failed for service '{service_name}'"
-                    f"{rev_desc} (region: '{region}')."
-                ),
-                timestamp=now,
-                console_url=incident.external_url,
+        err_lines = extract_error_lines(log_text)
+        if err_lines:
+            evidence_items.append(
+                EvidenceItem(
+                    kind="github_runner_log",
+                    excerpt="\n".join(err_lines[:5]),
+                    timestamp=now,
+                    console_url=incident.external_url,
+                )
             )
-        )
+        else:
+            rev_desc = f" (revision: '{revision_name}')" if revision_name else ""
+            evidence_items.append(
+                EvidenceItem(
+                    kind="github_runner_log",
+                    excerpt=(
+                        f"Deploy step '{step_name}' failed for service '{service_name}'"
+                        f"{rev_desc} (region: '{region}')."
+                    ),
+                    timestamp=now,
+                    console_url=incident.external_url,
+                )
+            )
 
         # 2. Query Cloud Run Revision conditions
         rev_info: dict[str, Any] = {}
@@ -194,8 +206,9 @@ class RuntimeHealthSpecialist(BaseSpecialist):
 
         # Format findings based on telemetry
         if is_oom or exit_code == 137:
+            rev_str = f" in revision '{revision_name}'" if revision_name else ""
             probable_cause = (
-                f"Cloud Run container in revision '{revision_name}' terminated due to "
+                f"Cloud Run container{rev_str} terminated due to "
                 "memory saturation / Out Of Memory (OOM, exit code 137) during startup."
             )
             confidence = 0.95
@@ -207,11 +220,16 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                 "Profile container startup memory usage and tune JVM/Python runtime heap limits",
                 "Inspect background workers or large in-memory caches initialized at bootstrap",
             ]
+            rev_lead = (
+                f"Cloud Run revision '{revision_name}' container"
+                if revision_name
+                else "Cloud Run container"
+            )
             evidence_items.append(
                 EvidenceItem(
                     kind="cloud_run_telemetry",
                     excerpt=(
-                        f"Cloud Run revision '{revision_name}' container terminated with exit "
+                        f"{rev_lead} terminated with exit "
                         f"code 137 (OOM).\n"
                         f"Reason: {failure_reason or 'Container exceeded memory limit'}."
                     ),
@@ -219,8 +237,9 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                 )
             )
         elif is_probe_timeout:
+            rev_str = f" in revision '{revision_name}'" if revision_name else ""
             probable_cause = (
-                f"Cloud Run container in revision '{revision_name}' failed startup readiness "
+                f"Cloud Run container{rev_str} failed startup readiness "
                 f"probe: {failure_reason}."
             )
             confidence = 0.90
@@ -231,11 +250,16 @@ class RuntimeHealthSpecialist(BaseSpecialist):
                 ),
                 "Increase startup probe timeout or initial delay if initialization takes longer",
             ]
+            rev_lead = (
+                f"Cloud Run revision '{revision_name}'"
+                if revision_name
+                else "Cloud Run container"
+            )
             evidence_items.append(
                 EvidenceItem(
                     kind="cloud_run_telemetry",
                     excerpt=(
-                        f"Cloud Run revision '{revision_name}' failed startup readiness probe: "
+                        f"{rev_lead} failed startup readiness probe: "
                         f"{failure_reason}."
                     ),
                     timestamp=now,
@@ -267,20 +291,49 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             )
         else:
             rev_label = f" of Cloud Run revision '{revision_name}'" if revision_name else ""
-            probable_cause = (
-                f"Deployment step '{step_name}' failed during rollout{rev_label} "
-                f"for service '{service_name}'."
+            has_iam_or_actas = any(
+                ("iam" in el.lower() or "permission" in el.lower() or "actas" in el.lower())
+                for el in (err_lines or [log_text])
             )
-            confidence = 0.75
-            rev_cmd = (
-                f"gcloud run revisions describe {revision_name} --region {region}"
-                if revision_name
-                else f"gcloud run revisions list --service {service_name} --region {region}"
+            if has_iam_or_actas and err_lines:
+                primary_err = err_lines[0]
+                probable_cause = (
+                    f"Deployment step '{step_name}' failed for service '{service_name}': "
+                    f"{primary_err}"
+                )
+                confidence = 0.85
+            else:
+                probable_cause = (
+                    f"Deployment step '{step_name}' failed during rollout{rev_label} "
+                    f"for service '{service_name}'."
+                )
+                confidence = 0.75
+
+            remediation = []
+            if has_iam_or_actas:
+                remediation.append(
+                    "Grant 'roles/iam.serviceAccountUser' (iam.serviceaccounts.actAs permission) "
+                    "to the deployment service account on the Cloud Run runtime service account"
+                )
+                remediation.append(
+                    "Verify Workload Identity Federation or GitHub Actions service account "
+                    "impersonation bindings"
+                )
+
+            if revision_name:
+                remediation.append(
+                    f"Check Cloud Run service revision health: gcloud run revisions describe "
+                    f"{revision_name} --region {region}"
+                )
+            else:
+                remediation.append(
+                    f"Check Cloud Run service configuration: gcloud run services describe "
+                    f"{service_name} --region {region}"
+                )
+
+            remediation.append(
+                "Review deployment pipeline IAM permissions and Cloud Run deployment configuration"
             )
-            remediation = [
-                f"Check Cloud Run service revision health: {rev_cmd}",
-                "Review deployment pipeline IAM permissions and Cloud Run deployment configuration",
-            ]
 
         rev_summary = f" (revision '{revision_name}')" if revision_name else ""
         summary = (

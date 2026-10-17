@@ -122,6 +122,10 @@ async def patch_servicenow_incident(sys_id: str, request: Request) -> dict[str, 
         incident["caller_id"] = str(body["caller_id"])
     if "assignment_group" in body:
         incident["assignment_group"] = str(body["assignment_group"])
+    if "short_description" in body:
+        incident["short_description"] = str(body["short_description"])
+    if "description" in body:
+        incident["description"] = str(body["description"])
     if "work_notes" in body:
         if isinstance(incident.get("work_notes"), list):
             incident["work_notes"].append(body["work_notes"])

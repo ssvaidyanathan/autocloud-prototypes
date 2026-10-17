@@ -196,11 +196,15 @@ class TestServiceNowReverse:
         assert ref.external_id == "sys_999999"
         assert ref.external_key == "INC0010074"
 
-        # Verify existing incident was patched with caller_id and assignment_group
+        # Verify existing incident was patched with caller_id, assignment_group,
+        # short_description, and description
         patched = ticket_state.servicenow_incidents["sys_999999"]
         assert patched["caller_id"] == "6816f79cc0a8016401c5a33be04be441"
         assert patched["assignment_group"] == "Cloud-Operations"
         assert patched["state"] == "2"
+        assert "my-org/sample-app" in patched["short_description"]
+        assert "Root Cause:" in patched["description"]
+        assert sample_report.probable_root_cause.text in patched["description"]
 
 
 

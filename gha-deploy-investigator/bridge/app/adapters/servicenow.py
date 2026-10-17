@@ -256,12 +256,40 @@ class ServiceNowAdapter(BaseAdapter):
                 caller_id = self._resolve_caller_sys_id(client, self.config.servicenow_caller)
                 assignment_group = self.config.servicenow_assignment_group
 
+                short_description = (
+                    f"[gdi-demo] [CI/CD Failure] {incident.github_repo or incident.title} "
+                    f"({incident.github_failing_stage or 'Pipeline'})"
+                )
+
+                root_cause_text = (
+                    report.probable_root_cause.text
+                    if report.probable_root_cause
+                    else report.summary
+                )
+
+                description_lines = [
+                    f"Repository: {incident.github_repo or 'N/A'}",
+                    f"Branch: {incident.github_branch or 'N/A'}",
+                    f"Commit SHA: {incident.github_head_sha or 'N/A'}",
+                    f"GitHub Actor: {incident.reporter or 'N/A'}",
+                    f"Commit Author: {incident.reporter or 'N/A'}",
+                    f"Reporter: {incident.reporter or 'N/A'}",
+                    "",
+                    "Root Cause:",
+                    root_cause_text,
+                ]
+                description = "\n".join(description_lines)
+
                 if existing_incident:
                     sys_id = existing_incident.get("sys_id", "mock-sys-id")
                     number = existing_incident.get("number", sys_id)
 
                     patch_endpoint = f"{table_endpoint}/{sys_id}"
-                    patch_body: dict[str, Any] = {"work_notes": work_notes}
+                    patch_body: dict[str, Any] = {
+                        "short_description": short_description,
+                        "description": description,
+                        "work_notes": work_notes,
+                    }
                     if caller_id:
                         patch_body["caller_id"] = caller_id
                     if assignment_group:
@@ -288,7 +316,7 @@ class ServiceNowAdapter(BaseAdapter):
 
                     logger.info(
                         "Found existing ServiceNow incident %s (%s) for correlation_id=%s; "
-                        "patched work notes, caller, state, and attached report",
+                        "patched description, work notes, caller, state, and attached report",
                         number,
                         sys_id,
                         correlation_id,
@@ -301,30 +329,6 @@ class ServiceNowAdapter(BaseAdapter):
                         external_key=number,
                         external_url=f"{base_url}/nav_to.do?uri=incident.do?sys_id={sys_id}",
                     )
-
-                short_description = (
-                    f"[gdi-demo] [CI/CD Failure] {incident.github_repo or incident.title} "
-                    f"({incident.github_failing_stage or 'Pipeline'})"
-                )
-
-                root_cause_text = (
-                    report.probable_root_cause.text
-                    if report.probable_root_cause
-                    else report.summary
-                )
-
-                description_lines = [
-                    f"Repository: {incident.github_repo or 'N/A'}",
-                    f"Branch: {incident.github_branch or 'N/A'}",
-                    f"Commit SHA: {incident.github_head_sha or 'N/A'}",
-                    f"GitHub Actor: {incident.reporter or 'N/A'}",
-                    f"Commit Author: {incident.reporter or 'N/A'}",
-                    f"Reporter: {incident.reporter or 'N/A'}",
-                    "",
-                    "Root Cause:",
-                    root_cause_text,
-                ]
-                description = "\n".join(description_lines)
 
                 sev_to_num = {"P1": "1", "P2": "2", "P3": "3", "P4": "4"}
                 urgency = sev_to_num.get(incident.severity, "3")

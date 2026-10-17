@@ -80,7 +80,8 @@ def generate_gemini_synthesis(
         ],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": 4096,
+            "responseMimeType": "application/json",
         },
     }
 
@@ -125,8 +126,10 @@ def generate_gemini_synthesis(
             parsed = json.loads(clean_text)
             if isinstance(parsed, dict) and "root_cause" in parsed:
                 return {
-                    "root_cause": str(parsed["root_cause"]),
-                    "remediation_actions": [str(a) for a in parsed.get("remediation_actions", [])],
+                    "root_cause": str(parsed["root_cause"]).strip(),
+                    "remediation_actions": [
+                        str(a).strip() for a in parsed.get("remediation_actions", [])
+                    ],
                     "confidence": float(parsed.get("confidence", 0.95)),
                 }
         except Exception:
@@ -137,18 +140,43 @@ def generate_gemini_synthesis(
                     parsed = json.loads(m.group(1))
                     if isinstance(parsed, dict) and "root_cause" in parsed:
                         return {
-                            "root_cause": str(parsed["root_cause"]),
+                            "root_cause": str(parsed["root_cause"]).strip(),
                             "remediation_actions": [
-                                str(a) for a in parsed.get("remediation_actions", [])
+                                str(a).strip() for a in parsed.get("remediation_actions", [])
                             ],
                             "confidence": float(parsed.get("confidence", 0.95)),
                         }
                 except Exception:
                     pass
 
+        # Defensive extraction for broken or truncated JSON:
+        # Extract root_cause without returning raw JSON syntax/brackets.
+        extracted_cause = None
+        rc_match = re.search(r'"root_cause"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"?', clean_text)
+        if rc_match:
+            extracted_cause = rc_match.group(1).replace(r"\"", '"').strip()
+
+        if not extracted_cause:
+            # Strip brackets, braces, and JSON keys to obtain clean prose
+            cleaned_prose = re.sub(r"^\{\s*\"root_cause\"\s*:\s*\"?", "", clean_text)
+            cleaned_prose = re.sub(
+                r"\"?\s*,?\s*\"remediation_actions\".*$", "", cleaned_prose, flags=re.DOTALL
+            )
+            cleaned_prose = re.sub(r"\"?\s*\}\s*$", "", cleaned_prose)
+            extracted_cause = cleaned_prose.strip(' \t\n\r"{}')
+
+        extracted_actions = []
+        rem_match = re.search(r'"remediation_actions"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL)
+        if rem_match:
+            actions_raw = rem_match.group(1)
+            for act in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', actions_raw):
+                extracted_actions.append(act.replace(r"\"", '"').strip())
+
         return {
-            "root_cause": clean_text,
-            "remediation_actions": [],
+            "root_cause": (
+                extracted_cause or "Automated diagnosis identified deployment failure."
+            ),
+            "remediation_actions": extracted_actions,
             "confidence": 0.90,
         }
     except Exception as exc:

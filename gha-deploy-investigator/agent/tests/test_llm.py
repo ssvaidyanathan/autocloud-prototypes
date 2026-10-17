@@ -108,3 +108,113 @@ class TestVertexAIGemini:
         assert report.probable_root_cause.confidence == 0.98
         assert "Automated fallback" not in report.probable_root_cause.text
         assert "Grant IAM role." in report.recommended_actions
+
+    def test_generate_gemini_synthesis_token_budget_and_mime_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = AgentConfig(
+            app_env="production",
+            gcp_project="test-proj-123",
+            vertex_ai_location="us-central1",
+            gemini_model="test-gemini-model",
+        )
+
+        class MockCreds:
+            valid = True
+            token = "mock-vertex-bearer-token"
+
+            def refresh(self, req: Any) -> None:
+                pass
+
+        monkeypatch.setattr("google.auth.default", lambda scopes: (MockCreds(), "test-proj-123"))
+
+        captured_request: dict[str, Any] = {}
+
+        def mock_post(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            nonlocal captured_request
+            captured_request = kwargs.get("json", {})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": (
+                                    '{"root_cause": "All good", "remediation_actions": [], '
+                                    '"confidence": 0.9}'
+                                )
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = httpx.Client()
+        client.post = mock_post  # type: ignore[method-assign]
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "deploy"},
+            failing_step={"name": "Deploy Step"},
+            log_text="Deploy error log",
+            config=cfg,
+            client=client,
+        )
+
+        assert res is not None
+        gen_cfg = captured_request.get("generationConfig", {})
+        assert gen_cfg.get("maxOutputTokens") == 4096
+        assert gen_cfg.get("responseMimeType") == "application/json"
+
+    def test_generate_gemini_synthesis_defensive_json_truncation_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = AgentConfig(
+            app_env="production",
+            gcp_project="test-proj-123",
+            vertex_ai_location="us-central1",
+            gemini_model="test-gemini-model",
+        )
+
+        class MockCreds:
+            valid = True
+            token = "mock-vertex-bearer-token"
+
+            def refresh(self, req: Any) -> None:
+                pass
+
+        monkeypatch.setattr("google.auth.default", lambda scopes: (MockCreds(), "test-proj-123"))
+
+        # Truncated JSON response simulating max token cutoff
+        truncated_text = (
+            '{\n  "root_cause": "The deployment failed because permission was denied to actAs '
+            'the service account gha-creds-7b90aa6c361'
+        )
+
+        def mock_post(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"candidates": [{"content": {"parts": [{"text": truncated_text}]}}]},
+            )
+
+        client = httpx.Client()
+        client.post = mock_post  # type: ignore[method-assign]
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "deploy"},
+            failing_step={"name": "Deploy Step"},
+            log_text="ERROR: PERMISSION_DENIED",
+            config=cfg,
+            client=client,
+        )
+
+        assert res is not None
+        # Root cause must be clean prose, not containing JSON syntax or unparsed brackets
+        assert not res["root_cause"].startswith("{")
+        assert '"root_cause"' not in res["root_cause"]
+        assert "The deployment failed because permission was denied to actAs" in res["root_cause"]

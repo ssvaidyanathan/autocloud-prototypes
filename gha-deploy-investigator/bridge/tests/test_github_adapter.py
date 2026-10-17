@@ -133,12 +133,14 @@ class TestGitHubAdapter:
         assert check_run["head_sha"] == sample_incident.github_head_sha
         assert check_run["status"] == "completed"
         assert "INC0019482" in check_run["output"]["summary"]
+        assert "**Confidence:**" in check_run["output"]["summary"]
 
         # Verify comment was posted
         assert len(github_state.comments) == 1
         comment = github_state.comments[0]
         assert "<details open>" in comment["body"]
         assert "INC0019482" in comment["body"]
+        assert "**Confidence:**" in comment["body"]
         assert "Probable Root Cause" in comment["body"]
 
     def test_post_report_link_pr_comment(

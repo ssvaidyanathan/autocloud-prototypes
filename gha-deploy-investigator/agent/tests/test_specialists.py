@@ -214,6 +214,13 @@ class TestSpecialists:
         assert "-00001-deploy" not in res.probable_cause
         assert "sample-app" in res.summary
         assert "cloudrun-deploy-troubleshooting" in res.skills_used
+        # Verbatim error line excerpt in evidence
+        assert any("PERMISSION_DENIED" in e.excerpt for e in res.evidence_items)
+        # IAM actAs remediation recommended
+        assert any(
+            "actAs" in a or "serviceAccountUser" in a
+            for a in res.remediation_actions
+        )
 
     def test_runtime_health_specialist_no_hallucinated_revision(self) -> None:
         reset_runtime_state()
@@ -230,3 +237,19 @@ class TestSpecialists:
         assert res.stage == "deploy"
         assert "-00001-deploy" not in res.probable_cause
         assert "-00001-deploy" not in res.summary
+        # Must not produce remediation command asking to describe non-existent revision
+        assert not any("revisions describe" in a for a in res.remediation_actions)
+        assert any("services describe" in a for a in res.remediation_actions)
+
+    def test_service_pattern_matches_gcloud_run_deploy(self) -> None:
+        from agent.app.specialists.runtime_health import SERVICE_PATTERN
+
+        match1 = SERVICE_PATTERN.search("gcloud run deploy my-cool-service --image gcr.io/app:v1")
+        assert match1 is not None
+        assert match1.group("srv1") == "my-cool-service"
+
+        match2 = SERVICE_PATTERN.search(
+            "Deploying container to Cloud Run service [my-cool-service]"
+        )
+        assert match2 is not None
+        assert match2.group("srv1") == "my-cool-service"
