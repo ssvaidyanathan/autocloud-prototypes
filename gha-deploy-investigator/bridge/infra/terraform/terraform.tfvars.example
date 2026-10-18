@@ -1,0 +1,18 @@
+# Example terraform.tfvars for GDI Bridge
+# Copy to terraform.tfvars and populate with environment-specific values.
+
+name_prefix  = "gdi"
+project_id   = "your-gcp-project-id"
+region       = "us-central1"
+environment  = "production"
+image_tag    = "latest"
+
+servicenow_instance_url = "https://your-instance.service-now.com"
+
+# Note: ServiceNow username is managed as Secret Manager secret '${name_prefix}-servicenow-username'
+# and populated at deploy time alongside password and webhook token.
+
+# Values populated after agent deployment:
+agent_service_url                   = "https://gdi-agent-xyz-uc.a.run.app"
+agent_service_account_email         = "gdi-agent-sa@your-gcp-project-id.iam.gserviceaccount.com"
+tasks_invoker_service_account_email = "gdi-tasks-invoker-sa@your-gcp-project-id.iam.gserviceaccount.com"
