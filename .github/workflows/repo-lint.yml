@@ -16,6 +16,9 @@ on:
       - 'scripts/**'
       - 'tests/**'
 
+permissions:
+  contents: read
+
 jobs:
   lint-portable-sed:
     name: Portable Sed Guard & Unit Tests
