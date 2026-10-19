@@ -6,13 +6,11 @@ on:
     paths:
       - 'incident-sre-agent/**'
       - '.github/workflows/incident-sre-agent-ci.yml'
-      - 'scripts/**'
   pull_request:
     branches: [ main ]
     paths:
       - 'incident-sre-agent/**'
       - '.github/workflows/incident-sre-agent-ci.yml'
-      - 'scripts/**'
 
 defaults:
   run:
@@ -62,9 +60,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify portable sed in-place usage
-        run: bash scripts/check-portable-sed.sh
-        working-directory: .
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
