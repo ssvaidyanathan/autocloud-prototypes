@@ -462,6 +462,37 @@ Before deploying, ensure you have:
    - `roles/resourcemanager.projectIamAdmin`
    - `roles/cloudbuild.builds.editor`
    - `roles/serviceusage.serviceUsageAdmin`
+   - `roles/storage.admin` (required to create and configure the GCS remote state bucket)
+
+   > [!NOTE]
+   > **Least Privilege vs. Project Owner**:
+   > In enterprise environments where `roles/owner` cannot be granted to CI/CD pipelines or development personnel, the 11 granular roles listed above provide the exact least-privilege boundary required to provision the infrastructure, deploy containers, configure WIF, and bind runtime IAM policies without granting arbitrary project mutation or billing administration authority.
+
+   ```bash
+   # Grant least-privilege operator roles to deploying identity (User or Deployment SA)
+   OPERATOR_PRINCIPAL="user:you@example.com" # or "serviceAccount:deployer@${PROJECT_ID}.iam.gserviceaccount.com"
+
+   OPERATOR_ROLES=(
+       "roles/serviceusage.serviceUsageAdmin"
+       "roles/resourcemanager.projectIamAdmin"
+       "roles/iam.serviceAccountAdmin"
+       "roles/iam.serviceAccountUser"
+       "roles/iam.workloadIdentityPoolAdmin"
+       "roles/artifactregistry.admin"
+       "roles/secretmanager.admin"
+       "roles/cloudtasks.admin"
+       "roles/run.admin"
+       "roles/cloudbuild.builds.editor"
+       "roles/storage.admin"
+   )
+
+   for role in "${OPERATOR_ROLES[@]}"; do
+       gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+           --member="${OPERATOR_PRINCIPAL}" \
+           --role="${role}" \
+           --condition=None
+   done
+   ```
 
 7. **Enable Required Google Cloud APIs**:
    ```bash
