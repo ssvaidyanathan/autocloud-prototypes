@@ -1,0 +1,11 @@
+name: Bad Workflow Test
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Non-portable sed step
+        run: |
+          echo "Updating file"
+          sed -i 's/foo/bar/' file.txt

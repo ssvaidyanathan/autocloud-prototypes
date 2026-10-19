@@ -127,10 +127,15 @@ TFVARS_FILE="${SCRIPT_DIR}/../agent/infra/terraform/terraform.tfvars"
 
 echo "Updating ${TFVARS_FILE} with github_app_id..."
 if [ -f "${TFVARS_FILE}" ]; then
+    # Determine sed in-place arguments for portability (macOS vs Linux)
+    sedi_args=("-i")
+    if [[ "$(uname)" == "Darwin" ]]; then
+      sedi_args=("-i" "") # For macOS, sed -i requires an extension argument. "" means no backup.
+    fi
+
     # Replace existing github_app_id or append
     if grep -q "github_app_id" "${TFVARS_FILE}"; then
-        sed -i.bak "s/github_app_id[[:space:]]*=.*/github_app_id = \"${APP_ID}\"/" "${TFVARS_FILE}"
-        rm -f "${TFVARS_FILE}.bak"
+        sed "${sedi_args[@]}" "s/github_app_id[[:space:]]*=.*/github_app_id = \"${APP_ID}\"/" "${TFVARS_FILE}"
     else
         echo "github_app_id = \"${APP_ID}\"" >> "${TFVARS_FILE}"
     fi

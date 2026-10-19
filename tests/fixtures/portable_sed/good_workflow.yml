@@ -1,0 +1,11 @@
+name: Good Workflow Test
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read-only sed step
+        run: |
+          echo "Processing logs"
+          sed -n 's/ERROR/WARN/p' output.log

@@ -1,0 +1,31 @@
+name: Repo Lint & Portability
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**/*.sh'
+      - '.github/workflows/**'
+      - 'scripts/**'
+      - 'tests/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '**/*.sh'
+      - '.github/workflows/**'
+      - 'scripts/**'
+      - 'tests/**'
+
+permissions:
+  contents: read
+
+jobs:
+  lint-portable-sed:
+    name: Portable Sed Guard & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify portable sed in-place usage across repo
+        run: bash scripts/check-portable-sed.sh
+      - name: Run portable sed guard unit tests
+        run: python3 tests/test_portable_sed.py
