@@ -14,6 +14,10 @@ set -euo pipefail
 # Bare sed -i, sed -i '', sed -i.bak, sed --in-place, and bundled flags like -Ei
 # are forbidden. Read-only sed calls (e.g. sed '$d', sed -n) are permitted.
 # Files using sed "${sedi_args[@]}" must also define the Darwin check.
+#
+# Note: Heredoc bodies (e.g. << 'EOF') are scanned as shell code. If generated
+# documentation inside a heredoc references sed, reword the text or omit literal
+# '-i' flags to satisfy the guard.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"

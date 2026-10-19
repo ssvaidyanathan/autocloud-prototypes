@@ -14,3 +14,5 @@ Autonomous CI/CD and SRE diagnostic platform for GitHub Actions pipeline failure
 ### Shell Script Portability
 All shell scripts and CI workflow `run:` blocks must remain portable across macOS (BSD) and Linux (GNU). Any in-place `sed` editing must use the uname-based `sedi_args` array pattern (`sedi_args=("-i")`; on Darwin `sedi_args=("-i" "")`). Non-portable variants (bare `sed -i`, `sed -i ''`, `sed -i.bak`, or `sed --in-place`) are blocked by `scripts/check-portable-sed.sh`.
 
+Note: Heredoc bodies (e.g. `cat << 'EOF'`) are scanned as shell code. If a script generates documentation or user instructions referencing `sed`, reword the text (e.g., describe in-place editing conceptually or avoid literal `-i` flags) to satisfy the guard.
+
