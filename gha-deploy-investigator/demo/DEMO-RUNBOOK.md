@@ -7,12 +7,10 @@ This runbook provides step-by-step instructions for executing and observing the 
 ## 1. Overview & Architecture
 
 When a GitHub Actions workflow run fails, the autonomous diagnostic bridge and investigator agent automatically:
-1. **Detect Failure**: Ingest inbound `workflow_run.completed` (status: `failure`) webhooks from GitHub.
-2. **Open Incident**: Automatically create a ServiceNow incident in state **New (1)**.
-3. **Dispatch Investigation**: Classify the failure stage (`lint`, `test`, `build`, `deploy`), assign specialized investigation tools, and transition the ServiceNow incident to **In Progress (2)**.
-4. **Execute Grounded Diagnosis**: Read runner logs, correlate git diffs, inspect container/telemetry logs, segregate unrelated warnings, and formulate grounded causal remediation.
-5. **Dual Write-Back**:
-   - **ServiceNow**: Post structured investigation work notes and attach a standalone HTML investigation report.
+1. **Detect Failure & Enqueue**: Ingest inbound `workflow_run.completed` (status: `failure`) webhooks from GitHub, verify HMAC-SHA256 signature, deduplicate via Cloud Tasks deterministic task naming, and dispatch an async task to the investigator agent (returning `202 Accepted`).
+2. **Execute Grounded Diagnosis**: Classify the failure stage (`lint`, `test`, `build`, `deploy`), assign specialized investigation tools, read runner logs, correlate git diffs, inspect container/telemetry logs, segregate unrelated warnings, and formulate grounded causal remediation.
+3. **Reverse Incident Creation & Dual Write-Back**:
+   - **ServiceNow**: Upon completion callback, create an incident directly in state **In Progress (2)** with structured work notes and attach a standalone HTML investigation report.
    - **GitHub**: Post a neutral Check Run linking to the ServiceNow incident and a rich, collapsible PR/commit comment with root cause, decisive evidence quotes, causal remediation, and segregated unrelated observations.
 
 ```
@@ -129,7 +127,7 @@ git pull origin main
   ```
 
 #### Step 3: Expected ServiceNow Write-Back
-- **Incident State**: Automatically created in state `New (1)` and updated to `In Progress (2)`.
+- **Incident State**: Created in state `In Progress (2)`.
 - **Short Description**: `[CI/CD Failure] ssvaidyanathan/gdi-sample-pipeline-app (lint)`
 - **Work Notes**: HTML summary detailing violations with file:line coordinates.
 - **Attachment**: Downloadable HTML investigation report `ci_cd_investigation_report_INC00XXXXX.html`.

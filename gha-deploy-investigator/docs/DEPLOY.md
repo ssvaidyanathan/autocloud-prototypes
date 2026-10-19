@@ -81,7 +81,7 @@ Terraform creates four dedicated least-privilege service accounts:
 | Service Account ID | Display Name / Component | Roles & Permissions |
 | :--- | :--- | :--- |
 | `${NAME_PREFIX}-agent-sa` | GDI Agent Runtime SA | `roles/aiplatform.user` (Gemini model invocation)<br>`roles/logging.viewer` (Workflow log reading)<br>`roles/run.viewer` (Cloud Run inspection)<br>`roles/secretmanager.secretAccessor` on `${NAME_PREFIX}-github-app-private-key` |
-| `${NAME_PREFIX}-bridge-sa` | GDI Bridge Runtime SA | `roles/cloudtasks.enqueuer` on `${NAME_PREFIX}-tasks-queue`<br>`roles/secretmanager.secretAccessor` on all 4 bridge secrets |
+| `${NAME_PREFIX}-bridge-sa` | GDI Bridge Runtime SA | `roles/cloudtasks.enqueuer` on `${NAME_PREFIX}-tasks-queue`<br>`roles/secretmanager.secretAccessor` on all 4 bridge secrets and `${NAME_PREFIX}-github-app-private-key` (write-back) |
 | `${NAME_PREFIX}-tasks-invoker-sa` | Cloud Tasks OIDC Invoker SA | `roles/run.invoker` on `${NAME_PREFIX}-agent` internal Cloud Run service |
 | `${NAME_PREFIX}-demo-deployer-sa` | Demo Pipeline CI/CD SA | `roles/run.admin` on project<br>`roles/artifactregistry.writer` on demo Artifact Registry<br>`roles/iam.serviceAccountUser` on itself<br>`roles/iam.workloadIdentityUser` bound to GitHub OIDC subject |
 
@@ -148,7 +148,8 @@ terraform -chdir=bridge/infra/terraform apply \
     -target=google_secret_manager_secret_iam_member.bridge_gh_secret_access \
     -target=google_secret_manager_secret_iam_member.bridge_snow_username_access \
     -target=google_secret_manager_secret_iam_member.bridge_snow_pwd_access \
-    -target=google_secret_manager_secret_iam_member.bridge_snow_token_access
+    -target=google_secret_manager_secret_iam_member.bridge_snow_token_access \
+    -target=google_secret_manager_secret_iam_member.bridge_gh_key_access
 ```
 
 ---
@@ -241,6 +242,7 @@ terraform apply \
     -var="agent_service_url=${AGENT_URL}" \
     -var="agent_service_account_email=${AGENT_SA}" \
     -var="tasks_invoker_service_account_email=${TASKS_INVOKER_SA}" \
+    -var="github_app_id=your-github-app-id" \
     -var="servicenow_instance_url=https://your-instance.service-now.com"
 
 BRIDGE_URL=$(terraform output -raw bridge_url)
