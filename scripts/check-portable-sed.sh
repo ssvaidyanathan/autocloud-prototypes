@@ -186,7 +186,7 @@ def get_target_files() -> list[Path]:
     if explicit_targets:
         return explicit_targets
 
-    # Scan tracked *.sh files via git if possible
+    # Scan tracked *.sh files via git if possible, excluding test fixtures
     files = []
     try:
         git_sh = subprocess.check_output(
@@ -194,16 +194,23 @@ def get_target_files() -> list[Path]:
             text=True
         ).splitlines()
         for p in git_sh:
+            if "fixtures" in Path(p).parts or "fixtures/" in p:
+                continue
             full = repo_root / p
             if full.is_file():
                 files.append(full)
     except Exception:
-        files.extend(repo_root.glob("**/*.sh"))
+        for p in repo_root.glob("**/*.sh"):
+            if "fixtures" in p.parts:
+                continue
+            files.append(p)
 
     # Scan workflow files
     workflows_dir = repo_root / ".github" / "workflows"
     if workflows_dir.is_dir():
         for yml in sorted(workflows_dir.glob("*.yml")) + sorted(workflows_dir.glob("*.yaml")):
+            if "fixtures" in yml.parts:
+                continue
             files.append(yml)
 
     return sorted(set(files))

@@ -22,6 +22,14 @@ def test_clean_repo_passes() -> None:
     assert "SUCCESS" in res.stdout
 
 
+def test_default_repo_scan_exits_zero() -> None:
+    """Assert that the default whole-repo scan (invoked with zero arguments) exits 0."""
+    res = run_guard()
+    assert res.returncode == 0, f"Default repo scan failed with exit code {res.returncode}:\n{res.stderr}"
+    assert "SUCCESS" in res.stdout
+    assert "satisfy portable sed in-place requirements" in res.stdout
+
+
 def test_bad_bare_i_fails() -> None:
     res = run_guard(FIXTURES_DIR / "bad_bare_i.sh")
     assert res.returncode != 0
@@ -85,6 +93,7 @@ def test_good_workflow_passes() -> None:
 if __name__ == "__main__":
     tests = [
         test_clean_repo_passes,
+        test_default_repo_scan_exits_zero,
         test_bad_bare_i_fails,
         test_bad_empty_suffix_fails,
         test_bad_bak_suffix_fails,
