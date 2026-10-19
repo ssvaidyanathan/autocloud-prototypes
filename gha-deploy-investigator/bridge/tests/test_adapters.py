@@ -129,16 +129,18 @@ class TestAdapters:
         ref = adapter.create_incident_with_report(sample_incident, sample_report)
         incident_data = ticket_state.servicenow_incidents[ref.external_id]
         desc = incident_data["description"]
+        work_notes = incident_data["work_notes"]
 
-        assert "Recommended Remediation:" in desc
-        assert "- Update test assertion" in desc
-        assert "Unrelated Observations:" in desc
-        assert "- Deprecation warning on helper library" in desc
-        # Ensure Unrelated Observations is not mixed into Recommended Remediation
-        rem_part, obs_part = desc.split("Unrelated Observations:")
-        assert "Deprecation warning on helper library" not in rem_part
-        assert "Update test assertion" in rem_part
-        assert "Deprecation warning on helper library" in obs_part
+        # Description is concise executive summary; remediation and observations are excluded
+        assert "Recommended Remediation:" not in desc
+        assert "Update test assertion" not in desc
+        assert "Unrelated Observations:" not in desc
+        assert "Deprecation warning on helper library" not in desc
+        assert "Full diagnostic analysis: see Work Notes and the attached HTML report." in desc
+
+        # Remediation and unrelated observations are rendered into work notes
+        assert "Update test assertion" in work_notes
+        assert "Deprecation warning on helper library" in work_notes
 
     def test_github_adapter_renders_unrelated_observations_separately(
         self,

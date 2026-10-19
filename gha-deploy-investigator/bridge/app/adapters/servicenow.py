@@ -35,6 +35,76 @@ class _ReusableClientWrapper:
         return getattr(self._client, name)
 
 
+def truncate_at_word_boundary(text: str, max_chars: int = 300) -> str:
+    """Truncate text to max_chars at a word boundary, appending an ellipsis if truncated."""
+    if len(text) <= max_chars:
+        return text
+
+    ellipsis = "..."
+    target_len = max_chars - len(ellipsis)
+    if target_len <= 0:
+        return ellipsis[:max_chars]
+
+    truncated = text[:target_len]
+    last_space = truncated.rfind(" ")
+    if last_space != -1:
+        truncated = truncated[:last_space]
+
+    truncated = truncated.rstrip(" .,;:!?")
+    return f"{truncated}{ellipsis}"
+
+
+def build_servicenow_description(incident: Incident, report: Report) -> str:
+    """Build a concise executive summary description for ServiceNow incidents.
+
+    Contains repository, branch, short commit SHA, GitHub actor, failing stage,
+    and workflow run URL (if available), followed by a concise root cause
+    capped at 300 characters, and a pointer to Work Notes and the attached report.
+    Remediation actions and unrelated observations live strictly in work notes
+    and the attachment.
+    """
+    repo = incident.github_repo or incident.service_hint or "N/A"
+    branch = incident.github_branch or "N/A"
+    short_sha = incident.github_head_sha[:8] if incident.github_head_sha else "N/A"
+    actor = incident.github_actor or incident.reporter or "N/A"
+
+    lines = [
+        f"Repository: {repo}",
+        f"Branch: {branch}",
+        f"Commit SHA: {short_sha}",
+        f"GitHub Actor: {actor}",
+    ]
+
+    stage = incident.github_failing_stage or (
+        report.metadata.get("failing_stage") if report and report.metadata else None
+    )
+    if stage:
+        lines.append(f"Failing Stage: {stage}")
+
+    if incident.external_url:
+        lines.append(f"Workflow Run URL: {incident.external_url}")
+
+    raw_root_cause = (
+        report.probable_root_cause.text
+        if report.probable_root_cause and report.probable_root_cause.text
+        else report.summary
+    )
+    normalized_root_cause = " ".join(raw_root_cause.split()) if raw_root_cause else "N/A"
+    concise_root_cause = truncate_at_word_boundary(normalized_root_cause, max_chars=300)
+
+    lines.extend(
+        [
+            "",
+            "Root Cause:",
+            concise_root_cause,
+            "",
+            "Full diagnostic analysis: see Work Notes and the attached HTML report.",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
 class ServiceNowAdapter(BaseAdapter):
     """Adapter for ServiceNow Table and Attachment APIs."""
 
@@ -46,6 +116,10 @@ class ServiceNowAdapter(BaseAdapter):
         self.config = config or get_settings()
         self._http_client = http_client
         self._caller_cache: dict[str, str] = {}
+
+    def build_description(self, incident: Incident, report: Report) -> str:
+        """Build concise executive summary description for ServiceNow incidents."""
+        return build_servicenow_description(incident, report)
 
     def _resolve_caller_sys_id(
         self,
@@ -261,61 +335,7 @@ class ServiceNowAdapter(BaseAdapter):
                     f"({incident.github_failing_stage or 'Pipeline'})"
                 )
 
-                root_cause_text = (
-                    report.probable_root_cause.text
-                    if report.probable_root_cause
-                    else report.summary
-                )
-
-                actor = incident.github_actor or incident.reporter or "N/A"
-                author = incident.github_commit_author or actor
-                description_lines = [
-                    f"Repository: {incident.github_repo or 'N/A'}",
-                    f"Branch: {incident.github_branch or 'N/A'}",
-                    f"Commit SHA: {incident.github_head_sha or 'N/A'}",
-                    f"GitHub Actor: {actor}",
-                    f"Commit Author: {author}",
-                    f"Reporter: {incident.reporter or actor}",
-                    "",
-                    "Root Cause:",
-                    root_cause_text,
-                ]
-                remediation_items = (
-                    report.causal_remediation
-                    if report.causal_remediation
-                    else report.recommended_actions
-                )
-                if remediation_items:
-                    description_lines.extend(["", "Recommended Remediation:"])
-                    for action in remediation_items:
-                        if isinstance(action, str):
-                            description_lines.append(f"- {action}")
-                        elif hasattr(action, "title") and not callable(getattr(action, "title")):
-                            desc = getattr(action, "description", None)
-                            description_lines.append(
-                                f"- {action.title}: {desc}"
-                                if desc
-                                else f"- {action.title}"
-                            )
-                        elif isinstance(action, dict) and "title" in action:
-                            desc = action.get("description")
-                            description_lines.append(
-                                f"- {action['title']}: {desc}"
-                                if desc
-                                else f"- {action['title']}"
-                            )
-                        elif hasattr(action, "title"):
-                            # Handle model or object where title might be an attribute
-                            title_val = action.title() if callable(action.title) else action.title
-                            description_lines.append(f"- {title_val}")
-                        else:
-                            description_lines.append(f"- {action}")
-
-                if report.unrelated_observations:
-                    description_lines.extend(["", "Unrelated Observations:"])
-                    for obs in report.unrelated_observations:
-                        description_lines.append(f"- {obs}")
-                description = "\n".join(description_lines)
+                description = self.build_description(incident, report)
 
                 if existing_incident:
                     sys_id = existing_incident.get("sys_id", "mock-sys-id")

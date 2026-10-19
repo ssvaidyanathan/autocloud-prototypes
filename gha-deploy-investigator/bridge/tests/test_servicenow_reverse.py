@@ -42,9 +42,22 @@ class TestServiceNowReverse:
         assert created_ticket["correlation_id"] == "gdi:my-org/sample-app:1849201948:1"
         assert created_ticket["work_notes"].startswith("[code]")
         assert created_ticket["work_notes"].endswith("[/code]")
-        assert "Recommended Remediation:" in created_ticket["description"]
+        assert "Run local linter" in created_ticket["work_notes"]
+        assert "Recommended Remediation:" not in created_ticket["description"]
+        assert "Unrelated Observations:" not in created_ticket["description"]
+        assert "Repository: my-org/sample-app" in created_ticket["description"]
+        assert "Branch: main" in created_ticket["description"]
+        assert "Commit SHA: e4b2a8d3" in created_ticket["description"]
+        assert "GitHub Actor: octocat" in created_ticket["description"]
+        assert "Failing Stage: Run Ruff Lint" in created_ticket["description"]
         assert (
-            "- Run local linter (`ruff check .`) to verify and fix syntax/style violations"
+            "Workflow Run URL: https://github.com/my-org/sample-app/actions/runs/1849201948"
+            in created_ticket["description"]
+        )
+        assert "Root Cause:" in created_ticket["description"]
+        assert sample_report.probable_root_cause.text in created_ticket["description"]
+        assert (
+            "Full diagnostic analysis: see Work Notes and the attached HTML report."
             in created_ticket["description"]
         )
 
@@ -170,7 +183,8 @@ class TestServiceNowReverse:
         assert ticket["assignment_group"] == "Platform-SRE"
         assert ticket["state"] == "2"
         assert "GitHub Actor: octocat" in ticket["description"]
-        assert "Commit Author: The Octocat" in ticket["description"]
+        assert "Commit SHA: e4b2a8d3" in ticket["description"]
+        assert "Commit Author:" not in ticket["description"]
 
     def test_idempotent_retry_patches_caller_id_on_existing_incident(
         self,
@@ -210,6 +224,12 @@ class TestServiceNowReverse:
         assert "my-org/sample-app" in patched["short_description"]
         assert "Root Cause:" in patched["description"]
         assert sample_report.probable_root_cause.text in patched["description"]
+        assert "Recommended Remediation:" not in patched["description"]
+        assert "Unrelated Observations:" not in patched["description"]
+        assert (
+            "Full diagnostic analysis: see Work Notes and the attached HTML report."
+            in patched["description"]
+        )
 
 
 
@@ -243,3 +263,152 @@ class TestServiceNowReverse:
 
         assert "ServiceNow rejected transition to state '2'" in caplog.text
         assert "State transition rejected: mandatory field" in caplog.text
+
+    def test_description_builder_required_summary_fields(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        ref = adapter.create_incident_with_report(sample_incident, sample_report)
+        ticket = ticket_state.servicenow_incidents[ref.external_id]
+        desc = ticket["description"]
+
+        # Required fields
+        assert "Repository: my-org/sample-app" in desc
+        assert "Branch: main" in desc
+        assert "Commit SHA: e4b2a8d3" in desc
+        assert sample_incident.github_head_sha not in desc  # full 40-char SHA must not be present
+        assert "GitHub Actor: octocat" in desc
+        assert "Failing Stage: Run Ruff Lint" in desc
+        expected_run_url = (
+            "Workflow Run URL: https://github.com/my-org/sample-app/actions/runs/1849201948"
+        )
+        assert expected_run_url in desc
+        assert "Root Cause:" in desc
+        assert sample_report.probable_root_cause.text in desc
+        assert "Full diagnostic analysis: see Work Notes and the attached HTML report." in desc
+
+        # Optional fields omitted when absent
+        sparse_incident = sample_incident.model_copy(
+            update={
+                "github_failing_stage": None,
+                "external_url": None,
+                "github_head_sha": None,
+                "github_actor": None,
+                "reporter": "backup-reporter",
+            }
+        )
+        desc_sparse = adapter.build_description(sparse_incident, sample_report)
+        assert "Failing Stage:" not in desc_sparse
+        assert "Workflow Run URL:" not in desc_sparse
+        assert "Commit SHA: N/A" in desc_sparse
+        assert "GitHub Actor: backup-reporter" in desc_sparse
+
+    def test_description_no_remediation_or_unrelated_observations(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        sample_report.causal_remediation = ["Revert commit e4b2a8d3 immediately"]
+        sample_report.recommended_actions = ["Run pytest with verbose flags"]
+        sample_report.unrelated_observations = ["Found deprecated library foo-bar in requirements"]
+
+        ref = adapter.create_incident_with_report(sample_incident, sample_report)
+        ticket = ticket_state.servicenow_incidents[ref.external_id]
+        desc = ticket["description"]
+        work_notes = ticket["work_notes"]
+
+        # Neither section header nor items in description
+        assert "Recommended Remediation:" not in desc
+        assert "Revert commit e4b2a8d3 immediately" not in desc
+        assert "Run pytest with verbose flags" not in desc
+        assert "Unrelated Observations:" not in desc
+        assert "Found deprecated library foo-bar in requirements" not in desc
+
+        # Work notes must retain the full report including remediation and observations
+        assert "Revert commit e4b2a8d3 immediately" in work_notes
+        assert "Found deprecated library foo-bar in requirements" in work_notes
+
+    def test_description_root_cause_truncation(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        # 1. Short root cause (< 300 chars) is preserved without truncation
+        short_cause = "Pipeline failed due to syntax error in app/main.py line 42."
+        sample_report.probable_root_cause.text = short_cause
+        desc_short = adapter.build_description(sample_incident, sample_report)
+        assert short_cause in desc_short
+        assert "..." not in desc_short
+
+        # 2. Long root cause (> 300 chars) is truncated safely at word boundary to <= 300 chars
+        long_words = [
+            "Container", "deployment", "failed", "because", "the", "orchestrator",
+            "detected", "severe", "configuration", "mismatch", "during", "startup",
+            "initialization", "sequence", "which", "prevented", "healthy", "socket",
+            "binding", "across", "all", "target", "workers", "in", "region", "us-central1",
+            "leading", "to", "repeated", "health", "check", "failures", "and", "rollback",
+            "after", "exceeding", "the", "configured", "deadline", "threshold", "of",
+            "five", "hundred", "seconds", "without", "any", "successful", "readiness",
+            "probe", "responses", "from", "internal", "endpoints"
+        ]
+        long_cause = " ".join(long_words)
+        assert len(long_cause) > 350
+        sample_report.probable_root_cause.text = long_cause
+
+        desc_long = adapter.build_description(sample_incident, sample_report)
+        lines = desc_long.splitlines()
+        rc_idx = lines.index("Root Cause:")
+        extracted_rc = lines[rc_idx + 1]
+
+        assert len(extracted_rc) <= 300
+        assert extracted_rc.endswith("...")
+        # Verify word boundary: should not cut in the middle of a word
+        before_ellipsis = extracted_rc[:-3]
+        last_word = before_ellipsis.split()[-1]
+        assert last_word in long_words
+
+        # 3. Multi-line root cause is normalized to single concise line
+        multiline_cause = "Line one failure.\n   Line two extra detail.\n\nLine three."
+        sample_report.probable_root_cause.text = multiline_cause
+        desc_multi = adapter.build_description(sample_incident, sample_report)
+        lines_multi = desc_multi.splitlines()
+        rc_multi_idx = lines_multi.index("Root Cause:")
+        extracted_multi_rc = lines_multi[rc_multi_idx + 1]
+        assert "\n" not in extracted_multi_rc
+        assert "Line one failure. Line two extra detail. Line three." == extracted_multi_rc
+
+    def test_work_notes_payload_unchanged_full_report(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        ref = adapter.create_incident_with_report(sample_incident, sample_report)
+        ticket = ticket_state.servicenow_incidents[ref.external_id]
+        work_notes = ticket["work_notes"]
+
+        # Work notes must remain valid HTML chunk wrapped in [code]...[/code]
+        assert work_notes.startswith("[code]")
+        assert work_notes.endswith("[/code]")
+        assert "Autocloud CI/CD Deployment Investigation Report" in work_notes
+        assert "Probable Root Cause" in work_notes
+        assert "Local variable" in work_notes
+        assert "unused_token" in work_notes
+        assert "Run local linter" in work_notes
+
