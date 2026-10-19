@@ -116,9 +116,12 @@ Provision these secret containers and their IAM bindings before deploying Cloud 
 ```bash
 cd gha-deploy-investigator
 
+# 0. Bootstrap GCS remote state bucket and generate backend.hcl
+./scripts/bootstrap-tfstate.sh --project-id "${PROJECT_ID}" --name-prefix "${NAME_PREFIX}" --region "${REGION}"
+
 # 1. Initialize Terraform stacks
-terraform -chdir=agent/infra/terraform init
-terraform -chdir=bridge/infra/terraform init
+terraform -chdir=agent/infra/terraform init -backend-config=backend.hcl
+terraform -chdir=bridge/infra/terraform init -backend-config=backend.hcl
 
 # 2. Provision Agent stack secret container and service accounts
 terraform -chdir=agent/infra/terraform apply \
@@ -258,7 +261,7 @@ To test the end-to-end pipeline against a dedicated customer-style repository wi
 ### 1. Provision Demo WIF Stack via Terraform
 ```bash
 cd demo/infra/terraform
-terraform init
+terraform init -backend-config=backend.hcl
 terraform apply \
     -var="project_id=${PROJECT_ID}" \
     -var="region=${REGION}" \
