@@ -6,7 +6,7 @@
 #   1. Bridge Health Check (GET /health)
 #   2. Inbound Webhook Authentication Rejection (401 for ServiceNow, Jira, Generic)
 #   3. Duplicate Webhook Idempotency (Deterministic deduplication)
-#   4. Private SRE Agent Invocation Protection (401/403 unauthenticated, 200 /health)
+#   4. Private SRE Agent Invocation Protection (401/403 unauthenticated, 200 /health with identity token)
 #   5. Callback Mutual Authentication Rejection (401 for missing/forged OIDC token)
 #   6. End-to-End Investigation Flow (Read-only probe ticket dispatch)
 #
@@ -278,15 +278,25 @@ if [ -n "${AGENT_URL}" ]; then
         log_fail "Private agent /investigate unauthenticated invocation returned HTTP ${AGENT_INV_CODE} (expected 401 or 403)"
     fi
 
-    # 4b: Health check
-    AGENT_HEALTH_RESP=$(curl -s -w "\n%{http_code}" "${AGENT_URL}/health" || true)
-    AGENT_HEALTH_CODE=$(echo "${AGENT_HEALTH_RESP}" | tail -n1)
-    AGENT_HEALTH_BODY=$(echo "${AGENT_HEALTH_RESP}" | sed '$d')
+    # 4b: Health check. The agent requires IAM authentication on every path, including
+    # /health, so call it with the operator's identity token.
+    ID_TOKEN=""
+    if command -v gcloud >/dev/null 2>&1; then
+        ID_TOKEN="$(gcloud auth print-identity-token 2>/dev/null || true)"
+    fi
 
-    if [ "${AGENT_HEALTH_CODE}" = "200" ]; then
-        log_pass "Agent /health returned HTTP 200 (response: ${AGENT_HEALTH_BODY})"
+    if [ -z "${ID_TOKEN}" ]; then
+        log_fail "Agent /health not checked: gcloud is missing or not authenticated (run 'gcloud auth login')"
     else
-        log_fail "Agent /health returned HTTP ${AGENT_HEALTH_CODE} (expected 200, response: ${AGENT_HEALTH_BODY})"
+        AGENT_HEALTH_RESP=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer ${ID_TOKEN}" "${AGENT_URL}/health" || true)
+        AGENT_HEALTH_CODE=$(echo "${AGENT_HEALTH_RESP}" | tail -n1)
+        AGENT_HEALTH_BODY=$(echo "${AGENT_HEALTH_RESP}" | sed '$d')
+
+        if [ "${AGENT_HEALTH_CODE}" = "200" ]; then
+            log_pass "Agent /health returned HTTP 200 with identity token (response: ${AGENT_HEALTH_BODY})"
+        else
+            log_fail "Agent /health returned HTTP ${AGENT_HEALTH_CODE} with identity token (expected 200, response: ${AGENT_HEALTH_BODY})"
+        fi
     fi
 else
     log_info "Skipping Check 4: --agent-url was not specified"
