@@ -47,6 +47,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
+          cache-suffix: ${{ github.workflow }}-${{ github.job }}
       - name: Set up Python
         run: uv python install 3.12
       - name: Verify zero demo overfit and AST guards
@@ -63,6 +64,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
+          cache-suffix: ${{ github.workflow }}-${{ github.job }}
       - name: Set up Python
         run: uv python install 3.12
       - name: Install dependencies
@@ -84,6 +86,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
+          cache-suffix: ${{ github.workflow }}-${{ github.job }}
       - name: Set up Python
         run: uv python install 3.12
       - name: Install dependencies
