@@ -26,9 +26,13 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY app/ /app/app/
 COPY pyproject.toml /app/
 
+# Cloud Run's front end terminates TLS and connects to the container from the link-local
+# range 169.254.0.0/16. Trusting its X-Forwarded-Proto header there makes request.base_url
+# report https, so the default callback URL handed to the agent is https (the agent rejects http).
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
-    PORT=8080
+    PORT=8080 \
+    FORWARDED_ALLOW_IPS=169.254.0.0/16
 
 EXPOSE 8080
 

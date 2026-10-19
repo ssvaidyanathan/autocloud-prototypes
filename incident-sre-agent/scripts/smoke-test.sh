@@ -9,6 +9,7 @@
 #   4. Private SRE Agent Invocation Protection (401/403 unauthenticated, 200 /health with identity token)
 #   5. Callback Mutual Authentication Rejection (401 for missing/forged OIDC token)
 #   6. End-to-End Investigation Flow (Read-only probe ticket dispatch)
+#   7. Report Delivery (probe report reaches bridge /callback/report; reads Cloud Logging)
 #
 # Safety Guarantee:
 #   Strictly read-only against production GCP infrastructure. The only write
@@ -342,6 +343,8 @@ E2E_PAYLOAD=$(cat <<EOF
 EOF
 )
 E2E_SIG=$(compute_hmac "${GENERIC_HMAC_KEY}" "${E2E_PAYLOAD}")
+E2E_SENT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+E2E_ACCEPTED=false
 
 E2E_RESP=$(curl -s -w "\n%{http_code}" -X POST "${BRIDGE_URL}/webhook/generic" \
     -H "Content-Type: application/json" \
@@ -352,8 +355,78 @@ E2E_BODY=$(echo "${E2E_RESP}" | sed '$d')
 
 if [[ "${E2E_CODE}" =~ ^(200|202)$ ]] && (echo "${E2E_BODY}" | grep -q "task_id" || echo "${E2E_BODY}" | grep -q "accepted" || echo "${E2E_BODY}" | grep -q "queued"); then
     log_pass "Read-only probe ticket accepted and enqueued successfully (HTTP ${E2E_CODE}, response: ${E2E_BODY})"
+    E2E_ACCEPTED=true
 else
     log_fail "Read-only probe ticket failed with HTTP ${E2E_CODE} (expected 200 or 202, response: ${E2E_BODY})"
+fi
+
+# ==============================================================================
+# Check 7: Report Delivery (Probe Report Reaches the Bridge)
+# ==============================================================================
+# A 202 in Check 6 only proves the probe was queued. Confirm the agent finished the
+# investigation and the bridge accepted its report, using Cloud Logging: the agent logs an
+# sre_report entry for the incident just before POSTing it, and the bridge's request log
+# then records POST /callback/report 200. Fails fast if the agent logs a delivery error.
+
+# Print the first <field> value from <prefix>-<service>'s Cloud Run logs since the probe was
+# sent, matching <filter>. Prints nothing if there is no match or the read fails.
+logs_query() {
+    local service="$1" filter="$2" field="$3"
+    gcloud logging read \
+        "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${NAME_PREFIX}-${service}\" AND timestamp>=\"${E2E_SENT_AT}\" AND ${filter}" \
+        --limit=1 --format="value(${field})" 2>/dev/null | head -n1 || true
+}
+
+# Succeed if Cloud Logging can be read; otherwise fail and print gcloud's error
+# (not logged in, no default project, or no log access).
+check_log_access() {
+    gcloud logging read 'resource.type="cloud_run_revision"' --limit=1 --format='value(timestamp)' 2>&1 >/dev/null
+}
+
+printf "\n%b--- Check 7: Report Delivery (Probe Report Reaches the Bridge) ---%b\n" "${BOLD}" "${NC}"
+REPORT_TIMEOUT_SECONDS="${REPORT_TIMEOUT_SECONDS:-300}"
+REPORT_POLL_SECONDS=15
+
+if [ "${E2E_ACCEPTED}" != true ]; then
+    log_info "Skipping Check 7: probe ticket from Check 6 was not accepted"
+elif ! command -v gcloud >/dev/null 2>&1; then
+    log_fail "Report delivery not checked: gcloud is not installed"
+elif ! LOG_ACCESS_ERROR=$(check_log_access); then
+    log_fail "Report delivery not checked: cannot read Cloud Logging (run 'gcloud auth login'): ${LOG_ACCESS_ERROR:0:240}"
+else
+    log_info "Waiting up to ${REPORT_TIMEOUT_SECONDS}s for the report for ${E2E_KEY}..."
+    REPORT_RESULT="timeout"
+    DEADLINE=$(( $(date +%s) + REPORT_TIMEOUT_SECONDS ))
+
+    DELIVERY_ERROR_FILTER='textPayload:"Failed to deliver callback"'
+    REPORT_SENT_FILTER="jsonPayload.jsonPayload.incident_external_key=\"${E2E_KEY}\""
+    CALLBACK_OK_FILTER='httpRequest.requestUrl:"/callback/report" AND httpRequest.status=200'
+
+    while [ "$(date +%s)" -lt "${DEADLINE}" ]; do
+        DELIVERY_ERROR=$(logs_query sre-agent "${DELIVERY_ERROR_FILTER}" textPayload)
+        if [ -n "${DELIVERY_ERROR}" ]; then
+            REPORT_RESULT="error"; break
+        fi
+
+        REPORT_SENT_AT=$(logs_query sre-agent "${REPORT_SENT_FILTER}" timestamp)
+        if [ -z "${REPORT_SENT_AT}" ]; then
+            sleep "${REPORT_POLL_SECONDS}"; continue        # agent hasn't sent a report yet
+        fi
+
+        if [ -n "$(logs_query incident-bridge "timestamp>=\"${REPORT_SENT_AT}\" AND ${CALLBACK_OK_FILTER}" timestamp)" ]; then
+            REPORT_RESULT="delivered"; break
+        fi
+        sleep "${REPORT_POLL_SECONDS}"
+    done
+
+    case "${REPORT_RESULT}" in
+        delivered)
+            log_pass "Report for ${E2E_KEY} delivered to bridge (POST /callback/report 200)" ;;
+        error)
+            log_fail "Agent could not deliver the report: ${DELIVERY_ERROR:0:240}" ;;
+        *)
+            log_fail "No report delivered for ${E2E_KEY} within ${REPORT_TIMEOUT_SECONDS}s (check ${NAME_PREFIX}-sre-agent logs)" ;;
+    esac
 fi
 
 # ==============================================================================
