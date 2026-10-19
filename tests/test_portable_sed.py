@@ -90,6 +90,56 @@ def test_good_workflow_passes() -> None:
     assert "SUCCESS" in res.stdout
 
 
+def test_bad_cmd_substitution_fails() -> None:
+    res = run_guard(FIXTURES_DIR / "bad_cmd_substitution.sh")
+    assert res.returncode != 0
+    assert "Non-portable in-place sed invocation '-i'" in res.stderr
+
+
+def test_bad_line_continuation_fails() -> None:
+    res = run_guard(FIXTURES_DIR / "bad_line_continuation.sh")
+    assert res.returncode != 0
+    assert "Non-portable in-place sed invocation '-i'" in res.stderr
+    # Must report line 3 where the command starts
+    assert "bad_line_continuation.sh:3:" in res.stderr
+
+
+def test_bad_subshell_conditional_fails() -> None:
+    res = run_guard(FIXTURES_DIR / "bad_subshell_conditional.sh")
+    assert res.returncode != 0
+    assert "Non-portable in-place sed invocation '-i'" in res.stderr
+
+
+def test_bad_wrappers_fails() -> None:
+    res = run_guard(FIXTURES_DIR / "bad_wrappers.sh")
+    assert res.returncode != 0
+    assert "Non-portable in-place sed invocation '-i'" in res.stderr
+
+
+def test_bad_binary_paths_fails() -> None:
+    res = run_guard(FIXTURES_DIR / "bad_binary_paths.sh")
+    assert res.returncode != 0
+    assert "Non-portable in-place sed invocation '-i'" in res.stderr
+
+
+def test_good_quoted_script_passes() -> None:
+    res = run_guard(FIXTURES_DIR / "good_quoted_script.sh")
+    assert res.returncode == 0, f"Unexpected failure on good_quoted_script.sh: {res.stderr}"
+    assert "SUCCESS" in res.stdout
+
+
+def test_good_comments_and_echo_passes() -> None:
+    res = run_guard(FIXTURES_DIR / "good_comments_and_echo.sh")
+    assert res.returncode == 0, f"Unexpected failure on good_comments_and_echo.sh: {res.stderr}"
+    assert "SUCCESS" in res.stdout
+
+
+def test_good_wrappers_portable_passes() -> None:
+    res = run_guard(FIXTURES_DIR / "good_wrappers_portable.sh")
+    assert res.returncode == 0, f"Unexpected failure on good_wrappers_portable.sh: {res.stderr}"
+    assert "SUCCESS" in res.stdout
+
+
 if __name__ == "__main__":
     tests = [
         test_clean_repo_passes,
@@ -104,8 +154,17 @@ if __name__ == "__main__":
         test_good_portable_passes,
         test_good_readonly_passes,
         test_good_workflow_passes,
+        test_bad_cmd_substitution_fails,
+        test_bad_line_continuation_fails,
+        test_bad_subshell_conditional_fails,
+        test_bad_wrappers_fails,
+        test_bad_binary_paths_fails,
+        test_good_quoted_script_passes,
+        test_good_comments_and_echo_passes,
+        test_good_wrappers_portable_passes,
     ]
     for t in tests:
         print(f"Running {t.__name__}...")
         t()
     print(f"\nAll {len(tests)} test(s) passed successfully!")
+
