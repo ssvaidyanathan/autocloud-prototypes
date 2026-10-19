@@ -19,6 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 python3 - "$REPO_ROOT" "$@" << 'EOF'
+from __future__ import annotations
 import os
 import re
 import subprocess

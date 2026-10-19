@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests verifying the check-portable-sed.sh guard against positive and negative fixtures."""
 
+from __future__ import annotations
+
 import subprocess
 import sys
 from pathlib import Path
