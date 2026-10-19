@@ -167,7 +167,7 @@ Terraform manages resource definitions and IAM bindings for 5 canonical secrets 
 
 | Stack | Secret ID | Consumer | Purpose |
 |---|---|---|---|
-| **Agent** | `${name_prefix}-github-app-private-key` | `gdi-agent-sa` | RSA private key for GitHub App authentication and Check Run write-back |
+| **Agent & Bridge** | `${name_prefix}-github-app-private-key` | `gdi-agent-sa`, `gdi-bridge-sa` | PEM-encoded RSA private key for GitHub App authentication (Agent: repo logs/diffs; Bridge: Check Run & comment write-back) |
 | **Bridge** | `${name_prefix}-github-webhook-secret` | `gdi-bridge-sa` | Shared secret for verifying `X-Hub-Signature-256` inbound webhook HMACs |
 | **Bridge** | `${name_prefix}-servicenow-username` | `gdi-bridge-sa` | Integration user for ServiceNow Table and Attachment REST APIs |
 | **Bridge** | `${name_prefix}-servicenow-password` | `gdi-bridge-sa` | Basic auth password for ServiceNow REST APIs |
