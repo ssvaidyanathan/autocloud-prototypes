@@ -28,8 +28,16 @@ if [[ ! -f "${TARGET_FILE}" ]]; then
     exit 1
 fi
 
-sed -i 's/MEMORY="${MEMORY:-512Mi}"/MEMORY="${MEMORY:-256Mi}"/' "${TARGET_FILE}"
-sed -i 's/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-}"/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-CACHE_PREWARM_BUFFER_MB=2048}"/' "${TARGET_FILE}"
+# Determine sed in-place arguments for portability (macOS vs Linux)
+sedi_args=("-i")
+if [[ "$(uname)" == "Darwin" ]]; then
+  sedi_args=("-i" "") # For macOS, sed -i requires an extension argument. "" means no backup.
+fi
+
+# shellcheck disable=SC2016
+sed "${sedi_args[@]}" 's/MEMORY="${MEMORY:-512Mi}"/MEMORY="${MEMORY:-256Mi}"/' "${TARGET_FILE}"
+# shellcheck disable=SC2016
+sed "${sedi_args[@]}" 's/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-}"/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-CACHE_PREWARM_BUFFER_MB=2048}"/' "${TARGET_FILE}"
 
 echo "Injected production cache buffer parameters into ${TARGET_FILE}:"
 echo "  - MEMORY: 256Mi"

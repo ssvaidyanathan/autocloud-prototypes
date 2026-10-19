@@ -42,18 +42,28 @@ if git -C "${APP_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 # 2. Idempotent programmatic cleanup in case not in git or uncommitted changes
+# Determine sed in-place arguments for portability (macOS vs Linux)
+sedi_args=("-i")
+if [[ "$(uname)" == "Darwin" ]]; then
+  sedi_args=("-i" "") # For macOS, sed -i requires an extension argument. "" means no backup.
+fi
+
 DEPLOY_SH="${APP_DIR}/scripts/deploy.sh"
 if [[ -f "${DEPLOY_SH}" ]]; then
-    sed -i 's/MEMORY="${MEMORY:-256Mi}"/MEMORY="${MEMORY:-512Mi}"/' "${DEPLOY_SH}"
-    sed -i 's/MEMORY="${MEMORY:-128Mi}"/MEMORY="${MEMORY:-512Mi}"/' "${DEPLOY_SH}"
-    sed -i 's/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-CACHE_PREWARM_BUFFER_MB=2048}"/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-}"/' "${DEPLOY_SH}"
-    sed -i 's/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-DEMO_ALLOCATE_OOM=true}"/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-}"/' "${DEPLOY_SH}"
+    # shellcheck disable=SC2016
+    sed "${sedi_args[@]}" 's/MEMORY="${MEMORY:-256Mi}"/MEMORY="${MEMORY:-512Mi}"/' "${DEPLOY_SH}"
+    # shellcheck disable=SC2016
+    sed "${sedi_args[@]}" 's/MEMORY="${MEMORY:-128Mi}"/MEMORY="${MEMORY:-512Mi}"/' "${DEPLOY_SH}"
+    # shellcheck disable=SC2016
+    sed "${sedi_args[@]}" 's/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-CACHE_PREWARM_BUFFER_MB=2048}"/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-}"/' "${DEPLOY_SH}"
+    # shellcheck disable=SC2016
+    sed "${sedi_args[@]}" 's/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-DEMO_ALLOCATE_OOM=true}"/EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-}"/' "${DEPLOY_SH}"
 fi
 
 DOCKERFILE="${APP_DIR}/Dockerfile"
 if [[ -f "${DOCKERFILE}" ]]; then
-    sed -i '/[Cc]ache.*warmup/d' "${DOCKERFILE}"
-    sed -i '/missing_asset_configuration/d' "${DOCKERFILE}"
+    sed "${sedi_args[@]}" '/[Cc]ache.*warmup/d' "${DOCKERFILE}"
+    sed "${sedi_args[@]}" '/missing_asset_configuration/d' "${DOCKERFILE}"
     python3 -c "
 import sys
 p = sys.argv[1]
