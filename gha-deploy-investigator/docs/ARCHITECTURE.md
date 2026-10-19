@@ -110,7 +110,7 @@ Once the investigation is synthesized, `gdi-agent` posts the findings back to `g
 In reverse of standard ITSM workflows where a ServiceNow ticket triggers an investigation, here the CI/CD failure creates the enterprise ServiceNow ticket:
 1. `POST /api/now/table/incident`:
    - `short_description`: `CI/CD Failure: <repo> - <job_name> (<stage>)`
-   - `description`: Formatted overview with run URL and commit SHA.
+   - `description`: Facts-only plain-text summary with repository, branch, short commit SHA, GitHub actor, failing stage, and workflow run URL (no root cause, remediation, observations, or pointer line; all findings and remediation live strictly in work notes and the attachment).
    - `state`: `2` (In Progress) or configured default.
    - `work_notes`: Complete diagnostic report with root cause, evidence, and remediation.
 2. `POST /api/now/attachment/file`:

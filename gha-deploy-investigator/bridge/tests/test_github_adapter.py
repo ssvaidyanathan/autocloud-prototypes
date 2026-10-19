@@ -326,9 +326,7 @@ class TestGitHubAdapter:
         assert created["assignment_group"] == "Platform-SRE"
 
         desc = created["description"]
-        # Actor and author must reflect GitHub entities, NEVER ServiceNow caller 'admin'
+        # Actor must reflect GitHub entity, NEVER ServiceNow caller 'admin'
         assert "GitHub Actor: ssvaidyanathan" in desc
-        assert "Commit Author: Sai Saran Vaidyanathan" in desc
-        assert "Reporter: ssvaidyanathan" in desc
         assert "GitHub Actor: admin" not in desc
-        assert "Commit Author: admin" not in desc
+        assert "Commit SHA: 6f420bd5" in desc

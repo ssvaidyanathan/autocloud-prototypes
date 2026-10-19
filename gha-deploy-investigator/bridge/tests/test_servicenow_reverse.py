@@ -42,11 +42,22 @@ class TestServiceNowReverse:
         assert created_ticket["correlation_id"] == "gdi:my-org/sample-app:1849201948:1"
         assert created_ticket["work_notes"].startswith("[code]")
         assert created_ticket["work_notes"].endswith("[/code]")
-        assert "Recommended Remediation:" in created_ticket["description"]
+        assert "Run local linter" in created_ticket["work_notes"]
+        assert "Recommended Remediation:" not in created_ticket["description"]
+        assert "Unrelated Observations:" not in created_ticket["description"]
+        assert "Repository: my-org/sample-app" in created_ticket["description"]
+        assert "Branch: main" in created_ticket["description"]
+        assert "Commit SHA: e4b2a8d3" in created_ticket["description"]
+        assert "GitHub Actor: octocat" in created_ticket["description"]
+        assert "Failing Stage: Run Ruff Lint" in created_ticket["description"]
         assert (
-            "- Run local linter (`ruff check .`) to verify and fix syntax/style violations"
+            "Workflow Run URL: https://github.com/my-org/sample-app/actions/runs/1849201948"
             in created_ticket["description"]
         )
+        assert "Root Cause:" not in created_ticket["description"]
+        assert sample_report.probable_root_cause.text not in created_ticket["description"]
+        assert "Full diagnostic analysis" not in created_ticket["description"]
+        assert "Work Notes" not in created_ticket["description"]
 
         # Verify Attachment API in fake server
         assert len(ticket_state.servicenow_attachments) == 1
@@ -170,7 +181,8 @@ class TestServiceNowReverse:
         assert ticket["assignment_group"] == "Platform-SRE"
         assert ticket["state"] == "2"
         assert "GitHub Actor: octocat" in ticket["description"]
-        assert "Commit Author: The Octocat" in ticket["description"]
+        assert "Commit SHA: e4b2a8d3" in ticket["description"]
+        assert "Commit Author:" not in ticket["description"]
 
     def test_idempotent_retry_patches_caller_id_on_existing_incident(
         self,
@@ -208,8 +220,12 @@ class TestServiceNowReverse:
         assert patched["assignment_group"] == "Cloud-Operations"
         assert patched["state"] == "2"
         assert "my-org/sample-app" in patched["short_description"]
-        assert "Root Cause:" in patched["description"]
-        assert sample_report.probable_root_cause.text in patched["description"]
+        assert "Root Cause:" not in patched["description"]
+        assert sample_report.probable_root_cause.text not in patched["description"]
+        assert "Recommended Remediation:" not in patched["description"]
+        assert "Unrelated Observations:" not in patched["description"]
+        assert "Full diagnostic analysis" not in patched["description"]
+        assert "Work Notes" not in patched["description"]
 
 
 
@@ -243,3 +259,138 @@ class TestServiceNowReverse:
 
         assert "ServiceNow rejected transition to state '2'" in caplog.text
         assert "State transition rejected: mandatory field" in caplog.text
+
+    def test_description_builder_required_summary_fields(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        ref = adapter.create_incident_with_report(sample_incident, sample_report)
+        ticket = ticket_state.servicenow_incidents[ref.external_id]
+        desc = ticket["description"]
+
+        # Required fields
+        assert "Repository: my-org/sample-app" in desc
+        assert "Branch: main" in desc
+        assert "Commit SHA: e4b2a8d3" in desc
+        assert sample_incident.github_head_sha not in desc  # full 40-char SHA must not be present
+        assert "GitHub Actor: octocat" in desc
+        assert "Failing Stage: Run Ruff Lint" in desc
+        expected_run_url = (
+            "Workflow Run URL: https://github.com/my-org/sample-app/actions/runs/1849201948"
+        )
+        assert expected_run_url in desc
+        assert "Root Cause:" not in desc
+        assert sample_report.probable_root_cause.text not in desc
+        assert "Full diagnostic analysis" not in desc
+        assert "Work Notes" not in desc
+
+        # Optional fields omitted when absent
+        sparse_incident = sample_incident.model_copy(
+            update={
+                "github_failing_stage": None,
+                "external_url": None,
+                "github_head_sha": None,
+                "github_actor": None,
+                "reporter": "backup-reporter",
+            }
+        )
+        desc_sparse = adapter.build_description(sparse_incident, sample_report)
+        assert "Failing Stage:" not in desc_sparse
+        assert "Workflow Run URL:" not in desc_sparse
+        assert "Commit SHA: N/A" in desc_sparse
+        assert "GitHub Actor: backup-reporter" in desc_sparse
+
+    def test_description_no_remediation_or_unrelated_observations(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        sample_report.causal_remediation = ["Revert commit e4b2a8d3 immediately"]
+        sample_report.recommended_actions = ["Run pytest with verbose flags"]
+        sample_report.unrelated_observations = ["Found deprecated library foo-bar in requirements"]
+
+        ref = adapter.create_incident_with_report(sample_incident, sample_report)
+        ticket = ticket_state.servicenow_incidents[ref.external_id]
+        desc = ticket["description"]
+        work_notes = ticket["work_notes"]
+
+        # Neither section header nor items in description
+        assert "Recommended Remediation:" not in desc
+        assert "Revert commit e4b2a8d3 immediately" not in desc
+        assert "Run pytest with verbose flags" not in desc
+        assert "Unrelated Observations:" not in desc
+        assert "Found deprecated library foo-bar in requirements" not in desc
+
+        # Work notes must retain the full report including remediation and observations
+        assert "Revert commit e4b2a8d3 immediately" in work_notes
+        assert "Found deprecated library foo-bar in requirements" in work_notes
+
+    def test_description_no_root_cause_findings_or_pointer(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        sample_report.probable_root_cause.text = "Severe container startup probe failure"
+        sample_report.causal_remediation = ["Revert deploy commit"]
+        sample_report.unrelated_observations = ["Deprecated runtime base image"]
+
+        desc = adapter.build_description(sample_incident, sample_report)
+
+        # Facts only: NO root cause, NO remediation, NO observations, NO pointer line
+        assert "Root Cause:" not in desc
+        assert "Severe container startup probe failure" not in desc
+        assert "Revert deploy commit" not in desc
+        assert "Deprecated runtime base image" not in desc
+        assert "Recommended Remediation:" not in desc
+        assert "Unrelated Observations:" not in desc
+        assert "Work Notes" not in desc
+        assert "attached HTML report" not in desc
+
+        # Verify that description consists exclusively of facts lines
+        lines = desc.splitlines()
+        assert len(lines) == 6
+        assert lines[0] == "Repository: my-org/sample-app"
+        assert lines[1] == "Branch: main"
+        assert lines[2] == "Commit SHA: e4b2a8d3"
+        assert lines[3] == "GitHub Actor: octocat"
+        assert lines[4] == "Failing Stage: Run Ruff Lint"
+        assert (
+            lines[5]
+            == "Workflow Run URL: https://github.com/my-org/sample-app/actions/runs/1849201948"
+        )
+
+    def test_work_notes_payload_unchanged_full_report(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        ref = adapter.create_incident_with_report(sample_incident, sample_report)
+        ticket = ticket_state.servicenow_incidents[ref.external_id]
+        work_notes = ticket["work_notes"]
+
+        # Work notes must remain valid HTML chunk wrapped in [code]...[/code]
+        assert work_notes.startswith("[code]")
+        assert work_notes.endswith("[/code]")
+        assert "Autocloud CI/CD Deployment Investigation Report" in work_notes
+        assert "Probable Root Cause" in work_notes
+        assert "Local variable" in work_notes
+        assert "unused_token" in work_notes
+        assert "Run local linter" in work_notes
+

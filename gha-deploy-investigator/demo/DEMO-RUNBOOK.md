@@ -181,7 +181,7 @@ git pull origin main
 #### Step 3: Expected ServiceNow Write-Back
 - **Incident State**: Transitioned to `In Progress (2)`.
 - **Work Notes**: Cites the failing test assertion and diff context confirming modifications are isolated to `tests/test_main.py`.
-- **Description**: Contains separate `Recommended Remediation:` and `Unrelated Observations:` sections.
+- **Description**: Facts-only plain-text summary with repository, branch, short commit SHA, actor, failing stage, and workflow URL (no root cause, remediation, observations, or pointer line; all findings and remediation live strictly in Work Notes and the attachment).
 
 #### Step 4: Expected GitHub Write-Back
 - **Check Run**: Completed with incident reference and confidence score.

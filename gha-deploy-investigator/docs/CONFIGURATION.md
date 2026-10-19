@@ -156,7 +156,7 @@ The integration user specified in `SERVICENOW_USERNAME` must possess the followi
 - **State**: `2` (In Progress; configurable via `SERVICENOW_IN_PROGRESS_STATE` and `SERVICENOW_INCIDENT_STATE_AFTER_REPORT`)
 - **Correlation Display**: `gha-deploy-investigator` (identifies GDI-created tickets for bi-directional exclusion)
 - **Correlation ID**: `gdi:<owner>/<repo>:<run_id>:<run_attempt>` (ensures query-before-create idempotency)
-- **Description**: Formatted markdown analysis with failing commit, actor, author, probable root cause, and suggested remediation commands.
+- **Description**: Facts-only plain-text summary with repository, branch, short commit SHA, GitHub actor, failing stage, and workflow run URL (root cause, remediation, observations, and pointer lines are excluded; all diagnostic analysis lives strictly in work notes and the attachment).
 - **Attachment**: `ci_cd_investigation_report_<INCIDENT_NUMBER>.html` containing interactive styling, failure timeline, and specialist telemetry breakdown.
 
 ---
