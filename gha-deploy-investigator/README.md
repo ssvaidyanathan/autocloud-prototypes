@@ -130,7 +130,7 @@ Once deployed, configure the external integration touchpoints:
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ gdi-bridge (Public Ingress Cloud Run Service)                                                   │
 │  • Validates X-Hub-Signature-256 using Secret Manager GITHUB_WEBHOOK_SECRET                     │
-│  • Deduplicates events using X-GitHub-Delivery (HTTP 200 duplicate_ignored)                     │
+│  • Deduplicates events using deterministic Cloud Tasks task IDs (HTTP 200 duplicate_ignored)     │
 │  • Normalizes GitHub Actions payload into canonical Incident contract                           │
 │  • Enqueues asynchronous task to Cloud Tasks queue                                              │
 └───────────────────────────────────────────────┬─────────────────────────────────────────────────┘
@@ -186,7 +186,7 @@ sequenceDiagram
         Bridge-->>GitHub: 401 Unauthorized
     else Non-Failure Event (action != completed or conclusion not failure/timed_out)
         Bridge-->>GitHub: 200 OK {"status": "ignored", "reason": "ignoring non-failure"}
-    else Duplicate Delivery (X-GitHub-Delivery seen within window)
+    else Duplicate Delivery (Task inv-<run_id> already enqueued in window)
         Bridge-->>GitHub: 200 OK {"status": "duplicate_ignored"}
     else Valid Failure Event
         Bridge->>Bridge: Normalize payload to canonical Incident contract
@@ -223,9 +223,6 @@ sequenceDiagram
         Bridge->>GHAPI: Post Collapsible PR Comment with Root Cause & Decisive Evidence
     else Branch / Main Push Triggered
         Bridge->>GHAPI: Post Commit Comment with Diagnostic Findings
-        opt Opt-in GitHub Issue (main/release)
-            Bridge->>GHAPI: Open Tracking GitHub Issue
-        end
     end
     Bridge-->>Agent: 200 OK {"status": "ok", "servicenow_ticket": "INC0019482"}
     deactivate Bridge
@@ -240,7 +237,7 @@ sequenceDiagram
 - **Technology**: Python 3.12+, FastAPI, Pydantic v2, Google Cloud Tasks client, Google Secret Manager client, HTTPX.
 - **Responsibilities**:
   - Inbound webhook authentication via `X-Hub-Signature-256` HMAC-SHA256 signature verification.
-  - Delivery deduplication using `X-GitHub-Delivery` UUID headers.
+  - Delivery deduplication using deterministic Cloud Tasks task IDs (inv-<run_id>).
   - Payload normalization into byte-identical canonical `Incident` models (`bridge/app/contracts/`).
   - Asynchronous investigation task dispatching to `gdi-tasks-queue` with OIDC service account token impersonation (`gdi-tasks-invoker-sa`).
   - OIDC token authentication and callback handling (`POST /callback/report`).
@@ -322,7 +319,7 @@ Sensitive credentials reside exclusively in Google Secret Manager:
 
 | Stack | Secret Identifier | Consumer | Purpose |
 |---|---|---|---|
-| **Agent** | `${NAME_PREFIX}-github-app-private-key` | `gdi-agent-sa` | PEM-encoded RSA private key for GitHub App authentication and Check Run creation |
+| **Agent & Bridge** | `${NAME_PREFIX}-github-app-private-key` | `gdi-agent-sa`, `gdi-bridge-sa` | PEM-encoded RSA private key for GitHub App authentication (Agent: repo logs/diffs; Bridge: Check Run & comment write-back) |
 | **Bridge** | `${NAME_PREFIX}-github-webhook-secret` | `gdi-bridge-sa` | Shared secret key for verifying inbound `X-Hub-Signature-256` HMAC headers |
 | **Bridge** | `${NAME_PREFIX}-servicenow-username` | `gdi-bridge-sa` | Integration user for ServiceNow Table and Attachment REST APIs |
 | **Bridge** | `${NAME_PREFIX}-servicenow-password` | `gdi-bridge-sa` | Basic auth password for ServiceNow REST APIs |
@@ -597,7 +594,8 @@ terraform apply \
     -target=google_secret_manager_secret_iam_member.bridge_gh_secret_access \
     -target=google_secret_manager_secret_iam_member.bridge_snow_username_access \
     -target=google_secret_manager_secret_iam_member.bridge_snow_pwd_access \
-    -target=google_secret_manager_secret_iam_member.bridge_snow_token_access
+    -target=google_secret_manager_secret_iam_member.bridge_snow_token_access \
+    -target=google_secret_manager_secret_iam_member.bridge_gh_key_access
 cd ../../..
 ```
 
@@ -640,6 +638,7 @@ terraform apply \
     -var="agent_service_url=${AGENT_URL}" \
     -var="agent_service_account_email=${AGENT_SA}" \
     -var="tasks_invoker_service_account_email=${TASKS_INVOKER_SA}" \
+    -var="github_app_id=<your-github-app-id>" \
     -var="servicenow_instance_url=https://<your-instance>.service-now.com"
 ```
 
@@ -950,6 +949,7 @@ terraform destroy \
     -var="agent_service_url=${AGENT_URL}" \
     -var="agent_service_account_email=${AGENT_SA}" \
     -var="tasks_invoker_service_account_email=${TASKS_INVOKER_SA}" \
+    -var="github_app_id=<your-github-app-id>" \
     -var="servicenow_instance_url=https://<your-instance>.service-now.com"
 cd ../../..
 
