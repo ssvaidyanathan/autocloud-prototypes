@@ -131,12 +131,12 @@ class TestAdapters:
         desc = incident_data["description"]
         work_notes = incident_data["work_notes"]
 
-        # Description is concise executive summary; remediation and observations are excluded
+        # Description is facts only; remediation, observations, root cause and pointer are excluded
         assert "Recommended Remediation:" not in desc
         assert "Update test assertion" not in desc
         assert "Unrelated Observations:" not in desc
         assert "Deprecation warning on helper library" not in desc
-        assert "Full diagnostic analysis: see Work Notes and the attached HTML report." in desc
+        assert "Root Cause:" not in desc
 
         # Remediation and unrelated observations are rendered into work notes
         assert "Update test assertion" in work_notes

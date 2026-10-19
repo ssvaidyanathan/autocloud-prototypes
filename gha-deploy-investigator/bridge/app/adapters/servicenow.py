@@ -35,33 +35,15 @@ class _ReusableClientWrapper:
         return getattr(self._client, name)
 
 
-def truncate_at_word_boundary(text: str, max_chars: int = 300) -> str:
-    """Truncate text to max_chars at a word boundary, appending an ellipsis if truncated."""
-    if len(text) <= max_chars:
-        return text
+def build_servicenow_description(
+    incident: Incident, report: Optional[Report] = None
+) -> str:
+    """Build a facts-only summary description for ServiceNow incidents.
 
-    ellipsis = "..."
-    target_len = max_chars - len(ellipsis)
-    if target_len <= 0:
-        return ellipsis[:max_chars]
-
-    truncated = text[:target_len]
-    last_space = truncated.rfind(" ")
-    if last_space != -1:
-        truncated = truncated[:last_space]
-
-    truncated = truncated.rstrip(" .,;:!?")
-    return f"{truncated}{ellipsis}"
-
-
-def build_servicenow_description(incident: Incident, report: Report) -> str:
-    """Build a concise executive summary description for ServiceNow incidents.
-
-    Contains repository, branch, short commit SHA, GitHub actor, failing stage,
-    and workflow run URL (if available), followed by a concise root cause
-    capped at 300 characters, and a pointer to Work Notes and the attached report.
-    Remediation actions and unrelated observations live strictly in work notes
-    and the attachment.
+    Contains facts only: repository, branch, short commit SHA, GitHub actor,
+    failing stage, and workflow run URL (if available).
+    No root cause, remediation, unrelated observations, or pointer lines;
+    all diagnostic findings live exclusively in Work Notes and the attachment.
     """
     repo = incident.github_repo or incident.service_hint or "N/A"
     branch = incident.github_branch or "N/A"
@@ -84,24 +66,6 @@ def build_servicenow_description(incident: Incident, report: Report) -> str:
     if incident.external_url:
         lines.append(f"Workflow Run URL: {incident.external_url}")
 
-    raw_root_cause = (
-        report.probable_root_cause.text
-        if report.probable_root_cause and report.probable_root_cause.text
-        else report.summary
-    )
-    normalized_root_cause = " ".join(raw_root_cause.split()) if raw_root_cause else "N/A"
-    concise_root_cause = truncate_at_word_boundary(normalized_root_cause, max_chars=300)
-
-    lines.extend(
-        [
-            "",
-            "Root Cause:",
-            concise_root_cause,
-            "",
-            "Full diagnostic analysis: see Work Notes and the attached HTML report.",
-        ]
-    )
-
     return "\n".join(lines)
 
 
@@ -117,8 +81,10 @@ class ServiceNowAdapter(BaseAdapter):
         self._http_client = http_client
         self._caller_cache: dict[str, str] = {}
 
-    def build_description(self, incident: Incident, report: Report) -> str:
-        """Build concise executive summary description for ServiceNow incidents."""
+    def build_description(
+        self, incident: Incident, report: Optional[Report] = None
+    ) -> str:
+        """Build facts-only summary description for ServiceNow incidents."""
         return build_servicenow_description(incident, report)
 
     def _resolve_caller_sys_id(

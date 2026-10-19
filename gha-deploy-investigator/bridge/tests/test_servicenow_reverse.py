@@ -54,12 +54,10 @@ class TestServiceNowReverse:
             "Workflow Run URL: https://github.com/my-org/sample-app/actions/runs/1849201948"
             in created_ticket["description"]
         )
-        assert "Root Cause:" in created_ticket["description"]
-        assert sample_report.probable_root_cause.text in created_ticket["description"]
-        assert (
-            "Full diagnostic analysis: see Work Notes and the attached HTML report."
-            in created_ticket["description"]
-        )
+        assert "Root Cause:" not in created_ticket["description"]
+        assert sample_report.probable_root_cause.text not in created_ticket["description"]
+        assert "Full diagnostic analysis" not in created_ticket["description"]
+        assert "Work Notes" not in created_ticket["description"]
 
         # Verify Attachment API in fake server
         assert len(ticket_state.servicenow_attachments) == 1
@@ -222,14 +220,12 @@ class TestServiceNowReverse:
         assert patched["assignment_group"] == "Cloud-Operations"
         assert patched["state"] == "2"
         assert "my-org/sample-app" in patched["short_description"]
-        assert "Root Cause:" in patched["description"]
-        assert sample_report.probable_root_cause.text in patched["description"]
+        assert "Root Cause:" not in patched["description"]
+        assert sample_report.probable_root_cause.text not in patched["description"]
         assert "Recommended Remediation:" not in patched["description"]
         assert "Unrelated Observations:" not in patched["description"]
-        assert (
-            "Full diagnostic analysis: see Work Notes and the attached HTML report."
-            in patched["description"]
-        )
+        assert "Full diagnostic analysis" not in patched["description"]
+        assert "Work Notes" not in patched["description"]
 
 
 
@@ -288,9 +284,10 @@ class TestServiceNowReverse:
             "Workflow Run URL: https://github.com/my-org/sample-app/actions/runs/1849201948"
         )
         assert expected_run_url in desc
-        assert "Root Cause:" in desc
-        assert sample_report.probable_root_cause.text in desc
-        assert "Full diagnostic analysis: see Work Notes and the attached HTML report." in desc
+        assert "Root Cause:" not in desc
+        assert sample_report.probable_root_cause.text not in desc
+        assert "Full diagnostic analysis" not in desc
+        assert "Work Notes" not in desc
 
         # Optional fields omitted when absent
         sparse_incident = sample_incident.model_copy(
@@ -337,7 +334,7 @@ class TestServiceNowReverse:
         assert "Revert commit e4b2a8d3 immediately" in work_notes
         assert "Found deprecated library foo-bar in requirements" in work_notes
 
-    def test_description_root_cause_truncation(
+    def test_description_no_root_cause_findings_or_pointer(
         self,
         bridge_settings: BridgeConfig,
         fake_ticket_client: httpx.Client,
@@ -346,49 +343,34 @@ class TestServiceNowReverse:
     ) -> None:
         adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
 
-        # 1. Short root cause (< 300 chars) is preserved without truncation
-        short_cause = "Pipeline failed due to syntax error in app/main.py line 42."
-        sample_report.probable_root_cause.text = short_cause
-        desc_short = adapter.build_description(sample_incident, sample_report)
-        assert short_cause in desc_short
-        assert "..." not in desc_short
+        sample_report.probable_root_cause.text = "Severe container startup probe failure"
+        sample_report.causal_remediation = ["Revert deploy commit"]
+        sample_report.unrelated_observations = ["Deprecated runtime base image"]
 
-        # 2. Long root cause (> 300 chars) is truncated safely at word boundary to <= 300 chars
-        long_words = [
-            "Container", "deployment", "failed", "because", "the", "orchestrator",
-            "detected", "severe", "configuration", "mismatch", "during", "startup",
-            "initialization", "sequence", "which", "prevented", "healthy", "socket",
-            "binding", "across", "all", "target", "workers", "in", "region", "us-central1",
-            "leading", "to", "repeated", "health", "check", "failures", "and", "rollback",
-            "after", "exceeding", "the", "configured", "deadline", "threshold", "of",
-            "five", "hundred", "seconds", "without", "any", "successful", "readiness",
-            "probe", "responses", "from", "internal", "endpoints"
-        ]
-        long_cause = " ".join(long_words)
-        assert len(long_cause) > 350
-        sample_report.probable_root_cause.text = long_cause
+        desc = adapter.build_description(sample_incident, sample_report)
 
-        desc_long = adapter.build_description(sample_incident, sample_report)
-        lines = desc_long.splitlines()
-        rc_idx = lines.index("Root Cause:")
-        extracted_rc = lines[rc_idx + 1]
+        # Facts only: NO root cause, NO remediation, NO observations, NO pointer line
+        assert "Root Cause:" not in desc
+        assert "Severe container startup probe failure" not in desc
+        assert "Revert deploy commit" not in desc
+        assert "Deprecated runtime base image" not in desc
+        assert "Recommended Remediation:" not in desc
+        assert "Unrelated Observations:" not in desc
+        assert "Work Notes" not in desc
+        assert "attached HTML report" not in desc
 
-        assert len(extracted_rc) <= 300
-        assert extracted_rc.endswith("...")
-        # Verify word boundary: should not cut in the middle of a word
-        before_ellipsis = extracted_rc[:-3]
-        last_word = before_ellipsis.split()[-1]
-        assert last_word in long_words
-
-        # 3. Multi-line root cause is normalized to single concise line
-        multiline_cause = "Line one failure.\n   Line two extra detail.\n\nLine three."
-        sample_report.probable_root_cause.text = multiline_cause
-        desc_multi = adapter.build_description(sample_incident, sample_report)
-        lines_multi = desc_multi.splitlines()
-        rc_multi_idx = lines_multi.index("Root Cause:")
-        extracted_multi_rc = lines_multi[rc_multi_idx + 1]
-        assert "\n" not in extracted_multi_rc
-        assert "Line one failure. Line two extra detail. Line three." == extracted_multi_rc
+        # Verify that description consists exclusively of facts lines
+        lines = desc.splitlines()
+        assert len(lines) == 6
+        assert lines[0] == "Repository: my-org/sample-app"
+        assert lines[1] == "Branch: main"
+        assert lines[2] == "Commit SHA: e4b2a8d3"
+        assert lines[3] == "GitHub Actor: octocat"
+        assert lines[4] == "Failing Stage: Run Ruff Lint"
+        assert (
+            lines[5]
+            == "Workflow Run URL: https://github.com/my-org/sample-app/actions/runs/1849201948"
+        )
 
     def test_work_notes_payload_unchanged_full_report(
         self,
