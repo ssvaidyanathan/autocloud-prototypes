@@ -139,12 +139,16 @@ Terraform creates five dedicated least-privilege service accounts:
 ## 4. Stage A: Provision Secret Containers, SAs & Queues via Terraform
 
 The standard deployment defines 5 Secret Manager secrets across the two stacks:
-- **Agent Stack (1 secret)**: `${NAME_PREFIX}-github-app-private-key`
+- **Agent Stack (1 secret)**: `${NAME_PREFIX}-github-app-private-key` (owned and provisioned by Agent stack)
 - **Bridge Stack (4 secrets)**:
   - `${NAME_PREFIX}-github-webhook-secret`
   - `${NAME_PREFIX}-servicenow-username`
   - `${NAME_PREFIX}-servicenow-password`
   - `${NAME_PREFIX}-servicenow-webhook-token`
+
+> [!IMPORTANT]
+> **Secret Ownership and Stack Deployment Sequencing**:
+> The `${NAME_PREFIX}-github-app-private-key` secret container resource is owned and provisioned exclusively by the **Agent stack** (`agent/infra/terraform`). The **Bridge stack** (`bridge/infra/terraform`) only defines an IAM policy binding (`bridge_gh_key_access`) referencing the agent-owned secret via a Terraform data source (`data.google_secret_manager_secret.github_app_private_key`). Consequently, **the Agent stack must be provisioned before the Bridge stack** on fresh deployments. Attempting to provision Bridge before Agent will fail because the secret container does not yet exist.
 
 Provision these secret containers and their IAM bindings before deploying Cloud Run:
 

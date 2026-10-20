@@ -24,7 +24,7 @@ The bridge service receives GitHub webhook events, verifies HMAC signatures, dis
 | `AGENT_SERVICE_URL` | String | `""` | Yes (in GCP) | `var.agent_service_url` | Target URL of the internal `gdi-agent` Cloud Run service |
 | `AGENT_SA` | String | `""` | No | `var.agent_service_account_email` | Service account email of internal agent for identity verification |
 | `CALLBACK_URL` | String | `""` | Yes (in GCP) | `var.callback_url` | Public URL where `gdi-agent` posts completed investigation results |
-| `ADAPTER_TIMEOUT_SECONDS` | Float | `60.0` | No | Container default | HTTP request timeout in seconds for outbound ServiceNow and GitHub adapter calls |
+| `ADAPTER_TIMEOUT_SECONDS` | Float | `60.0` | No | `var.adapter_timeout_seconds` | HTTP request timeout in seconds for outbound ServiceNow and GitHub adapter calls |
 | `GITHUB_WEBHOOK_SECRET` | String (Secret) | `None` | Yes (in prod) | Secret `${var.name_prefix}-github-webhook-secret` | Shared secret key used to verify `X-Hub-Signature-256` HMAC inbound webhook headers |
 | `GITHUB_TOKEN` | String (Secret) | `None` | No | Secret / Environment | Optional fallback personal access token (used if GitHub App not active) |
 | `GITHUB_API_URL` | String | `https://api.github.com` | No | Container default | Base URL of the GitHub REST API |
@@ -36,9 +36,9 @@ The bridge service receives GitHub webhook events, verifies HMAC signatures, dis
 | `SERVICENOW_PASSWORD` | String (Secret) | `None` | Yes (in prod) | Secret `${var.name_prefix}-servicenow-password` | ServiceNow integration user password |
 | `SERVICENOW_WEBHOOK_TOKEN` | String (Secret) | `None` | No | Secret `${var.name_prefix}-servicenow-webhook-token` | Optional bearer token for ServiceNow inbound webhooks |
 | `SERVICENOW_IN_PROGRESS_STATE` | String | `"2"` | No | Container default | State integer assigned to newly created incidents (`"2"` = In Progress) |
-| `SERVICENOW_INCIDENT_STATE_AFTER_REPORT` | String | `"2"` | No | Container default | Target incident state integer when findings and report attachments are uploaded (`"2"` = In Progress) |
+| `SERVICENOW_INCIDENT_STATE_AFTER_REPORT` | String | `"2"` | No | `var.servicenow_incident_state_after_report` | Target incident state integer when findings and report attachments are uploaded (`"2"` = In Progress) |
 | `SERVICENOW_CORRELATION_DISPLAY` | String | `"gha-deploy-investigator"` | No | Container default | Correlation display tag set on created ServiceNow incidents for bi-directional exclusion |
-| `SERVICENOW_CALLER` | String | `"admin"` | No | Container default | Configurable user ID / username assigned to `caller_id` on created incidents (defaults to `"admin"`) |
+| `SERVICENOW_CALLER` | String | `None` (`"admin"`) | No | `var.servicenow_caller` (omitted if `null` to use app default) | Configurable user ID / username assigned to `caller_id` on created incidents (defaults to `"admin"` in app; configurable via `var.servicenow_caller`) |
 | `SERVICENOW_ASSIGNMENT_GROUP` | String | `None` | No | Container default | Optional assignment group sys_id or group name for routing created incidents |
 
 ---
@@ -185,8 +185,12 @@ Terraform manages resource definitions and IAM bindings for 5 canonical secrets 
 
 | Stack | Secret ID | Consumer | Purpose |
 |---|---|---|---|
-| **Agent & Bridge** | `${name_prefix}-github-app-private-key` | `gdi-agent-sa`, `gdi-bridge-sa` | PEM-encoded RSA private key for GitHub App authentication (Agent: repo logs/diffs; Bridge: Check Run & comment write-back) |
+| **Agent (Owner) & Bridge (Reader)** | `${name_prefix}-github-app-private-key` | `gdi-agent-sa`, `gdi-bridge-sa` | PEM-encoded RSA private key for GitHub App authentication (owned and provisioned by Agent stack; Bridge stack references via data source and binds IAM accessor) |
 | **Bridge** | `${name_prefix}-github-webhook-secret` | `gdi-bridge-sa` | Shared secret for verifying `X-Hub-Signature-256` inbound webhook HMACs |
 | **Bridge** | `${name_prefix}-servicenow-username` | `gdi-bridge-sa` | Integration user for ServiceNow Table and Attachment REST APIs |
 | **Bridge** | `${name_prefix}-servicenow-password` | `gdi-bridge-sa` | Basic auth password for ServiceNow REST APIs |
 | **Bridge** | `${name_prefix}-servicenow-webhook-token` | `gdi-bridge-sa` | Bearer token for verifying inbound ServiceNow webhook callbacks |
+
+> [!NOTE]
+> **Secret Ownership & Deployment Ordering**: The `${name_prefix}-github-app-private-key` secret resource is declared and provisioned exclusively in `agent/infra/terraform`. The `bridge/infra/terraform` stack references it via `data.google_secret_manager_secret` and provisions the `bridge_gh_key_access` IAM binding. This requires that the Agent stack be applied before the Bridge stack on fresh deployments.
+
