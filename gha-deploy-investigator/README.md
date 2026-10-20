@@ -294,9 +294,11 @@ Configuration is managed strictly through environment variables and Google Secre
 | **Invoker SA** | `TASKS_INVOKER_SA` | `""` | Yes (in GCP) | Service account email for Cloud Tasks OIDC invocation of Agent |
 | **Agent URL** | `AGENT_SERVICE_URL` | `""` | Yes (in GCP) | Target internal URL of `gdi-agent` Cloud Run service |
 | **Callback URL** | `CALLBACK_URL` | `""` | Yes (in GCP) | Public URL where Agent posts completed investigation results |
+| **Adapter Timeout** | `ADAPTER_TIMEOUT_SECONDS` | `60.0` | No | HTTP request timeout in seconds for outbound ServiceNow and GitHub adapter calls (`var.adapter_timeout_seconds`) |
 | **ServiceNow URL** | `SERVICENOW_INSTANCE_URL` | *None* | Yes (in prod) | Base URL of ServiceNow instance (e.g. `https://<your-instance>.service-now.com`) |
-| **ServiceNow Caller** | `SERVICENOW_CALLER` | `"admin"` | No | Username/caller assigned to `caller_id` on created incidents |
+| **ServiceNow Caller** | `SERVICENOW_CALLER` | *None* (`"admin"`) | No | Username/caller assigned to `caller_id` on created incidents (defaults to `"admin"` in app; configurable via `var.servicenow_caller`) |
 | **ServiceNow State** | `SERVICENOW_IN_PROGRESS_STATE` | `"2"` | No | State integer assigned to created incidents (`"2"` = In Progress) |
+| **ServiceNow Report State** | `SERVICENOW_INCIDENT_STATE_AFTER_REPORT` | `"2"` | No | Incident state integer after investigation report is posted (`var.servicenow_incident_state_after_report`) |
 | **Correlation Display** | `SERVICENOW_CORRELATION_DISPLAY` | `"gha-deploy-investigator"` | No | Correlation display tag for bi-directional exclusion filtering |
 | **GitHub App ID** | `GITHUB_APP_ID` | *None* | Yes (for App) | Numeric GitHub App ID installed on target repositories |
 | **GitHub Write-Back** | `ENABLE_GITHUB_WRITEBACK` | `true` | No | Enables Check Run creation and PR/commit comment posting |
@@ -319,7 +321,7 @@ Sensitive credentials reside exclusively in Google Secret Manager:
 
 | Stack | Secret Identifier | Consumer | Purpose |
 |---|---|---|---|
-| **Agent & Bridge** | `${NAME_PREFIX}-github-app-private-key` | `gdi-agent-sa`, `gdi-bridge-sa` | PEM-encoded RSA private key for GitHub App authentication (Agent: repo logs/diffs; Bridge: Check Run & comment write-back) |
+| **Agent (Owner) & Bridge (Reader)** | `${NAME_PREFIX}-github-app-private-key` | `gdi-agent-sa`, `gdi-bridge-sa` | PEM-encoded RSA private key for GitHub App authentication (owned and provisioned by Agent stack; Bridge stack references via data source and binds IAM accessor) |
 | **Bridge** | `${NAME_PREFIX}-github-webhook-secret` | `gdi-bridge-sa` | Shared secret key for verifying inbound `X-Hub-Signature-256` HMAC headers |
 | **Bridge** | `${NAME_PREFIX}-servicenow-username` | `gdi-bridge-sa` | Integration user for ServiceNow Table and Attachment REST APIs |
 | **Bridge** | `${NAME_PREFIX}-servicenow-password` | `gdi-bridge-sa` | Basic auth password for ServiceNow REST APIs |
@@ -556,6 +558,9 @@ cd ../../..
 The agent infrastructure must be deployed first so its outputs (`agent_url`, `agent_service_account_email`, and `tasks_invoker_service_account_email`) can be supplied to the bridge stack.
 
 > [!IMPORTANT]
+> **Stack Deployment Ordering & Secret Ownership**: The **Agent stack (`agent/infra/terraform`) must be deployed before the Bridge stack (`bridge/infra/terraform`)**. The GitHub App private key secret container (`${NAME_PREFIX}-github-app-private-key`) is owned and provisioned exclusively by the Agent stack. The Bridge stack references this existing secret via a Terraform data source (`data.google_secret_manager_secret.github_app_private_key`) to bind secret accessor IAM permissions (`bridge_gh_key_access`) without duplicating the secret container. Deploying the Bridge stack before the Agent stack on fresh infrastructure will fail because the secret container has not yet been provisioned.
+
+> [!IMPORTANT]
 > **Strict 3-Stage Deployment Sequencing**: In Cloud Run, services referencing Secret Manager secrets fail to deploy if the secret container has zero enabled versions. Deploy in sequence: Stage A (Secret Containers & SAs) $\rightarrow$ Stage B (Secret Values) $\rightarrow$ Stage C (Build Images) $\rightarrow$ Stage D (Cloud Run Services).
 
 #### 2.1 Provision Agent Secret Container & IAM via Terraform
@@ -623,6 +628,9 @@ cd ../../..
 ---
 
 ### Step 3: Deploy Ingestion Bridge Infrastructure
+
+> [!NOTE]
+> **Dependency on Prior Agent Deployment**: Step 2 (Agent stack) must be deployed before Step 3. The Bridge stack references the Agent-owned `${NAME_PREFIX}-github-app-private-key` secret via a Terraform data source.
 
 #### 3.1 Provision Bridge Secret Containers, IAM & Tasks Queue
 ```bash

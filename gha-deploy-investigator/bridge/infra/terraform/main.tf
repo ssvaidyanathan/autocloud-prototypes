@@ -83,20 +83,15 @@ resource "google_secret_manager_secret" "servicenow_password" {
   }
 }
 
-# Secret Definition for GitHub App Private Key
-resource "google_secret_manager_secret" "github_app_private_key" {
+# Reference Agent-owned GitHub App Private Key Secret
+data "google_secret_manager_secret" "github_app_private_key" {
   project   = var.project_id
   secret_id = "${var.name_prefix}-github-app-private-key"
-  labels    = local.common_labels
-
-  replication {
-    auto {}
-  }
 }
 
 resource "google_secret_manager_secret_iam_member" "bridge_gh_key_access" {
   project   = var.project_id
-  secret_id = google_secret_manager_secret.github_app_private_key.secret_id
+  secret_id = data.google_secret_manager_secret.github_app_private_key.secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.bridge_sa.email}"
 }
@@ -199,6 +194,21 @@ resource "google_cloud_run_v2_service" "bridge" {
         value = var.servicenow_instance_url
       }
       env {
+        name  = "ADAPTER_TIMEOUT_SECONDS"
+        value = tostring(var.adapter_timeout_seconds)
+      }
+      dynamic "env" {
+        for_each = var.servicenow_caller != null ? [var.servicenow_caller] : []
+        content {
+          name  = "SERVICENOW_CALLER"
+          value = env.value
+        }
+      }
+      env {
+        name  = "SERVICENOW_INCIDENT_STATE_AFTER_REPORT"
+        value = var.servicenow_incident_state_after_report
+      }
+      env {
         name  = "GITHUB_APP_ID"
         value = var.github_app_id
       }
@@ -206,7 +216,7 @@ resource "google_cloud_run_v2_service" "bridge" {
         name = "GITHUB_APP_PRIVATE_KEY"
         value_source {
           secret_key_ref {
-            secret  = google_secret_manager_secret.github_app_private_key.secret_id
+            secret  = data.google_secret_manager_secret.github_app_private_key.secret_id
             version = "latest"
           }
         }
@@ -258,6 +268,13 @@ resource "google_cloud_run_v2_service" "bridge" {
     google_secret_manager_secret_iam_member.bridge_snow_token_access,
     google_secret_manager_secret_iam_member.bridge_gh_key_access,
   ]
+
+  lifecycle {
+    ignore_changes = [
+      client,
+      client_version,
+    ]
+  }
 }
 
 # Allow public access for inbound webhooks and callbacks

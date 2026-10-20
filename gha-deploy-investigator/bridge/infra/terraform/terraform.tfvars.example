@@ -16,3 +16,8 @@ servicenow_instance_url = "https://your-instance.service-now.com"
 agent_service_url                   = "https://gdi-agent-xyz-uc.a.run.app"
 agent_service_account_email         = "gdi-agent-sa@your-gcp-project-id.iam.gserviceaccount.com"
 tasks_invoker_service_account_email = "gdi-tasks-invoker-sa@your-gcp-project-id.iam.gserviceaccount.com"
+
+# Runtime adapter and incident lifecycle settings:
+adapter_timeout_seconds                = 60
+servicenow_incident_state_after_report = "2"
+# servicenow_caller                    = "your-servicenow-caller"

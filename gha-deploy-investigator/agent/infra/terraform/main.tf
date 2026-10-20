@@ -136,6 +136,13 @@ resource "google_cloud_run_v2_service" "agent" {
     google_project_iam_member.agent_logging_viewer,
     google_project_iam_member.agent_cloud_run_viewer,
   ]
+
+  lifecycle {
+    ignore_changes = [
+      client,
+      client_version,
+    ]
+  }
 }
 
 # Allow Cloud Tasks Invoker SA to invoke internal Agent Cloud Run service
