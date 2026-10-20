@@ -137,3 +137,19 @@ resource "google_cloud_run_v2_service_iam_member" "agent_invokes_calculator" {
   role     = "roles/run.invoker"
   member   = "serviceAccount:${var.agent_sa_email}"
 }
+
+resource "google_cloud_run_v2_service_iam_member" "agent_public_access" {
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.agent.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+resource "google_cloud_run_v2_service_iam_member" "calculator_public_access" {
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.calculator.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
