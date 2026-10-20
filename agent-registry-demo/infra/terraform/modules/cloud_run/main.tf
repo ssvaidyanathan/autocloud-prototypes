@@ -2,7 +2,7 @@ resource "google_cloud_run_v2_service" "calculator" {
   project  = var.project_id
   location = var.region
   name     = var.calculator_service_name
-  ingress  = var.ingress
+  ingress  = var.tool_ingress
   labels   = var.labels
 
   template {
@@ -58,7 +58,7 @@ resource "google_cloud_run_v2_service" "agent" {
   project  = var.project_id
   location = var.region
   name     = var.agent_service_name
-  ingress  = var.ingress
+  ingress  = var.agent_ingress
   labels   = var.labels
 
   template {

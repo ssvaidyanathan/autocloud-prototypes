@@ -91,8 +91,14 @@ variable "agent_registry_endpoint" {
   default     = "https://agentregistry.googleapis.com/v1alpha"
 }
 
-variable "ingress" {
-  description = "Ingress setting for Cloud Run services"
+variable "agent_ingress" {
+  description = "Ingress setting for Agent Service"
   type        = string
   default     = "INGRESS_TRAFFIC_ALL"
+}
+
+variable "tool_ingress" {
+  description = "Ingress setting for Calculator Tool Service"
+  type        = string
+  default     = "INGRESS_TRAFFIC_INTERNAL_ONLY"
 }

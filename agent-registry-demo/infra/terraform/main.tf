@@ -5,8 +5,8 @@ locals {
     prefix = var.name_prefix
   }
 
-  agent_sa_account_id           = substr("${var.name_prefix}-agent-sa", 0, 30)
-  calculator_tool_sa_account_id = substr("${var.name_prefix}-calculator-sa", 0, 30)
+  agent_sa_account_id           = trimsuffix(substr("${var.name_prefix}-agent-sa", 0, 30), "-")
+  calculator_tool_sa_account_id = trimsuffix(substr("${var.name_prefix}-calculator-sa", 0, 30), "-")
 
   artifact_registry_repo_id = "${var.name_prefix}-docker-repo"
   repo_base_url             = "${var.region}-docker.pkg.dev/${var.project_id}/${local.artifact_registry_repo_id}"
@@ -58,7 +58,8 @@ module "cloud_run" {
   tool_memory              = var.tool_memory
   tool_timeout_seconds     = var.tool_timeout_seconds
   agent_registry_endpoint  = var.agent_registry_endpoint
-  ingress                  = var.ingress
+  agent_ingress            = var.agent_ingress
+  tool_ingress             = var.tool_ingress
 
   depends_on = [module.apis, module.iam]
 }
