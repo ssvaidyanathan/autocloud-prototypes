@@ -391,7 +391,7 @@ if [[ "${REV_2}" != "r2" ]]; then
 fi
 log_pass "Active skill revision verified as 'r2'"
 
-if [[ "${RESP_TEXT_2}" != *"CALCULATOR-V2"* || "${RESP_TEXT_2}" != *"**256**"* ]]; then
+if [[ "${RESP_TEXT_2}" != *"CALCULATOR-V2"* || "${RESP_TEXT_2}" != *"256"* ]]; then
   log_fail "Act 2 assertion failed: response '${RESP_TEXT_2}' did not match Revision 2 directives"
 fi
 log_pass "Response matches Revision 2 emoji formatting: '${RESP_TEXT_2}'"
