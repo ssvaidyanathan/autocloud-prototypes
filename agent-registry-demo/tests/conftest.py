@@ -5,6 +5,7 @@ import zipfile
 from collections.abc import Iterator
 from typing import Callable
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -87,15 +88,122 @@ def forbidden_scripts_zip() -> bytes:
     )
 
 
+def make_mock_mcp_transport() -> httpx.MockTransport:
+    """Build mock MCP HTTP transport handling JSON-RPC lifecycle."""
+    import json
+
+    def mcp_mock_handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content.decode())
+        method = data.get("method")
+        req_id = data.get("id")
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "capabilities": {"tools": {}},
+                        "protocolVersion": "2024-11-05",
+                        "serverInfo": {"name": "mock-calculator", "version": "1.0.0"},
+                    },
+                },
+            )
+        elif method == "tools/list":
+            tools = [
+                {
+                    "name": "add",
+                    "description": "Add two numbers with precision arithmetic.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+                        "required": ["a", "b"],
+                    },
+                },
+                {
+                    "name": "multiply",
+                    "description": "Multiply two numbers with precision arithmetic.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+                        "required": ["a", "b"],
+                    },
+                },
+                {
+                    "name": "power",
+                    "description": "Raise base to the power of exponent.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "base": {"type": "number"},
+                            "exponent": {"type": "number"},
+                        },
+                        "required": ["base", "exponent"],
+                    },
+                },
+            ]
+            return httpx.Response(
+                200, json={"jsonrpc": "2.0", "id": req_id, "result": {"tools": tools}}
+            )
+        elif method == "tools/call":
+            params = data.get("params", {})
+            name = params.get("name")
+            args = params.get("arguments", {})
+            if name == "add":
+                val = float(args["a"]) + float(args["b"])
+            elif name == "multiply":
+                val = float(args["a"]) * float(args["b"])
+            elif name == "power":
+                val = float(args["base"]) ** float(args["exponent"])
+            else:
+                val = 0.0
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [{"type": "text", "text": str(val)}],
+                        "structuredContent": {"result": val},
+                        "isError": False,
+                    },
+                },
+            )
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": req_id, "result": {}})
+
+    return httpx.MockTransport(mcp_mock_handler)
+
+
 @pytest.fixture
-def test_client() -> Iterator[TestClient]:
-    """Fixture providing a FastAPI TestClient."""
+def test_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """Fixture providing a FastAPI TestClient configured for offline testing."""
+    import httpx
+
+    from app.config import get_settings
+    from app.tools.registry import ToolRegistryManager
+
+    monkeypatch.setenv("PROJECT_ID", "demo-project-id")
+    monkeypatch.setenv("MOCK_REGISTRY", "true")
+    get_settings.cache_clear()
+
     # Reset global overrides
     set_skills_loader(None)
     set_chat_executor(None)
-    set_tool_registry_manager(None)
+
+    mcp_transport = make_mock_mcp_transport()
+    default_tm = ToolRegistryManager(
+        project_id="demo-project-id",
+        location="us-central1",
+        tool_service_url="http://127.0.0.1:8080/mcp",
+        http_client_factory=lambda **kwargs: httpx.AsyncClient(
+            transport=mcp_transport, base_url="http://127.0.0.1:8080", **kwargs
+        ),
+    )
+    set_tool_registry_manager(default_tm)
+
     client = TestClient(app)
     yield client
     set_skills_loader(None)
     set_chat_executor(None)
     set_tool_registry_manager(None)
+    get_settings.cache_clear()

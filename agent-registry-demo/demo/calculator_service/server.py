@@ -101,9 +101,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         else:
             self._auth_request = None
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         # Exempt health probes and CORS preflight OPTIONS requests from authentication
         if (
             not self.enforce_auth

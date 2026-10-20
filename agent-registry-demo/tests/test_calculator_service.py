@@ -70,7 +70,6 @@ def test_health_check_trailing_slash_bypasses_auth(auth_enforced_client: TestCli
     assert response.json() == {"status": "healthy"}
 
 
-
 # ==============================================================================
 # 2. Direct Function Execution Tests
 # ==============================================================================
@@ -114,7 +113,6 @@ def test_direct_power_boundary_conditions() -> None:
     # Valid negative base with integer exponent succeeds
     assert power(-2.0, 3.0) == -8.0
     assert power(-4.0, 2.0) == 16.0
-
 
 
 # ==============================================================================
@@ -272,7 +270,6 @@ def test_mcp_tools_call_power_boundary_errors(unauthenticated_client: TestClient
     res_complex = response_complex.json().get("result", {})
     assert res_complex.get("isError") is True
     assert "Fractional exponent of a negative base" in res_complex["content"][0]["text"]
-
 
 
 # ==============================================================================
@@ -465,7 +462,6 @@ def test_auth_oidc_uses_pooled_auth_request() -> None:
             assert isinstance(passed_request_adapter, GoogleAuthRequest)
 
 
-
 # ==============================================================================
 # 5. Registration Script Dry-Run Tests
 # ==============================================================================
@@ -495,8 +491,7 @@ def test_register_tool_script_dry_run() -> None:
     assert '--location="us-central1"' in stdout
     assert '--display-name="Precision Calculator Service"' in stdout
     assert (
-        '--description="Provides verified arithmetic operations (add, multiply, power)"'
-        in stdout
+        '--description="Provides verified arithmetic operations (add, multiply, power)"' in stdout
     )
     assert "--mcp-server-spec-type=no-spec" in stdout
     expected_iface = (
@@ -534,10 +529,7 @@ def test_register_tool_script_space_separated_flags() -> None:
     assert "gcloud agent-registry services create custom-calc" in stdout
     assert '--project="custom-project-123"' in stdout
     assert '--location="europe-west1"' in stdout
-    expected_iface = (
-        '--interfaces="protocolBinding=jsonrpc,'
-        'url=https://calc-custom.a.run.app/mcp"'
-    )
+    expected_iface = '--interfaces="protocolBinding=jsonrpc,url=https://calc-custom.a.run.app/mcp"'
     assert expected_iface in stdout
 
 
@@ -549,10 +541,7 @@ def test_register_tool_script_space_separated_flags() -> None:
 def test_dockerfile_copies_source_files() -> None:
     """Test that calculator_service Dockerfile copies source code in builder stage."""
     dockerfile_path = (
-        Path(__file__).resolve().parent.parent
-        / "demo"
-        / "calculator_service"
-        / "Dockerfile"
+        Path(__file__).resolve().parent.parent / "demo" / "calculator_service" / "Dockerfile"
     )
     assert dockerfile_path.exists(), f"Dockerfile not found at {dockerfile_path}"
     content = dockerfile_path.read_text()
@@ -564,13 +553,9 @@ def test_dockerfile_copies_source_files() -> None:
 def test_pyproject_contains_hatchling_wheel_packages() -> None:
     """Test that calculator_service pyproject.toml configures Hatchling wheel packages."""
     pyproject_path = (
-        Path(__file__).resolve().parent.parent
-        / "demo"
-        / "calculator_service"
-        / "pyproject.toml"
+        Path(__file__).resolve().parent.parent / "demo" / "calculator_service" / "pyproject.toml"
     )
     assert pyproject_path.exists(), f"pyproject.toml not found at {pyproject_path}"
     content = pyproject_path.read_text()
     assert "[tool.hatch.build.targets.wheel]" in content
     assert 'packages = ["."]' in content
-

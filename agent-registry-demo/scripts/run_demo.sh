@@ -307,7 +307,7 @@ echo -e "Response Payload:\n${C_MAGENTA}${ACT1_BODY}${C_RESET}"
 
 REV_1="$(echo "${ACT1_BODY}" | jq -r '.skill_revision')"
 RESP_TEXT_1="$(echo "${ACT1_BODY}" | jq -r '.response')"
-TOOLS_1="$(echo "${ACT1_BODY}" | jq -r '.tools_invoked | sort | join(",")')"
+TOOLS_1="$(echo "${ACT1_BODY}" | jq -r 'if (.tools_invoked[0] | type) == "object" then [.tools_invoked[].name] else .tools_invoked end | sort | join(",")')"
 
 if [[ "${REV_1}" != "r1" ]]; then
   log_fail "Act 1 assertion failed: expected skill_revision 'r1', got '${REV_1}'"
@@ -384,7 +384,7 @@ echo -e "Response Payload:\n${C_MAGENTA}${ACT2_BODY}${C_RESET}"
 
 REV_2="$(echo "${ACT2_BODY}" | jq -r '.skill_revision')"
 RESP_TEXT_2="$(echo "${ACT2_BODY}" | jq -r '.response')"
-TOOLS_2="$(echo "${ACT2_BODY}" | jq -r '.tools_invoked | join(",")')"
+TOOLS_2="$(echo "${ACT2_BODY}" | jq -r 'if (.tools_invoked[0] | type) == "object" then [.tools_invoked[].name] else .tools_invoked end | join(",")')"
 
 if [[ "${REV_2}" != "r2" ]]; then
   log_fail "Act 2 assertion failed: expected skill_revision 'r2', got '${REV_2}'"

@@ -156,12 +156,22 @@ class CachedSkillRegistry(SkillRegistry):
             List of skill names that were flushed from the cache.
         """
         if name is not None:
-            if not name.strip():
+            clean_name = name.strip()
+            if not clean_name:
                 return []
-            if name in self._cache:
-                del self._cache[name]
-                return [name]
-            return []
+            flushed = []
+            if clean_name in self._cache:
+                del self._cache[clean_name]
+                flushed.append(clean_name)
+            alt_name = (
+                f"private-{clean_name}"
+                if not clean_name.startswith("private-")
+                else clean_name[len("private-") :]
+            )
+            if alt_name in self._cache:
+                del self._cache[alt_name]
+                flushed.append(alt_name)
+            return flushed
 
         flushed = list(self._cache.keys())
         self._cache.clear()

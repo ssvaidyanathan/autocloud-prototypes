@@ -255,6 +255,11 @@ The architecture enforces strict least-privilege security boundaries using Googl
 4. **Dynamic Tool Access Control (`adk_additional_tools`)**:
    - Tools are not globally exposed to the model.
    - The agent strictly enforces `metadata.adk_additional_tools`. When Skill Revision 1 is active, only `add` and `multiply` are exposed. Any prompt attempting to execute undeclared tools (e.g., `power`) is rejected before invocation.
+5. **Zero-Fallback Architecture & Loud Error Propagation**:
+   - Local fallback computation or hardcoded arithmetic functions are strictly prohibited.
+   - If a remote FastMCP tool fails or the registry is unreachable, the agent fails loudly and immediately with HTTP 502 (Bad Gateway) or HTTP 503 (Service Unavailable).
+6. **Production Safety Guards**:
+   - The configuration layer enforces fail-fast guards at boot time: setting `MOCK_REGISTRY=true` in production environments (where Cloud Run's `K_SERVICE` is set or `PROJECT_ID != "demo-project-id"`) triggers a startup `RuntimeError` refusing to boot.
 
 ---
 
@@ -262,8 +267,8 @@ The architecture enforces strict least-privilege security boundaries using Googl
 
 | Component | Path | Description |
 | :--- | :--- | :--- |
-| **FastAPI Agent Service** | `app/main.py` | Exposes `/chat`, `/admin/cache/invalidate`, and `/health`. Coordinates dynamic skill resolution and tool execution. |
-| **Configuration** | `app/config.py` | Pydantic Settings managing endpoints, project identifiers, and cache TTL (default: 60s). |
+| **FastAPI Agent Service** | `app/main.py` | Exposes `/chat`, `/admin/cache/invalidate`, and `/health`. Executes real ADK `LlmAgent` + `Runner` with Vertex AI Gemini, dynamic `SKILL.md` instruction injection, and structured provenance metadata. |
+| **Configuration** | `app/config.py` | Pydantic Settings managing endpoints, project identifiers, cache TTL (default: 60s), Gemini model selection, and production safety guards. |
 | **Cached Skill Registry** | `app/registry/cache.py` | Thread-safe in-memory cache wrapping `GCPSkillRegistryClient`. Sub-millisecond reads on hits, atomic flush via `invalidate()`. |
 | **GCP Skill Registry Client** | `app/registry/client.py` | Client targeting `agentregistry.googleapis.com/v1alpha` for skill metadata and media ZIP downloads. |
 | **Skills Loader** | `app/skills_loader.py` | Bridges Agent Registry into ADK `SkillToolset` and enforces zero-scripts guardrails. |
@@ -387,10 +392,26 @@ curl -X POST "${AGENT_SERVICE_URL}/chat" \
 ```json
 {
   "response": "Result: 70 (Computed via multiply, add)",
+  "skill": {
+    "name": "calculator",
+    "revision": "r1",
+    "resource_name": "projects/<PROJECT_ID>/locations/us-central1/skills/private-calculator/revisions/r1"
+  },
   "skill_revision": "r1",
+  "mcp_server": "https://calculator-tool-service-....run.app/mcp",
   "tools_invoked": [
-    "multiply",
-    "add"
+    {
+      "tool": "multiply",
+      "name": "multiply",
+      "args": {"a": 15.0, "b": 4.0},
+      "result": {"result": 60.0}
+    },
+    {
+      "tool": "add",
+      "name": "add",
+      "args": {"a": 60.0, "b": 10.0},
+      "result": {"result": 70.0}
+    }
   ]
 }
 ```
@@ -446,9 +467,20 @@ curl -X POST "${AGENT_SERVICE_URL}/chat" \
 ```json
 {
   "response": "🧮 [CALCULATOR-V2] Computed value: **256**",
+  "skill": {
+    "name": "calculator",
+    "revision": "r2",
+    "resource_name": "projects/<PROJECT_ID>/locations/us-central1/skills/private-calculator/revisions/r2"
+  },
   "skill_revision": "r2",
+  "mcp_server": "https://calculator-tool-service-....run.app/mcp",
   "tools_invoked": [
-    "power"
+    {
+      "tool": "power",
+      "name": "power",
+      "args": {"base": 2.0, "exponent": 8.0},
+      "result": {"result": 256.0}
+    }
   ]
 }
 ```

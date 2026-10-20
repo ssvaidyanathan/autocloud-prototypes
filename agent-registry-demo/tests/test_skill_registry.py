@@ -181,14 +181,17 @@ def test_chat_endpoint_minimal(test_client: TestClient, valid_skill_zip: bytes) 
 
     def mock_handler(request: httpx.Request) -> httpx.Response:
         url_str = str(request.url)
-        if url_str.endswith("/skills/calculator"):
+        if url_str.endswith("/skills/calculator") or url_str.endswith("/skills/private-calculator"):
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
+                    "name": (
+                        "projects/demo-project-id/locations/us-central1/"
+                        "skills/private-calculator"
+                    ),
                     "defaultRevision": (
                         "projects/demo-project-id/locations/us-central1/"
-                        "skills/calculator/revisions/r1"
+                        "skills/private-calculator/revisions/r1"
                     ),
                 },
             )
@@ -217,22 +220,43 @@ def test_chat_endpoint_minimal(test_client: TestClient, valid_skill_zip: bytes) 
     data = response.json()
     assert data["skill_revision"] == "r1"
     assert "Result: 70" in data["response"]
-    assert "multiply" in data["tools_invoked"]
-    assert "add" in data["tools_invoked"]
+    tool_names = [t["tool"] for t in data["tools_invoked"]]
+    assert "multiply" in tool_names
+    assert "add" in tool_names
+    assert data["skill"]["name"] == "calculator"
+    assert data["mcp_server"] == "http://127.0.0.1:8080/mcp"
 
 
 def test_config_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify default Settings values match Phase 1 requirements when env is unset."""
+    """Verify default Settings values match requirements when env is unset."""
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     monkeypatch.delenv("PROJECT_ID", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
     monkeypatch.delenv("REGION", raising=False)
+    monkeypatch.delenv("MOCK_REGISTRY", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
     settings = Settings()
     assert settings.project_id == "demo-project-id"
     assert settings.region == "us-central1"
     assert settings.agent_registry_endpoint == "https://agentregistry.googleapis.com/v1alpha"
     assert settings.port == 8080
     assert settings.log_level == "INFO"
+    assert settings.skill_name == "private-calculator"
+    assert settings.mock_registry is False
+
+
+def test_production_safety_guard_blocks_mock_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify application Settings refuses to instantiate mock_registry in production."""
+    # Production project ID
+    with pytest.raises(RuntimeError) as exc_info:
+        Settings(project_id="real-production-project", mock_registry=True)
+    assert "production safety guard" in str(exc_info.value).lower()
+
+    # Cloud Run K_SERVICE set
+    monkeypatch.setenv("K_SERVICE", "ard-agent-service")
+    with pytest.raises(RuntimeError) as exc_info2:
+        Settings(project_id="demo-project-id", mock_registry=True)
+    assert "production safety guard" in str(exc_info2.value).lower()
 
 
 def test_config_settings_standard_gcp_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,4 +373,3 @@ def test_boot_without_local_skills_dir() -> None:
     # App and loader instantiate without error
     loader = SkillsLoader()
     assert loader.registry is not None
-

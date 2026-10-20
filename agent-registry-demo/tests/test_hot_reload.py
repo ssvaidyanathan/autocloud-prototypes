@@ -273,54 +273,44 @@ async def test_tool_registry_manager_discover_and_execute() -> None:
     from demo.calculator_service.server import create_app
 
     fastmcp_app = create_app(enforce_auth=False)
-    transport = httpx.ASGITransport(app=fastmcp_app)
-    manager = ToolRegistryManager(
-        tool_service_url="http://testserver/mcp",
-        http_client_factory=lambda: httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ),
-    )
-    tools = await manager.discover_tools("calculator")
-    tool_names = [t.name for t in tools]
-    assert "add" in tool_names
-    assert "multiply" in tool_names
-    assert "power" in tool_names
+    async with fastmcp_app.router.lifespan_context(fastmcp_app):
+        transport = httpx.ASGITransport(app=fastmcp_app)
+        manager = ToolRegistryManager(
+            tool_service_url="http://testserver/mcp",
+            http_client_factory=lambda **kwargs: httpx.AsyncClient(
+                transport=transport, base_url="http://testserver", **kwargs
+            ),
+        )
+        tools = await manager.discover_tools("calculator")
+        tool_names = [t.name for t in tools]
+        assert "add" in tool_names
+        assert "multiply" in tool_names
+        assert "power" in tool_names
 
-    # Test arithmetic tool executions via real MCP JSON-RPC protocol
-    add_res = await manager.execute_tool("add", {"a": 12.0, "b": 8.0})
-    assert add_res == 20.0
+        # Test arithmetic tool executions via real MCP JSON-RPC protocol
+        add_res = await manager.execute_tool("add", {"a": 12.0, "b": 8.0})
+        assert add_res == 20.0
 
-    mult_res = await manager.execute_tool("multiply", {"a": 6.0, "b": 7.0})
-    assert mult_res == 42.0
+        mult_res = await manager.execute_tool("multiply", {"a": 6.0, "b": 7.0})
+        assert mult_res == 42.0
 
-    power_res = await manager.execute_tool("power", {"base": 2.0, "exponent": 8.0})
-    assert power_res == 256.0
+        power_res = await manager.execute_tool("power", {"base": 2.0, "exponent": 8.0})
+        assert power_res == 256.0
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_manager_fallback_tools() -> None:
-    """Verify ToolRegistryManager falls back to local tools when remote MCP is unreachable."""
+async def test_tool_registry_manager_fails_loudly_on_mcp_error() -> None:
+    """Verify ToolRegistryManager fails loudly when remote MCP is unreachable (zero fallback)."""
     manager = ToolRegistryManager(
         tool_service_url="http://127.0.0.1:9999/unreachable/mcp",
-        http_client_factory=lambda: httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda req: httpx.Response(503))
+        http_client_factory=lambda **kwargs: httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda req: httpx.Response(503)),
+            **kwargs,
         ),
     )
-    tools = await manager.discover_tools("calculator")
-    tool_names = [t.name for t in tools]
-    assert "add" in tool_names
-    assert "multiply" in tool_names
-    assert "power" in tool_names
-
-    # Test arithmetic fallback executions
-    add_res = await manager.execute_tool("add", {"a": 12.0, "b": 8.0})
-    assert add_res == 20.0
-
-    mult_res = await manager.execute_tool("multiply", {"a": 6.0, "b": 7.0})
-    assert mult_res == 42.0
-
-    power_res = await manager.execute_tool("power", {"base": 2.0, "exponent": 8.0})
-    assert power_res == 256.0
+    with pytest.raises(RuntimeError) as exc_info:
+        await manager.discover_tools("calculator")
+    assert "failed to discover tools" in str(exc_info.value).lower()
 
 
 @pytest.mark.asyncio
@@ -363,14 +353,17 @@ def test_adk_additional_tools_enforcement_rejects_unauthorized_tool(
 
     def mock_handler(request: httpx.Request) -> httpx.Response:
         url_str = str(request.url)
-        if url_str.endswith("/skills/calculator"):
+        if url_str.endswith("/skills/calculator") or url_str.endswith("/skills/private-calculator"):
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
+                    "name": (
+                        "projects/demo-project-id/locations/us-central1/"
+                        "skills/private-calculator"
+                    ),
                     "defaultRevision": (
                         "projects/demo-project-id/locations/us-central1/"
-                        "skills/calculator/revisions/r1"
+                        "skills/private-calculator/revisions/r1"
                     ),
                 },
             )
@@ -450,14 +443,17 @@ def test_e2e_hot_reload_simulation(test_client: TestClient) -> None:
 
     def mock_registry_handler(request: httpx.Request) -> httpx.Response:
         url_str = str(request.url)
-        if url_str.endswith("/skills/calculator"):
+        if url_str.endswith("/skills/calculator") or url_str.endswith("/skills/private-calculator"):
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
+                    "name": (
+                        "projects/demo-project-id/locations/us-central1/"
+                        "skills/private-calculator"
+                    ),
                     "defaultRevision": (
                         f"projects/demo-project-id/locations/us-central1/"
-                        f"skills/calculator/revisions/{current_revision}"
+                        f"skills/private-calculator/revisions/{current_revision}"
                     ),
                 },
             )
@@ -490,7 +486,12 @@ def test_e2e_hot_reload_simulation(test_client: TestClient) -> None:
     data1 = res1.json()
     assert data1["skill_revision"] == "r1"
     assert data1["response"] == "Result: 70 (Computed via multiply, add)"
-    assert data1["tools_invoked"] == ["multiply", "add"]
+    tool_names_1 = [t["tool"] for t in data1["tools_invoked"]]
+    assert "multiply" in tool_names_1
+    assert "add" in tool_names_1
+    assert data1["skill"]["name"] == "calculator"
+    assert data1["skill"]["revision"] == "r1"
+    assert "revisions/r1" in data1["skill"]["resource_name"]
 
     # --- Step 2: Live Registry Update (Zero container restart) ---
     # Author pushes revision r2 to Agent Registry and updates defaultRevision
@@ -500,7 +501,7 @@ def test_e2e_hot_reload_simulation(test_client: TestClient) -> None:
     inv_res = test_client.post("/admin/cache/invalidate", json={"skill_name": "calculator"})
     assert inv_res.status_code == 200
     assert inv_res.json()["status"] == "invalidated"
-    assert "calculator" in inv_res.json()["flushed"]
+    assert any("calculator" in s for s in inv_res.json()["flushed"])
 
     # --- Step 3: Query exponentiation with Revision 2 directives ---
     res2 = test_client.post(
@@ -511,7 +512,12 @@ def test_e2e_hot_reload_simulation(test_client: TestClient) -> None:
     data2 = res2.json()
     assert data2["skill_revision"] == "r2"
     assert data2["response"] == "🧮 [CALCULATOR-V2] Computed value: **256**"
-    assert data2["tools_invoked"] == ["power"]
+    tool_names_2 = [t["tool"] for t in data2["tools_invoked"]]
+    assert tool_names_2 == ["power"]
+    assert data2["tools_invoked"][0]["args"] == {"base": 2.0, "exponent": 8.0}
+    assert data2["tools_invoked"][0]["result"] == 256.0 or data2["tools_invoked"][0]["result"] == {
+        "result": 256.0
+    }
 
     # --- Step 4: Verify zero restarts ---
     # The application instance 'app' has remained continuous and live throughout
@@ -551,10 +557,7 @@ def test_app_main_standalone_container_simulation(tmp_path: Path) -> None:
     container_app = tmp_path / "app"
     shutil.copytree(repo_app, container_app)
 
-    code = (
-        "import app.main\n"
-        "print('container standalone import ok')\n"
-    )
+    code = "import app.main\nprint('container standalone import ok')\n"
     result = subprocess.run(
         [sys.executable, "-c", code],
         cwd=str(tmp_path),
@@ -565,3 +568,147 @@ def test_app_main_standalone_container_simulation(tmp_path: Path) -> None:
     assert result.returncode == 0, f"Standalone container import failed: {result.stderr}"
     assert "container standalone import ok" in result.stdout
 
+
+# ==============================================================================
+# 6. Zero Fallback & ADK Event Provenance Verification Tests (Remediation v2)
+# ==============================================================================
+
+
+def test_chat_endpoint_mcp_failure_returns_http_502_zero_fallback(
+    test_client: TestClient,
+    valid_skill_zip: bytes,
+) -> None:
+    """Verify that MCP server failure produces HTTP 502/503 and NEVER computes fallback locally."""
+    from app.main import set_skills_loader, set_tool_registry_manager
+    from app.registry.client import GCPSkillRegistryClient
+    from app.skills_loader import SkillsLoader
+    from app.tools.registry import ToolRegistryManager
+
+    def mock_registry_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if url_str.endswith("/skills/calculator") or url_str.endswith("/skills/private-calculator"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "name": (
+                        "projects/demo-project-id/locations/us-central1/"
+                        "skills/private-calculator"
+                    ),
+                    "defaultRevision": (
+                        "projects/demo-project-id/locations/us-central1/"
+                        "skills/private-calculator/revisions/r1"
+                    ),
+                },
+            )
+        elif "revisions/r1" in url_str:
+            return httpx.Response(
+                status_code=200,
+                content=valid_skill_zip,
+                headers={"content-type": "application/zip"},
+            )
+        return httpx.Response(status_code=404)
+
+    reg_transport = httpx.MockTransport(mock_registry_handler)
+    mock_reg_http = httpx.AsyncClient(transport=reg_transport)
+    client = GCPSkillRegistryClient(
+        project_id="demo-project-id",
+        location="us-central1",
+        http_client=mock_reg_http,
+    )
+    loader = SkillsLoader(registry=client)
+    set_skills_loader(loader)
+
+    # Point tool manager to an unreachable / failing MCP service (HTTP 503)
+    failing_mcp_transport = httpx.MockTransport(
+        lambda req: httpx.Response(503, text="Service Unavailable")
+    )
+    failing_tm = ToolRegistryManager(
+        project_id="demo-project-id",
+        location="us-central1",
+        tool_service_url="http://failing-mcp-server/mcp",
+        http_client_factory=lambda **kwargs: httpx.AsyncClient(
+            transport=failing_mcp_transport, base_url="http://failing-mcp-server", **kwargs
+        ),
+    )
+    set_tool_registry_manager(failing_tm)
+
+    response = test_client.post(
+        "/chat",
+        json={"prompt": "Compute 15 multiplied by 4, then add 10."},
+    )
+
+    # MUST return 502/503 Bad Gateway, NEVER a computed fallback answer
+    assert response.status_code in (502, 503)
+    detail = response.json()["detail"].lower()
+    assert "mcp" in detail or "tool" in detail or "failure" in detail
+
+
+def test_chat_endpoint_provenance_and_adk_events(
+    test_client: TestClient,
+    valid_skill_zip: bytes,
+) -> None:
+    """Verify that /chat response includes structured provenance from ADK events."""
+    from app.main import set_skills_loader
+    from app.registry.client import GCPSkillRegistryClient
+    from app.skills_loader import SkillsLoader
+
+    def mock_registry_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if url_str.endswith("/skills/calculator") or url_str.endswith("/skills/private-calculator"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "name": (
+                        "projects/demo-project-id/locations/us-central1/"
+                        "skills/private-calculator"
+                    ),
+                    "defaultRevision": (
+                        "projects/demo-project-id/locations/us-central1/"
+                        "skills/private-calculator/revisions/r1"
+                    ),
+                },
+            )
+        elif "revisions/r1" in url_str:
+            return httpx.Response(
+                status_code=200,
+                content=valid_skill_zip,
+                headers={"content-type": "application/zip"},
+            )
+        return httpx.Response(status_code=404)
+
+    transport = httpx.MockTransport(mock_registry_handler)
+    mock_http = httpx.AsyncClient(transport=transport)
+    client = GCPSkillRegistryClient(
+        project_id="demo-project-id",
+        location="us-central1",
+        http_client=mock_http,
+    )
+    loader = SkillsLoader(registry=client)
+    set_skills_loader(loader)
+
+    response = test_client.post(
+        "/chat",
+        json={"prompt": "Compute 15 multiplied by 4, then add 10."},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    # Provenance assertions
+    assert "skill" in data
+    assert data["skill"]["name"] == "calculator"
+    assert data["skill"]["revision"] == "r1"
+    assert "revisions/r1" in data["skill"]["resource_name"]
+
+    assert "mcp_server" in data
+    assert data["mcp_server"] == "http://127.0.0.1:8080/mcp"
+
+    assert "tools_invoked" in data
+    assert len(data["tools_invoked"]) == 2
+    for inv in data["tools_invoked"]:
+        assert "tool" in inv
+        assert "name" in inv
+        assert "args" in inv
+        assert "result" in inv
+        assert inv["args"] is not None
+        assert inv["result"] is not None

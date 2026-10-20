@@ -92,14 +92,17 @@ def test_e2e_hot_reload_lifecycle_with_real_packages(test_client: TestClient) ->
 
     def mock_registry_handler(request: httpx.Request) -> httpx.Response:
         url_str = str(request.url)
-        if url_str.endswith("/skills/calculator"):
+        if url_str.endswith("/skills/calculator") or url_str.endswith("/skills/private-calculator"):
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
+                    "name": (
+                        "projects/demo-project-id/locations/us-central1/"
+                        "skills/private-calculator"
+                    ),
                     "defaultRevision": (
                         f"projects/demo-project-id/locations/us-central1/"
-                        f"skills/calculator/revisions/{active_revision}"
+                        f"skills/private-calculator/revisions/{active_revision}"
                     ),
                 },
             )
@@ -136,13 +139,17 @@ def test_e2e_hot_reload_lifecycle_with_real_packages(test_client: TestClient) ->
     act1_data = act1_res.json()
     assert act1_data["skill_revision"] == "r1"
     assert act1_data["response"] == "Result: 70 (Computed via multiply, add)"
-    assert set(act1_data["tools_invoked"]) == {"multiply", "add"}
+    assert set(t["tool"] for t in act1_data["tools_invoked"]) == {"multiply", "add"}
+    assert act1_data["skill"]["name"] == "calculator"
+    assert act1_data["skill"]["revision"] == "r1"
+    assert "revisions/r1" in act1_data["skill"]["resource_name"]
 
     # Live Registry Mutation: Promote r2 and flush cache
     active_revision = "r2"
     inv_res = test_client.post("/admin/cache/invalidate", json={"skill_name": "calculator"})
     assert inv_res.status_code == 200
-    assert inv_res.json() == {"status": "invalidated", "flushed": ["calculator"]}
+    assert inv_res.json()["status"] == "invalidated"
+    assert any("calculator" in s for s in inv_res.json()["flushed"])
 
     # Act 2: Immediate verification query under Revision 2
     act2_res = test_client.post(
@@ -153,7 +160,11 @@ def test_e2e_hot_reload_lifecycle_with_real_packages(test_client: TestClient) ->
     act2_data = act2_res.json()
     assert act2_data["skill_revision"] == "r2"
     assert act2_data["response"] == "🧮 [CALCULATOR-V2] Computed value: **256**"
-    assert act2_data["tools_invoked"] == ["power"]
+    assert [t["tool"] for t in act2_data["tools_invoked"]] == ["power"]
+    assert act2_data["tools_invoked"][0]["args"] == {"base": 2.0, "exponent": 8.0}
+    assert act2_data["tools_invoked"][0]["result"] == 256.0 or act2_data["tools_invoked"][0][
+        "result"
+    ] == {"result": 256.0}
 
     # Continuous live check: container never restarted
     final_health = test_client.get("/health")
@@ -219,14 +230,17 @@ def test_tool_guardrail_blocks_undeclared_power_tool_in_v1(test_client: TestClie
 
     def mock_registry_handler(request: httpx.Request) -> httpx.Response:
         url_str = str(request.url)
-        if url_str.endswith("/skills/calculator"):
+        if url_str.endswith("/skills/calculator") or url_str.endswith("/skills/private-calculator"):
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
+                    "name": (
+                        "projects/demo-project-id/locations/us-central1/"
+                        "skills/private-calculator"
+                    ),
                     "defaultRevision": (
                         "projects/demo-project-id/locations/us-central1/"
-                        "skills/calculator/revisions/r1"
+                        "skills/private-calculator/revisions/r1"
                     ),
                 },
             )
@@ -353,6 +367,7 @@ def test_run_demo_script_mock_mode() -> None:
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "PROJECT_ID": "demo-project-id"},
     )
 
     assert result.returncode == 0, f"Script failed: {result.stderr}\nOutput: {result.stdout}"

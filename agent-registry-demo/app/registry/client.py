@@ -104,41 +104,18 @@ class GCPSkillRegistryClient(GCPSkillRegistry):
                 f"{self.base_url}/projects/{self.project_id}/"
                 f"locations/{self.location}/skills/{quote(resolved_name, safe='')}"
             )
-            try:
-                response = await self._make_request(client, skill_url)
-            except RuntimeError as err:
-                if (
-                    "404" in str(err)
-                    and not resolved_name.startswith("private-")
-                    and "." not in resolved_name
-                ):
-                    fallback_name = f"private-{resolved_name}"
-                    fallback_url = (
-                        f"{self.base_url}/projects/{self.project_id}/"
-                        f"locations/{self.location}/skills/{quote(fallback_name, safe='')}"
-                    )
-                    try:
-                        response = await self._make_request(client, fallback_url)
-                        resolved_name = fallback_name
-                    except RuntimeError:
-                        raise err from None
-                else:
-                    raise
+            response = await self._make_request(client, skill_url)
             skill_data = response.json()
 
             default_revision = skill_data.get("defaultRevision") or skill_data.get(
                 "default_revision"
             )
             if not default_revision:
-                raise ValueError(
-                    f"Skill '{resolved_name}' does not contain default revision."
-                )
+                raise ValueError(f"Skill '{resolved_name}' does not contain default revision.")
 
             # 2. Fetch immutable ZIP package bytes via direct media download
             revision_url = f"{self.base_url}/{default_revision}"
-            media_response = await self._make_request(
-                client, revision_url, params={"alt": "media"}
-            )
+            media_response = await self._make_request(client, revision_url, params={"alt": "media"})
             zip_bytes = media_response.content
 
         # Security guardrail: Scan raw ZIP entries for forbidden scripts/ directory

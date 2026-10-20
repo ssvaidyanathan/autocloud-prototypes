@@ -25,11 +25,27 @@ class Settings(BaseSettings):
     port: int = 8080
     log_level: str = "INFO"
     service_name: str = "agent-registry-demo"
-    skill_name: str = "calculator"
+    skill_name: str = "private-calculator"
     skill_cache_ttl: float = 60.0
     tools_registry_endpoint: str = "https://agentregistry.googleapis.com/v1"
     calculator_service_url: str = "http://localhost:8080/mcp"
     calculator_mcp_server: str = "calculator"
+    model_name: str = Field(
+        default="gemini-2.0-flash-001",
+        validation_alias=AliasChoices("model_name", "gemini_model"),
+    )
+    mock_registry: bool = False
+
+    def model_post_init(self, __context: object) -> None:
+        """Enforce production safety guard prohibiting mock registry in production."""
+        import os
+
+        is_production = bool(os.getenv("K_SERVICE")) or (self.project_id != "demo-project-id")
+        if is_production and self.mock_registry:
+            raise RuntimeError(
+                "Production safety guard: mock_registry must not be enabled in production "
+                f"mode (project_id='{self.project_id}', K_SERVICE='{os.getenv('K_SERVICE')}')."
+            )
 
 
 @lru_cache

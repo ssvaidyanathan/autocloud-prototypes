@@ -1,12 +1,22 @@
 """FastAPI Application for Agent Registry Demo Prototype."""
 
+from __future__ import annotations
+
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, status
+from google.adk.agents import LlmAgent
+from google.adk.events import Event
+from google.adk.models.google_llm import Gemini
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 from google.adk.skills.models import Skill
+from google.adk.tools.base_tool import BaseTool
+from google.genai import types
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -32,13 +42,39 @@ class ChatRequest(BaseModel):
     )
 
 
+class SkillProvenance(BaseModel):
+    """Provenance details for the resolved Agent Registry skill."""
+
+    name: str = Field(..., description="Skill name")
+    revision: str = Field(..., description="Active skill revision")
+    resource_name: str = Field(..., description="Full GCP Agent Registry resource name")
+
+
+class ToolInvocation(BaseModel):
+    """Record of a tool invocation extracted directly from ADK events."""
+
+    tool: str = Field(..., description="Tool name invoked")
+    name: str | None = Field(default=None, description="Tool name alias")
+    args: dict[str, Any] = Field(default_factory=dict, description="Arguments passed to the tool")
+    result: Any = Field(default=None, description="Return value from tool execution")
+
+    def model_post_init(self, __context: object) -> None:
+        if self.name is None:
+            self.name = self.tool
+
+
 class ChatResponse(BaseModel):
-    """Structured response from chat execution."""
+    """Structured response from chat execution with full provenance."""
 
     response: str = Field(..., description="Assistant response text")
-    skill_revision: str = Field(..., description="Agent Registry revision of the active skill")
-    tools_invoked: list[str] = Field(
-        default_factory=list, description="Names of tools invoked during the turn"
+    skill: SkillProvenance = Field(..., description="Provenance metadata of active skill")
+    skill_revision: str = Field(
+        ..., description="Active skill revision (maintained for backward compatibility)"
+    )
+    mcp_server: str = Field(..., description="Resolved MCP server endpoint URL from Agent Registry")
+    tools_invoked: list[ToolInvocation] = Field(
+        default_factory=list,
+        description="Tools invoked during the turn detailing args and return values",
     )
 
 
@@ -62,7 +98,7 @@ class CacheInvalidateResponse(BaseModel):
 # Pluggable loader, tool manager & executor for dependency injection and testing
 _skills_loader: SkillsLoader | None = None
 _tool_registry_manager: ToolRegistryManager | None = None
-_chat_executor: Callable[[str, Skill], Awaitable[tuple[str, list[str]]]] | None = None
+_chat_executor: Callable[[str, Skill], Awaitable[tuple[str, list[Any]]]] | None = None
 
 
 def get_skills_loader() -> SkillsLoader:
@@ -108,7 +144,7 @@ def set_tool_registry_manager(manager: ToolRegistryManager | None) -> None:
 
 
 def set_chat_executor(
-    executor: Callable[[str, Skill], Awaitable[tuple[str, list[str]]]] | None,
+    executor: Callable[[str, Skill], Awaitable[tuple[str, list[Any]]]] | None,
 ) -> None:
     """Set or override custom chat execution logic."""
     global _chat_executor
@@ -145,21 +181,8 @@ def extract_skill_revision(skill: Skill) -> str:
     return "r1"
 
 
-async def default_chat_executor(
-    prompt: str,
-    skill: Skill,
-    tool_manager: ToolRegistryManager | None = None,
-) -> tuple[str, list[str]]:
-    """Execute chat turn guided by dynamically loaded skill instructions and declared tools.
-
-    Enforces adk_additional_tools: Only tools declared in the active skill's
-    metadata.adk_additional_tools are bound/exposed for execution.
-    """
-    tm = tool_manager or get_tool_registry_manager()
-    instructions = skill.instructions or ""
-    tools_invoked: list[str] = []
-
-    # Extract declared tools from skill frontmatter
+def extract_declared_tools(skill: Skill) -> list[str]:
+    """Extract declared tool names from skill frontmatter metadata."""
     declared_tools: list[str] = []
     if skill.frontmatter and skill.frontmatter.metadata:
         meta = skill.frontmatter.metadata
@@ -173,67 +196,273 @@ async def default_chat_executor(
             declared_tools = skill.frontmatter.allowed_tools.split()
         elif isinstance(skill.frontmatter.allowed_tools, (list, tuple)):
             declared_tools = [str(t) for t in skill.frontmatter.allowed_tools]
+    return declared_tools
 
-    # Pattern recognition for arithmetic prompts
-    mult_add_match = re.search(
-        r"(\d+(?:\.\d+)?)\s*(?:multiplied by|\*)\s*(\d+(?:\.\d+)?).*?add\s*(\d+(?:\.\d+)?)",
-        prompt,
-        re.I,
-    )
-    power_match = re.search(
-        r"(\d+(?:\.\d+)?)\s*(?:to the power of|\^)\s*(\d+(?:\.\d+)?)",
-        prompt,
-        re.I,
-    )
 
-    if mult_add_match:
-        required_tools = ["multiply", "add"]
-        for req_tool in required_tools:
-            if req_tool not in declared_tools:
-                raise ValueError(
-                    f"Tool '{req_tool}' is not declared in adk_additional_tools "
-                    f"for skill '{skill.name}'"
-                )
+def extract_provenance_from_events(
+    events: list[Event],
+) -> tuple[str, list[ToolInvocation]]:
+    """Extract final response text and structured tool invocations from ADK Events."""
+    response_text = ""
+    invocations: list[ToolInvocation] = []
+    call_map: dict[str, ToolInvocation] = {}
 
-        a, b, c = (
-            float(mult_add_match.group(1)),
-            float(mult_add_match.group(2)),
-            float(mult_add_match.group(3)),
+    for event in events:
+        for fc in event.get_function_calls():
+            inv = ToolInvocation(
+                tool=fc.name,
+                name=fc.name,
+                args=fc.args or {},
+            )
+            invocations.append(inv)
+            key = fc.id or fc.name
+            call_map[key] = inv
+
+        for fr in event.get_function_responses():
+            key = fr.id or fr.name
+            if key in call_map:
+                call_map[key].result = fr.response
+            else:
+                for inv in reversed(invocations):
+                    if inv.tool == fr.name and inv.result is None:
+                        inv.result = fr.response
+                        break
+
+        if event.is_final_response() and event.content and event.content.parts:
+            for part in event.content.parts:
+                if part.text:
+                    response_text += part.text
+        elif event.content and event.content.role == "model" and event.content.parts:
+            for part in event.content.parts:
+                if part.text and not part.function_call:
+                    response_text += part.text
+
+    return response_text.strip(), invocations
+
+
+async def default_chat_executor(
+    prompt: str,
+    skill: Skill,
+    tool_manager: ToolRegistryManager | None = None,
+) -> tuple[str, list[ToolInvocation]]:
+    """Execute chat turn using real ADK LlmAgent and Runner with Vertex AI Gemini.
+
+    Strictly enforces adk_additional_tools, interacts via remote MCP, and extracts
+    provenance from ADK events with zero local fallback calculation.
+    """
+    tm = tool_manager or get_tool_registry_manager()
+    settings = get_settings()
+
+    # 1. Access control guardrail: Validate required tools are declared in skill metadata
+    declared_tools = set(extract_declared_tools(skill))
+    if ("power" in prompt.lower() or "^" in prompt) and "power" not in declared_tools:
+        raise ValueError(
+            f"Tool 'power' is not declared in adk_additional_tools for skill '{skill.name}'"
         )
-        mult_res = await tm.execute_tool("multiply", {"a": a, "b": b})
-        final_val = await tm.execute_tool("add", {"a": mult_res, "b": c})
-        tools_invoked = ["multiply", "add"]
+    if ("multiply" in prompt.lower() or "*" in prompt) and "multiply" not in declared_tools:
+        raise ValueError(
+            f"Tool 'multiply' is not declared in adk_additional_tools for skill '{skill.name}'"
+        )
+    if ("add" in prompt.lower() or "+" in prompt) and "add" not in declared_tools:
+        raise ValueError(
+            f"Tool 'add' is not declared in adk_additional_tools for skill '{skill.name}'"
+        )
 
-        formatted_val = int(final_val) if int(final_val) == final_val else final_val
-        if "CALCULATOR-V2" in instructions or "[CALCULATOR-V2]" in instructions:
-            response_text = f"🧮 [CALCULATOR-V2] Computed value: **{formatted_val}**"
-        else:
-            response_text = f"Result: {formatted_val} (Computed via {', '.join(tools_invoked)})"
+    # 2. Discover remote MCP tools from Agent Registry catalog (fails loudly if unavailable)
+    all_tools = await tm.discover_tools(settings.calculator_mcp_server)
 
-    elif power_match:
-        required_tools = ["power"]
-        for req_tool in required_tools:
-            if req_tool not in declared_tools:
-                raise ValueError(
-                    f"Tool '{req_tool}' is not declared in adk_additional_tools "
-                    f"for skill '{skill.name}'"
+    # 3. Filter discovered tools strictly to skill's declared tools
+    active_tools: list[BaseTool] = [tool for tool in all_tools if tool.name in declared_tools]
+
+    # 4. Handle Mock Mode (offline simulation for CI without external Vertex AI billing)
+    if settings.mock_registry:
+        # Execute via remote MCP server using JSON-RPC (zero local fallback)
+        events: list[Event] = []
+        instructions = skill.instructions or ""
+        mult_add_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(?:multiplied by|\*)\s*(\d+(?:\.\d+)?).*?add\s*(\d+(?:\.\d+)?)",
+            prompt,
+            re.I,
+        )
+        power_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(?:to the power of|\^)\s*(\d+(?:\.\d+)?)",
+            prompt,
+            re.I,
+        )
+
+        if mult_add_match:
+            a = float(mult_add_match.group(1))
+            b = float(mult_add_match.group(2))
+            c = float(mult_add_match.group(3))
+
+            # Multiply via remote MCP
+            m_res = await tm.execute_tool("multiply", {"a": a, "b": b})
+            events.append(
+                Event(
+                    content=types.Content(
+                        role="model",
+                        parts=[
+                            types.Part.from_function_call(name="multiply", args={"a": a, "b": b})
+                        ],
+                    )
                 )
+            )
+            events.append(
+                Event(
+                    content=types.Content(
+                        role="tool",
+                        parts=[
+                            types.Part.from_function_response(
+                                name="multiply", response={"result": m_res}
+                            )
+                        ],
+                    )
+                )
+            )
 
-        base, exp = float(power_match.group(1)), float(power_match.group(2))
-        final_val = await tm.execute_tool("power", {"base": base, "exponent": exp})
-        tools_invoked = ["power"]
+            # Add via remote MCP
+            a_res = await tm.execute_tool("add", {"a": m_res, "b": c})
+            events.append(
+                Event(
+                    content=types.Content(
+                        role="model",
+                        parts=[
+                            types.Part.from_function_call(name="add", args={"a": m_res, "b": c})
+                        ],
+                    )
+                )
+            )
+            events.append(
+                Event(
+                    content=types.Content(
+                        role="tool",
+                        parts=[
+                            types.Part.from_function_response(
+                                name="add", response={"result": a_res}
+                            )
+                        ],
+                    )
+                )
+            )
 
-        formatted_val = int(final_val) if int(final_val) == final_val else final_val
-        if "CALCULATOR-V2" in instructions or "[CALCULATOR-V2]" in instructions:
-            response_text = f"🧮 [CALCULATOR-V2] Computed value: **{formatted_val}**"
+            fmt_val = int(a_res) if int(a_res) == a_res else a_res
+            if "CALCULATOR-V2" in instructions or "[CALCULATOR-V2]" in instructions:
+                resp_text = f"🧮 [CALCULATOR-V2] Computed value: **{fmt_val}**"
+            else:
+                resp_text = f"Result: {fmt_val} (Computed via multiply, add)"
+
+            events.append(
+                Event(
+                    content=types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text=resp_text)],
+                    )
+                )
+            )
+
+        elif power_match:
+            base = float(power_match.group(1))
+            exp = float(power_match.group(2))
+
+            # Power via remote MCP
+            p_res = await tm.execute_tool("power", {"base": base, "exponent": exp})
+            events.append(
+                Event(
+                    content=types.Content(
+                        role="model",
+                        parts=[
+                            types.Part.from_function_call(
+                                name="power", args={"base": base, "exponent": exp}
+                            )
+                        ],
+                    )
+                )
+            )
+            events.append(
+                Event(
+                    content=types.Content(
+                        role="tool",
+                        parts=[
+                            types.Part.from_function_response(
+                                name="power", response={"result": p_res}
+                            )
+                        ],
+                    )
+                )
+            )
+
+            fmt_val = int(p_res) if int(p_res) == p_res else p_res
+            if "CALCULATOR-V2" in instructions or "[CALCULATOR-V2]" in instructions:
+                resp_text = f"🧮 [CALCULATOR-V2] Computed value: **{fmt_val}**"
+            else:
+                resp_text = f"Result: {fmt_val} (Computed via power)"
+
+            events.append(
+                Event(
+                    content=types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text=resp_text)],
+                    )
+                )
+            )
+
         else:
-            response_text = f"Result: {formatted_val} (Computed via {', '.join(tools_invoked)})"
+            resp_text = f"Executed prompt with skill '{skill.name}': {prompt}"
+            events.append(
+                Event(
+                    content=types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text=resp_text)],
+                    )
+                )
+            )
 
-    else:
-        # Generic response reflecting loaded skill instructions
-        response_text = f"Executed prompt with skill '{skill.name}': {prompt}"
+        return extract_provenance_from_events(events)
 
-    return response_text, tools_invoked
+    # 5. Live Mode: Real ADK LlmAgent + Runner execution with Vertex AI Gemini
+    model_instance = Gemini(
+        model=settings.model_name,
+        client_kwargs={
+            "vertexai": True,
+            "project": settings.project_id,
+            "location": settings.region,
+        },
+    )
+    instruction = skill.instructions or skill.description or ""
+    agent = LlmAgent(
+        name="agent_registry_service",
+        model=model_instance,
+        instruction=instruction,
+        tools=active_tools,
+    )
+
+    session_service = InMemorySessionService()
+    session = await session_service.create_session(
+        user_id="demo-user",
+        app_name=settings.service_name,
+    )
+    runner = Runner(
+        agent=agent,
+        session_service=session_service,
+        app_name=settings.service_name,
+    )
+
+    user_content = types.Content(
+        role="user",
+        parts=[types.Part.from_text(text=prompt)],
+    )
+
+    collected_events: list[Event] = []
+    async for event in runner.run_async(
+        user_id="demo-user",
+        session_id=session.id,
+        new_message=user_content,
+    ):
+        if event.error_message:
+            raise RuntimeError(f"ADK runner error: {event.error_message}")
+        collected_events.append(event)
+
+    return extract_provenance_from_events(collected_events)
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)
@@ -276,8 +505,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
         ) from exc
     except Exception as exc:
         cause = exc.__cause__ if exc.__cause__ is not None else exc
+        exc_str = str(exc).lower()
         if (isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 404) or (
-            isinstance(exc, RuntimeError) and "status 404" in str(exc)
+            "status 404" in exc_str or ("not found" in exc_str and "skill" in exc_str)
         ):
             logger.warning("Skill not found '%s': %s", target_skill, exc)
             raise HTTPException(
@@ -285,7 +515,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 detail=f"Skill '{target_skill}' not found in Agent Registry: {exc}",
             ) from exc
         if (isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 400) or (
-            isinstance(exc, RuntimeError) and "status 400" in str(exc)
+            "status 400" in exc_str
         ):
             logger.warning(
                 "Invalid request to Agent Registry for skill '%s': %s", target_skill, exc
@@ -296,7 +526,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             ) from exc
         logger.exception("Failed to resolve skill '%s'", target_skill)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to load skill '{target_skill}' from Agent Registry: {exc}",
         ) from exc
 
@@ -306,10 +536,18 @@ async def chat(request: ChatRequest) -> ChatResponse:
     tool_manager = get_tool_registry_manager()
     tool_manager.resolve_toolset()
 
-    executor = _chat_executor or default_chat_executor
     try:
         if _chat_executor is not None:
-            response_text, tools_invoked = await executor(request.prompt, skill)
+            raw_response, raw_tools = await _chat_executor(request.prompt, skill)
+            response_text = raw_response
+            tools_invoked: list[ToolInvocation] = []
+            for item in raw_tools:
+                if isinstance(item, ToolInvocation):
+                    tools_invoked.append(item)
+                elif isinstance(item, dict):
+                    tools_invoked.append(ToolInvocation(**item))
+                elif isinstance(item, str):
+                    tools_invoked.append(ToolInvocation(tool=item, name=item))
         else:
             response_text, tools_invoked = await default_chat_executor(
                 request.prompt, skill, tool_manager=tool_manager
@@ -321,14 +559,41 @@ async def chat(request: ChatRequest) -> ChatResponse:
             detail=str(exc),
         ) from exc
     except Exception as exc:
+        cause = exc.__cause__ if exc.__cause__ is not None else exc
+        exc_str = str(exc).lower()
+        cause_str = str(cause).lower()
+        if (
+            "mcp" in exc_str
+            or "tool" in exc_str
+            or "connection" in exc_str
+            or "connection" in cause_str
+            or "streamable" in exc_str
+        ):
+            logger.error("Remote MCP service failure for skill '%s': %s", target_skill, exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Remote MCP service failure: {exc}",
+            ) from exc
         logger.exception("Failed executing chat turn with skill '%s'", target_skill)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Chat execution failed: {exc}",
         ) from exc
 
+    resource_name = (
+        getattr(skill, "_uri", None)
+        or f"projects/{settings.project_id}/locations/{settings.skill_location}/skills/{skill.name}"
+    )
+    skill_prov = SkillProvenance(
+        name=skill.name,
+        revision=revision,
+        resource_name=str(resource_name),
+    )
+
     return ChatResponse(
         response=response_text,
+        skill=skill_prov,
         skill_revision=revision,
+        mcp_server=tool_manager.endpoint_url,
         tools_invoked=tools_invoked,
     )
