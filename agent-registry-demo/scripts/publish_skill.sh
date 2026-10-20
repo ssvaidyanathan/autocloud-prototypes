@@ -210,7 +210,17 @@ echo "Set Default:      ${SET_DEFAULT}"
 echo "Dry Run:          ${DRY_RUN}"
 echo "=========================================================="
 
-REVISION_RESOURCE="projects/${PROJECT_ID}/locations/${REGION}/skills/${SKILL_NAME}/revisions/${REVISION_ID}"
+SKILL_LOCATION="${REGION:-global}"
+if [[ "${SKILL_LOCATION}" == "us-central1" ]]; then
+  SKILL_LOCATION="global"
+fi
+
+REVISION_TAG="${REVISION_ID}"
+if [[ "${REVISION_TAG}" != rev-* ]]; then
+  REVISION_TAG="rev-${REVISION_TAG}"
+fi
+
+REVISION_RESOURCE="projects/${PROJECT_ID}/locations/${SKILL_LOCATION}/skills/${SKILL_NAME}/revisions/${REVISION_ID}"
 
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "[dry-run] Validation passed: zero forbidden 'scripts/' directories detected."
@@ -232,6 +242,27 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   fi
   exit 0
 fi
+
+# Resolve actual skill resource name (plain or private- prefix)
+ACTUAL_SKILL_NAME="${SKILL_NAME}"
+if gcloud alpha agent-registry skills describe "${SKILL_NAME}" --project="${PROJECT_ID}" --location="${SKILL_LOCATION}" >/dev/null 2>&1; then
+  ACTUAL_SKILL_NAME="${SKILL_NAME}"
+elif gcloud alpha agent-registry skills describe "private-${SKILL_NAME}" --project="${PROJECT_ID}" --location="${SKILL_LOCATION}" >/dev/null 2>&1; then
+  ACTUAL_SKILL_NAME="private-${SKILL_NAME}"
+else
+  echo "Skill '${SKILL_NAME}' does not exist. Creating skill..."
+  gcloud alpha agent-registry skills create "${SKILL_NAME}" \
+    --project="${PROJECT_ID}" \
+    --location="${SKILL_LOCATION}" \
+    --display-name="Precision Calculator Skill" \
+    --description="Precision arithmetic calculation skill" \
+    --target-state=active
+  if gcloud alpha agent-registry skills describe "private-${SKILL_NAME}" --project="${PROJECT_ID}" --location="${SKILL_LOCATION}" >/dev/null 2>&1; then
+    ACTUAL_SKILL_NAME="private-${SKILL_NAME}"
+  fi
+fi
+
+REVISION_RESOURCE="projects/${PROJECT_ID}/locations/${SKILL_LOCATION}/skills/${ACTUAL_SKILL_NAME}/revisions/${REVISION_TAG}"
 
 # Create temporary zip archive
 TEMP_ZIP="$(mktemp -t "skill_${SKILL_NAME}_${REVISION_ID}_XXXXXX.zip")"
@@ -259,19 +290,33 @@ with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
 
 echo "Skill archive packaged successfully ($(wc -c < "${TEMP_ZIP}") bytes)."
 
-echo "Publishing revision '${REVISION_ID}' to Agent Registry..."
-gcloud alpha agent-registry skills revisions create "${REVISION_ID}" \
-  --skill="${SKILL_NAME}" \
+# If revision already exists, delete it first to ensure fresh upload
+if gcloud alpha agent-registry skills revisions describe "${REVISION_TAG}" \
+    --skill="${ACTUAL_SKILL_NAME}" \
+    --project="${PROJECT_ID}" \
+    --location="${SKILL_LOCATION}" >/dev/null 2>&1; then
+  echo "Revision '${REVISION_TAG}' already exists. Recreating revision..."
+  gcloud alpha agent-registry skills revisions delete "${REVISION_TAG}" \
+    --skill="${ACTUAL_SKILL_NAME}" \
+    --project="${PROJECT_ID}" \
+    --location="${SKILL_LOCATION}" \
+    --quiet
+fi
+
+echo "Publishing revision '${REVISION_TAG}' to Agent Registry..."
+gcloud alpha agent-registry skills revisions create "${REVISION_TAG}" \
+  --skill="${ACTUAL_SKILL_NAME}" \
   --project="${PROJECT_ID}" \
-  --location="${REGION}" \
+  --location="${SKILL_LOCATION}" \
   --payload="${TEMP_ZIP}"
 
 if [[ "${SET_DEFAULT}" == "true" ]]; then
-  echo "Promoting '${REVISION_ID}' to default revision for skill '${SKILL_NAME}'..."
-  gcloud alpha agent-registry skills update "${SKILL_NAME}" \
+  echo "Promoting '${REVISION_TAG}' to default revision for skill '${ACTUAL_SKILL_NAME}'..."
+  gcloud alpha agent-registry skills update "${ACTUAL_SKILL_NAME}" \
     --project="${PROJECT_ID}" \
-    --location="${REGION}" \
-    --default-revision="${REVISION_RESOURCE}"
+    --location="${SKILL_LOCATION}" \
+    --default-revision="${REVISION_RESOURCE}" \
+    --target-state=active
 fi
 
-echo "Successfully published and updated skill revision '${REVISION_ID}' in Agent Registry."
+echo "Successfully published and updated skill revision '${REVISION_TAG}' in Agent Registry."

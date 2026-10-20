@@ -104,7 +104,26 @@ class GCPSkillRegistryClient(GCPSkillRegistry):
                 f"{self.base_url}/projects/{self.project_id}/"
                 f"locations/{self.location}/skills/{quote(resolved_name, safe='')}"
             )
-            response = await self._make_request(client, skill_url)
+            try:
+                response = await self._make_request(client, skill_url)
+            except RuntimeError as err:
+                if (
+                    "404" in str(err)
+                    and not resolved_name.startswith("private-")
+                    and "." not in resolved_name
+                ):
+                    fallback_name = f"private-{resolved_name}"
+                    fallback_url = (
+                        f"{self.base_url}/projects/{self.project_id}/"
+                        f"locations/{self.location}/skills/{quote(fallback_name, safe='')}"
+                    )
+                    try:
+                        response = await self._make_request(client, fallback_url)
+                        resolved_name = fallback_name
+                    except RuntimeError:
+                        raise err from None
+                else:
+                    raise
             skill_data = response.json()
 
             default_revision = skill_data.get("defaultRevision") or skill_data.get(

@@ -120,8 +120,10 @@ def extract_skill_revision(skill: Skill) -> str:
     if hasattr(skill, "_uri") and skill._uri:
         uri_str = str(skill._uri)
         if "/revisions/" in uri_str:
-            rev_part = uri_str.split("/revisions/")[-1]
-            return rev_part.split("?")[0]
+            rev_part = uri_str.split("/revisions/")[-1].split("?")[0]
+            if rev_part.startswith("rev-"):
+                rev_part = rev_part[4:]
+            return rev_part
     if skill.frontmatter and skill.frontmatter.metadata:
         revision = skill.frontmatter.metadata.get("revision")
         if revision:
@@ -160,13 +162,17 @@ async def default_chat_executor(
     # Extract declared tools from skill frontmatter
     declared_tools: list[str] = []
     if skill.frontmatter and skill.frontmatter.metadata:
-        declared = skill.frontmatter.metadata.get("adk_additional_tools")
+        meta = skill.frontmatter.metadata
+        declared = meta.get("adk_additional_tools") or meta.get("tools")
         if isinstance(declared, list):
             declared_tools = [str(t) for t in declared]
         elif isinstance(declared, str):
-            declared_tools = declared.split()
+            declared_tools = [t.strip() for t in declared.replace(",", " ").split() if t.strip()]
     if not declared_tools and skill.frontmatter and skill.frontmatter.allowed_tools:
-        declared_tools = [str(t) for t in skill.frontmatter.allowed_tools]
+        if isinstance(skill.frontmatter.allowed_tools, str):
+            declared_tools = skill.frontmatter.allowed_tools.split()
+        elif isinstance(skill.frontmatter.allowed_tools, (list, tuple)):
+            declared_tools = [str(t) for t in skill.frontmatter.allowed_tools]
 
     # Pattern recognition for arithmetic prompts
     mult_add_match = re.search(

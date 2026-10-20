@@ -17,6 +17,10 @@ class Settings(BaseSettings):
         default="us-central1",
         validation_alias=AliasChoices("region", "google_cloud_location"),
     )
+    skill_location: str = Field(
+        default="global",
+        validation_alias=AliasChoices("skill_location", "google_cloud_skill_location"),
+    )
     agent_registry_endpoint: str = "https://agentregistry.googleapis.com/v1alpha"
     port: int = 8080
     log_level: str = "INFO"

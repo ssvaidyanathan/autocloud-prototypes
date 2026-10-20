@@ -4,9 +4,8 @@ description: Precision arithmetic calculation skill for addition and multiplicat
 allowed-tools: add multiply
 metadata:
   version: "1.0.0"
-  adk_additional_tools:
-    - add
-    - multiply
+  tools: "add,multiply"
+  # adk_additional_tools: declared via allowed-tools for Agent Registry scalar compatibility
 ---
 # Calculator Skill (v1)
 

@@ -42,7 +42,7 @@ class SkillsLoader:
         else:
             base_client = GCPSkillRegistryClient(
                 project_id=project_id or settings.project_id,
-                location=location or settings.region,
+                location=location or settings.skill_location,
                 base_url=base_url or settings.agent_registry_endpoint,
             )
             self.cached_registry = CachedSkillRegistry(base_client, ttl_seconds=ttl)

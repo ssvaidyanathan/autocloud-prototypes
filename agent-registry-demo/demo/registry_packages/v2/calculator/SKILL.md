@@ -4,10 +4,8 @@ description: Advanced arithmetic calculation skill supporting addition, multipli
 allowed-tools: add multiply power
 metadata:
   version: "2.0.0"
-  adk_additional_tools:
-    - add
-    - multiply
-    - power
+  tools: "add,multiply,power"
+  # adk_additional_tools: declared via allowed-tools for Agent Registry scalar compatibility
 ---
 # Calculator Skill (v2)
 
