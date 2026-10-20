@@ -22,9 +22,9 @@ async def test_agent_registry_downloads_and_unpacks(valid_skill_zip: bytes) -> N
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/cloud-assist-fde-7/locations/us-central1/skills/calculator",
+                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
                     "defaultRevision": (
-                        "projects/cloud-assist-fde-7/locations/us-central1/"
+                        "projects/demo-project-id/locations/us-central1/"
                         "skills/calculator/revisions/r1"
                     ),
                 },
@@ -40,7 +40,7 @@ async def test_agent_registry_downloads_and_unpacks(valid_skill_zip: bytes) -> N
     transport = httpx.MockTransport(mock_handler)
     async with httpx.AsyncClient(transport=transport) as mock_http:
         client = GCPSkillRegistryClient(
-            project_id="cloud-assist-fde-7",
+            project_id="demo-project-id",
             location="us-central1",
             http_client=mock_http,
         )
@@ -79,7 +79,7 @@ async def test_agent_registry_downloads_and_unpacks(valid_skill_zip: bytes) -> N
 )
 async def test_agent_registry_invalid_skill_name(invalid_name: str) -> None:
     """Verify safe path segment validation rejects malicious or malformed skill resource IDs."""
-    client = GCPSkillRegistryClient(project_id="cloud-assist-fde-7", location="us-central1")
+    client = GCPSkillRegistryClient(project_id="demo-project-id", location="us-central1")
     with pytest.raises(ValueError, match="(Invalid skill name|Skill name must be)"):
         await client.get_skill(name=invalid_name)
 
@@ -94,9 +94,9 @@ async def test_agent_registry_rejects_forbidden_scripts(forbidden_scripts_zip: b
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/cloud-assist-fde-7/locations/us-central1/skills/bad-skill",
+                    "name": "projects/demo-project-id/locations/us-central1/skills/bad-skill",
                     "defaultRevision": (
-                        "projects/cloud-assist-fde-7/locations/us-central1/"
+                        "projects/demo-project-id/locations/us-central1/"
                         "skills/bad-skill/revisions/r1"
                     ),
                 },
@@ -112,7 +112,7 @@ async def test_agent_registry_rejects_forbidden_scripts(forbidden_scripts_zip: b
     transport = httpx.MockTransport(mock_handler)
     async with httpx.AsyncClient(transport=transport) as mock_http:
         client = GCPSkillRegistryClient(
-            project_id="cloud-assist-fde-7",
+            project_id="demo-project-id",
             location="us-central1",
             http_client=mock_http,
         )
@@ -133,9 +133,9 @@ async def test_skills_loader_provides_toolset_and_resolves_skills(
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/cloud-assist-fde-7/locations/us-central1/skills/calculator",
+                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
                     "defaultRevision": (
-                        "projects/cloud-assist-fde-7/locations/us-central1/"
+                        "projects/demo-project-id/locations/us-central1/"
                         "skills/calculator/revisions/r1"
                     ),
                 },
@@ -151,7 +151,7 @@ async def test_skills_loader_provides_toolset_and_resolves_skills(
     transport = httpx.MockTransport(mock_handler)
     async with httpx.AsyncClient(transport=transport) as mock_http:
         registry = GCPSkillRegistryClient(
-            project_id="cloud-assist-fde-7",
+            project_id="demo-project-id",
             location="us-central1",
             http_client=mock_http,
         )
@@ -185,9 +185,9 @@ def test_chat_endpoint_minimal(test_client: TestClient, valid_skill_zip: bytes) 
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/cloud-assist-fde-7/locations/us-central1/skills/calculator",
+                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
                     "defaultRevision": (
-                        "projects/cloud-assist-fde-7/locations/us-central1/"
+                        "projects/demo-project-id/locations/us-central1/"
                         "skills/calculator/revisions/r1"
                     ),
                 },
@@ -203,7 +203,7 @@ def test_chat_endpoint_minimal(test_client: TestClient, valid_skill_zip: bytes) 
     transport = httpx.MockTransport(mock_handler)
     mock_http = httpx.AsyncClient(transport=transport)
     registry = GCPSkillRegistryClient(
-        project_id="cloud-assist-fde-7",
+        project_id="demo-project-id",
         location="us-central1",
         http_client=mock_http,
     )
@@ -228,7 +228,7 @@ def test_config_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
     monkeypatch.delenv("REGION", raising=False)
     settings = Settings()
-    assert settings.project_id == "cloud-assist-fde-7"
+    assert settings.project_id == "demo-project-id"
     assert settings.region == "us-central1"
     assert settings.agent_registry_endpoint == "https://agentregistry.googleapis.com/v1alpha"
     assert settings.port == 8080
@@ -253,7 +253,7 @@ def test_chat_endpoint_skill_not_found(test_client: TestClient) -> None:
     transport = httpx.MockTransport(mock_handler)
     mock_http = httpx.AsyncClient(transport=transport)
     registry = GCPSkillRegistryClient(
-        project_id="cloud-assist-fde-7",
+        project_id="demo-project-id",
         location="us-central1",
         http_client=mock_http,
     )

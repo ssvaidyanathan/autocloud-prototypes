@@ -31,7 +31,7 @@ C_MAGENTA="\033[35m"
 
 # Default configuration
 AGENT_URL="${AGENT_URL:-http://localhost:8080}"
-PROJECT_ID="${PROJECT_ID:-cloud-assist-fde-7}"
+PROJECT_ID="${PROJECT_ID:-demo-project-id}"
 REGION="${REGION:-us-central1}"
 DRY_RUN=false
 MOCK_MODE=false

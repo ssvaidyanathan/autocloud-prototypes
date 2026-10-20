@@ -47,6 +47,8 @@ def setup_mock_registry(root_dir: Path) -> None:
     r1_zip = build_zip_from_dir(v1_dir)
     r2_zip = build_zip_from_dir(v2_dir)
 
+    project_id = os.environ.get("PROJECT_ID", "demo-project-id")
+
     def mock_registry_handler(request: httpx.Request) -> httpx.Response:
         url_str = str(request.url)
         current_rev = get_current_mock_revision()
@@ -55,9 +57,9 @@ def setup_mock_registry(root_dir: Path) -> None:
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/cloud-assist-fde-7/locations/us-central1/skills/calculator",
+                    "name": f"projects/{project_id}/locations/us-central1/skills/calculator",
                     "defaultRevision": (
-                        f"projects/cloud-assist-fde-7/locations/us-central1/"
+                        f"projects/{project_id}/locations/us-central1/"
                         f"skills/calculator/revisions/{current_rev}"
                     ),
                 },
@@ -75,7 +77,7 @@ def setup_mock_registry(root_dir: Path) -> None:
     transport = httpx.MockTransport(mock_registry_handler)
     mock_http = httpx.AsyncClient(transport=transport)
     base_registry = GCPSkillRegistryClient(
-        project_id="cloud-assist-fde-7",
+        project_id=project_id,
         location="us-central1",
         http_client=mock_http,
     )

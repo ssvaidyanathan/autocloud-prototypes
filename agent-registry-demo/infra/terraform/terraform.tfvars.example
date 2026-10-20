@@ -1,5 +1,5 @@
 # Example Terraform variables for Agent Registry Demo infrastructure
-project_id              = "cloud-assist-fde-7"
+project_id              = "example-project-id"
 region                  = "us-central1"
 environment             = "demo"
 name_prefix             = "ard"

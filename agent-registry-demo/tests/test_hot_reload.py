@@ -327,7 +327,7 @@ async def test_tool_registry_manager_fallback_tools() -> None:
 async def test_tool_registry_manager_query_agent_registry() -> None:
     """Verify ToolRegistryManager query_mcp_server queries Agent Registry v1."""
     mock_response = {
-        "name": "projects/cloud-assist-fde-7/locations/us-central1/mcpServers/calculator",
+        "name": "projects/demo-project-id/locations/us-central1/mcpServers/calculator",
         "displayName": "Precision Calculator Service",
         "interfaces": [{"protocolBinding": "http-json", "url": "http://localhost:8080/mcp"}],
     }
@@ -340,7 +340,7 @@ async def test_tool_registry_manager_query_agent_registry() -> None:
     transport = httpx.MockTransport(mock_handler)
     async with httpx.AsyncClient(transport=transport) as mock_http:
         manager = ToolRegistryManager(
-            project_id="cloud-assist-fde-7",
+            project_id="demo-project-id",
             location="us-central1",
             http_client=mock_http,
         )
@@ -367,9 +367,9 @@ def test_adk_additional_tools_enforcement_rejects_unauthorized_tool(
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/cloud-assist-fde-7/locations/us-central1/skills/calculator",
+                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
                     "defaultRevision": (
-                        "projects/cloud-assist-fde-7/locations/us-central1/"
+                        "projects/demo-project-id/locations/us-central1/"
                         "skills/calculator/revisions/r1"
                     ),
                 },
@@ -385,7 +385,7 @@ def test_adk_additional_tools_enforcement_rejects_unauthorized_tool(
     transport = httpx.MockTransport(mock_handler)
     mock_http = httpx.AsyncClient(transport=transport)
     client = GCPSkillRegistryClient(
-        project_id="cloud-assist-fde-7",
+        project_id="demo-project-id",
         location="us-central1",
         http_client=mock_http,
     )
@@ -454,9 +454,9 @@ def test_e2e_hot_reload_simulation(test_client: TestClient) -> None:
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/cloud-assist-fde-7/locations/us-central1/skills/calculator",
+                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
                     "defaultRevision": (
-                        f"projects/cloud-assist-fde-7/locations/us-central1/"
+                        f"projects/demo-project-id/locations/us-central1/"
                         f"skills/calculator/revisions/{current_revision}"
                     ),
                 },
@@ -473,7 +473,7 @@ def test_e2e_hot_reload_simulation(test_client: TestClient) -> None:
     transport = httpx.MockTransport(mock_registry_handler)
     mock_http = httpx.AsyncClient(transport=transport)
     base_registry = GCPSkillRegistryClient(
-        project_id="cloud-assist-fde-7",
+        project_id="demo-project-id",
         location="us-central1",
         http_client=mock_http,
     )

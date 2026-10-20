@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # Default configuration per project design
-PROJECT_ID="${PROJECT_ID:-cloud-assist-fde-7}"
+PROJECT_ID="${PROJECT_ID:-demo-project-id}"
 REGION="${REGION:-us-central1}"
 DISPLAY_NAME="${DISPLAY_NAME:-Precision Calculator Service}"
 DESCRIPTION="${DESCRIPTION:-Provides verified arithmetic operations (add, multiply, power)}"
@@ -35,7 +35,7 @@ Arguments:
 
 Options:
   --dry-run                    Print gcloud commands without executing them
-  --project=ID, --project ID   Target GCP project ID (default: ${PROJECT_ID:-cloud-assist-fde-7})
+  --project=ID, --project ID   Target GCP project ID (default: ${PROJECT_ID:-demo-project-id})
   --location=REGION, --location REGION
                                Target GCP region (default: ${REGION:-us-central1})
   --tool-url=URL, --tool-url URL

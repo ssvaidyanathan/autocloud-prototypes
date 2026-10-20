@@ -280,7 +280,7 @@ The architecture enforces strict least-privilege security boundaries using Googl
 ## 6. Prerequisites & Environment Setup
 
 ### Required Google Cloud APIs
-The following APIs must be enabled in your target Google Cloud project (`cloud-assist-fde-7`):
+The following APIs must be enabled in your target Google Cloud project (`<PROJECT_ID>`):
 - `run.googleapis.com` (Cloud Run Admin API)
 - `agentregistry.googleapis.com` (Google Cloud Agent Registry API)
 - `artifactregistry.googleapis.com` (Artifact Registry API)
@@ -290,7 +290,7 @@ The following APIs must be enabled in your target Google Cloud project (`cloud-a
 Install and configure the `alpha` component required for Agent Registry commands:
 ```bash
 gcloud components install alpha
-gcloud config set project cloud-assist-fde-7
+gcloud config set project <PROJECT_ID>
 gcloud config set compute/region us-central1
 ```
 
@@ -311,7 +311,7 @@ source ../.venv/bin/activate
 
 ### Step 2: Build & Push Container Images to Artifact Registry
 ```bash
-export PROJECT_ID="cloud-assist-fde-7"
+export PROJECT_ID="<PROJECT_ID>"
 export REGION="us-central1"
 export REPO="ard-images"
 
@@ -621,7 +621,7 @@ agent-registry-demo/
 
 ## 12. Teardown & Resource Cleanup
 
-To avoid ongoing charges and cleanly decommission prototype resources from `cloud-assist-fde-7`, follow these teardown steps:
+To avoid ongoing charges and cleanly decommission prototype resources from `<PROJECT_ID>`, follow these teardown steps:
 
 ### 1. Destroy Cloud Run Services & Infrastructure
 The Terraform configuration uses a dedicated GCS backend prefix (e.g. `prefix = "agent-registry-demo/default.tfstate"`), ensuring strict isolation from other prototypes:

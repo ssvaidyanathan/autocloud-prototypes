@@ -340,7 +340,7 @@ def test_auth_accepted_with_valid_bearer_token(auth_enforced_client: TestClient)
 def test_auth_with_oidc_verification_success() -> None:
     """Test OIDC verification when valid Google ID token claims are returned."""
     mock_claims: dict[str, Any] = {
-        "email": "agent-sa@cloud-assist-fde-7.iam.gserviceaccount.com",
+        "email": "agent-sa@demo-project-id.iam.gserviceaccount.com",
         "aud": "https://calculator-tool-service-uc.a.run.app",
     }
 
@@ -348,7 +348,7 @@ def test_auth_with_oidc_verification_success() -> None:
         enforce_auth=True,
         verify_oidc=True,
         expected_audience="https://calculator-tool-service-uc.a.run.app",
-        allowed_service_accounts=["agent-sa@cloud-assist-fde-7.iam.gserviceaccount.com"],
+        allowed_service_accounts=["agent-sa@demo-project-id.iam.gserviceaccount.com"],
     )
 
     with patch("google.oauth2.id_token.verify_oauth2_token", return_value=mock_claims):
@@ -378,7 +378,7 @@ def test_auth_with_oidc_verification_unauthorized_service_account() -> None:
         enforce_auth=True,
         verify_oidc=True,
         expected_audience="https://calculator-tool-service-uc.a.run.app",
-        allowed_service_accounts=["agent-sa@cloud-assist-fde-7.iam.gserviceaccount.com"],
+        allowed_service_accounts=["agent-sa@demo-project-id.iam.gserviceaccount.com"],
     )
 
     with patch("google.oauth2.id_token.verify_oauth2_token", return_value=mock_claims):
@@ -435,11 +435,11 @@ def test_auth_oidc_uses_pooled_auth_request() -> None:
         enforce_auth=True,
         verify_oidc=True,
         expected_audience="https://calculator-tool-service-uc.a.run.app",
-        allowed_service_accounts=["agent-sa@cloud-assist-fde-7.iam.gserviceaccount.com"],
+        allowed_service_accounts=["agent-sa@demo-project-id.iam.gserviceaccount.com"],
     )
 
     mock_claims: dict[str, Any] = {
-        "email": "agent-sa@cloud-assist-fde-7.iam.gserviceaccount.com",
+        "email": "agent-sa@demo-project-id.iam.gserviceaccount.com",
         "aud": "https://calculator-tool-service-uc.a.run.app",
     }
 
@@ -491,7 +491,7 @@ def test_register_tool_script_dry_run() -> None:
     assert result.returncode == 0, f"Script failed with output: {result.stderr}"
     stdout = result.stdout
     assert "gcloud agent-registry services create calculator" in stdout
-    assert '--project="cloud-assist-fde-7"' in stdout
+    assert '--project="demo-project-id"' in stdout
     assert '--location="us-central1"' in stdout
     assert '--display-name="Precision Calculator Service"' in stdout
     assert (

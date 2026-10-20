@@ -12,7 +12,6 @@ variable "name_prefix" {
 variable "project_id" {
   description = "The GCP project ID"
   type        = string
-  default     = "cloud-assist-fde-7"
 }
 
 variable "region" {

@@ -96,9 +96,9 @@ def test_e2e_hot_reload_lifecycle_with_real_packages(test_client: TestClient) ->
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/cloud-assist-fde-7/locations/us-central1/skills/calculator",
+                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
                     "defaultRevision": (
-                        f"projects/cloud-assist-fde-7/locations/us-central1/"
+                        f"projects/demo-project-id/locations/us-central1/"
                         f"skills/calculator/revisions/{active_revision}"
                     ),
                 },
@@ -115,7 +115,7 @@ def test_e2e_hot_reload_lifecycle_with_real_packages(test_client: TestClient) ->
     transport = httpx.MockTransport(mock_registry_handler)
     mock_http = httpx.AsyncClient(transport=transport)
     base_registry = GCPSkillRegistryClient(
-        project_id="cloud-assist-fde-7",
+        project_id="demo-project-id",
         location="us-central1",
         http_client=mock_http,
     )
@@ -184,9 +184,9 @@ async def test_security_guardrail_rejects_malicious_scripts_dir() -> None:
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/cloud-assist-fde-7/locations/us-central1/skills/malicious",
+                    "name": "projects/demo-project-id/locations/us-central1/skills/malicious",
                     "defaultRevision": (
-                        "projects/cloud-assist-fde-7/locations/us-central1/"
+                        "projects/demo-project-id/locations/us-central1/"
                         "skills/malicious/revisions/r1"
                     ),
                 },
@@ -202,7 +202,7 @@ async def test_security_guardrail_rejects_malicious_scripts_dir() -> None:
     transport = httpx.MockTransport(mock_handler)
     mock_http = httpx.AsyncClient(transport=transport)
     base_registry = GCPSkillRegistryClient(
-        project_id="cloud-assist-fde-7",
+        project_id="demo-project-id",
         location="us-central1",
         http_client=mock_http,
     )
@@ -223,9 +223,9 @@ def test_tool_guardrail_blocks_undeclared_power_tool_in_v1(test_client: TestClie
             return httpx.Response(
                 status_code=200,
                 json={
-                    "name": "projects/cloud-assist-fde-7/locations/us-central1/skills/calculator",
+                    "name": "projects/demo-project-id/locations/us-central1/skills/calculator",
                     "defaultRevision": (
-                        "projects/cloud-assist-fde-7/locations/us-central1/"
+                        "projects/demo-project-id/locations/us-central1/"
                         "skills/calculator/revisions/r1"
                     ),
                 },
@@ -241,7 +241,7 @@ def test_tool_guardrail_blocks_undeclared_power_tool_in_v1(test_client: TestClie
     transport = httpx.MockTransport(mock_registry_handler)
     mock_http = httpx.AsyncClient(transport=transport)
     base_registry = GCPSkillRegistryClient(
-        project_id="cloud-assist-fde-7",
+        project_id="demo-project-id",
         location="us-central1",
         http_client=mock_http,
     )

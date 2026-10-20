@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", case_sensitive=False, extra="ignore")
 
     project_id: str = Field(
-        default="cloud-assist-fde-7",
+        default="demo-project-id",
         validation_alias=AliasChoices("project_id", "google_cloud_project"),
     )
     region: str = Field(

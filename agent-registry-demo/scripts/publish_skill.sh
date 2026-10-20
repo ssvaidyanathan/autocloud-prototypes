@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # Default configuration per project design
-PROJECT_ID="${PROJECT_ID:-cloud-assist-fde-7}"
+PROJECT_ID="${PROJECT_ID:-demo-project-id}"
 REGION="${REGION:-us-central1}"
 SKILL_NAME="${SKILL_NAME:-calculator}"
 REVISION_ID="${REVISION_ID:-r1}"
