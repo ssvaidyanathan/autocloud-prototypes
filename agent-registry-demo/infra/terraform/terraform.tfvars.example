@@ -1,0 +1,12 @@
+# Example Terraform variables for Agent Registry Demo infrastructure
+project_id              = "cloud-assist-fde-7"
+region                  = "us-central1"
+environment             = "demo"
+name_prefix             = "ard"
+agent_cpu               = "1"
+agent_memory            = "1Gi"
+agent_timeout_seconds   = 300
+tool_cpu                = "1"
+tool_memory             = "512Mi"
+tool_timeout_seconds    = 300
+agent_registry_endpoint = "https://agentregistry.googleapis.com/v1alpha"

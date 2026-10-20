@@ -1,0 +1,2 @@
+bucket = "cloud-assist-fde-7-tfstate"
+prefix = "agent-registry-demo/default.tfstate"
