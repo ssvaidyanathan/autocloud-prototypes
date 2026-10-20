@@ -500,7 +500,7 @@ def test_register_tool_script_dry_run() -> None:
     )
     assert "--mcp-server-spec-type=no-spec" in stdout
     expected_iface = (
-        '--interfaces="protocolBinding=http-json,'
+        '--interfaces="protocolBinding=jsonrpc,'
         'url=https://calculator-tool-service-12345-uc.a.run.app/mcp"'
     )
     assert expected_iface in stdout
@@ -535,7 +535,7 @@ def test_register_tool_script_space_separated_flags() -> None:
     assert '--project="custom-project-123"' in stdout
     assert '--location="europe-west1"' in stdout
     expected_iface = (
-        '--interfaces="protocolBinding=http-json,'
+        '--interfaces="protocolBinding=jsonrpc,'
         'url=https://calc-custom.a.run.app/mcp"'
     )
     assert expected_iface in stdout
