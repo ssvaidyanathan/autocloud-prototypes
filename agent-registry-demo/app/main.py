@@ -296,10 +296,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
     revision = extract_skill_revision(skill)
 
-    # Configure SkillToolset with dynamic additional tools from ToolRegistryManager
+    # Ensure ToolRegistryManager has resolved its toolset
     tool_manager = get_tool_registry_manager()
-    toolset = tool_manager.resolve_toolset()
-    _ = loader.get_skill_toolset(additional_tools=[toolset])
+    tool_manager.resolve_toolset()
 
     executor = _chat_executor or default_chat_executor
     try:

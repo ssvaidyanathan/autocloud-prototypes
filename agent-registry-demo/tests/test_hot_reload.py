@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -149,6 +153,29 @@ async def test_atomic_invalidate_all_entries() -> None:
     assert flushed_empty == []
 
 
+def test_invalidate_empty_or_whitespace_name() -> None:
+    """Verify invalidate with empty or whitespace string does not flush entries."""
+    dummy = DummyRegistry()
+    cached_reg = CachedSkillRegistry(target_registry=dummy, ttl_seconds=60.0)
+    cached_reg._cache["calculator"] = CacheEntry(
+        skill=dummy.skills["calculator"],
+        timestamp=time.time(),
+        content_hash="test-hash",
+    )
+    assert len(cached_reg._cache) == 1
+
+    # Invalidate with empty or whitespace string returns [] and preserves cache
+    assert cached_reg.invalidate("") == []
+    assert len(cached_reg._cache) == 1
+
+    assert cached_reg.invalidate("   ") == []
+    assert len(cached_reg._cache) == 1
+
+    # Invalidate specific entry flushes that entry
+    assert cached_reg.invalidate("calculator") == ["calculator"]
+    assert len(cached_reg._cache) == 0
+
+
 @pytest.mark.asyncio
 async def test_concurrent_get_skill_fetches_once() -> None:
     """Verify thread-safe locking ensures concurrent requests only fetch once."""
@@ -242,15 +269,50 @@ def test_admin_cache_invalidate_all_endpoint(test_client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_tool_registry_manager_discover_and_execute() -> None:
-    """Verify ToolRegistryManager discovers tools and executes operations."""
-    manager = ToolRegistryManager()
+    """Verify ToolRegistryManager discovers and executes tools via FastMCP ASGI transport."""
+    from demo.calculator_service.server import create_app
+
+    fastmcp_app = create_app(enforce_auth=False)
+    transport = httpx.ASGITransport(app=fastmcp_app)
+    manager = ToolRegistryManager(
+        tool_service_url="http://testserver/mcp",
+        http_client_factory=lambda: httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ),
+    )
     tools = await manager.discover_tools("calculator")
     tool_names = [t.name for t in tools]
     assert "add" in tool_names
     assert "multiply" in tool_names
     assert "power" in tool_names
 
-    # Test arithmetic tool executions
+    # Test arithmetic tool executions via real MCP JSON-RPC protocol
+    add_res = await manager.execute_tool("add", {"a": 12.0, "b": 8.0})
+    assert add_res == 20.0
+
+    mult_res = await manager.execute_tool("multiply", {"a": 6.0, "b": 7.0})
+    assert mult_res == 42.0
+
+    power_res = await manager.execute_tool("power", {"base": 2.0, "exponent": 8.0})
+    assert power_res == 256.0
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_manager_fallback_tools() -> None:
+    """Verify ToolRegistryManager falls back to local tools when remote MCP is unreachable."""
+    manager = ToolRegistryManager(
+        tool_service_url="http://127.0.0.1:9999/unreachable/mcp",
+        http_client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda req: httpx.Response(503))
+        ),
+    )
+    tools = await manager.discover_tools("calculator")
+    tool_names = [t.name for t in tools]
+    assert "add" in tool_names
+    assert "multiply" in tool_names
+    assert "power" in tool_names
+
+    # Test arithmetic fallback executions
     add_res = await manager.execute_tool("add", {"a": 12.0, "b": 8.0})
     assert add_res == 20.0
 
@@ -456,3 +518,48 @@ def test_e2e_hot_reload_simulation(test_client: TestClient) -> None:
     health_res = test_client.get("/health")
     assert health_res.status_code == 200
     assert health_res.json() == {"status": "healthy"}
+
+
+# ==============================================================================
+# 5. Standalone Container Import Isolation Tests (Finding 1)
+# ==============================================================================
+
+
+def test_import_app_main_without_demo_in_sys_path() -> None:
+    """Verify app.main imports cleanly when demo package is completely blocked/absent."""
+    code = (
+        "import sys\n"
+        "sys.modules['demo'] = None\n"
+        "import app.main\n"
+        "print('app.main imported cleanly without demo package')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"Import failed with stderr: {result.stderr}"
+    assert "app.main imported cleanly without demo package" in result.stdout
+
+
+def test_app_main_standalone_container_simulation(tmp_path: Path) -> None:
+    """Verify app.main imports in container-like environment where demo/ does not exist."""
+    repo_app = Path(__file__).resolve().parent.parent / "app"
+    container_app = tmp_path / "app"
+    shutil.copytree(repo_app, container_app)
+
+    code = (
+        "import app.main\n"
+        "print('container standalone import ok')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"Standalone container import failed: {result.stderr}"
+    assert "container standalone import ok" in result.stdout
+

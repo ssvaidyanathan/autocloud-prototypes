@@ -155,7 +155,9 @@ class CachedSkillRegistry(SkillRegistry):
         Returns:
             List of skill names that were flushed from the cache.
         """
-        if name:
+        if name is not None:
+            if not name.strip():
+                return []
             if name in self._cache:
                 del self._cache[name]
                 return [name]

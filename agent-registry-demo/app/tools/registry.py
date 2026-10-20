@@ -12,9 +12,58 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset, StreamableHTTPConnectionParams
 
 from app.config import get_settings
-from demo.calculator_service.server import add, multiply, power
 
 logger = logging.getLogger(__name__)
+
+
+def _fallback_add(a: float, b: float) -> float:
+    """Add two numbers with precision arithmetic.
+
+    Args:
+        a: First number.
+        b: Second number.
+
+    Returns:
+        Sum of a and b.
+    """
+    return float(a + b)
+
+
+def _fallback_multiply(a: float, b: float) -> float:
+    """Multiply two numbers with precision arithmetic.
+
+    Args:
+        a: First number.
+        b: Second number.
+
+    Returns:
+        Product of a and b.
+    """
+    return float(a * b)
+
+
+def _fallback_power(base: float, exponent: float) -> float:
+    """Raise base to the power of exponent.
+
+    Args:
+        base: Base number.
+        exponent: Exponent power.
+
+    Returns:
+        Base raised to the exponent power.
+    """
+    if base == 0 and exponent < 0:
+        raise ValueError("Division by zero: zero cannot be raised to a negative exponent")
+    if base < 0 and not exponent.is_integer():
+        raise ValueError("Fractional exponent of a negative base produces a complex number")
+    return float(base**exponent)
+
+
+def _create_fallback_tool(func: Callable[..., Any], name: str) -> FunctionTool:
+    tool = FunctionTool(func)
+    tool.name = name
+    return tool
+
 
 
 class ToolRegistryManager:
@@ -83,9 +132,9 @@ class ToolRegistryManager:
     def _fallback_tools(self) -> list[BaseTool]:
         """Provide verified arithmetic operations as ADK FunctionTools."""
         return [
-            FunctionTool(add),
-            FunctionTool(multiply),
-            FunctionTool(power),
+            _create_fallback_tool(_fallback_add, "add"),
+            _create_fallback_tool(_fallback_multiply, "multiply"),
+            _create_fallback_tool(_fallback_power, "power"),
         ]
 
     async def discover_tools(self, server_name: str = "calculator") -> list[BaseTool]:
@@ -141,11 +190,11 @@ class ToolRegistryManager:
                 "Tool execution via BaseTool failed (%s); invoking operation directly", exc
             )
             if name == "add":
-                return float(add(float(args["a"]), float(args["b"])))
+                return float(_fallback_add(float(args["a"]), float(args["b"])))
             if name == "multiply":
-                return float(multiply(float(args["a"]), float(args["b"])))
+                return float(_fallback_multiply(float(args["a"]), float(args["b"])))
             if name == "power":
-                return float(power(float(args["base"]), float(args["exponent"])))
+                return float(_fallback_power(float(args["base"]), float(args["exponent"])))
             raise
 
         # Parse result from response
