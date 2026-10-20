@@ -616,3 +616,44 @@ agent-registry-demo/
     ├── test_hot_reload.py              # Hot-reload engine, TTL cache, and tool activation tests
     └── test_skill_registry.py          # Skill registry client & minimal agent tests
 ```
+
+---
+
+## 12. Teardown & Resource Cleanup
+
+To avoid ongoing charges and cleanly decommission prototype resources from `cloud-assist-fde-7`, follow these teardown steps:
+
+### 1. Destroy Cloud Run Services & Infrastructure
+The Terraform configuration uses a dedicated GCS backend prefix (e.g. `prefix = "agent-registry-demo/default.tfstate"`), ensuring strict isolation from other prototypes:
+
+```bash
+cd infra/terraform
+
+# Destroy all provisioned ard-* Cloud Run services, IAM bindings, and repositories
+terraform destroy \
+  -var="project_id=${PROJECT_ID}" \
+  -var="region=${REGION}" \
+  -var="agent_image=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/agent-service:latest" \
+  -var="tool_image=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/calculator-tool-service:latest"
+
+cd ../..
+```
+
+### 2. Remove Registered Services & Skills from Agent Registry
+Clean up the registered MCP service and demo skills:
+
+```bash
+# Delete the registered Calculator service from Tools Registry
+gcloud agent-registry services delete calculator \
+  --project="${PROJECT_ID}" \
+  --location="${REGION}" \
+  --quiet
+
+# Delete the demo Calculator skill from Skills Registry
+gcloud alpha agent-registry skills delete private-calculator \
+  --project="${PROJECT_ID}" \
+  --location=global \
+  --quiet
+```
+
+All prototype resources prefixed with `ard-` are now completely removed without affecting any `gdi-*`, `cymbal-*`, or `alm-*` resources.
