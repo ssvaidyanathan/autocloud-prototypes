@@ -34,12 +34,19 @@ Arguments:
   TOOL_SERVICE_URL   Base URL of the tool service (e.g. https://calculator-tool-service-uc.a.run.app)
 
 Options:
-  --dry-run          Print gcloud commands without executing them
-  --project=ID       Target GCP project ID (default: \${PROJECT_ID:-cloud-assist-fde-7})
-  --location=REGION  Target GCP region (default: \${REGION:-us-central1})
-  --display-name=NAME Human-readable service name
-  --description=TEXT Service description
-  -h, --help         Display this help message
+  --dry-run                    Print gcloud commands without executing them
+  --project=ID, --project ID   Target GCP project ID (default: ${PROJECT_ID:-cloud-assist-fde-7})
+  --location=REGION, --location REGION
+                               Target GCP region (default: ${REGION:-us-central1})
+  --tool-url=URL, --tool-url URL
+                               Base URL of the tool service
+  --service-name=NAME, --service-name NAME
+                               Service ID to register/update (default: calculator)
+  --display-name=NAME, --display-name NAME
+                               Human-readable service name
+  --description=TEXT, --description TEXT
+                               Service description
+  -h, --help                   Display this help message
 
 Environment Variables:
   PROJECT_ID         Target GCP project ID
@@ -59,17 +66,73 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=true
       shift
       ;;
+    --project)
+      if [[ $# -lt 2 || "$2" == -* ]]; then
+        echo "Error: --project requires an argument" >&2
+        exit 1
+      fi
+      PROJECT_ID="$2"
+      shift 2
+      ;;
     --project=*)
       PROJECT_ID="${1#*=}"
       shift
+      ;;
+    --location)
+      if [[ $# -lt 2 || "$2" == -* ]]; then
+        echo "Error: --location requires an argument" >&2
+        exit 1
+      fi
+      REGION="$2"
+      shift 2
       ;;
     --location=*)
       REGION="${1#*=}"
       shift
       ;;
+    --tool-url)
+      if [[ $# -lt 2 || "$2" == -* ]]; then
+        echo "Error: --tool-url requires an argument" >&2
+        exit 1
+      fi
+      TOOL_SERVICE_URL="$2"
+      shift 2
+      ;;
+    --tool-url=*)
+      TOOL_SERVICE_URL="${1#*=}"
+      shift
+      ;;
+    --service-name)
+      if [[ $# -lt 2 || "$2" == -* ]]; then
+        echo "Error: --service-name requires an argument" >&2
+        exit 1
+      fi
+      SERVICE_NAME="$2"
+      shift 2
+      ;;
+    --service-name=*)
+      SERVICE_NAME="${1#*=}"
+      shift
+      ;;
+    --display-name)
+      if [[ $# -lt 2 || "$2" == -* ]]; then
+        echo "Error: --display-name requires an argument" >&2
+        exit 1
+      fi
+      DISPLAY_NAME="$2"
+      shift 2
+      ;;
     --display-name=*)
       DISPLAY_NAME="${1#*=}"
       shift
+      ;;
+    --description)
+      if [[ $# -lt 2 || "$2" == -* ]]; then
+        echo "Error: --description requires an argument" >&2
+        exit 1
+      fi
+      DESCRIPTION="$2"
+      shift 2
       ;;
     --description=*)
       DESCRIPTION="${1#*=}"
@@ -89,7 +152,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-SERVICE_NAME="${POSITIONAL[0]:-calculator}"
+SERVICE_NAME="${POSITIONAL[0]:-${SERVICE_NAME:-calculator}}"
 TOOL_SERVICE_URL="${POSITIONAL[1]:-${TOOL_SERVICE_URL:-}}"
 
 if [[ -z "${TOOL_SERVICE_URL}" ]]; then

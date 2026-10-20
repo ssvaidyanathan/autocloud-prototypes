@@ -63,6 +63,14 @@ def test_health_check_bypasses_auth(auth_enforced_client: TestClient) -> None:
     assert response.json() == {"status": "healthy"}
 
 
+def test_health_check_trailing_slash_bypasses_auth(auth_enforced_client: TestClient) -> None:
+    """Test that GET /health/ succeeds without authentication when auth is enforced."""
+    response = auth_enforced_client.get("/health/")
+    assert response.status_code == 200
+    assert response.json() == {"status": "healthy"}
+
+
+
 # ==============================================================================
 # 2. Direct Function Execution Tests
 # ==============================================================================
@@ -88,6 +96,25 @@ def test_direct_power() -> None:
     assert power(3.0, 3.0) == 27.0
     assert power(5.0, 0.0) == 1.0
     assert power(4.0, 0.5) == 2.0
+
+
+def test_direct_power_boundary_conditions() -> None:
+    """Test that power raises ValueError on division-by-zero or complex results."""
+    with pytest.raises(
+        ValueError, match="Division by zero: zero cannot be raised to a negative exponent"
+    ):
+        power(0.0, -1.0)
+
+    with pytest.raises(
+        ValueError,
+        match="Fractional exponent of a negative base produces a complex number",
+    ):
+        power(-4.0, 0.5)
+
+    # Valid negative base with integer exponent succeeds
+    assert power(-2.0, 3.0) == -8.0
+    assert power(-4.0, 2.0) == 16.0
+
 
 
 # ==============================================================================
@@ -216,6 +243,36 @@ def test_mcp_tools_call_unknown_tool(unauthenticated_client: TestClient) -> None
     data = response.json()
     # FastMCP returns an error or tool result with isError=True
     assert "error" in data or data.get("result", {}).get("isError") is True
+
+
+def test_mcp_tools_call_power_boundary_errors(unauthenticated_client: TestClient) -> None:
+    """Test that FastMCP /mcp returns tool error on power boundary violations."""
+    # Zero to negative power
+    payload_zero = {
+        "jsonrpc": "2.0",
+        "id": "pow-zero-neg",
+        "method": "tools/call",
+        "params": {"name": "power", "arguments": {"base": 0.0, "exponent": -2.0}},
+    }
+    response_zero = unauthenticated_client.post("/mcp", json=payload_zero)
+    assert response_zero.status_code == 200
+    res_zero = response_zero.json().get("result", {})
+    assert res_zero.get("isError") is True
+    assert "Division by zero" in res_zero["content"][0]["text"]
+
+    # Negative base with fractional exponent
+    payload_complex = {
+        "jsonrpc": "2.0",
+        "id": "pow-complex",
+        "method": "tools/call",
+        "params": {"name": "power", "arguments": {"base": -9.0, "exponent": 0.5}},
+    }
+    response_complex = unauthenticated_client.post("/mcp", json=payload_complex)
+    assert response_complex.status_code == 200
+    res_complex = response_complex.json().get("result", {})
+    assert res_complex.get("isError") is True
+    assert "Fractional exponent of a negative base" in res_complex["content"][0]["text"]
+
 
 
 # ==============================================================================
@@ -370,6 +427,45 @@ def test_auth_with_oidc_verification_invalid_token() -> None:
             assert "Token verification failed" in response.json()["detail"]
 
 
+def test_auth_oidc_uses_pooled_auth_request() -> None:
+    """Test that AuthMiddleware reuses a single GoogleAuthRequest instance."""
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+
+    oidc_app = create_app(
+        enforce_auth=True,
+        verify_oidc=True,
+        expected_audience="https://calculator-tool-service-uc.a.run.app",
+        allowed_service_accounts=["agent-sa@cloud-assist-fde-7.iam.gserviceaccount.com"],
+    )
+
+    mock_claims: dict[str, Any] = {
+        "email": "agent-sa@cloud-assist-fde-7.iam.gserviceaccount.com",
+        "aud": "https://calculator-tool-service-uc.a.run.app",
+    }
+
+    with patch(
+        "google.oauth2.id_token.verify_oauth2_token", return_value=mock_claims
+    ) as mock_verify:
+        with TestClient(oidc_app) as client:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "pool-1",
+                "method": "tools/list",
+                "params": {},
+            }
+            res = client.post(
+                "/mcp",
+                json=payload,
+                headers={"Authorization": "Bearer mock-google-id-token"},
+            )
+            assert res.status_code == 200
+            assert mock_verify.called
+            # Verify the request adapter passed was an instance of GoogleAuthRequest
+            passed_request_adapter = mock_verify.call_args[0][1]
+            assert isinstance(passed_request_adapter, GoogleAuthRequest)
+
+
+
 # ==============================================================================
 # 5. Registration Script Dry-Run Tests
 # ==============================================================================
@@ -409,3 +505,72 @@ def test_register_tool_script_dry_run() -> None:
     )
     assert expected_iface in stdout
     assert "gcloud agent-registry services update calculator" in stdout
+
+
+def test_register_tool_script_space_separated_flags() -> None:
+    """Test that register_tool.sh correctly parses space-separated flags."""
+    script_path = Path(__file__).resolve().parent.parent / "scripts" / "register_tool.sh"
+    assert script_path.exists(), f"Registration script not found at {script_path}"
+
+    result = subprocess.run(
+        [
+            str(script_path),
+            "--dry-run",
+            "--project",
+            "custom-project-123",
+            "--location",
+            "europe-west1",
+            "--tool-url",
+            "https://calc-custom.a.run.app",
+            "custom-calc",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, f"Script failed with output: {result.stderr}"
+    stdout = result.stdout
+    assert "gcloud agent-registry services create custom-calc" in stdout
+    assert '--project="custom-project-123"' in stdout
+    assert '--location="europe-west1"' in stdout
+    expected_iface = (
+        '--interfaces="protocolBinding=http-json,'
+        'url=https://calc-custom.a.run.app/mcp"'
+    )
+    assert expected_iface in stdout
+
+
+# ==============================================================================
+# 6. Dockerfile & Packaging Manifest Validation Tests
+# ==============================================================================
+
+
+def test_dockerfile_copies_source_files() -> None:
+    """Test that calculator_service Dockerfile copies source code in builder stage."""
+    dockerfile_path = (
+        Path(__file__).resolve().parent.parent
+        / "demo"
+        / "calculator_service"
+        / "Dockerfile"
+    )
+    assert dockerfile_path.exists(), f"Dockerfile not found at {dockerfile_path}"
+    content = dockerfile_path.read_text()
+    assert "COPY pyproject.toml /app/" in content
+    assert "COPY __init__.py main.py server.py /app/" in content
+    assert "RUN pip install --no-cache-dir --prefix=/install ." in content
+
+
+def test_pyproject_contains_hatchling_wheel_packages() -> None:
+    """Test that calculator_service pyproject.toml configures Hatchling wheel packages."""
+    pyproject_path = (
+        Path(__file__).resolve().parent.parent
+        / "demo"
+        / "calculator_service"
+        / "pyproject.toml"
+    )
+    assert pyproject_path.exists(), f"pyproject.toml not found at {pyproject_path}"
+    content = pyproject_path.read_text()
+    assert "[tool.hatch.build.targets.wheel]" in content
+    assert 'packages = ["."]' in content
+

@@ -65,6 +65,10 @@ def power(base: float, exponent: float) -> float:
     Returns:
         Base raised to the exponent power.
     """
+    if base == 0 and exponent < 0:
+        raise ValueError("Division by zero: zero cannot be raised to a negative exponent")
+    if base < 0 and not exponent.is_integer():
+        raise ValueError("Fractional exponent of a negative base produces a complex number")
     return float(base**exponent)
 
 
@@ -90,12 +94,22 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self.verify_oidc = verify_oidc
         self.expected_audience = expected_audience
         self.allowed_service_accounts = allowed_service_accounts
+        if self.verify_oidc:
+            from google.auth.transport.requests import Request as GoogleAuthRequest
+
+            self._auth_request: Any = GoogleAuthRequest()
+        else:
+            self._auth_request = None
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         # Exempt health probes and CORS preflight OPTIONS requests from authentication
-        if not self.enforce_auth or request.url.path == "/health" or request.method == "OPTIONS":
+        if (
+            not self.enforce_auth
+            or request.url.path.rstrip("/") == "/health"
+            or request.method == "OPTIONS"
+        ):
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization")
@@ -120,12 +134,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         if self.verify_oidc:
             try:
-                from google.auth.transport.requests import Request as GoogleAuthRequest
                 from google.oauth2 import id_token
 
                 claims: dict[str, Any] = id_token.verify_oauth2_token(
                     token,
-                    GoogleAuthRequest(),
+                    self._auth_request,
                     audience=self.expected_audience,
                 )
                 if self.allowed_service_accounts:

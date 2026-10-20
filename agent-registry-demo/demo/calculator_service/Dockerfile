@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml /app/
+COPY __init__.py main.py server.py /app/
 RUN pip install --no-cache-dir --prefix=/install .
 
 # Final runtime stage
