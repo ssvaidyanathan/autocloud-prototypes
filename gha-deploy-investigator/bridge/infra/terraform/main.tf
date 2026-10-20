@@ -268,6 +268,13 @@ resource "google_cloud_run_v2_service" "bridge" {
     google_secret_manager_secret_iam_member.bridge_snow_token_access,
     google_secret_manager_secret_iam_member.bridge_gh_key_access,
   ]
+
+  lifecycle {
+    ignore_changes = [
+      client,
+      client_version,
+    ]
+  }
 }
 
 # Allow public access for inbound webhooks and callbacks
