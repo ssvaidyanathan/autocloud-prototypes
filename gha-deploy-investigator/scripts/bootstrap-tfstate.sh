@@ -128,14 +128,15 @@ if [ "${DRY_RUN}" = true ]; then
     echo "${YELLOW}[DRY RUN] Plan for bootstrapping GCS state bucket:${NC}"
     echo "1. Check if bucket exists: gcloud storage buckets describe ${BUCKET_URI} --project=${PROJECT_ID}"
     echo "2. If not exists: gcloud storage buckets create ${BUCKET_URI} --project=${PROJECT_ID} --location=${REGION} --uniform-bucket-level-access --public-access-prevention"
-    echo "3. Enforce uniform bucket-level access: gcloud storage buckets update ${BUCKET_URI} --uniform-bucket-level-access"
-    echo "4. Enforce public access prevention: gcloud storage buckets update ${BUCKET_URI} --public-access-prevention"
-    echo "5. Enforce object versioning: gcloud storage buckets update ${BUCKET_URI} --versioning"
-    echo "6. Apply common labels: gcloud storage buckets update ${BUCKET_URI} --update-labels=app=gha-deploy-investigator,component=tfstate,env=${ENVIRONMENT},prefix=${NAME_PREFIX}"
+    echo "3. Enforce uniform bucket-level access: gcloud storage buckets update ${BUCKET_URI} --project=${PROJECT_ID} --uniform-bucket-level-access"
+    echo "4. Enforce public access prevention: gcloud storage buckets update ${BUCKET_URI} --project=${PROJECT_ID} --public-access-prevention"
+    echo "5. Enforce object versioning: gcloud storage buckets update ${BUCKET_URI} --project=${PROJECT_ID} --versioning"
+    echo "6. Apply common labels: gcloud storage buckets update ${BUCKET_URI} --project=${PROJECT_ID} --update-labels=app=gha-deploy-investigator,component=tfstate,env=${ENVIRONMENT},prefix=${NAME_PREFIX}"
+    echo "7. Generate backend configuration files (backend.hcl):"
     for stack in "${STACKS[@]}"; do
-        echo "7. Generate ${stack}/infra/terraform/backend.hcl (bucket=${BUCKET_NAME}, prefix=${NAME_PREFIX}/${stack})"
+        echo "   - Generate ${stack}/infra/terraform/backend.hcl (bucket=${BUCKET_NAME}, prefix=${NAME_PREFIX}/${stack})"
     done
-    echo -e "\n${GREEN}[DRY RUN] Bootstrap simulation completed successfully.${NC}"
+    printf '\n%s\n' "${GREEN}[DRY RUN] Bootstrap simulation completed successfully.${NC}"
     exit 0
 fi
 
@@ -181,13 +182,14 @@ fi
 echo "Applying security settings and labels to ${BUCKET_URI}..."
 if [ "${USE_GCLOUD_STORAGE}" = true ]; then
     # Uniform bucket-level access
-    gcloud storage buckets update "${BUCKET_URI}" --uniform-bucket-level-access
+    gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" --uniform-bucket-level-access
     # Public access prevention
-    gcloud storage buckets update "${BUCKET_URI}" --public-access-prevention
+    gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" --public-access-prevention
     # Object versioning
-    gcloud storage buckets update "${BUCKET_URI}" --versioning
+    gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" --versioning
     # Labels
     gcloud storage buckets update "${BUCKET_URI}" \
+        --project="${PROJECT_ID}" \
         --update-labels="app=gha-deploy-investigator,component=tfstate,env=${ENVIRONMENT},prefix=${NAME_PREFIX}"
 else
     # gsutil fallback
@@ -218,5 +220,5 @@ EOF
     fi
 done
 
-echo -e "\n${GREEN}${BOLD}SUCCESS: Terraform state bucket ${BUCKET_URI} configured successfully.${NC}"
+printf '\n%s\n' "${GREEN}${BOLD}SUCCESS: Terraform state bucket ${BUCKET_URI} configured successfully.${NC}"
 echo "Stack backend.hcl files generated. You can now run 'terraform init -backend-config=backend.hcl' in each stack."

@@ -887,6 +887,10 @@ To migrate an existing deployment with local `terraform.tfstate` files to the GC
    ```
    Terraform should report `No changes. Your infrastructure matches the configuration.`
 
+> [!WARNING]
+> **Do not delete local state files prematurely**:
+> Do not delete or remove local `terraform.tfstate` or `terraform.tfstate.backup` files until `terraform plan` reports `No changes` across all stacks and state integrity is verified. Keep local backups until the remote backend is fully verified in your team workflow.
+
 ---
 
 ## 12. Enterprise Organization Policy Considerations

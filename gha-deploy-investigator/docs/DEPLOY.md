@@ -157,7 +157,16 @@ cd gha-deploy-investigator
 # 1. Initialize Terraform stacks
 terraform -chdir=agent/infra/terraform init -backend-config=backend.hcl
 terraform -chdir=bridge/infra/terraform init -backend-config=backend.hcl
+```
 
+> [!NOTE]
+> **Migrating Existing Local Deployments**: If migrating from existing local `terraform.tfstate` files rather than initializing fresh stacks, run `terraform init -migrate-state -backend-config=backend.hcl` in each stack directory and verify with `terraform plan` (see [README.md Section 11](../README.md#migrating-existing-local-state)).
+
+> [!WARNING]
+> **Do not delete local state files prematurely**:
+> Do not delete or remove local `terraform.tfstate` or `terraform.tfstate.backup` files until `terraform plan` reports `No changes` across all stacks and state integrity is verified. Keep local backups until the remote backend is fully verified in your team workflow.
+
+```bash
 # 2. Provision Agent stack secret container and service accounts
 terraform -chdir=agent/infra/terraform apply \
     -var="project_id=${PROJECT_ID}" \
