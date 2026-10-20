@@ -10,7 +10,7 @@ resource "google_agent_registry_service" "calculator" {
   }
 
   interfaces {
-    protocol_binding = "http-json"
+    protocol_binding = "JSONRPC"
     url              = "${var.calculator_service_url}/mcp"
   }
 }

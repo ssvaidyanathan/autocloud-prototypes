@@ -200,7 +200,7 @@ if [[ "${EXISTS}" == "true" ]]; then
     --location="${REGION}"
     --display-name="${DISPLAY_NAME}"
     --description="${DESCRIPTION}"
-    --interfaces="protocolBinding=http-json,url=${INTERFACE_URL}"
+    --interfaces="protocolBinding=jsonrpc,url=${INTERFACE_URL}"
   )
 else
   CMD=(
@@ -210,7 +210,7 @@ else
     --display-name="${DISPLAY_NAME}"
     --description="${DESCRIPTION}"
     --mcp-server-spec-type=no-spec
-    --interfaces="protocolBinding=http-json,url=${INTERFACE_URL}"
+    --interfaces="protocolBinding=jsonrpc,url=${INTERFACE_URL}"
   )
 fi
 
@@ -222,7 +222,7 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "    --display-name=\"${DISPLAY_NAME}\" \\"
   echo "    --description=\"${DESCRIPTION}\" \\"
   echo "    --mcp-server-spec-type=no-spec \\"
-  echo "    --interfaces=\"protocolBinding=http-json,url=${INTERFACE_URL}\""
+  echo "    --interfaces=\"protocolBinding=jsonrpc,url=${INTERFACE_URL}\""
   echo ""
   echo "[dry-run] Or update command (if service already exists):"
   echo "  gcloud agent-registry services update ${SERVICE_NAME} \\"
@@ -230,7 +230,7 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "    --location=\"${REGION}\" \\"
   echo "    --display-name=\"${DISPLAY_NAME}\" \\"
   echo "    --description=\"${DESCRIPTION}\" \\"
-  echo "    --interfaces=\"protocolBinding=http-json,url=${INTERFACE_URL}\""
+  echo "    --interfaces=\"protocolBinding=jsonrpc,url=${INTERFACE_URL}\""
   exit 0
 fi
 
