@@ -533,11 +533,13 @@ def test_import_app_main_without_demo_in_sys_path() -> None:
         "import app.main\n"
         "print('app.main imported cleanly without demo package')\n"
     )
+    project_root = str(Path(__file__).resolve().parent.parent)
     result = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
         check=False,
+        cwd=project_root,
     )
     assert result.returncode == 0, f"Import failed with stderr: {result.stderr}"
     assert "app.main imported cleanly without demo package" in result.stdout
