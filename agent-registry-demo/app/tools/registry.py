@@ -76,7 +76,7 @@ class ToolRegistryManager:
     ) -> McpToolset:
         """Resolve and instantiate McpToolset configured with Streamable HTTP transport."""
         target_url = url or self.tool_service_url
-        params_kwargs: dict[str, Any] = {"url": target_url}
+        params_kwargs: dict[str, Any] = {"url": target_url, "timeout": 30.0}
         if self.http_client_factory is not None:
             params_kwargs["httpx_client_factory"] = self.http_client_factory
 

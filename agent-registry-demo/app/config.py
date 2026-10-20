@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     calculator_service_url: str = "http://localhost:8080/mcp"
     calculator_mcp_server: str = "calculator"
     model_name: str = Field(
-        default="gemini-2.0-flash-001",
+        default="gemini-2.5-flash",
         validation_alias=AliasChoices("model_name", "gemini_model"),
     )
     mock_registry: bool = False

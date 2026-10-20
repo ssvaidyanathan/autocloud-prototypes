@@ -22,7 +22,7 @@ Implemented Phase 7 Remediation addressing all findings from reviewer and lead a
 
 3. **Real ADK `LlmAgent` + `Runner` Execution Flow (`app/main.py`)**:
    - Eliminated regex-based prompt matching and pseudo-agent simulation.
-   - Wired ADK `LlmAgent` with `model=settings.model_name` (defaulting to `"gemini-2.0-flash-001"`), `instruction=active_skill.instructions`, and tools dynamically populated via `SkillToolset` / `McpToolset`.
+   - Wired ADK `LlmAgent` with `model=settings.model_name`, `instruction=active_skill.instructions`, and tools dynamically populated via `SkillToolset` / `McpToolset`.
    - Managed multi-turn sessions using ADK `Runner` and `InMemorySessionService`.
    - Added `extract_provenance_from_events` to inspect ADK run events, extracting `FunctionCall` arguments and `FunctionResponse` results.
    - For offline mock mode (`MOCK_REGISTRY=true`), agent executes actual JSON-RPC `tools/call` requests over the mock transport against the FastMCP router, capturing dynamic function execution events without requiring live Vertex AI credentials.
