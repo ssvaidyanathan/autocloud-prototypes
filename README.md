@@ -3,6 +3,9 @@ A repo of Autocloud prototypes
 
 ## Prototypes
 
+### Agent Registry Demo
+Autonomous agent prototype built with the Google Agent Development Kit (ADK) and Gemini that loads its skills from Google Cloud Agent Registry. Discovers tools through a registry-registered Model Context Protocol (MCP) calculator server, picks up skill updates without a redeploy using an in-memory TTL cache and cache invalidation endpoint, and returns structured provenance in responses while operating fail-closed with no fallbacks. See [agent-registry-demo/](agent-registry-demo/) for documentation and setup instructions.
+
 ### Incident SRE Agent
 Autonomous SRE agent prototype for Google Cloud Platform incident investigation, root cause diagnosis, and bidirectional ITSM ticket enrichment (ServiceNow and Jira). See [incident-sre-agent/](incident-sre-agent/) for documentation and setup instructions.
 
