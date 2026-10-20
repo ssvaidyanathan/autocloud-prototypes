@@ -20,7 +20,7 @@ set -euo pipefail
 PROJECT_ID="${PROJECT_ID:-demo-project-id}"
 REGION="${REGION:-us-central1}"
 SERVICE_NAME="ambient-calculator"
-DISPLAY_NAME="${DISPLAY_NAME:-Ambient Precision Calculator Service}"
+DISPLAY_NAME="${DISPLAY_NAME:-Precision Calculator Service}"
 DESCRIPTION="${DESCRIPTION:-Provides verified arithmetic operations (add, multiply, power)}"
 DRY_RUN=false
 TOOL_SERVICE_URL=""
