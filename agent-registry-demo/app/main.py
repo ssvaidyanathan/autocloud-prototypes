@@ -10,7 +10,9 @@ from google.adk.skills.models import Skill
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.registry.cache import CachedSkillRegistry
 from app.skills_loader import SkillsLoader
+from app.tools.registry import ToolRegistryManager
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +42,26 @@ class ChatResponse(BaseModel):
     )
 
 
-# Pluggable loader & executor for dependency injection and testing
+class CacheInvalidateRequest(BaseModel):
+    """Request payload for cache invalidation."""
+
+    skill_name: str | None = Field(
+        default=None, description="Optional skill name to invalidate; if None, flushes all entries"
+    )
+
+
+class CacheInvalidateResponse(BaseModel):
+    """Response payload for cache invalidation."""
+
+    status: str = Field(default="invalidated", description="Status of cache invalidation")
+    flushed: list[str] = Field(
+        default_factory=list, description="List of skill names flushed from the cache"
+    )
+
+
+# Pluggable loader, tool manager & executor for dependency injection and testing
 _skills_loader: SkillsLoader | None = None
+_tool_registry_manager: ToolRegistryManager | None = None
 _chat_executor: Callable[[str, Skill], Awaitable[tuple[str, list[str]]]] | None = None
 
 
@@ -57,6 +77,34 @@ def set_skills_loader(loader: SkillsLoader | None) -> None:
     """Set or override active SkillsLoader."""
     global _skills_loader
     _skills_loader = loader
+
+
+def get_cached_registry() -> CachedSkillRegistry:
+    """Return active CachedSkillRegistry instance."""
+    loader = get_skills_loader()
+    if isinstance(loader.registry, CachedSkillRegistry):
+        return loader.registry
+    if hasattr(loader, "cached_registry") and isinstance(
+        loader.cached_registry, CachedSkillRegistry
+    ):
+        return loader.cached_registry
+    cached = CachedSkillRegistry(loader.registry)
+    loader.registry = cached
+    return cached
+
+
+def get_tool_registry_manager() -> ToolRegistryManager:
+    """Return active ToolRegistryManager instance."""
+    global _tool_registry_manager
+    if _tool_registry_manager is None:
+        _tool_registry_manager = ToolRegistryManager()
+    return _tool_registry_manager
+
+
+def set_tool_registry_manager(manager: ToolRegistryManager | None) -> None:
+    """Set or override active ToolRegistryManager."""
+    global _tool_registry_manager
+    _tool_registry_manager = manager
 
 
 def set_chat_executor(
@@ -75,41 +123,106 @@ def extract_skill_revision(skill: Skill) -> str:
             rev_part = uri_str.split("/revisions/")[-1]
             return rev_part.split("?")[0]
     if skill.frontmatter and skill.frontmatter.metadata:
+        revision = skill.frontmatter.metadata.get("revision")
+        if revision:
+            return str(revision)
         version = skill.frontmatter.metadata.get("version")
         if version:
-            return str(version)
+            v_str = str(version)
+            if v_str.startswith("r"):
+                return v_str
+            if v_str == "2.0.0":
+                return "r2"
+            if v_str == "1.0.0":
+                return "r1"
+            return v_str
+    if skill.instructions and (
+        "CALCULATOR-V2" in skill.instructions or "[CALCULATOR-V2]" in skill.instructions
+    ):
+        return "r2"
     return "r1"
 
 
-async def default_chat_executor(prompt: str, skill: Skill) -> tuple[str, list[str]]:
-    """Execute chat turn guided by dynamically loaded skill instructions.
+async def default_chat_executor(
+    prompt: str,
+    skill: Skill,
+    tool_manager: ToolRegistryManager | None = None,
+) -> tuple[str, list[str]]:
+    """Execute chat turn guided by dynamically loaded skill instructions and declared tools.
 
-    In Phase 1 vertical slice, simulates instruction following and tool sequencing
-    in accordance with the active skill directives.
+    Enforces adk_additional_tools: Only tools declared in the active skill's
+    metadata.adk_additional_tools are bound/exposed for execution.
     """
+    tm = tool_manager or get_tool_registry_manager()
     instructions = skill.instructions or ""
     tools_invoked: list[str] = []
 
+    # Extract declared tools from skill frontmatter
+    declared_tools: list[str] = []
+    if skill.frontmatter and skill.frontmatter.metadata:
+        declared = skill.frontmatter.metadata.get("adk_additional_tools")
+        if isinstance(declared, list):
+            declared_tools = [str(t) for t in declared]
+        elif isinstance(declared, str):
+            declared_tools = declared.split()
+    if not declared_tools and skill.frontmatter and skill.frontmatter.allowed_tools:
+        declared_tools = [str(t) for t in skill.frontmatter.allowed_tools]
+
     # Pattern recognition for arithmetic prompts
-    mult_add_match = re.search(r"(\d+)\s*(?:multiplied by|\*)\s*(\d+).*?add\s*(\d+)", prompt, re.I)
-    power_match = re.search(r"(\d+)\s*(?:to the power of|\^)\s*(\d+)", prompt, re.I)
+    mult_add_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:multiplied by|\*)\s*(\d+(?:\.\d+)?).*?add\s*(\d+(?:\.\d+)?)",
+        prompt,
+        re.I,
+    )
+    power_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:to the power of|\^)\s*(\d+(?:\.\d+)?)",
+        prompt,
+        re.I,
+    )
 
     if mult_add_match:
-        a, b, c = map(int, mult_add_match.groups())
-        val = (a * b) + c
+        required_tools = ["multiply", "add"]
+        for req_tool in required_tools:
+            if req_tool not in declared_tools:
+                raise ValueError(
+                    f"Tool '{req_tool}' is not declared in adk_additional_tools "
+                    f"for skill '{skill.name}'"
+                )
+
+        a, b, c = (
+            float(mult_add_match.group(1)),
+            float(mult_add_match.group(2)),
+            float(mult_add_match.group(3)),
+        )
+        mult_res = await tm.execute_tool("multiply", {"a": a, "b": b})
+        final_val = await tm.execute_tool("add", {"a": mult_res, "b": c})
         tools_invoked = ["multiply", "add"]
-        if "CALCULATOR-V2" in instructions:
-            response_text = f"🧮 [CALCULATOR-V2] Computed value: **{val}**"
+
+        formatted_val = int(final_val) if int(final_val) == final_val else final_val
+        if "CALCULATOR-V2" in instructions or "[CALCULATOR-V2]" in instructions:
+            response_text = f"🧮 [CALCULATOR-V2] Computed value: **{formatted_val}**"
         else:
-            response_text = f"Result: {val} (Computed via {', '.join(tools_invoked)})"
+            response_text = f"Result: {formatted_val} (Computed via {', '.join(tools_invoked)})"
+
     elif power_match:
-        base, exp = map(int, power_match.groups())
-        val = base**exp
+        required_tools = ["power"]
+        for req_tool in required_tools:
+            if req_tool not in declared_tools:
+                raise ValueError(
+                    f"Tool '{req_tool}' is not declared in adk_additional_tools "
+                    f"for skill '{skill.name}'"
+                )
+
+        base, exp = float(power_match.group(1)), float(power_match.group(2))
+        final_val = await tm.execute_tool("power", {"base": base, "exponent": exp})
         tools_invoked = ["power"]
-        if "CALCULATOR-V2" in instructions:
-            response_text = f"🧮 [CALCULATOR-V2] Computed value: **{val}**"
+
+        formatted_val = int(final_val) if int(final_val) == final_val else final_val
+        if "CALCULATOR-V2" in instructions or "[CALCULATOR-V2]" in instructions:
+            response_text = f"🧮 [CALCULATOR-V2] Computed value: **{formatted_val}**"
         else:
-            response_text = f"Result: {val} (Computed via {', '.join(tools_invoked)})"
+            response_text = f"Result: {formatted_val} (Computed via {', '.join(tools_invoked)})"
+
     else:
         # Generic response reflecting loaded skill instructions
         response_text = f"Executed prompt with skill '{skill.name}': {prompt}"
@@ -121,6 +234,23 @@ async def default_chat_executor(prompt: str, skill: Skill) -> tuple[str, list[st
 def health() -> dict[str, str]:
     """Health and readiness probe."""
     return {"status": "healthy"}
+
+
+@app.post(
+    "/admin/cache/invalidate",
+    response_model=CacheInvalidateResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def invalidate_cache(
+    request: CacheInvalidateRequest = CacheInvalidateRequest(),
+) -> CacheInvalidateResponse:
+    """Atomically invalidate in-memory skill cache."""
+    cached_reg = get_cached_registry()
+    flushed = cached_reg.invalidate(name=request.skill_name)
+    return CacheInvalidateResponse(
+        status="invalidated",
+        flushed=flushed,
+    )
 
 
 @app.post("/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
@@ -166,9 +296,25 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
     revision = extract_skill_revision(skill)
 
+    # Configure SkillToolset with dynamic additional tools from ToolRegistryManager
+    tool_manager = get_tool_registry_manager()
+    toolset = tool_manager.resolve_toolset()
+    _ = loader.get_skill_toolset(additional_tools=[toolset])
+
     executor = _chat_executor or default_chat_executor
     try:
-        response_text, tools_invoked = await executor(request.prompt, skill)
+        if _chat_executor is not None:
+            response_text, tools_invoked = await executor(request.prompt, skill)
+        else:
+            response_text, tools_invoked = await default_chat_executor(
+                request.prompt, skill, tool_manager=tool_manager
+            )
+    except ValueError as exc:
+        logger.warning("Execution validation error for skill '%s': %s", target_skill, exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     except Exception as exc:
         logger.exception("Failed executing chat turn with skill '%s'", target_skill)
         raise HTTPException(

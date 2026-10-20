@@ -8,7 +8,7 @@ from typing import Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app, set_chat_executor, set_skills_loader
+from app.main import app, set_chat_executor, set_skills_loader, set_tool_registry_manager
 
 
 def create_skill_zip(
@@ -93,7 +93,9 @@ def test_client() -> Iterator[TestClient]:
     # Reset global overrides
     set_skills_loader(None)
     set_chat_executor(None)
+    set_tool_registry_manager(None)
     client = TestClient(app)
     yield client
     set_skills_loader(None)
     set_chat_executor(None)
+    set_tool_registry_manager(None)

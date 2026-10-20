@@ -8,6 +8,7 @@ from google.adk.skills.skill_registry import SkillRegistry
 from google.adk.tools.skill_toolset import SkillToolset
 
 from app.config import get_settings
+from app.registry.cache import CachedSkillRegistry
 from app.registry.client import GCPSkillRegistryClient
 
 logger = logging.getLogger(__name__)
@@ -27,17 +28,30 @@ class SkillsLoader:
         project_id: str | None = None,
         location: str | None = None,
         base_url: str | None = None,
+        cache_ttl: float | None = None,
     ) -> None:
-        """Initialize the SkillsLoader with an Agent Registry client."""
+        """Initialize the SkillsLoader with a Cached Agent Registry client."""
+        settings = get_settings()
+        ttl = cache_ttl if cache_ttl is not None else settings.skill_cache_ttl
+
         if registry is not None:
-            self.registry = registry
+            if isinstance(registry, CachedSkillRegistry):
+                self.cached_registry = registry
+            else:
+                self.cached_registry = CachedSkillRegistry(registry, ttl_seconds=ttl)
         else:
-            settings = get_settings()
-            self.registry = GCPSkillRegistryClient(
+            base_client = GCPSkillRegistryClient(
                 project_id=project_id or settings.project_id,
                 location=location or settings.region,
                 base_url=base_url or settings.agent_registry_endpoint,
             )
+            self.cached_registry = CachedSkillRegistry(base_client, ttl_seconds=ttl)
+
+        self.registry = self.cached_registry
+
+    def invalidate(self, name: str | None = None) -> list[str]:
+        """Atomically invalidate specific cached skill or all cached skills."""
+        return self.cached_registry.invalidate(name=name)
 
     async def resolve_skill(self, name: str) -> Skill:
         """Fetch and return an ADK Skill instance from the registry.

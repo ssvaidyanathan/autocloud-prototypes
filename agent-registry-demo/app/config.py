@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     service_name: str = "agent-registry-demo"
     skill_name: str = "calculator"
+    skill_cache_ttl: float = 60.0
+    tools_registry_endpoint: str = "https://agentregistry.googleapis.com/v1"
+    calculator_service_url: str = "http://localhost:8080/mcp"
+    calculator_mcp_server: str = "calculator"
 
 
 @lru_cache
