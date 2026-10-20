@@ -24,10 +24,6 @@ resource "google_cloud_run_v2_service" "calculator" {
       }
 
       env {
-        name  = "PORT"
-        value = "8080"
-      }
-      env {
         name  = "LOG_LEVEL"
         value = "INFO"
       }
@@ -93,11 +89,11 @@ resource "google_cloud_run_v2_service" "agent" {
       }
       env {
         name  = "TOOL_SERVICE_URL"
-        value = google_cloud_run_v2_service.calculator.uri
+        value = "${google_cloud_run_v2_service.calculator.uri}/mcp"
       }
       env {
-        name  = "PORT"
-        value = "8080"
+        name  = "CALCULATOR_SERVICE_URL"
+        value = "${google_cloud_run_v2_service.calculator.uri}/mcp"
       }
       env {
         name  = "LOG_LEVEL"
