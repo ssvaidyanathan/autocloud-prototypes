@@ -73,6 +73,24 @@ The agent service runs behind internal ingress, coordinates autonomous ADK multi
 | `GOOGLE_API_KEY` | String (Secret) | `None` | No | Direct Google AI Studio API key (used if running offline/local outside Vertex AI) |
 | `GEMINI_API_KEY` | String (Secret) | `None` | No | Alias for `GOOGLE_API_KEY` for Google AI Studio API access |
 
+### 1.3 Terraform Remote State & GCS Backend
+
+All 3 Terraform stacks (`agent`, `bridge`, `demo`) define a partial GCS backend:
+```hcl
+terraform {
+  backend "gcs" {}
+}
+```
+- **State Bucket**: Bootstrapped via `scripts/bootstrap-tfstate.sh` with uniform bucket-level access, public access prevention, object versioning, and common labels (`app=gha-deploy-investigator`, `component=tfstate`, `env=${ENVIRONMENT}`, `prefix=${NAME_PREFIX}`).
+- **Backend Configuration**: Provided via `backend.hcl` (`bucket = "..."`, `prefix = "gdi/agent"`) or CLI flag `-backend-config`.
+- **CI & Local Validation**: Pre-deployment quality gates and CI use `terraform init -backend=false` to validate syntax and schemas without cloud dependencies.
+- **State Migration**: For existing deployments migrating from local state, initialize each stack with `terraform init -migrate-state -backend-config=backend.hcl` and verify with `terraform plan` (see [README.md Section 11](../README.md#migrating-existing-local-state)).
+- **Disaster Recovery**: State recovery is enabled by GCS object versioning.
+
+> [!WARNING]
+> **Do not delete local state files prematurely**:
+> Do not delete or remove local `terraform.tfstate` or `terraform.tfstate.backup` files until `terraform plan` reports `No changes` across all stacks and state integrity is verified. Keep local backups until the remote backend is fully verified in your team workflow.
+
 ---
 
 ## 2. GitHub App Setup Guide (Personal App for `ssvaidyanathan`)

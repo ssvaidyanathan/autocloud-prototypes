@@ -19,7 +19,38 @@ To allow a newcomer or automation pipeline to deploy `gha-deploy-investigator` e
 - **`roles/resourcemanager.projectIamAdmin`**: Binds project-level IAM roles (`roles/aiplatform.user`, `roles/logging.viewer`, `roles/run.viewer`) to service accounts.
 - **`roles/cloudbuild.builds.editor`**: Submits container image builds via Google Cloud Build.
 - **`roles/serviceusage.serviceUsageAdmin`**: Enables required Google Cloud APIs if not already activated.
-- **Terraform State Access**: `roles/storage.objectAdmin` on the remote GCS state bucket (if using a remote backend).
+- **`roles/storage.admin`**: Creates and configures the GCS remote state bucket (`scripts/bootstrap-tfstate.sh`).
+
+> [!NOTE]
+> **Least Privilege vs. Project Owner**:
+> In enterprise environments where `roles/owner` cannot be granted to CI/CD pipelines or development personnel, the 11 granular roles listed above provide the exact least-privilege boundary required to provision the infrastructure, deploy containers, configure WIF, and bind runtime IAM policies without granting arbitrary project mutation or billing administration authority.
+
+#### One-Shot Provisioning Script for Deployer Roles
+```bash
+# Grant least-privilege operator roles to the deploying identity (User or Deployment SA)
+OPERATOR_PRINCIPAL="user:you@example.com" # or "serviceAccount:deployer@${PROJECT_ID}.iam.gserviceaccount.com"
+
+OPERATOR_ROLES=(
+    "roles/serviceusage.serviceUsageAdmin"
+    "roles/resourcemanager.projectIamAdmin"
+    "roles/iam.serviceAccountAdmin"
+    "roles/iam.serviceAccountUser"
+    "roles/iam.workloadIdentityPoolAdmin"
+    "roles/artifactregistry.admin"
+    "roles/secretmanager.admin"
+    "roles/cloudtasks.admin"
+    "roles/run.admin"
+    "roles/cloudbuild.builds.editor"
+    "roles/storage.admin"
+)
+
+for role in "${OPERATOR_ROLES[@]}"; do
+    gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+        --member="${OPERATOR_PRINCIPAL}" \
+        --role="${role}" \
+        --condition=None
+done
+```
 
 > [!NOTE]
 > **Post-Deployment Least-Privilege Role Revocation**:
@@ -36,6 +67,9 @@ To allow a newcomer or automation pipeline to deploy `gha-deploy-investigator` e
 >     --role="roles/artifactregistry.admin" \
 >     --condition=None
 > ```
+
+> [!NOTE]
+> For enterprise organization policy constraints (domain-restricted sharing, Cloud Run ingress, Workload Identity restrictions), see [README Section 12: Enterprise Organization Policy Considerations](../README.md#12-enterprise-organization-policy-considerations).
 
 ### Required Google Cloud APIs
 Ensure the following APIs are enabled in your target GCP project:
@@ -76,14 +110,15 @@ export DEMO_REPO_NAME="gdi-sample-pipeline-app"
 
 ## 2. Runtime Service Accounts & Architectural Roles
 
-Terraform creates four dedicated least-privilege service accounts:
+Terraform creates five dedicated least-privilege service accounts:
 
 | Service Account ID | Display Name / Component | Roles & Permissions |
 | :--- | :--- | :--- |
 | `${NAME_PREFIX}-agent-sa` | GDI Agent Runtime SA | `roles/aiplatform.user` (Gemini model invocation)<br>`roles/logging.viewer` (Workflow log reading)<br>`roles/run.viewer` (Cloud Run inspection)<br>`roles/secretmanager.secretAccessor` on `${NAME_PREFIX}-github-app-private-key` |
-| `${NAME_PREFIX}-bridge-sa` | GDI Bridge Runtime SA | `roles/cloudtasks.enqueuer` on `${NAME_PREFIX}-tasks-queue`<br>`roles/secretmanager.secretAccessor` on all 4 bridge secrets and `${NAME_PREFIX}-github-app-private-key` (write-back) |
+| `${NAME_PREFIX}-bridge-sa` | GDI Bridge Runtime SA | `roles/cloudtasks.enqueuer` on `${NAME_PREFIX}-tasks-queue`<br>`roles/iam.serviceAccountUser` on `${NAME_PREFIX}-tasks-invoker-sa`<br>`roles/secretmanager.secretAccessor` on all 4 bridge secrets and `${NAME_PREFIX}-github-app-private-key` (write-back) |
 | `${NAME_PREFIX}-tasks-invoker-sa` | Cloud Tasks OIDC Invoker SA | `roles/run.invoker` on `${NAME_PREFIX}-agent` internal Cloud Run service |
-| `${NAME_PREFIX}-demo-deployer-sa` | Demo Pipeline CI/CD SA | `roles/run.admin` on project<br>`roles/artifactregistry.writer` on demo Artifact Registry<br>`roles/iam.serviceAccountUser` on itself<br>`roles/iam.workloadIdentityUser` bound to GitHub OIDC subject |
+| `${NAME_PREFIX}-demo-deployer-sa` | Demo Pipeline CI/CD SA | `roles/run.admin` on project<br>`roles/artifactregistry.writer` on demo Artifact Registry<br>`roles/iam.serviceAccountUser` on `${NAME_PREFIX}-demo-app-sa` (and on itself)<br>`roles/iam.workloadIdentityUser` bound to GitHub OIDC subject |
+| `${NAME_PREFIX}-demo-app-sa` | Demo App Cloud Run Runtime SA | Minimal runtime execution identity for Cloud Run demo service |
 
 ---
 
@@ -116,10 +151,22 @@ Provision these secret containers and their IAM bindings before deploying Cloud 
 ```bash
 cd gha-deploy-investigator
 
-# 1. Initialize Terraform stacks
-terraform -chdir=agent/infra/terraform init
-terraform -chdir=bridge/infra/terraform init
+# 0. Bootstrap GCS remote state bucket and generate backend.hcl
+./scripts/bootstrap-tfstate.sh --project-id "${PROJECT_ID}" --name-prefix "${NAME_PREFIX}" --region "${REGION}"
 
+# 1. Initialize Terraform stacks
+terraform -chdir=agent/infra/terraform init -backend-config=backend.hcl
+terraform -chdir=bridge/infra/terraform init -backend-config=backend.hcl
+```
+
+> [!NOTE]
+> **Migrating Existing Local Deployments**: If migrating from existing local `terraform.tfstate` files rather than initializing fresh stacks, run `terraform init -migrate-state -backend-config=backend.hcl` in each stack directory and verify with `terraform plan` (see [README.md Section 11](../README.md#migrating-existing-local-state)).
+
+> [!WARNING]
+> **Do not delete local state files prematurely**:
+> Do not delete or remove local `terraform.tfstate` or `terraform.tfstate.backup` files until `terraform plan` reports `No changes` across all stacks and state integrity is verified. Keep local backups until the remote backend is fully verified in your team workflow.
+
+```bash
 # 2. Provision Agent stack secret container and service accounts
 terraform -chdir=agent/infra/terraform apply \
     -var="project_id=${PROJECT_ID}" \
@@ -258,7 +305,7 @@ To test the end-to-end pipeline against a dedicated customer-style repository wi
 ### 1. Provision Demo WIF Stack via Terraform
 ```bash
 cd demo/infra/terraform
-terraform init
+terraform init -backend-config=backend.hcl
 terraform apply \
     -var="project_id=${PROJECT_ID}" \
     -var="region=${REGION}" \

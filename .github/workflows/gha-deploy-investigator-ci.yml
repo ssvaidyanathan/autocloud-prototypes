@@ -107,9 +107,9 @@ jobs:
       - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: "1.9.8"
-      - name: Validate Terraform stacks (agent, bridge)
+      - name: Validate Terraform stacks (agent, bridge, demo)
         run: |
-          for stack in agent/infra/terraform bridge/infra/terraform; do
+          for stack in agent/infra/terraform bridge/infra/terraform demo/infra/terraform; do
             echo "Checking ${stack}..."
             terraform -chdir="${stack}" fmt -check
             terraform -chdir="${stack}" init -backend=false

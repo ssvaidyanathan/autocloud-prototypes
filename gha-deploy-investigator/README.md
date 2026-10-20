@@ -22,7 +22,7 @@ An autonomous SRE diagnostic platform for continuous integration and delivery. W
 - [9. Full Step-by-Step GCP Deployment Walkthrough](#9-full-step-by-step-gcp-deployment-walkthrough)
   - [Prerequisites & IAM Requirements](#prerequisites--iam-requirements)
   - [Step 1: Clone Repository and Local Environment Setup](#step-1-clone-repository-and-local-environment-setup)
-  - [Step 1b: Configure Terraform State & Backend](#step-1b-configure-terraform-state--backend)
+  - [Step 1b: Bootstrap GCS Remote State & Configure Backend](#step-1b-bootstrap-gcs-remote-state--configure-backend)
   - [Step 2: Deploy Investigator Agent Infrastructure](#step-2-deploy-investigator-agent-infrastructure)
   - [Step 3: Deploy Ingestion Bridge Infrastructure](#step-3-deploy-ingestion-bridge-infrastructure)
   - [Step 4: Configure GitHub App & ServiceNow Integration](#step-4-configure-github-app--servicenow-integration)
@@ -462,6 +462,37 @@ Before deploying, ensure you have:
    - `roles/resourcemanager.projectIamAdmin`
    - `roles/cloudbuild.builds.editor`
    - `roles/serviceusage.serviceUsageAdmin`
+   - `roles/storage.admin` (required to create and configure the GCS remote state bucket)
+
+   > [!NOTE]
+   > **Least Privilege vs. Project Owner**:
+   > In enterprise environments where `roles/owner` cannot be granted to CI/CD pipelines or development personnel, the 11 granular roles listed above provide the exact least-privilege boundary required to provision the infrastructure, deploy containers, configure WIF, and bind runtime IAM policies without granting arbitrary project mutation or billing administration authority.
+
+   ```bash
+   # Grant least-privilege operator roles to deploying identity (User or Deployment SA)
+   OPERATOR_PRINCIPAL="user:you@example.com" # or "serviceAccount:deployer@${PROJECT_ID}.iam.gserviceaccount.com"
+
+   OPERATOR_ROLES=(
+       "roles/serviceusage.serviceUsageAdmin"
+       "roles/resourcemanager.projectIamAdmin"
+       "roles/iam.serviceAccountAdmin"
+       "roles/iam.serviceAccountUser"
+       "roles/iam.workloadIdentityPoolAdmin"
+       "roles/artifactregistry.admin"
+       "roles/secretmanager.admin"
+       "roles/cloudtasks.admin"
+       "roles/run.admin"
+       "roles/cloudbuild.builds.editor"
+       "roles/storage.admin"
+   )
+
+   for role in "${OPERATOR_ROLES[@]}"; do
+       gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+           --member="${OPERATOR_PRINCIPAL}" \
+           --role="${role}" \
+           --condition=None
+   done
+   ```
 
 7. **Enable Required Google Cloud APIs**:
    ```bash
@@ -496,9 +527,27 @@ uv pip install -e "./bridge[dev]" -e "./agent[dev]" -e "./demo[dev]" pytest ruff
 
 ---
 
-### Step 1b: Configure Terraform State & Backend
+### Step 1b: Bootstrap GCS Remote State & Configure Backend
 
-By default, the prototype stacks (`agent/infra/terraform`, `bridge/infra/terraform`, and `demo/infra/terraform`) manage state locally for self-contained prototyping. If deploying in a team or CI/CD environment, configure a remote GCS backend as detailed in [Section 11](#11-terraform-remote-state--gcs-backend).
+Before applying Terraform resources, bootstrap the Google Cloud Storage remote state bucket and configure partial backends:
+
+```bash
+# 1. Bootstrap GCS remote state bucket and generate backend.hcl for all stacks
+./scripts/bootstrap-tfstate.sh \
+  --project-id "${PROJECT_ID}" \
+  --name-prefix "${NAME_PREFIX}" \
+  --region "${REGION}"
+
+# 2. Or configure partial backend manually using backend.hcl.example:
+# cp agent/infra/terraform/backend.hcl.example agent/infra/terraform/backend.hcl
+# cp bridge/infra/terraform/backend.hcl.example bridge/infra/terraform/backend.hcl
+# cp demo/infra/terraform/backend.hcl.example demo/infra/terraform/backend.hcl
+
+# 3. Initialize Agent stack with backend configuration
+cd agent/infra/terraform
+terraform init -backend-config=backend.hcl
+cd ../../..
+```
 
 ---
 
@@ -512,7 +561,7 @@ The agent infrastructure must be deployed first so its outputs (`agent_url`, `ag
 #### 2.1 Provision Agent Secret Container & IAM via Terraform
 ```bash
 cd agent/infra/terraform
-terraform init
+terraform init -backend-config=backend.hcl
 
 terraform apply \
     -var="project_id=${PROJECT_ID}" \
@@ -578,7 +627,7 @@ cd ../../..
 #### 3.1 Provision Bridge Secret Containers, IAM & Tasks Queue
 ```bash
 cd bridge/infra/terraform
-terraform init
+terraform init -backend-config=backend.hcl
 
 terraform apply \
     -var="project_id=${PROJECT_ID}" \
@@ -693,7 +742,7 @@ This ensures incidents created by `gha-deploy-investigator` do not trigger exter
 #### 5.1 Provision Demo WIF Stack via Terraform
 ```bash
 cd demo/infra/terraform
-terraform init
+terraform init -backend-config=backend.hcl
 terraform apply \
     -var="project_id=${PROJECT_ID}" \
     -var="region=${REGION}" \
@@ -797,39 +846,50 @@ Bootstraps and seeds a standalone customer demo repository (`gdi-sample-pipeline
 
 ## 11. Terraform Remote State & GCS Backend
 
-The Terraform stacks in `gha-deploy-investigator` (`agent/infra/terraform`, `bridge/infra/terraform`, `demo/infra/terraform`) default to standard local state for rapid prototyping.
-
-To configure remote state in an enterprise Google Cloud environment:
-
-### 1. Bootstrap GCS State Bucket
-```bash
-gcloud storage buckets create "gs://${PROJECT_ID}-${NAME_PREFIX}-tfstate" \
-    --project="${PROJECT_ID}" \
-    --location="${REGION}" \
-    --uniform-bucket-level-access
-gcloud storage buckets update "gs://${PROJECT_ID}-${NAME_PREFIX}-tfstate" --versioning
-```
-
-### 2. Configure Backend Configuration Files
-Add a `backend "gcs" {}` block to each stack's `versions.tf` and supply `backend.hcl`:
+All three Terraform stacks define a partial GCS backend:
 ```hcl
-bucket = "<your-project-id>-gdi-tfstate"
-prefix = "gdi/agent"
+terraform {
+  backend "gcs" {}
+}
 ```
 
-Initialize with partial configuration:
-```bash
-terraform -chdir=agent/infra/terraform init -backend-config=backend.hcl
-terraform -chdir=bridge/infra/terraform init -backend-config=backend.hcl
-terraform -chdir=demo/infra/terraform init -backend-config=backend.hcl
-```
+- **Bootstrapping**: Initialized via `scripts/bootstrap-tfstate.sh` with uniform bucket-level access, public access prevention, object versioning, and enterprise labels (`app=gha-deploy-investigator`, `component=tfstate`, `env=prod`, `prefix=gdi`). The script automatically generates `backend.hcl` for each stack (`agent`, `bridge`, `demo`).
+- **CI Compatibility**: Pre-deployment quality gates and CI use `terraform init -backend=false && terraform validate`, verifying syntax and configuration without remote dependencies or credentials.
+- **Disaster Recovery**: Previous state generations can be downloaded and restored using GCS object versioning.
 
-### 3. CI Quality Gate Compatibility
-Pre-deployment quality gates and CI pipelines run:
-```bash
-terraform init -backend=false && terraform validate
-```
-This validates syntax and configuration without requiring remote storage credentials.
+### Migrating Existing Local State
+
+To migrate an existing deployment with local `terraform.tfstate` files to the GCS remote backend:
+
+1. Run the bootstrap script to create the GCS state bucket and generate `backend.hcl` files:
+   ```bash
+   ./scripts/bootstrap-tfstate.sh \
+     --project-id "${PROJECT_ID}" \
+     --name-prefix "${NAME_PREFIX}" \
+     --region "${REGION}"
+   ```
+
+2. Migrate state for each stack using `terraform init -migrate-state`:
+   ```bash
+   for stack in agent/infra/terraform bridge/infra/terraform demo/infra/terraform; do
+     echo "Migrating state for ${stack}..."
+     (cd "${stack}" && terraform init -migrate-state -backend-config=backend.hcl)
+   done
+   ```
+   When prompted, answer `yes` to copy existing local state to the newly configured GCS backend.
+
+3. Verify state migration with a non-destructive plan in each stack:
+   ```bash
+   for stack in agent/infra/terraform bridge/infra/terraform demo/infra/terraform; do
+     echo "Verifying plan for ${stack}..."
+     (cd "${stack}" && terraform plan)
+   done
+   ```
+   Terraform should report `No changes. Your infrastructure matches the configuration.`
+
+> [!WARNING]
+> **Do not delete local state files prematurely**:
+> Do not delete or remove local `terraform.tfstate` or `terraform.tfstate.backup` files until `terraform plan` reports `No changes` across all stacks and state integrity is verified. Keep local backups until the remote backend is fully verified in your team workflow.
 
 ---
 
