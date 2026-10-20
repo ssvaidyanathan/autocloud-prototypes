@@ -194,6 +194,21 @@ resource "google_cloud_run_v2_service" "bridge" {
         value = var.servicenow_instance_url
       }
       env {
+        name  = "ADAPTER_TIMEOUT_SECONDS"
+        value = tostring(var.adapter_timeout_seconds)
+      }
+      dynamic "env" {
+        for_each = var.servicenow_caller != null ? [var.servicenow_caller] : []
+        content {
+          name  = "SERVICENOW_CALLER"
+          value = env.value
+        }
+      }
+      env {
+        name  = "SERVICENOW_INCIDENT_STATE_AFTER_REPORT"
+        value = var.servicenow_incident_state_after_report
+      }
+      env {
         name  = "GITHUB_APP_ID"
         value = var.github_app_id
       }

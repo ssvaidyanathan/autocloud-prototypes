@@ -103,3 +103,21 @@ variable "github_app_id" {
   type        = string
   default     = ""
 }
+
+variable "adapter_timeout_seconds" {
+  description = "Timeout in seconds for external adapter requests"
+  type        = number
+  default     = 60
+}
+
+variable "servicenow_caller" {
+  description = "Caller/reporter ID used when creating or updating ServiceNow incidents. Defaults to null (omitted from env, falling back to application default)"
+  type        = string
+  default     = null
+}
+
+variable "servicenow_incident_state_after_report" {
+  description = "ServiceNow incident state after diagnosis report is posted (e.g. 2 for In Progress)"
+  type        = string
+  default     = "2"
+}
