@@ -1,0 +1,2 @@
+bucket = "example-project-id-tfstate"
+prefix = "agent-registry-demo/default.tfstate"

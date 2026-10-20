@@ -1,0 +1,19 @@
+[project]
+name = "calculator-tool-service"
+version = "0.1.0"
+description = "Remote FastMCP Calculator Service for GCP Agent Registry Demo"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=0.1.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "httpx>=0.27.0",
+    "google-auth>=2.29.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
