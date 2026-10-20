@@ -221,8 +221,12 @@ def test_chat_endpoint_minimal(test_client: TestClient, valid_skill_zip: bytes) 
     assert "add" in data["tools_invoked"]
 
 
-def test_config_settings_defaults() -> None:
-    """Verify default Settings values match Phase 1 requirements."""
+def test_config_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify default Settings values match Phase 1 requirements when env is unset."""
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("PROJECT_ID", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
+    monkeypatch.delenv("REGION", raising=False)
     settings = Settings()
     assert settings.project_id == "cloud-assist-fde-7"
     assert settings.region == "us-central1"
@@ -231,8 +235,17 @@ def test_config_settings_defaults() -> None:
     assert settings.log_level == "INFO"
 
 
+def test_config_settings_standard_gcp_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify Settings recognizes standard GCP env vars GOOGLE_CLOUD_PROJECT/LOCATION."""
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "custom-gcp-project")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "europe-west1")
+    settings = Settings()
+    assert settings.project_id == "custom-gcp-project"
+    assert settings.region == "europe-west1"
+
+
 def test_chat_endpoint_skill_not_found(test_client: TestClient) -> None:
-    """Verify POST /chat returns 500 when requested skill cannot be resolved."""
+    """Verify POST /chat returns 404 when requested skill cannot be resolved."""
 
     def mock_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status_code=404, json={"error": "Skill not found"})
@@ -248,8 +261,83 @@ def test_chat_endpoint_skill_not_found(test_client: TestClient) -> None:
     set_skills_loader(loader)
 
     response = test_client.post("/chat", json={"prompt": "Hello"})
-    assert response.status_code == 500
-    assert "Failed to load skill" in response.json()["detail"]
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_chat_endpoint_invalid_skill_name(test_client: TestClient) -> None:
+    """Verify POST /chat returns 400 Bad Request when an invalid skill ID is requested."""
+    response = test_client.post(
+        "/chat",
+        json={"prompt": "Hello", "skill_name": "../invalid-traversal"},
+    )
+    assert response.status_code == 400
+    assert "invalid skill" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_production_raises_and_test_fallback() -> None:
+    """Verify production client raises on missing ADC, while test client uses fallback."""
+    from unittest.mock import patch
+
+    # 1. Production client (no http_client) re-raises RuntimeError
+    prod_client = GCPSkillRegistryClient(project_id="p", location="l")
+    with patch(
+        "google.adk.integrations.skill_registry.gcp_skill_registry.GCPSkillRegistry._get_headers",
+        side_effect=RuntimeError("ADC not found"),
+    ):
+        with pytest.raises(RuntimeError, match="ADC not found"):
+            await prod_client._get_headers()
+
+    # 2. Test client (with http_client) provides offline fallback
+    async with httpx.AsyncClient() as mock_http:
+        test_client = GCPSkillRegistryClient(project_id="p", location="l", http_client=mock_http)
+        with patch(
+            "google.adk.integrations.skill_registry.gcp_skill_registry.GCPSkillRegistry._get_headers",
+            side_effect=RuntimeError("ADC not found"),
+        ):
+            headers = await test_client._get_headers()
+            assert headers["Authorization"] == "Bearer mock-agent-registry-token"
+
+
+@pytest.mark.asyncio
+async def test_agent_registry_rejects_forbidden_scripts_windows_path() -> None:
+    """Verify zip archive path separator normalization detects backslash scripts entries."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(
+            "SKILL.md",
+            "---\nname: win-skill\ndescription: Windows path test\n---\ninstructions",
+        )
+        z.writestr("scripts\\nested\\run.bat", "echo bad")
+    zip_bytes = buf.getvalue()
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if url_str.endswith("/skills/win-skill"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "name": "projects/p/locations/l/skills/win-skill",
+                    "defaultRevision": "projects/p/locations/l/skills/win-skill/revisions/r1",
+                },
+            )
+        elif "revisions/r1" in url_str:
+            return httpx.Response(
+                status_code=200,
+                content=zip_bytes,
+                headers={"content-type": "application/zip"},
+            )
+        return httpx.Response(status_code=404)
+
+    transport = httpx.MockTransport(mock_handler)
+    async with httpx.AsyncClient(transport=transport) as mock_http:
+        client = GCPSkillRegistryClient(project_id="p", location="l", http_client=mock_http)
+        with pytest.raises(ValueError, match="forbidden 'scripts/' directory"):
+            await client.get_skill("win-skill")
 
 
 def test_boot_without_local_skills_dir() -> None:

@@ -59,17 +59,19 @@ class GCPSkillRegistryClient(GCPSkillRegistry):
                 yield client
 
     async def _get_headers(self) -> dict[str, str]:
-        """Retrieve auth headers, with graceful fallback for offline/test environments."""
+        """Retrieve auth headers, with fallback only in explicit test environments."""
         try:
             return await super()._get_headers()
         except RuntimeError as e:
-            logger.warning(
-                "Unable to obtain default GCP credentials (%s); using offline test headers", e
-            )
-            return {
-                "Authorization": "Bearer mock-agent-registry-token",
-                "Content-Type": "application/json",
-            }
+            if self._custom_client is not None:
+                logger.warning(
+                    "Unable to obtain default GCP credentials (%s); using offline test headers", e
+                )
+                return {
+                    "Authorization": "Bearer mock-agent-registry-token",
+                    "Content-Type": "application/json",
+                }
+            raise
 
     async def get_skill(self, name: str | None = None, **kwargs: Any) -> models.Skill:
         """Fetch and unpack a skill package in memory from GCP Agent Registry.
@@ -124,7 +126,12 @@ class GCPSkillRegistryClient(GCPSkillRegistry):
         try:
             with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
                 for member in z.infolist():
-                    if member.filename.startswith("scripts/") or "/scripts/" in member.filename:
+                    norm_path = member.filename.replace("\\", "/")
+                    if (
+                        norm_path.startswith("scripts/")
+                        or "/scripts/" in norm_path
+                        or norm_path.strip("/") == "scripts"
+                    ):
                         raise ValueError(
                             f"Security violation: skill at '{resolved_name}' contains a forbidden "
                             "'scripts/' directory. Code execution inside skills is prohibited."

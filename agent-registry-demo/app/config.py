@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,8 +9,14 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="", case_sensitive=False, extra="ignore")
 
-    project_id: str = "cloud-assist-fde-7"
-    region: str = "us-central1"
+    project_id: str = Field(
+        default="cloud-assist-fde-7",
+        validation_alias=AliasChoices("project_id", "google_cloud_project"),
+    )
+    region: str = Field(
+        default="us-central1",
+        validation_alias=AliasChoices("region", "google_cloud_location"),
+    )
     agent_registry_endpoint: str = "https://agentregistry.googleapis.com/v1alpha"
     port: int = 8080
     log_level: str = "INFO"

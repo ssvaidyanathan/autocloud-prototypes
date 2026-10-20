@@ -4,6 +4,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 
+import httpx
 from fastapi import FastAPI, HTTPException, status
 from google.adk.skills.models import Skill
 from pydantic import BaseModel, Field
@@ -131,7 +132,32 @@ async def chat(request: ChatRequest) -> ChatResponse:
     loader = get_skills_loader()
     try:
         skill = await loader.resolve_skill(target_skill)
+    except ValueError as exc:
+        logger.warning("Invalid skill requested '%s': %s", target_skill, exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid skill '{target_skill}': {exc}",
+        ) from exc
     except Exception as exc:
+        cause = exc.__cause__ if exc.__cause__ is not None else exc
+        if (isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 404) or (
+            isinstance(exc, RuntimeError) and "status 404" in str(exc)
+        ):
+            logger.warning("Skill not found '%s': %s", target_skill, exc)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Skill '{target_skill}' not found in Agent Registry: {exc}",
+            ) from exc
+        if (isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 400) or (
+            isinstance(exc, RuntimeError) and "status 400" in str(exc)
+        ):
+            logger.warning(
+                "Invalid request to Agent Registry for skill '%s': %s", target_skill, exc
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid request for skill '{target_skill}': {exc}",
+            ) from exc
         logger.exception("Failed to resolve skill '%s'", target_skill)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
