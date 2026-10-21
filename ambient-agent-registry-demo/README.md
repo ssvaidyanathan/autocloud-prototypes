@@ -602,7 +602,7 @@ The response is a native ADK event trace list (`list[Event]`), enriched with run
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r1",
-        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r1"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r1"
       },
       "skill_revision": "r1",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -633,7 +633,7 @@ The response is a native ADK event trace list (`list[Event]`), enriched with run
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r1",
-        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r1"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r1"
       },
       "skill_revision": "r1",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -664,7 +664,7 @@ The response is a native ADK event trace list (`list[Event]`), enriched with run
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r1",
-        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r1"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r1"
       },
       "skill_revision": "r1",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -695,7 +695,7 @@ The response is a native ADK event trace list (`list[Event]`), enriched with run
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r1",
-        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r1"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r1"
       },
       "skill_revision": "r1",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -722,7 +722,7 @@ The response is a native ADK event trace list (`list[Event]`), enriched with run
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r1",
-        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r1"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r1"
       },
       "skill_revision": "r1",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -819,7 +819,7 @@ curl -X POST "${AGENT_SERVICE_URL}/run" \
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r2",
-        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r2"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r2"
       },
       "skill_revision": "r2",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -850,7 +850,7 @@ curl -X POST "${AGENT_SERVICE_URL}/run" \
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r2",
-        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r2"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r2"
       },
       "skill_revision": "r2",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -877,7 +877,7 @@ curl -X POST "${AGENT_SERVICE_URL}/run" \
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r2",
-        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r2"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r2"
       },
       "skill_revision": "r2",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
