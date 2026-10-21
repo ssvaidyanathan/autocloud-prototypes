@@ -260,53 +260,23 @@ The response is a JSON array of Google GenAI ADK `Event` objects representing th
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Client as Caller / Demo Script
-    participant Agent as Ambient Agent Service (Cloud Run)
-    participant Loader as AmbientAgentLoader
-    participant Cache as CachedSkillRegistry
-    participant SkillsReg as GCP Skills Registry (v1alpha)
-    participant ToolReg as GCP Tools Registry (v1)
-    participant ToolSvc as Ambient Calculator Service (Cloud Run)
+    participant Client as Client
+    participant Agent as Ambient Agent
+    participant Registry as Agent Registry
+    participant Calculator as Remote Calculator
+    participant Publisher as Skill Publisher
 
-    Note over Client,ToolSvc: Act 1: Initial Query Under Skill Revision 1
-    Client->>Agent: POST /run (RunAgentRequest: "Compute 15 multiplied by 4, then add 10.")
-    Agent->>Loader: load_agent("ambient_agent")
-    Loader->>Cache: get_skill("ambient-privilege-audit-skill")
-    Cache->>SkillsReg: GET /skills/ambient-privilege-audit-skill (defaultRevision -> r1)
-    SkillsReg-->>Cache: 200 OK (metadata)
-    Cache->>SkillsReg: GET /skills/ambient-privilege-audit-skill/revisions/r1?alt=media
-    SkillsReg-->>Cache: 200 OK (application/zip bytes)
-    Note over Cache: In-memory unpack via _load_skill_from_zip_bytes
-    Cache-->>Loader: Skill(v1: add, multiply)
-    Loader->>ToolReg: Resolve services/ambient-calculator
-    ToolReg-->>Loader: Service URL & JSONRPC binding
-    Loader-->>Agent: ADK LlmAgent (instructions from SKILL.md, tools: [add, multiply])
-    Agent->>ToolSvc: POST /mcp tools/call: multiply(15, 4)
-    ToolSvc-->>Agent: {"result": 60}
-    Agent->>ToolSvc: POST /mcp tools/call: add(60, 10)
-    ToolSvc-->>Agent: {"result": 70}
-    Agent-->>Client: 200 OK (list[Event] with functionCall/Response for multiply, add)
-
-    Note over Client,ToolSvc: Live Registry Mutation (Zero Container Restarts)
-    Client->>SkillsReg: publish_skill.sh (Upload v2.zip as r2 & promote to default)
-    SkillsReg-->>Client: 200 OK (r2 published)
-    Client->>Agent: POST /admin/cache/invalidate {"skill_name": "ambient-privilege-audit-skill"}
-    Agent->>Cache: invalidate("ambient-privilege-audit-skill")
-    Agent-->>Client: 200 OK: {"status": "invalidated", "flushed": ["ambient-privilege-audit-skill"]}
-
-    Note over Client,ToolSvc: Act 2: Immediate Verification Query Under Revision 2
-    Client->>Agent: POST /run (RunAgentRequest: "Compute 2 to the power of 8.")
-    Agent->>Loader: load_agent("ambient_agent") [Cache Miss]
-    Loader->>Cache: get_skill("ambient-privilege-audit-skill")
-    Cache->>SkillsReg: GET /skills/ambient-privilege-audit-skill (defaultRevision -> r2)
-    Cache->>SkillsReg: GET /skills/ambient-privilege-audit-skill/revisions/r2?alt=media
-    SkillsReg-->>Cache: 200 OK (v2 application/zip bytes)
-    Cache-->>Loader: Skill(v2: add, multiply, power)
-    Note over Loader: adk_additional_tools unlocks 'power' dynamically
-    Loader-->>Agent: ADK LlmAgent (instructions from v2 SKILL.md, tools: [add, multiply, power])
-    Agent->>ToolSvc: POST /mcp tools/call: power(2, 8)
-    ToolSvc-->>Agent: {"result": 256}
-    Agent-->>Client: 200 OK (list[Event] with functionCall/Response for power)
+    Client->>Agent: Call ADK /run with user prompt
+    Agent->>Registry: Fetch skill instructions (ambient-privilege-audit-skill) (populates cache)
+    Agent->>Registry: Discover calculator tools
+    Agent->>Calculator: Call remote calculator (MCP)
+    Agent-->>Client: Return event trace with provenance (revision, tools)
+    Publisher->>Registry: Publish new skill revision (ambient-privilege-audit-skill)
+    Note over Agent,Registry: Cache TTL ~60s / invalidate
+    Client->>Agent: Call ADK /run requiring new skill
+    Agent->>Registry: Fetch updated skill revision (cache miss)
+    Agent->>Calculator: Call newly allowed tool (power) (MCP)
+    Agent-->>Client: Return event trace with new revision provenance
 ```
 
 ---
