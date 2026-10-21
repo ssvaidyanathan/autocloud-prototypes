@@ -12,7 +12,7 @@ locals {
   repo_base_url             = "${var.region}-docker.pkg.dev/${var.project_id}/${local.artifact_registry_repo_id}"
 
   agent_image = var.agent_image != null ? var.agent_image : "${local.repo_base_url}/${var.name_prefix}-agent-service:latest"
-  tool_image  = var.tool_image != null ? var.tool_image : "${local.repo_base_url}/${var.name_prefix}-calculator-service:latest"
+  tool_image  = var.tool_image != null ? var.tool_image : (var.calculator_image != null ? var.calculator_image : "${local.repo_base_url}/${var.name_prefix}-calculator-service:latest")
 }
 
 module "apis" {
@@ -60,6 +60,7 @@ module "cloud_run" {
   agent_registry_endpoint  = var.agent_registry_endpoint
   agent_ingress            = var.agent_ingress
   tool_ingress             = var.tool_ingress
+  skill_name               = var.skill_name
 
   depends_on = [module.apis, module.iam]
 }

@@ -38,6 +38,12 @@ variable "tool_image" {
   default     = null
 }
 
+variable "calculator_image" {
+  description = "Alias for tool_image: Container image for the calculator tool service"
+  type        = string
+  default     = null
+}
+
 variable "agent_cpu" {
   description = "Cloud Run CPU limit for the agent service"
   type        = string
@@ -89,5 +95,12 @@ variable "agent_ingress" {
 variable "tool_ingress" {
   description = "Ingress traffic setting for the Calculator Tool Cloud Run service (INGRESS_TRAFFIC_INTERNAL_ONLY for VPC/internal microservice isolation, or INGRESS_TRAFFIC_ALL for serverless demo invocation without VPC connector)"
   type        = string
-  default     = "INGRESS_TRAFFIC_INTERNAL_ONLY"
+  default     = "INGRESS_TRAFFIC_ALL"
 }
+
+variable "skill_name" {
+  description = "Exact skill resource ID in GCP Agent Registry"
+  type        = string
+  default     = "private-ambient-privilege-audit-skill"
+}
+

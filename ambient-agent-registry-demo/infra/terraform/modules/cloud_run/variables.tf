@@ -102,3 +102,10 @@ variable "tool_ingress" {
   type        = string
   default     = "INGRESS_TRAFFIC_INTERNAL_ONLY"
 }
+
+variable "skill_name" {
+  description = "Exact skill resource ID in GCP Agent Registry"
+  type        = string
+  default     = "private-ambient-privilege-audit-skill"
+}
+

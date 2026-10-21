@@ -23,7 +23,7 @@ Phase 4 completed full live deployment of `ambient-agent-registry-demo` to Googl
 ### 2. Container Build & Packaging
 - Built and published production Docker images to Artifact Registry via Google Cloud Build:
   - `us-central1-docker.pkg.dev/<PROJECT_ID>/ambient-docker-repo/ambient-calculator-service:latest` (digest: `sha256:77b8f4cd5b00aba3722df67e2535c4e19fa116b27ac0637304c465c11c729335`)
-  - `us-central1-docker.pkg.dev/<PROJECT_ID>/ambient-docker-repo/ambient-agent-service:latest` (digest: `sha256:b49c853f5c9fdc70b9a9b9d19ce2564a1ea202a3cbbf80b0e6b5da84c255ec28`)
+  - `us-central1-docker.pkg.dev/<PROJECT_ID>/ambient-docker-repo/ambient-agent-service:latest` (digest: `sha256:d86edeb06702ae62db2870aacd61d4ab9a473bdd1d7053d4b76c921fd9546f6a`)
 
 ### 3. Registry Registration & Skill Publishing
 - Registered FastMCP tool `ambient-calculator` in Agent Registry (`us-central1`).
@@ -56,9 +56,10 @@ Phase 4 completed full live deployment of `ambient-agent-registry-demo` to Googl
 
 ## 2. Key Technical Findings & Compatibility Resolutions
 
-1. **Private Skill Prefixing in GCP Agent Registry**:
+1. **Exact Skill Resource Configuration & Zero Fallback Guarantee**:
    - GCP Agent Registry automatically creates private skills with a `private-` resource name prefix (e.g., `private-ambient-privilege-audit-skill`).
-   - Enhanced `app/registry/client.py` with seamless 404 fallback logic to search for both `name` and `private-{name}`, ensuring full compatibility with public and private skill namespaces.
+   - To strictly uphold the zero-fallback invariant, all silent fallback/retry logic was eliminated from `app/registry/client.py`.
+   - The exact skill resource ID `private-ambient-privilege-audit-skill` is explicitly configured via Terraform variables and injected as container environment variables (`AMBIENT_SKILL_NAME`, `SKILL_NAME`). Non-existent skills fail loudly and immediately with HTTP 404 without secondary requests.
 
 2. **Scalar String Validation in Agent Registry Metadata**:
    - The GCP Agent Registry API strictly enforces that all `metadata` key-value pairs must be scalar strings.

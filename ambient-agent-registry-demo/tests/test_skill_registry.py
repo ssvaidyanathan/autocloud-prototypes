@@ -326,33 +326,12 @@ def test_boot_without_local_skills_dir() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_registry_private_prefix_fallback(valid_skill_zip: bytes) -> None:
-    """Verify that client falls back to private-{name} when standard name returns 404."""
+async def test_agent_registry_missing_skill_fails_loudly_without_fallback() -> None:
+    """Verify that a 404 for a skill fails loudly and does NOT trigger a second request."""
+    requests: list[httpx.Request] = []
 
     def mock_handler(request: httpx.Request) -> httpx.Response:
-        url_str = str(request.url)
-        if url_str.endswith("/skills/ambient-privilege-audit-skill"):
-            return httpx.Response(status_code=404, json={"error": "Not Found"})
-        elif url_str.endswith("/skills/private-ambient-privilege-audit-skill"):
-            return httpx.Response(
-                status_code=200,
-                json={
-                    "name": (
-                        "projects/demo-project-id/locations/global/"
-                        "skills/private-ambient-privilege-audit-skill"
-                    ),
-                    "defaultRevision": (
-                        "projects/demo-project-id/locations/global/"
-                        "skills/private-ambient-privilege-audit-skill/revisions/r1"
-                    ),
-                },
-            )
-        elif "revisions/r1" in url_str and "alt=media" in url_str:
-            return httpx.Response(
-                status_code=200,
-                content=valid_skill_zip,
-                headers={"content-type": "application/zip"},
-            )
+        requests.append(request)
         return httpx.Response(status_code=404, json={"error": "Not Found"})
 
     transport = httpx.MockTransport(mock_handler)
@@ -363,9 +342,10 @@ async def test_agent_registry_private_prefix_fallback(valid_skill_zip: bytes) ->
             http_client=mock_http,
         )
 
-        skill = await client.get_skill(name="ambient-privilege-audit-skill")
-        assert isinstance(skill, models.Skill)
-        assert skill.name == "ambient-privilege-audit-skill"
-        assert skill.frontmatter.allowed_tools is not None
-        assert "add" in skill.frontmatter.allowed_tools
+        with pytest.raises(RuntimeError) as exc_info:
+            await client.get_skill(name="ambient-privilege-audit-skill")
+
+        assert "404" in str(exc_info.value)
+        assert len(requests) == 1
+
 
