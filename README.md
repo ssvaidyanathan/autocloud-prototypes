@@ -10,8 +10,8 @@ A repo of Autocloud prototypes
 | **Core Architecture** | Dynamic skill and tool loading from GCP Agent Registry with zero-downtime hot-reloading |
 | **Runtime & Protocols** | Custom FastAPI exposing `POST /chat` and `POST /admin/cache/invalidate`; FastMCP over Streamable HTTP |
 | **Integrations** | GCP Agent Registry (`v1alpha` skills, `v1` tools), Vertex AI Gemini |
-| **Live Cloud Run Services** | `ard-agent-service`, `ard-calculator-service` |
-| **State & Persistence** | Pure in-memory ZIP unpacking (zero local disk persistence); TTL in-memory cache with explicit invalidation |
+| **Cloud Run Services (default prefix)** | `ard-agent-service`, `ard-calculator-service` |
+| **State & Persistence** | Pure in-memory ZIP unpacking (zero local disk persistence for skills); TTL in-memory cache with explicit invalidation |
 | **Docs & Quick-Start** | [Documentation](agent-registry-demo/) • [Hot-Reload Demo](agent-registry-demo/#8-hot-reload-demonstration-scenarios) |
 
 ### [Incident SRE Agent](incident-sre-agent/)
@@ -19,9 +19,9 @@ A repo of Autocloud prototypes
 | Specification | Details |
 | :--- | :--- |
 | **Core Architecture** | Autonomous GCP incident investigation across logs, metrics, changes, and assets with ITSM sync |
-| **Runtime & Protocols** | Asynchronous webhook ingestion bridge (`POST /webhook/{snow,jira,generic}`) + Cloud Tasks worker |
+| **Runtime & Protocols** | Asynchronous webhook ingestion bridge (`POST /webhook/{servicenow,jira,generic}`) + Cloud Tasks worker |
 | **Integrations** | ServiceNow (Flow Designer), Jira Cloud, Cloud Logging/Monitoring/Audit/Asset, Vertex AI Gemini |
-| **Live Cloud Run Services** | `isa-incident-bridge`, `isa-sre-agent` |
+| **Cloud Run Services (default prefix)** | `isa-incident-bridge`, `isa-sre-agent` |
 | **State & Persistence** | Stateless Cloud Run services; Cloud Tasks asynchronous queue; standalone HTML dossier generation |
 | **Docs & Quick-Start** | [Documentation](incident-sre-agent/) • [Deployment Script](incident-sre-agent/#10-master-automated-deployment-script) |
 
@@ -32,8 +32,8 @@ A repo of Autocloud prototypes
 | **Core Architecture** | Autonomous CI/CD pipeline failure triage, Gemini log correlation, and bidirectional write-back |
 | **Runtime & Protocols** | Ingestion bridge receiving GitHub App webhooks (`workflow_run`, `workflow_job`) + Cloud Tasks worker |
 | **Integrations** | GitHub App (Check Runs, PRs, Actions API), ServiceNow (Table & Attachment API), Cloud Run, Vertex AI |
-| **Live Cloud Run Services** | `gdi-bridge`, `gdi-agent` |
-| **State & Persistence** | Stateless event processing; Cloud Tasks asynchronous queue; read-only AST guardrails |
+| **Cloud Run Services (default prefix)** | `gdi-bridge`, `gdi-agent` |
+| **State & Persistence** | Stateless event processing; Cloud Tasks asynchronous queue; in-memory query cache |
 | **Docs & Quick-Start** | [Documentation](gha-deploy-investigator/) • [Deployment Walkthrough](gha-deploy-investigator/#9-full-step-by-step-gcp-deployment-walkthrough) |
 
 ## Development Guidelines
