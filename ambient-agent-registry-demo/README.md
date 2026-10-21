@@ -38,7 +38,13 @@ An enterprise prototype demonstrating dynamic discovery, runtime loading, and ze
   - [Step 4: Register Remote Tools in Agent Registry](#step-4-register-remote-tools-in-agent-registry)
   - [Step 5: Publish Versioned Skills to Agent Registry](#step-5-publish-versioned-skills-to-agent-registry)
 - [8. Live Demonstration Execution](#8-live-demonstration-execution)
-- [9. Teardown & Cleanup](#9-teardown--cleanup)
+  - [Act 1: Initial Query Under Skill Revision 1](#act-1-initial-query-under-skill-revision-1)
+  - [Live Registry Mutation: Zero-Downtime Skill Publication](#live-registry-mutation-zero-downtime-skill-publication)
+  - [Act 2: Verification Query Under Skill Revision 2](#act-2-verification-query-under-skill-revision-2)
+  - [Continuous Liveness & Zero Container Restarts](#continuous-liveness--zero-container-restarts)
+  - [Negative Scenarios: Guardrails & Zero-Fallback Enforcement](#negative-scenarios-guardrails--zero-fallback-enforcement)
+- [9. Automated Demo Tooling & Verification](#9-automated-demo-tooling--verification)
+- [10. Teardown & Cleanup](#10-teardown--cleanup)
 
 ---
 
@@ -68,19 +74,19 @@ This prototype resolves these limitations by combining:
 
 ### Architectural Comparison
 
-| Dimension | Static Container Baseline | ARD Custom Wrapper (`/chat`) | Ambient Agent Registry (`/run`) |
-| :--- | :--- | :--- | :--- |
-| **API Framework** | Custom FastAPI wrapper | Custom FastAPI wrapper | **Native ADK Runtime** (`get_fast_api_app`) |
-| **Execution Endpoint** | `POST /chat` | `POST /chat` | **`POST /run`** (`RunAgentRequest` $\rightarrow$ `list[Event]`) |
-| **Streaming Endpoint** | Custom SSE | Custom SSE | **`POST /run_sse`** (Native ADK SSE) |
-| **Health Probe** | Custom `/health` | Custom `/health` | **`GET /health`** (Native ADK probe) |
-| **Model Runtime** | Hardcoded client | ADK `LlmAgent` + `Runner` | **ADK `LlmAgent` + `Runner` via `AgentLoader`** |
-| **Skill Storage** | Local container disk | GCP Agent Registry (`v1alpha`) | **GCP Agent Registry (`v1alpha`)** |
-| **Skill Loading** | Filesystem scan | In-memory ZIP unpack | **In-memory ZIP unpack** |
-| **Tool Registry** | In-process Python functions | Remote GCP Tools Registry | **Remote GCP Tools Registry** (`v1`) |
-| **Hot-Reload Hook** | Container restart | `POST /admin/cache/invalidate` | Mounted **`POST /admin/cache/invalidate`** |
-| **Execution Provenance** | Custom JSON fields | Structured JSON fields | **Full `list[Event]` ADK trace** (`functionCall` / `functionResponse`) |
-| **Resource Naming** | Project specific | `ard-` prefix | **`ambient-` prefix** |
+| Dimension | Ambient Agent Registry (`/run`) |
+| :--- | :--- |
+| **API Framework** | **Native ADK Runtime** (`get_fast_api_app`) |
+| **Execution Endpoint** | **`POST /run`** (`RunAgentRequest` $\rightarrow$ `list[Event]`) |
+| **Streaming Endpoint** | **`POST /run_sse`** (Native ADK SSE) |
+| **Health Probe** | **`GET /health`** (Native ADK probe) |
+| **Model Runtime** | **ADK `LlmAgent` + `Runner` via `AgentLoader`** |
+| **Skill Storage** | **GCP Agent Registry (`v1alpha`)** |
+| **Skill Loading** | **In-memory ZIP unpack** |
+| **Tool Registry** | **Remote GCP Tools Registry** (`v1`) |
+| **Hot-Reload Hook** | Mounted **`POST /admin/cache/invalidate`** |
+| **Execution Provenance** | **Full `list[Event]` ADK trace** (`functionCall` / `functionResponse`) |
+| **Resource Naming** | **`ambient-` prefix** |
 
 ---
 
@@ -539,40 +545,555 @@ bash scripts/publish_skill.sh \
 
 ---
 
+<a id="8-hot-reload-demonstration-scenarios"></a>
+<a id="8-live-demonstration-execution"></a>
 ## 8. Live Demonstration Execution
 
-The automated demonstration script (`scripts/run_demo.sh`) executes the complete 2-act verification against the live Cloud Run deployment:
+The live demonstration showcases zero-downtime hot-reloading through a two-act presentation using native Google ADK synchronous `/run` execution without restarting or redeploying the Cloud Run container.
 
+### Act 1: Initial Query Under Skill Revision 1
+
+**Context**: Skill Revision 1 (`r1`) (`ambient-privilege-audit-skill`) is active in Google Cloud Agent Registry. Directives mandate standard formatting (`Result: <value> (Computed via <tools_used>)`) and authorize remote tools `add` and `multiply`.
+
+**Execution**:
+Send a standard Google ADK `RunAgentRequest` to the synchronous `/run` endpoint:
 ```bash
-export AGENT_URL="$(terraform -chdir=infra/terraform output -raw agent_service_url)"
-export PROJECT_ID="<PROJECT_ID>"
-
-bash scripts/run_demo.sh --agent-url "${AGENT_URL}" --project-id "${PROJECT_ID}"
+curl -X POST "${AGENT_SERVICE_URL}/run" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "app_name": "ambient_agent",
+    "user_id": "demo-user",
+    "session_id": "demo-act1",
+    "new_message": {
+      "role": "user",
+      "parts": [
+        {"text": "Compute 15 multiplied by 4, then add 10."}
+      ]
+    }
+  }'
 ```
 
-### Demonstration Steps:
-1. **Act 1: Baseline Execution (Revision 1)**
-   - Sends `RunAgentRequest` to `POST ${AGENT_URL}/run`: `"Compute 15 multiplied by 4, then add 10."`
-   - Inspects `list[Event]` response for `functionCall` and `functionResponse` events for `multiply` and `add`.
-   - Verifies mathematical result is 70.
-2. **Live Registry Mutation**
-   - Publishes Revision 2 (`demo/registry_packages/v2/calculator`) introducing `power`.
-   - Sends cache invalidation request:
-     ```bash
-     curl -s -X POST "${AGENT_URL}/admin/cache/invalidate" \
-       -H "Content-Type: application/json" \
-       -d '{"skill_name": "ambient-privilege-audit-skill"}'
-     ```
-3. **Act 2: Verification Under Revision 2 (Zero Container Restarts)**
-   - Sends `RunAgentRequest` to `POST ${AGENT_URL}/run`: `"Compute 2 to the power of 8."`
-   - Inspects `list[Event]` response for `functionCall` and `functionResponse` for `power`.
-   - Verifies mathematical result is 256.
-4. **Continuous Liveness Assertion**
-   - Probes `GET ${AGENT_URL}/health` to confirm zero container restarts and 100% continuous uptime.
+**Expected Response (`list[Event]` Execution Trace)**:
+The response is a native ADK event trace list (`list[Event]`), enriched with runtime provenance metadata in `custom_metadata` (note that offline tests and the mock use a different fixture URI):
+```json
+[
+  {
+    "id": "e1-fc-multiply",
+    "author": "ambient_agent",
+    "content": {
+      "role": "model",
+      "parts": [
+        {
+          "functionCall": {
+            "id": "call_m1",
+            "name": "multiply",
+            "args": {"a": 15.0, "b": 4.0}
+          }
+        }
+      ]
+    },
+    "actions": {
+      "stateDelta": {},
+      "artifactDelta": {},
+      "requestedAuthConfigs": {},
+      "requestedToolConfirmations": {}
+    },
+    "custom_metadata": {
+      "skill": {
+        "name": "ambient-privilege-audit-skill",
+        "revision": "r1",
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r1"
+      },
+      "skill_revision": "r1",
+      "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
+    }
+  },
+  {
+    "id": "e2-fr-multiply",
+    "author": "ambient_agent",
+    "content": {
+      "role": "user",
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call_m1",
+            "name": "multiply",
+            "response": {"result": 60.0}
+          }
+        }
+      ]
+    },
+    "actions": {
+      "stateDelta": {},
+      "artifactDelta": {},
+      "requestedAuthConfigs": {},
+      "requestedToolConfirmations": {}
+    },
+    "custom_metadata": {
+      "skill": {
+        "name": "ambient-privilege-audit-skill",
+        "revision": "r1",
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r1"
+      },
+      "skill_revision": "r1",
+      "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
+    }
+  },
+  {
+    "id": "e3-fc-add",
+    "author": "ambient_agent",
+    "content": {
+      "role": "model",
+      "parts": [
+        {
+          "functionCall": {
+            "id": "call_a1",
+            "name": "add",
+            "args": {"a": 60.0, "b": 10.0}
+          }
+        }
+      ]
+    },
+    "actions": {
+      "stateDelta": {},
+      "artifactDelta": {},
+      "requestedAuthConfigs": {},
+      "requestedToolConfirmations": {}
+    },
+    "custom_metadata": {
+      "skill": {
+        "name": "ambient-privilege-audit-skill",
+        "revision": "r1",
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r1"
+      },
+      "skill_revision": "r1",
+      "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
+    }
+  },
+  {
+    "id": "e4-fr-add",
+    "author": "ambient_agent",
+    "content": {
+      "role": "user",
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call_a1",
+            "name": "add",
+            "response": {"result": 70.0}
+          }
+        }
+      ]
+    },
+    "actions": {
+      "stateDelta": {},
+      "artifactDelta": {},
+      "requestedAuthConfigs": {},
+      "requestedToolConfirmations": {}
+    },
+    "custom_metadata": {
+      "skill": {
+        "name": "ambient-privilege-audit-skill",
+        "revision": "r1",
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r1"
+      },
+      "skill_revision": "r1",
+      "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
+    }
+  },
+  {
+    "id": "e5-text",
+    "author": "ambient_agent",
+    "content": {
+      "role": "model",
+      "parts": [
+        {
+          "text": "Result: 70 (Computed via multiply, add)"
+        }
+      ]
+    },
+    "actions": {
+      "stateDelta": {},
+      "artifactDelta": {},
+      "requestedAuthConfigs": {},
+      "requestedToolConfirmations": {}
+    },
+    "custom_metadata": {
+      "skill": {
+        "name": "ambient-privilege-audit-skill",
+        "revision": "r1",
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r1"
+      },
+      "skill_revision": "r1",
+      "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
+    }
+  }
+]
+```
+
+**Log & Execution Evidence**:
+- `CachedSkillRegistry`: Fetches `ambient-privilege-audit-skill` Revision 1 ZIP bundle from Agent Registry on initial miss; unpacks in memory with zero local disk writes.
+- `AmbientAgentLoader`: Configures ADK `LlmAgent` and `Runner` with prompt instructions and scopes active tools strictly to `add` and `multiply`.
+- `ToolRegistryManager`: Invokes remote tools `multiply(15.0, 4.0) -> 60.0` and `add(60.0, 10.0) -> 70.0` via FastMCP over Streamable HTTP (`/mcp`).
+- `attach_provenance_middleware`: Injects Agent Registry resource metadata (`r1`) and remote MCP service URL into each event's `custom_metadata`.
+- Output strictly formatted per Revision 1 rules: `"Result: 70 (Computed via multiply, add)"`.
 
 ---
 
-## 9. Teardown & Cleanup
+### Live Registry Mutation: Zero-Downtime Skill Publication
+
+**Action**: Without modifying or redeploying the Cloud Run container, publish Revision 2 to Google Cloud Agent Registry and invalidate the agent's in-memory cache:
+
+```bash
+# 1. Publish Revision 2 to Agent Registry (unlocks 'power' tool, updates prompt directives)
+./scripts/publish_skill.sh \
+  --project="${PROJECT_ID}" \
+  --location="${REGION}" \
+  ambient-privilege-audit-skill r2 demo/registry_packages/v2/calculator
+
+# 2. Flush agent in-memory cache instantaneously via mounted administrative hook
+curl -X POST "${AGENT_SERVICE_URL}/admin/cache/invalidate" \
+  -H "Content-Type: application/json" \
+  -d '{"skill_name": "ambient-privilege-audit-skill"}'
+```
+
+**Expected Invalidation Response**:
+```json
+{
+  "status": "invalidated",
+  "flushed": [
+    "ambient-privilege-audit-skill"
+  ]
+}
+```
+
+---
+
+### Act 2: Verification Query Under Skill Revision 2
+
+**Context**: Skill Revision 2 (`r2`) is now promoted as `defaultRevision`. Directives mandate emoji styling (`🧮 [CALCULATOR-V2] Computed value: **<value>**`) and authorize the newly unlocked `power` tool.
+
+**Execution**:
+Send an exponentiation prompt to the synchronous `/run` endpoint:
+```bash
+curl -X POST "${AGENT_SERVICE_URL}/run" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "app_name": "ambient_agent",
+    "user_id": "demo-user",
+    "session_id": "demo-act2",
+    "new_message": {
+      "role": "user",
+      "parts": [
+        {"text": "Compute 2 to the power of 8."}
+      ]
+    }
+  }'
+```
+
+**Expected Response (`list[Event]` Execution Trace)**:
+```json
+[
+  {
+    "id": "e1-fc-power",
+    "author": "ambient_agent",
+    "content": {
+      "role": "model",
+      "parts": [
+        {
+          "functionCall": {
+            "id": "call_p1",
+            "name": "power",
+            "args": {"base": 2.0, "exponent": 8.0}
+          }
+        }
+      ]
+    },
+    "actions": {
+      "stateDelta": {},
+      "artifactDelta": {},
+      "requestedAuthConfigs": {},
+      "requestedToolConfirmations": {}
+    },
+    "custom_metadata": {
+      "skill": {
+        "name": "ambient-privilege-audit-skill",
+        "revision": "r2",
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r2"
+      },
+      "skill_revision": "r2",
+      "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
+    }
+  },
+  {
+    "id": "e2-fr-power",
+    "author": "ambient_agent",
+    "content": {
+      "role": "user",
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call_p1",
+            "name": "power",
+            "response": {"result": 256.0}
+          }
+        }
+      ]
+    },
+    "actions": {
+      "stateDelta": {},
+      "artifactDelta": {},
+      "requestedAuthConfigs": {},
+      "requestedToolConfirmations": {}
+    },
+    "custom_metadata": {
+      "skill": {
+        "name": "ambient-privilege-audit-skill",
+        "revision": "r2",
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r2"
+      },
+      "skill_revision": "r2",
+      "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
+    }
+  },
+  {
+    "id": "e3-text",
+    "author": "ambient_agent",
+    "content": {
+      "role": "model",
+      "parts": [
+        {
+          "text": "🧮 [CALCULATOR-V2] Computed value: **256**"
+        }
+      ]
+    },
+    "actions": {
+      "stateDelta": {},
+      "artifactDelta": {},
+      "requestedAuthConfigs": {},
+      "requestedToolConfirmations": {}
+    },
+    "custom_metadata": {
+      "skill": {
+        "name": "ambient-privilege-audit-skill",
+        "revision": "r2",
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill/revisions/rev-r2"
+      },
+      "skill_revision": "r2",
+      "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
+    }
+  }
+]
+```
+
+**Log & Execution Evidence**:
+- `CachedSkillRegistry`: Detects cache invalidation; downloads `ambient-privilege-audit-skill` Revision 2 package from Agent Registry into memory.
+- `AmbientAgentLoader`: Instantiates ADK runner with updated system instructions and dynamically binds `power`.
+- `ToolRegistryManager`: Invokes remote tool `power(base=2.0, exponent=8.0) -> 256.0` over `/mcp`.
+- `attach_provenance_middleware`: Verifies revision `r2` and resource URI in `custom_metadata`.
+- Output formatted per Revision 2 rules with emoji tags: `"🧮 [CALCULATOR-V2] Computed value: **256**"`.
+
+---
+
+<a id="continuous-liveness--zero-container-restarts"></a>
+<a id="continuous-liveness-zero-container-restarts"></a>
+### Continuous Liveness & Zero Container Restarts
+
+Verify that the Cloud Run service maintained 100% continuous uptime with zero restarts or process recycling throughout the live mutation:
+
+```bash
+curl -X GET "${AGENT_SERVICE_URL}/health"
+```
+**Expected Response**: `{"status": "ok"}` (local mock server returns `{"status": "healthy"}`).
+
+---
+
+### Negative Scenarios: Guardrails & Zero-Fallback Enforcement
+
+The ambient architecture enforces strict security boundaries and mathematical integrity:
+
+#### 1. Undeclared Tool Invocation Blocked (Revision 1 Guardrail)
+Under Revision 1 (`r1`), only `add` and `multiply` are declared in `allowed-tools`. Attempting to invoke undeclared tool `power` before Revision 2 publication is rejected:
+```bash
+curl -s -X POST "${AGENT_SERVICE_URL}/run" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "app_name": "ambient_agent",
+    "user_id": "demo-user",
+    "session_id": "demo-guardrail-test",
+    "new_message": {
+      "role": "user",
+      "parts": [{"text": "Compute 2 to the power of 8."}]
+    }
+  }'
+```
+**Behavior**: Tool scoping guardrails prohibit binding `power`. The request fails safely (HTTP 400 or error status), preventing privilege escalation.
+
+#### 2. Remote Tool Failure & Zero-Fallback Enforcement
+When upstream FastMCP tool services fail, time out, or return HTTP 503:
+```bash
+curl -s -X POST "${AGENT_SERVICE_URL}/run" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "app_name": "ambient_agent",
+    "user_id": "demo-user",
+    "session_id": "demo-failing-tool",
+    "new_message": {
+      "role": "user",
+      "parts": [{"text": "Compute 15 multiplied by 4, then add 10."}]
+    }
+  }'
+```
+**Expected Response**:
+- **HTTP 502 Bad Gateway**:
+  ```json
+  {
+    "detail": "Remote MCP service failure: Service Unavailable"
+  }
+  ```
+- **Zero Local Fallback**: The agent NEVER falls back to in-process evaluation, mental approximation, or unverified math.
+
+#### 3. Unregistered Skill or Unknown Agent Resolution
+When requesting an unknown agent application or an unresolvable skill:
+```bash
+curl -s -X POST "${AGENT_SERVICE_URL}/run" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "app_name": "non_existent_agent",
+    "user_id": "demo-user",
+    "session_id": "demo-404-test",
+    "new_message": {
+      "role": "user",
+      "parts": [{"text": "Hello"}]
+    }
+  }'
+```
+**Expected Response**: HTTP 404 Not Found (`{"detail": "Agent 'non_existent_agent' not found"}`).
+
+---
+
+## 9. Automated Demo Tooling & Verification
+
+The repository includes a push-button automation suite for running and verifying the live demo.
+
+### 1. Offline Verification via `--mock-mode`
+Run the complete end-to-end hot-reload scenario locally without requiring live GCP credentials or cloud deployments:
+
+```bash
+./scripts/run_demo.sh --mock-mode
+```
+
+**Output**:
+```text
+======================================================================
+  STARTING MOCK AGENT SERVER FOR OFFLINE DEMO
+======================================================================
+Mock Agent URL: http://127.0.0.1:8089
+  [PASS] Mock agent server is live and responsive at http://127.0.0.1:8089 (PID: 1221)
+
+======================================================================
+  STARTING AMBIENT AGENT REGISTRY HOT-RELOAD DEMONSTRATION
+======================================================================
+Target Agent URL: http://127.0.0.1:8089
+
+>>> 1. Health & Readiness Probe (GET /health)
+Response: {"status":"healthy"}
+  [PASS] Health check succeeded (HTTP 200, status: healthy)
+
+>>> 2. Act 1: Initial Query Under Skill Revision 1 (POST /run)
+Prompt: "Compute 15 multiplied by 4, then add 10."
+Response Trace (list[Event]):
+[{"id":"...","author":"ambient_agent","content":{"role":"model","parts":[{"functionCall":{"id":"call_m1","name":"multiply","args":{"a":15.0,"b":4.0}}}]}}, ...]
+Function calls detected:     [multiply,add]
+Function responses detected: [multiply,add]
+  [PASS] ADK Event trace verifies functionCall sequence: [multiply,add]
+  [PASS] ADK Event trace verifies functionResponse sequence: [multiply,add]
+  [PASS] Model final response verified: 'Result: 70 (Computed via multiply, add)'
+
+>>> 3. Live Registry Mutation & Instant Invalidation
+Publishing Skill Revision 2 (adding 'power' tool and emoji directives)...
+  [PASS] Skill Revision 2 published to registry catalog (Revision r2 promoted to default)
+Flushing agent in-memory cache via POST /admin/cache/invalidate...
+Response: {"status":"invalidated","flushed":["ambient-privilege-audit-skill"]}
+  [PASS] In-memory cache atomically flushed for skill 'ambient-privilege-audit-skill' (flushed: [ambient-privilege-audit-skill])
+
+>>> 4. Act 2: Immediate Verification Query Under Revision 2 (POST /run)
+Prompt: "Compute 2 to the power of 8."
+Response Trace (list[Event]):
+[{"id":"...","author":"ambient_agent","content":{"role":"model","parts":[{"functionCall":{"id":"call_p1","name":"power","args":{"base":2.0,"exponent":8.0}}}]}}, ...]
+Function calls detected:     [power]
+Function responses detected: [power]
+  [PASS] ADK Event trace verifies functionCall for newly unlocked tool 'power'
+  [PASS] ADK Event trace verifies functionResponse for 'power'
+  [PASS] Model final response verified: '🧮 [CALCULATOR-V2] Computed value: **256**'
+
+>>> 5. Zero Container Restarts & Continuous Liveness Verification
+  [PASS] Agent process PID remained continuous with zero restarts
+  [PASS] Agent health status verified as continuous (status: healthy)
+
+======================================================================
+  HOT-RELOAD DEMONSTRATION SUMMARY: ALL ASSERTIONS PASSED
+======================================================================
+Scenario Results:
+  1. Health & Readiness Probe:       PASS (HTTP 200)
+  2. Act 1 (POST /run - r1):         PASS (multiply, add -> Result: 70)
+  3. Live Registry Mutation:         PASS (Revision r2 promoted, cache flushed)
+  4. Act 2 (POST /run - r2):         PASS (power -> 🧮 [CALCULATOR-V2] **256**)
+  5. Container Uptime / Restarts:    PASS (Zero restarts, 100% availability)
+
+✨ End-to-end hot-reload verified with zero container downtime! ✨
+```
+
+### 2. Execution Planning via `--dry-run`
+Inspect planned commands, HTTP payloads, and assertions without executing requests across all automation scripts:
+
+```bash
+# Dry-run complete hot-reload demonstration sequence
+./scripts/run_demo.sh --dry-run
+
+# Dry-run skill packaging and Agent Registry publication
+./scripts/publish_skill.sh --dry-run ambient-privilege-audit-skill r1 demo/registry_packages/v1/calculator
+
+# Dry-run remote MCP tool service registration
+./scripts/register_tool.sh --dry-run ambient-calculator https://ambient-calculator-service.run.app
+```
+
+### 3. Live Cloud Run Execution
+Run the automated demonstration against your deployed Cloud Run service:
+
+```bash
+export AGENT_SERVICE_URL="$(terraform -chdir=infra/terraform output -raw agent_service_url)"
+export PROJECT_ID="<PROJECT_ID>"
+
+./scripts/run_demo.sh --agent-url="${AGENT_SERVICE_URL}" --project="${PROJECT_ID}"
+```
+
+**Script Flags & Parameter Reference**:
+- `run_demo.sh`:
+  - `--agent-url <URL>`: Base URL of target Agent Service (default: `${AGENT_URL}` or `http://localhost:8080`).
+  - `--mock-mode`: Launches local mock server (`scripts/mock_server.py`) and executes offline verification.
+  - `--dry-run`: Prints demo steps, payloads, and assertions without network execution.
+  - `--project <ID>`: Target GCP project ID (default: `${PROJECT_ID}` or `demo-project-id`).
+  - `--location <REGION>`: Target GCP region (default: `${REGION}` or `us-central1`).
+  - `--skill-name <NAME>`: Target Skill identifier in Agent Registry (default: `ambient-privilege-audit-skill`).
+- `publish_skill.sh`:
+  - `--project <ID>`: Target GCP project ID.
+  - `--location <REGION>`: Target GCP region (default: `global`).
+  - `--skill-name <NAME>`: Target skill name in Agent Registry.
+  - `--revision-id <ID>`: Revision identifier (e.g., `r1`, `r2`).
+  - `--source-dir <DIR>`: Path to directory containing `SKILL.md`.
+  - `--dry-run`: Validates directory structure and displays `gcloud alpha agent-registry skills` commands.
+  - `--set-default` / `--no-set-default`: Controls whether to promote the published revision to `defaultRevision` (default: `true`).
+- `register_tool.sh`:
+  - `--project <ID>`: Target GCP project ID.
+  - `--location <REGION>`: Target GCP region (default: `us-central1`).
+  - `--service-name <NAME>`: Service ID to register/update (default: `ambient-calculator`).
+  - `--tool-url <URL>`: Base URL of the FastMCP tool service.
+  - `--dry-run`: Prints `gcloud agent-registry services` commands without executing.
+
+---
+
+## 10. Teardown & Cleanup
 
 To destroy all cloud resources and prevent ongoing charges:
 

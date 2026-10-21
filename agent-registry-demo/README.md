@@ -53,16 +53,16 @@ This prototype eliminates container-level skill bundling entirely. The agent con
 
 ### Baseline Comparison
 
-| Architectural Dimension | Reference Baseline (`gha-deploy-investigator`) | Agent Registry Prototype |
-| :--- | :--- | :--- |
-| **Skill Storage** | Local container filesystem (`/app/skills/`) | Google Cloud Agent Registry (`v1alpha`) |
-| **Skill Packaging** | Loose markdown files on disk | Immutable binary ZIP bundle (`SKILL.md` + references) |
-| **Skill Loading** | Disk scan (`load_skills_from_dir`) | In-memory download & unpack (`_load_skill_from_zip_bytes`) |
-| **Tool Catalog** | In-process Python functions decorated with `@readonly_tool` | Remote Tools Registry (`agentregistry.googleapis.com/v1`) |
-| **Tool Execution** | In-process Python code execution | Remote FastMCP service over Streamable HTTP |
-| **Tool Activation** | Fixed set bound in Python code at startup | Dynamic activation via `adk_additional_tools` frontmatter |
-| **Update Cycle** | Commit $\rightarrow$ Build $\rightarrow$ Cloud Run Deploy (5–10 mins) | Registry publish $\rightarrow$ In-memory hot-reload ($\le$ 5ms) |
-| **Container Mutation** | Container rebuild required for every prompt/skill change | **Zero container redeployments or restarts** |
+| Dimension | Agent Registry Prototype |
+| :--- | :--- |
+| **Skill Storage** | Google Cloud Agent Registry (`v1alpha`) |
+| **Skill Packaging** | Immutable binary ZIP bundle (`SKILL.md` + references) |
+| **Skill Loading** | In-memory download & unpack (`_load_skill_from_zip_bytes`) |
+| **Tool Catalog** | Remote Tools Registry (`agentregistry.googleapis.com/v1`) |
+| **Tool Execution** | Remote FastMCP service over Streamable HTTP |
+| **Tool Activation** | Dynamic activation via `adk_additional_tools` frontmatter |
+| **Update Cycle** | Registry publish $\rightarrow$ In-memory hot-reload ($\le$ 5ms) |
+| **Container Mutation** | **Zero container redeployments or restarts** |
 
 ---
 
