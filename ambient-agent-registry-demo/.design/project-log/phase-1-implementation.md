@@ -51,5 +51,28 @@ The implementation transitions from custom `/chat` JSON endpoints to the native 
 - **Ruff Linting**: 0 errors across `ambient-agent-registry-demo/`.
 - **Project Literal Scan**: Zero forbidden literal project IDs verified by `scripts/check-no-literal-projects.sh`.
 
-## 4. Next Phase Readiness
-Phase 1 provides the fully tested core ADK runtime, ready for Phase 2 Terraform infrastructure definition and Phase 3 Cloud Build CI/CD automation.
+## 4. Phase 1 Review Remediation
+Following the Phase 1 Code Review (`reviews/phase-1-review.md`), the following fixes were implemented:
+- **Cross-Event-Loop / Cross-Thread Concurrency Safety (`app/registry/cache.py`)**:
+  - Replaced `asyncio.Lock()` with `threading.RLock()`.
+  - Guarded cache dictionary access (`self._cache`) with `with self._lock:`.
+  - Implemented cross-thread and cross-event-loop safe in-flight request coordination using `concurrent.futures.Future` and `asyncio.wrap_future`, eliminating thread/coroutine deadlocks while guaranteeing single fetches for concurrent cache misses.
+  - Added unit test `test_multithreaded_concurrent_get_skill_across_event_loops` in `tests/test_hot_reload.py` verifying multi-threaded concurrent execution across separate `asyncio.run()` event loops.
+- **Standardized `ambient_` Environment Prefix (`app/config.py`)**:
+  - Configured `env_prefix="ambient_"` in `SettingsConfigDict(env_prefix="ambient_", case_sensitive=False, extra="ignore")`.
+  - Mapped all settings fields to support both `AMBIENT_<FIELD>` and standard GCP/generic names via `validation_alias=AliasChoices(...)`.
+  - Added unit test `test_config_settings_ambient_prefix` in `tests/test_skill_registry.py`.
+- **Dead Code Cleanup & API Server Logging (`app/main.py`)**:
+  - Removed orphaned `ToolInvocation` and `extract_provenance_from_events` routines and unused `Event` import.
+  - Added `logger.warning(...)` in `create_app()` if `_find_api_server` cannot resolve `ApiServer` from route closures.
+- **Dead Code Cleanup & Reusable ThreadPool (`app/agent_loader.py`)**:
+  - Removed unused module-level helper `extract_skill_revision`.
+  - Replaced per-call `ThreadPoolExecutor` creation in `_sync_worker` with class-level reusable executor `_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)`.
+
+## 5. Verification & Test Suite (`tests/`)
+- **Pytest Suite**: 65 passing unit and integration tests (expanded from 63).
+- **Ruff Linting**: Clean (0 errors).
+- **Project Literal Scan**: Zero forbidden literal project IDs verified.
+
+## 6. Next Phase Readiness
+Phase 1 core ADK runtime and review remediations are complete and fully verified, ready for Phase 2 Terraform infrastructure definition and Phase 3 Cloud Build CI/CD automation.

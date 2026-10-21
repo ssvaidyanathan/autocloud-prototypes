@@ -45,35 +45,6 @@ def extract_declared_tools(skill: Skill) -> list[str]:
     return declared_tools
 
 
-def extract_skill_revision(skill: Skill) -> str:
-    """Extract revision identifier from skill metadata or URI."""
-    if hasattr(skill, "_uri") and skill._uri:
-        uri_str = str(skill._uri)
-        if "/revisions/" in uri_str:
-            rev_part = uri_str.split("/revisions/")[-1].split("?")[0]
-            if rev_part.startswith("rev-"):
-                rev_part = rev_part[4:]
-            return rev_part
-    if skill.frontmatter and skill.frontmatter.metadata:
-        revision = skill.frontmatter.metadata.get("revision")
-        if revision:
-            return str(revision)
-        version = skill.frontmatter.metadata.get("version")
-        if version:
-            v_str = str(version)
-            if v_str.startswith("r"):
-                return v_str
-            if v_str == "2.0.0":
-                return "r2"
-            if v_str == "1.0.0":
-                return "r1"
-            return v_str
-    if skill.instructions and (
-        "CALCULATOR-V2" in skill.instructions or "[CALCULATOR-V2]" in skill.instructions
-    ):
-        return "r2"
-    return "r1"
-
 
 class MockGeminiModel(BaseLlm):
     """Mock Gemini model for offline testing without Vertex AI API credentials.
@@ -255,6 +226,8 @@ class MockGeminiModel(BaseLlm):
 class AmbientAgentLoader(BaseAgentLoader):
     """ADK Agent Loader subclass dynamically loading skills and tools from Agent Registry."""
 
+    _EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
     def __init__(
         self,
         skills_loader: SkillsLoader | None = None,
@@ -294,9 +267,8 @@ class AmbientAgentLoader(BaseAgentLoader):
         Prevents 'event loop is already running' conflicts when called from inside
         an async server runner.
         """
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(asyncio.run, coro)
-            return future.result()
+        future = self._EXECUTOR.submit(asyncio.run, coro)
+        return future.result()
 
     def load_agent(self, agent_name: str) -> BaseAgent:
         """Loads an instance of the ambient agent with dynamic skill and tools.

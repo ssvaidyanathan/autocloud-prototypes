@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -68,7 +70,8 @@ class CachedSkillRegistry(SkillRegistry):
         self._target = target_registry
         self._ttl = ttl_seconds
         self._cache: dict[str, CacheEntry] = {}
-        self._lock = asyncio.Lock()
+        self._lock = threading.RLock()
+        self._inflight: dict[str, concurrent.futures.Future[Skill]] = {}
 
     @property
     def ttl_seconds(self) -> float:
@@ -82,17 +85,19 @@ class CachedSkillRegistry(SkillRegistry):
 
     def is_cached(self, name: str) -> bool:
         """Return True if skill exists in cache and has not expired."""
-        entry = self._cache.get(name)
-        if not entry:
-            return False
-        return (time.monotonic() - entry.timestamp) < self._ttl
+        with self._lock:
+            entry = self._cache.get(name)
+            if not entry:
+                return False
+            return (time.monotonic() - entry.timestamp) < self._ttl
 
     def get_cached_entry(self, name: str) -> CacheEntry | None:
         """Return cache entry if valid, else None."""
-        entry = self._cache.get(name)
-        if entry and (time.monotonic() - entry.timestamp) < self._ttl:
-            return entry
-        return None
+        with self._lock:
+            entry = self._cache.get(name)
+            if entry and (time.monotonic() - entry.timestamp) < self._ttl:
+                return entry
+            return None
 
     async def get_skill(
         self,
@@ -110,21 +115,27 @@ class CachedSkillRegistry(SkillRegistry):
         if not resolved_name or not isinstance(resolved_name, str):
             raise ValueError("Skill name must be a non-empty string.")
 
-        # 1. Fast path: in-memory cache hit (< 1ms, lock-free read)
+        # 1. Fast path: in-memory cache hit (< 1ms) or check in-flight coordinator
         now = time.monotonic()
-        entry = self._cache.get(resolved_name)
-        if entry and (now - entry.timestamp) < self._ttl:
-            return entry.skill
-
-        # 2. Cache miss or expired: serialize refresh via async lock
-        async with self._lock:
-            # Double-check inside lock in case another task refreshed it
-            now = time.monotonic()
+        with self._lock:
             entry = self._cache.get(resolved_name)
             if entry and (now - entry.timestamp) < self._ttl:
                 return entry.skill
 
-            # Fetch fresh skill from underlying target registry
+            fut = self._inflight.get(resolved_name)
+            if fut is None:
+                fut = concurrent.futures.Future()
+                self._inflight[resolved_name] = fut
+                is_fetcher = True
+            else:
+                is_fetcher = False
+
+        if not is_fetcher:
+            # Wait on the in-flight resolution across event loops/threads
+            return await asyncio.wrap_future(fut)
+
+        # 2. Fetch fresh skill from underlying target registry
+        try:
             fresh_skill = await self._target.get_skill(name=resolved_name, **kwargs)
 
             # Compute content hash
@@ -135,12 +146,21 @@ class CachedSkillRegistry(SkillRegistry):
             except Exception:
                 chash = compute_skill_content_hash(fresh_skill)
 
-            self._cache[resolved_name] = CacheEntry(
-                skill=fresh_skill,
-                timestamp=time.monotonic(),
-                content_hash=chash,
-            )
+            with self._lock:
+                self._cache[resolved_name] = CacheEntry(
+                    skill=fresh_skill,
+                    timestamp=time.monotonic(),
+                    content_hash=chash,
+                )
+                fut.set_result(fresh_skill)
             return fresh_skill
+        except BaseException as exc:
+            with self._lock:
+                fut.set_exception(exc)
+            raise
+        finally:
+            with self._lock:
+                self._inflight.pop(resolved_name, None)
 
     async def search_skills(self, *, query: str, **kwargs: Any) -> list[Frontmatter]:
         """Search skills via the underlying registry."""
@@ -155,30 +175,31 @@ class CachedSkillRegistry(SkillRegistry):
         Returns:
             List of skill names that were flushed from the cache.
         """
-        if name is not None:
-            clean_name = name.strip()
-            if not clean_name:
-                return []
-            flushed: list[str] = []
-            if clean_name in self._cache:
-                del self._cache[clean_name]
-                flushed.append(clean_name)
+        with self._lock:
+            if name is not None:
+                clean_name = name.strip()
+                if not clean_name:
+                    return []
+                flushed: list[str] = []
+                if clean_name in self._cache:
+                    del self._cache[clean_name]
+                    flushed.append(clean_name)
 
-            # Also check ambient- and private- prefixed aliases
-            candidates = [
-                f"ambient-{clean_name}"
-                if not clean_name.startswith("ambient-")
-                else clean_name[len("ambient-") :],
-                f"private-{clean_name}"
-                if not clean_name.startswith("private-")
-                else clean_name[len("private-") :],
-            ]
-            for alt in candidates:
-                if alt in self._cache and alt not in flushed:
-                    del self._cache[alt]
-                    flushed.append(alt)
+                # Also check ambient- and private- prefixed aliases
+                candidates = [
+                    f"ambient-{clean_name}"
+                    if not clean_name.startswith("ambient-")
+                    else clean_name[len("ambient-") :],
+                    f"private-{clean_name}"
+                    if not clean_name.startswith("private-")
+                    else clean_name[len("private-") :],
+                ]
+                for alt in candidates:
+                    if alt in self._cache and alt not in flushed:
+                        del self._cache[alt]
+                        flushed.append(alt)
+                return flushed
+
+            flushed = list(self._cache.keys())
+            self._cache.clear()
             return flushed
-
-        flushed = list(self._cache.keys())
-        self._cache.clear()
-        return flushed

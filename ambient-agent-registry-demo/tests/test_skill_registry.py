@@ -226,6 +226,32 @@ def test_config_settings_standard_gcp_aliases(monkeypatch: pytest.MonkeyPatch) -
     assert settings.region == "europe-west1"
 
 
+def test_config_settings_ambient_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify Settings respects AMBIENT_ prefixed environment variables."""
+    monkeypatch.setenv("AMBIENT_PROJECT_ID", "custom-ambient-project")
+    monkeypatch.setenv("AMBIENT_REGION", "europe-west4")
+    monkeypatch.setenv("AMBIENT_SKILL_LOCATION", "us-east1")
+    monkeypatch.setenv("AMBIENT_PORT", "9090")
+    monkeypatch.setenv("AMBIENT_SERVICE_NAME", "my-ambient-service")
+    monkeypatch.setenv("AMBIENT_SKILL_NAME", "custom-skill")
+    monkeypatch.setenv("AMBIENT_MODEL_NAME", "gemini-2.5-pro")
+    monkeypatch.setenv("AMBIENT_CALCULATOR_SERVICE_URL", "https://calculator.internal/mcp")
+    monkeypatch.setenv("AMBIENT_CALCULATOR_MCP_SERVER", "my-calculator")
+    monkeypatch.setenv("AMBIENT_MOCK_REGISTRY", "false")
+
+    settings = Settings()
+    assert settings.project_id == "custom-ambient-project"
+    assert settings.region == "europe-west4"
+    assert settings.skill_location == "us-east1"
+    assert settings.port == 9090
+    assert settings.service_name == "my-ambient-service"
+    assert settings.skill_name == "custom-skill"
+    assert settings.model_name == "gemini-2.5-pro"
+    assert settings.calculator_service_url == "https://calculator.internal/mcp"
+    assert settings.calculator_mcp_server == "my-calculator"
+    assert settings.mock_registry is False
+
+
 @pytest.mark.asyncio
 async def test_auth_headers_production_raises_and_test_fallback() -> None:
     """Verify production client raises on missing ADC, while test client uses fallback."""

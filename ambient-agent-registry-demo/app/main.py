@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from google.adk.cli.api_server import ApiServer
 from google.adk.cli.fast_api import get_fast_api_app
-from google.adk.events import Event
 from pydantic import BaseModel, Field
 
 from app.agent_loader import AmbientAgentLoader
@@ -41,60 +39,6 @@ class CacheInvalidateResponse(BaseModel):
     flushed: list[str] = Field(
         default_factory=list, description="List of skill names flushed from the cache"
     )
-
-
-class ToolInvocation(BaseModel):
-    """Record of a tool invocation extracted directly from ADK events."""
-
-    tool: str = Field(..., description="Tool name invoked")
-    name: str | None = Field(default=None, description="Tool name alias")
-    args: dict[str, Any] = Field(default_factory=dict, description="Arguments passed to the tool")
-    result: Any = Field(default=None, description="Return value from tool execution")
-
-    def model_post_init(self, __context: object) -> None:
-        if self.name is None:
-            self.name = self.tool
-
-
-def extract_provenance_from_events(
-    events: list[Event],
-) -> tuple[str, list[ToolInvocation]]:
-    """Extract final response text and structured tool invocations from ADK Events."""
-    response_text = ""
-    invocations: list[ToolInvocation] = []
-    call_map: dict[str, ToolInvocation] = {}
-
-    for event in events:
-        for fc in event.get_function_calls():
-            inv = ToolInvocation(
-                tool=fc.name,
-                name=fc.name,
-                args=fc.args or {},
-            )
-            invocations.append(inv)
-            key = fc.id or fc.name
-            call_map[key] = inv
-
-        for fr in event.get_function_responses():
-            key = fr.id or fr.name
-            if key in call_map:
-                call_map[key].result = fr.response
-            else:
-                for inv in reversed(invocations):
-                    if inv.tool == fr.name and inv.result is None:
-                        inv.result = fr.response
-                        break
-
-        if event.is_final_response() and event.content and event.content.parts:
-            for part in event.content.parts:
-                if part.text:
-                    response_text += part.text
-        elif event.content and event.content.role == "model" and event.content.parts:
-            for part in event.content.parts:
-                if part.text and not part.function_call:
-                    response_text += part.text
-
-    return response_text.strip(), invocations
 
 
 # Pluggable loader & tool manager for dependency injection and testing
@@ -203,6 +147,11 @@ def create_app() -> FastAPI:
     if api_server:
         api_server.default_app_name = "ambient_agent"
         fastapi_app.state.api_server = api_server
+    else:
+        logger.warning(
+            "Could not extract ADK ApiServer instance from FastAPI routes. "
+            "Runner cache eviction during hot reload may be impaired."
+        )
 
     # Custom administrative route for cache invalidation & hot-reload
     @fastapi_app.post(

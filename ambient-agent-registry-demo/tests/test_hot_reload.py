@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import shutil
 import subprocess
 import sys
@@ -175,6 +176,28 @@ async def test_concurrent_get_skill_fetches_once() -> None:
 
     assert dummy.fetch_count == 1
     assert results[0] is results[1] is results[2]
+
+
+def test_multithreaded_concurrent_get_skill_across_event_loops() -> None:
+    """Verify multi-threaded access to CachedSkillRegistry across separate event loops."""
+    dummy = DummyRegistry(fetch_delay=0.05)
+    cached_reg = CachedSkillRegistry(dummy, ttl_seconds=60.0)
+
+    def worker_thread(skill_name: str) -> Skill:
+        # Each thread creates its own fresh event loop via asyncio.run
+        return asyncio.run(cached_reg.get_skill(name=skill_name))
+
+    worker_count = 6
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(worker_thread, "ambient-privilege-audit-skill")
+            for _ in range(worker_count)
+        ]
+        results = [f.result(timeout=10.0) for f in futures]
+
+    assert dummy.fetch_count == 1
+    assert all(r.name == "ambient-privilege-audit-skill" for r in results)
+    assert all(r is results[0] for r in results)
 
 
 @pytest.mark.asyncio
