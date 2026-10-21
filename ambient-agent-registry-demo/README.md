@@ -574,7 +574,7 @@ curl -X POST "${AGENT_SERVICE_URL}/run" \
 ```
 
 **Expected Response (`list[Event]` Execution Trace)**:
-The response is a native ADK event trace list (`list[Event]`), enriched with runtime provenance metadata in `custom_metadata`:
+The response is a native ADK event trace list (`list[Event]`), enriched with runtime provenance metadata in `custom_metadata` (note that offline tests and the mock use a different fixture URI):
 ```json
 [
   {
@@ -602,7 +602,7 @@ The response is a native ADK event trace list (`list[Event]`), enriched with run
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r1",
-        "resource_name": "projects/<PROJECT_ID>/locations/us-central1/skills/ambient-privilege-audit-skill/revisions/r1"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r1"
       },
       "skill_revision": "r1",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -633,7 +633,7 @@ The response is a native ADK event trace list (`list[Event]`), enriched with run
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r1",
-        "resource_name": "projects/<PROJECT_ID>/locations/us-central1/skills/ambient-privilege-audit-skill/revisions/r1"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r1"
       },
       "skill_revision": "r1",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -664,7 +664,7 @@ The response is a native ADK event trace list (`list[Event]`), enriched with run
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r1",
-        "resource_name": "projects/<PROJECT_ID>/locations/us-central1/skills/ambient-privilege-audit-skill/revisions/r1"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r1"
       },
       "skill_revision": "r1",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -695,7 +695,7 @@ The response is a native ADK event trace list (`list[Event]`), enriched with run
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r1",
-        "resource_name": "projects/<PROJECT_ID>/locations/us-central1/skills/ambient-privilege-audit-skill/revisions/r1"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r1"
       },
       "skill_revision": "r1",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -722,7 +722,7 @@ The response is a native ADK event trace list (`list[Event]`), enriched with run
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r1",
-        "resource_name": "projects/<PROJECT_ID>/locations/us-central1/skills/ambient-privilege-audit-skill/revisions/r1"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r1"
       },
       "skill_revision": "r1",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -819,7 +819,7 @@ curl -X POST "${AGENT_SERVICE_URL}/run" \
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r2",
-        "resource_name": "projects/<PROJECT_ID>/locations/us-central1/skills/ambient-privilege-audit-skill/revisions/r2"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r2"
       },
       "skill_revision": "r2",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -850,7 +850,7 @@ curl -X POST "${AGENT_SERVICE_URL}/run" \
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r2",
-        "resource_name": "projects/<PROJECT_ID>/locations/us-central1/skills/ambient-privilege-audit-skill/revisions/r2"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r2"
       },
       "skill_revision": "r2",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -877,7 +877,7 @@ curl -X POST "${AGENT_SERVICE_URL}/run" \
       "skill": {
         "name": "ambient-privilege-audit-skill",
         "revision": "r2",
-        "resource_name": "projects/<PROJECT_ID>/locations/us-central1/skills/ambient-privilege-audit-skill/revisions/r2"
+        "resource_name": "projects/<PROJECT_ID>/locations/global/skills/ambient-privilege-audit-skill/revisions/rev-r2"
       },
       "skill_revision": "r2",
       "mcp_server": "https://ambient-calculator-service-....run.app/mcp"
@@ -904,7 +904,7 @@ Verify that the Cloud Run service maintained 100% continuous uptime with zero re
 ```bash
 curl -X GET "${AGENT_SERVICE_URL}/health"
 ```
-**Expected Response**: `{"status": "healthy"}` (Continuous 100% availability).
+**Expected Response**: `{"status": "ok"}` (local mock server returns `{"status": "healthy"}`).
 
 ---
 
