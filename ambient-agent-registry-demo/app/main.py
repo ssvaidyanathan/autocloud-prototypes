@@ -159,6 +159,7 @@ def create_app() -> FastAPI:
     async def attach_provenance_middleware(request: Request, call_next):
         response = await call_next(request)
         if request.url.path == "/run" and response.status_code == 200:
+            body = b""
             try:
                 body = b"".join([chunk async for chunk in response.body_iterator])
                 payload = json.loads(body.decode("utf-8"))
@@ -204,6 +205,14 @@ def create_app() -> FastAPI:
                     )
             except Exception as exc:
                 logger.warning("Failed to enrich /run response with provenance: %s", exc)
+                if body:
+                    headers = dict(response.headers)
+                    return Response(
+                        content=body,
+                        status_code=response.status_code,
+                        headers=headers,
+                        media_type=response.media_type or "application/json",
+                    )
         return response
 
     # Custom administrative route for cache invalidation & hot-reload

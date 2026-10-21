@@ -323,3 +323,49 @@ def test_boot_without_local_skills_dir() -> None:
     assert not local_skills_dir.exists(), "Local skills directory must not exist"
     loader = SkillsLoader()
     assert loader.registry is not None
+
+
+@pytest.mark.asyncio
+async def test_agent_registry_private_prefix_fallback(valid_skill_zip: bytes) -> None:
+    """Verify that client falls back to private-{name} when standard name returns 404."""
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if url_str.endswith("/skills/ambient-privilege-audit-skill"):
+            return httpx.Response(status_code=404, json={"error": "Not Found"})
+        elif url_str.endswith("/skills/private-ambient-privilege-audit-skill"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "name": (
+                        "projects/demo-project-id/locations/global/"
+                        "skills/private-ambient-privilege-audit-skill"
+                    ),
+                    "defaultRevision": (
+                        "projects/demo-project-id/locations/global/"
+                        "skills/private-ambient-privilege-audit-skill/revisions/r1"
+                    ),
+                },
+            )
+        elif "revisions/r1" in url_str and "alt=media" in url_str:
+            return httpx.Response(
+                status_code=200,
+                content=valid_skill_zip,
+                headers={"content-type": "application/zip"},
+            )
+        return httpx.Response(status_code=404, json={"error": "Not Found"})
+
+    transport = httpx.MockTransport(mock_handler)
+    async with httpx.AsyncClient(transport=transport) as mock_http:
+        client = GCPSkillRegistryClient(
+            project_id="demo-project-id",
+            location="global",
+            http_client=mock_http,
+        )
+
+        skill = await client.get_skill(name="ambient-privilege-audit-skill")
+        assert isinstance(skill, models.Skill)
+        assert skill.name == "ambient-privilege-audit-skill"
+        assert skill.frontmatter.allowed_tools is not None
+        assert "add" in skill.frontmatter.allowed_tools
+

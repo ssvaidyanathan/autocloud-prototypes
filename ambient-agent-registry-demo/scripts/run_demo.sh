@@ -360,6 +360,8 @@ if [[ -n "${ACT1_PROV_SKILL}" ]]; then
   echo "Provenance - Skill Revision: ${ACT1_PROV_REV}"
   echo "Provenance - MCP Server URL: ${ACT1_PROV_MCP}"
   log_pass "Provenance verified: Skill '${ACT1_PROV_REV}' loaded from Agent Registry, tools routed to MCP"
+elif [[ "${MOCK_MODE}" != "true" ]]; then
+  log_fail "Act 1 assertion failed: live response missing Agent Registry provenance in custom_metadata"
 fi
 
 # Verify functionCall sequence for multiply and add using jq
@@ -466,6 +468,8 @@ if [[ -n "${ACT2_PROV_SKILL}" ]]; then
   echo "Provenance - Skill Revision: ${ACT2_PROV_REV}"
   echo "Provenance - MCP Server URL: ${ACT2_PROV_MCP}"
   log_pass "Provenance verified: Skill '${ACT2_PROV_REV}' loaded from Agent Registry, tools routed to MCP"
+elif [[ "${MOCK_MODE}" != "true" ]]; then
+  log_fail "Act 2 assertion failed: live response missing Agent Registry provenance in custom_metadata"
 fi
 
 ACT2_FC="$(echo "${ACT2_BODY}" | jq -r '[.. | .functionCall? // .function_call? // empty | .name] | join(",")')"
