@@ -148,49 +148,26 @@ This prototype eliminates container-level skill bundling entirely. The agent con
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Client as Caller / Demo Script
-    participant Agent as Agent Service (Cloud Run)
-    participant Cache as CachedSkillRegistry
-    participant SkillsReg as GCP Skills Registry (v1alpha)
-    participant ToolReg as GCP Tools Registry (v1)
-    participant ToolSvc as Calculator Tool Service (Cloud Run)
+    participant Client as Client
+    participant Agent as Gemini Agent
+    participant Registry as Agent Registry
+    participant Calculator as Remote Calculator
+    participant Publisher as Skill Publisher
 
-    Note over Client,ToolSvc: Act 1: Initial Query Under Revision 1
-    Client->>Agent: POST /chat {"prompt": "Compute 15 multiplied by 4, then add 10."}
-    Agent->>Cache: get_skill("calculator")
-    Cache->>SkillsReg: GET /skills/calculator (defaultRevision -> r1)
-    SkillsReg-->>Cache: 200 OK (metadata)
-    Cache->>SkillsReg: GET /skills/calculator/revisions/r1?alt=media
-    SkillsReg-->>Cache: 200 OK (application/zip bytes)
-    Note over Cache: In-memory unpack via _load_skill_from_zip_bytes
-    Cache-->>Agent: Skill(v1: add, multiply)
-    Agent->>ToolReg: Resolve mcpServers/calculator
-    ToolReg-->>Agent: Service URL & http-json binding
-    Agent->>ToolSvc: POST /mcp tools/call: multiply(15, 4)
-    ToolSvc-->>Agent: {"result": 60}
-    Agent->>ToolSvc: POST /mcp tools/call: add(60, 10)
-    ToolSvc-->>Agent: {"result": 70}
-    Agent-->>Client: 200 OK: "Result: 70 (Computed via multiply, add)" [revision: r1]
-
-    Note over Client,ToolSvc: Live Registry Mutation (Zero Container Restarts)
-    Client->>SkillsReg: publish_skill.sh (Upload calculator-v2.zip as r2 & promote to default)
-    SkillsReg-->>Client: 200 OK (r2 published)
-    Client->>Agent: POST /admin/cache/invalidate {"skill_name": "calculator"}
-    Agent->>Cache: invalidate("calculator")
-    Agent-->>Client: 200 OK: {"status": "invalidated", "flushed": ["calculator"]}
-
-    Note over Client,ToolSvc: Act 2: Immediate Verification Query Under Revision 2
-    Client->>Agent: POST /chat {"prompt": "Compute 2 to the power of 8."}
-    Agent->>Cache: get_skill("calculator") [Cache Miss]
-    Cache->>SkillsReg: GET /skills/calculator (defaultRevision -> r2)
-    Cache->>SkillsReg: GET /skills/calculator/revisions/r2?alt=media
-    SkillsReg-->>Cache: 200 OK (v2 application/zip bytes)
-    Cache-->>Agent: Skill(v2: add, multiply, power)
-    Note over Agent: adk_additional_tools unlocks 'power' dynamically
-    Agent->>ToolSvc: POST /mcp tools/call: power(2, 8)
-    ToolSvc-->>Agent: {"result": 256}
-    Agent-->>Client: 200 OK: "🧮 [CALCULATOR-V2] Computed value: **256**" [revision: r2]
+    Client->>Agent: Send user prompt
+    Agent->>Registry: Fetch skill instructions (populates cache)
+    Agent->>Registry: Discover calculator tools
+    Agent->>Calculator: Call remote calculator (MCP)
+    Agent-->>Client: Return answer with provenance (revision, tools)
+    Publisher->>Registry: Publish new skill revision
+    Note over Agent,Registry: Cache TTL ~60s / invalidate
+    Client->>Agent: Send prompt requiring new skill
+    Agent->>Registry: Fetch updated skill revision (cache miss)
+    Agent->>Calculator: Call newly allowed tool (power) (MCP)
+    Agent-->>Client: Return answer with new revision provenance
 ```
+
+*Figure: Dynamic skill resolution, remote tool discovery, and zero-downtime hot reloading via Agent Registry.*
 
 ---
 

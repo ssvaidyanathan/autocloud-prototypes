@@ -3,17 +3,49 @@ A repo of Autocloud prototypes
 
 ## Prototypes
 
-### Agent Registry Demo
-Autonomous agent prototype built with the Google Agent Development Kit (ADK) and Gemini that loads its skills from Google Cloud Agent Registry. Discovers tools through a registry-registered Model Context Protocol (MCP) calculator server, picks up skill updates without a redeploy using an in-memory TTL cache and cache invalidation endpoint, and returns structured provenance in responses while operating fail-closed with no fallbacks. See [agent-registry-demo/](agent-registry-demo/) for documentation and setup instructions.
+### [Agent Registry Demo](agent-registry-demo/)
 
-### Ambient Agent Registry Demo
-Autonomous agent prototype built on Google Agent Development Kit (ADK) exposing native synchronous `/run` execution traces (`list[Event]`). Loads and updates skills dynamically from Google Cloud Agent Registry, discovers remote FastMCP calculator tools, supports zero-downtime hot-reloads via `/admin/cache/invalidate`, and enforces fail-closed execution with zero fallbacks and production safety startup guards. See [ambient-agent-registry-demo/](ambient-agent-registry-demo/) for documentation and setup instructions.
+| Specification | Details |
+| :--- | :--- |
+| **Core Architecture** | Dynamic skill and tool loading from GCP Agent Registry with zero-downtime hot-reloading |
+| **Runtime & Protocols** | Custom FastAPI exposing `POST /chat` and `POST /admin/cache/invalidate`; FastMCP over Streamable HTTP |
+| **Integrations** | GCP Agent Registry (`v1alpha` skills, `v1` tools), Vertex AI Gemini |
+| **Cloud Run Services (default prefix)** | `ard-agent-service`, `ard-calculator-service` |
+| **State & Persistence** | Pure in-memory ZIP unpacking (zero local disk persistence for skills); TTL in-memory cache with explicit invalidation |
+| **Docs & Quick-Start** | [Documentation](agent-registry-demo/) • [Hot-Reload Demo](agent-registry-demo/#8-hot-reload-demonstration-scenarios) |
 
-### Incident SRE Agent
-Autonomous SRE agent prototype for Google Cloud Platform incident investigation, root cause diagnosis, and bidirectional ITSM ticket enrichment (ServiceNow and Jira). See [incident-sre-agent/](incident-sre-agent/) for documentation and setup instructions.
+### [Ambient Agent Registry Demo](ambient-agent-registry-demo/)
 
-### GitHub Actions Deployment Failure Investigator
-Autonomous CI/CD and SRE diagnostic platform for GitHub Actions pipeline failures. Ingests failure webhooks, triages multi-stage failures across lint, test, build, and deploy stages, correlates logs and Cloud Run runtime health with Vertex AI Gemini, creates enriched ServiceNow incident records, and writes diagnostic findings and ticket deep-links directly back to GitHub Check Runs and Pull Requests. See [gha-deploy-investigator/](gha-deploy-investigator/) for documentation and setup instructions.
+| Specification | Details |
+| :--- | :--- |
+| **Core Architecture** | Native ADK runtime with dynamic skill/tool loading from GCP Agent Registry and zero-downtime hot-reloading |
+| **Runtime & Protocols** | Native Google ADK `LlmAgent` + `Runner` exposing synchronous `POST /run` (`list[Event]`), `POST /run_sse`, and `POST /admin/cache/invalidate`; FastMCP over Streamable HTTP |
+| **Integrations** | GCP Agent Registry (`v1alpha` skills, `v1` tools), Vertex AI Gemini (2.5 Flash) |
+| **Cloud Run Services (default prefix)** | `ambient-agent-service`, `ambient-calculator-service` |
+| **State & Persistence** | Pure in-memory ZIP unpacking (zero local disk persistence for skills); in-memory TTL cache with explicit atomic invalidation |
+| **Docs & Quick-Start** | [Documentation](ambient-agent-registry-demo/) • [Hot-Reload Demo](ambient-agent-registry-demo/#8-live-demonstration-execution) |
+
+### [Incident SRE Agent](incident-sre-agent/)
+
+| Specification | Details |
+| :--- | :--- |
+| **Core Architecture** | Autonomous GCP incident investigation across logs, metrics, changes, and assets with ITSM sync |
+| **Runtime & Protocols** | Asynchronous webhook ingestion bridge (`POST /webhook/{servicenow,jira,generic}`) + Cloud Tasks worker |
+| **Integrations** | ServiceNow (Flow Designer), Jira Cloud, Cloud Logging/Monitoring/Audit/Asset, Vertex AI Gemini |
+| **Cloud Run Services (default prefix)** | `isa-incident-bridge`, `isa-sre-agent` |
+| **State & Persistence** | Stateless Cloud Run services; Cloud Tasks asynchronous queue; standalone HTML dossier generation |
+| **Docs & Quick-Start** | [Documentation](incident-sre-agent/) • [Deployment Script](incident-sre-agent/#10-master-automated-deployment-script) |
+
+### [GitHub Actions Deployment Failure Investigator](gha-deploy-investigator/)
+
+| Specification | Details |
+| :--- | :--- |
+| **Core Architecture** | Autonomous CI/CD pipeline failure triage, Gemini log correlation, and bidirectional write-back |
+| **Runtime & Protocols** | Ingestion bridge receiving GitHub App webhooks (`workflow_run`, `workflow_job`) + Cloud Tasks worker |
+| **Integrations** | GitHub App (Check Runs, PRs, Actions API), ServiceNow (Table & Attachment API), Cloud Run, Vertex AI |
+| **Cloud Run Services (default prefix)** | `gdi-bridge`, `gdi-agent` |
+| **State & Persistence** | Stateless event processing; Cloud Tasks asynchronous queue; in-memory query cache |
+| **Docs & Quick-Start** | [Documentation](gha-deploy-investigator/) • [Deployment Walkthrough](gha-deploy-investigator/#9-full-step-by-step-gcp-deployment-walkthrough) |
 
 ## Development Guidelines
 
@@ -21,4 +53,3 @@ Autonomous CI/CD and SRE diagnostic platform for GitHub Actions pipeline failure
 All shell scripts and CI workflow `run:` blocks must remain portable across macOS (BSD) and Linux (GNU). Any in-place `sed` editing must use the uname-based `sedi_args` array pattern (`sedi_args=("-i")`; on Darwin `sedi_args=("-i" "")`). Non-portable variants (bare `sed -i`, `sed -i ''`, `sed -i.bak`, or `sed --in-place`) are blocked by `scripts/check-portable-sed.sh`.
 
 Note: Heredoc bodies (e.g. `cat << 'EOF'`) are scanned as shell code. If a script generates documentation or user instructions referencing `sed`, reword the text (e.g., describe in-place editing conceptually or avoid literal `-i` flags) to satisfy the guard.
-
