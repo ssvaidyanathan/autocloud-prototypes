@@ -155,7 +155,7 @@ sequenceDiagram
     participant Publisher as Skill Publisher
 
     Client->>Agent: Send user prompt
-    Agent->>Registry: Fetch skill instructions (cached)
+    Agent->>Registry: Fetch skill instructions (populates cache)
     Agent->>Registry: Discover calculator tools
     Agent->>Calculator: Call remote calculator (MCP)
     Agent-->>Client: Return answer with provenance (revision, tools)
@@ -163,7 +163,7 @@ sequenceDiagram
     Note over Agent,Registry: Cache TTL ~60s / invalidate
     Client->>Agent: Send prompt requiring new skill
     Agent->>Registry: Fetch updated skill revision (cache miss)
-    Agent->>Calculator: Call updated calculator tool (MCP)
+    Agent->>Calculator: Call newly allowed tool (power) (MCP)
     Agent-->>Client: Return answer with new revision provenance
 ```
 
