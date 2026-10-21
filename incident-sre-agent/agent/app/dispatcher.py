@@ -162,7 +162,7 @@ class Dispatcher(BaseAgent):
     ) -> tuple[str, Findings, Optional[str]]:
         """Run a single specialist asynchronously with strict error containment."""
         try:
-            timeout_s = getattr(self.config, "specialist_timeout_seconds", 120.0)
+            timeout_s = self.config.specialist_timeout_seconds
             if hasattr(specialist, "investigate_async"):
                 finding = await specialist.investigate_async(
                     incident=incident,

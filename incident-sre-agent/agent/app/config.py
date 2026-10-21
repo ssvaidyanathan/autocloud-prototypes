@@ -82,7 +82,9 @@ class AgentConfig(BaseSettings):
     allowed_callback_hosts: list[str] = Field(default_factory=lambda: ["*.run.app"])
     timeout_seconds: int = 600
     investigation_timeout_seconds: Optional[int] = None
+    # Not yet enforced; reserved for a cap on all specialist work in one investigation.
     investigation_budget_seconds: float = 300.0
+    specialist_timeout_seconds: float = 120.0
     max_review_rounds: int = 1
     specialist_query_limit: int = 5
     specialist_max_entries: int = 50

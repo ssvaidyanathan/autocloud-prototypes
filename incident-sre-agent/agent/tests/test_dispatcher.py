@@ -636,3 +636,22 @@ async def test_dispatcher_no_skill_crosstalk_concurrent_fan_out() -> None:
     assert "change-correlation" not in logs_spec.skill_tracker.skills_used
     assert "cloud-logging-queries" not in metrics_spec.skill_tracker.skills_used
     assert "cloud-run-troubleshooting" not in changes_spec.skill_tracker.skills_used
+
+
+@pytest.mark.anyio
+async def test_dispatcher_passes_specialist_timeout_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SPECIALIST_TIMEOUT_SECONDS from the environment reaches each specialist."""
+    monkeypatch.setenv("SPECIALIST_TIMEOUT_SECONDS", "42.5")
+    findings = Findings(
+        summary="ok", evidence=[], anomalies=[], queries_run=[], confidence=0.5, errors=[]
+    )
+    specialists = {name: MockSpecialist(name, findings) for name in ("logs", "metrics")}
+
+    dispatcher = Dispatcher(config=AgentConfig(timeout_seconds=30), specialists=specialists)
+    result = await dispatcher.investigate(_make_request())
+
+    assert result.status == "completed"
+    for specialist in specialists.values():
+        assert specialist.last_kwargs["timeout_seconds"] == 42.5

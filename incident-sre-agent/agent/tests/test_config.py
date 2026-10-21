@@ -17,6 +17,7 @@ def test_agent_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.model_synthesizer == "gemini-3.8-flash"
     assert config.allowed_callback_hosts == ["*.run.app"]
     assert config.timeout_seconds == 600
+    assert config.specialist_timeout_seconds == 120.0
     assert config.specialist_max_llm_calls == 8
     assert config.specialist_max_tool_calls == 5
     assert config.max_tool_calls_per_specialist == 25
