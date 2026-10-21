@@ -1,0 +1,92 @@
+name: Ambient Agent Registry Demo CI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'ambient-agent-registry-demo/**'
+      - '.github/workflows/ambient-agent-registry-demo-ci.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'ambient-agent-registry-demo/**'
+      - '.github/workflows/ambient-agent-registry-demo-ci.yml'
+
+defaults:
+  run:
+    working-directory: ambient-agent-registry-demo
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  no-literals-check:
+    name: No Forbidden Literals Check
+    runs-on: ubuntu-24.04
+    env:
+      FORBIDDEN_LITERALS: ${{ secrets.FORBIDDEN_LITERALS || vars.FORBIDDEN_LITERALS || '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify zero forbidden literals and models (reads FORBIDDEN_LITERALS env var)
+        run: bash scripts/check-no-literal-projects.sh
+
+  lint:
+    name: Lint & Quality Checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          cache-suffix: ${{ github.workflow }}-${{ github.job }}
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: |
+          uv venv .venv --python 3.12
+          source .venv/bin/activate
+          uv pip install -e ".[dev]"
+      - name: Ruff check
+        run: |
+          source .venv/bin/activate
+          ruff check .
+
+  test:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          cache-suffix: ${{ github.workflow }}-${{ github.job }}
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: |
+          uv venv .venv --python 3.12
+          source .venv/bin/activate
+          uv pip install -e ".[dev]"
+      - name: Run Pytest
+        run: |
+          source .venv/bin/activate
+          pytest tests/
+
+  terraform-validate:
+    name: Terraform Format & Validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.9.8"
+      - name: Validate Terraform stack
+        run: |
+          echo "Checking infra/terraform..."
+          terraform -chdir="infra/terraform" fmt -check
+          terraform -chdir="infra/terraform" init -backend=false
+          terraform -chdir="infra/terraform" validate

@@ -1,0 +1,12 @@
+# Example Terraform variables for Ambient Agent Registry Demo infrastructure
+project_id              = "<PROJECT_ID>"
+region                  = "us-central1"
+environment             = "demo"
+name_prefix             = "ambient"
+agent_cpu               = "1"
+agent_memory            = "1Gi"
+agent_timeout_seconds   = 300
+tool_cpu                = "1"
+tool_memory             = "512Mi"
+tool_timeout_seconds    = 300
+agent_registry_endpoint = "https://agentregistry.googleapis.com/v1alpha"

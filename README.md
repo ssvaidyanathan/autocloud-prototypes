@@ -14,6 +14,17 @@ A repo of Autocloud prototypes
 | **State & Persistence** | Pure in-memory ZIP unpacking (zero local disk persistence for skills); TTL in-memory cache with explicit invalidation |
 | **Docs & Quick-Start** | [Documentation](agent-registry-demo/) • [Hot-Reload Demo](agent-registry-demo/#8-hot-reload-demonstration-scenarios) |
 
+### [Ambient Agent Registry Demo](ambient-agent-registry-demo/)
+
+| Specification | Details |
+| :--- | :--- |
+| **Core Architecture** | Native ADK runtime with dynamic skill/tool loading from GCP Agent Registry and zero-downtime hot-reloading |
+| **Runtime & Protocols** | Native Google ADK `LlmAgent` + `Runner` exposing synchronous `POST /run` (`list[Event]`), `POST /run_sse`, and `POST /admin/cache/invalidate`; FastMCP over Streamable HTTP |
+| **Integrations** | GCP Agent Registry (`v1alpha` skills, `v1` tools), Vertex AI Gemini (2.5 Flash) |
+| **Cloud Run Services (default prefix)** | `ambient-agent-service`, `ambient-calculator-service` |
+| **State & Persistence** | Pure in-memory ZIP unpacking (zero local disk persistence for skills); in-memory TTL cache with explicit atomic invalidation |
+| **Docs & Quick-Start** | [Documentation](ambient-agent-registry-demo/) • [Hot-Reload Demo](ambient-agent-registry-demo/#8-live-demonstration-execution) |
+
 ### [Incident SRE Agent](incident-sre-agent/)
 
 | Specification | Details |
@@ -42,4 +53,3 @@ A repo of Autocloud prototypes
 All shell scripts and CI workflow `run:` blocks must remain portable across macOS (BSD) and Linux (GNU). Any in-place `sed` editing must use the uname-based `sedi_args` array pattern (`sedi_args=("-i")`; on Darwin `sedi_args=("-i" "")`). Non-portable variants (bare `sed -i`, `sed -i ''`, `sed -i.bak`, or `sed --in-place`) are blocked by `scripts/check-portable-sed.sh`.
 
 Note: Heredoc bodies (e.g. `cat << 'EOF'`) are scanned as shell code. If a script generates documentation or user instructions referencing `sed`, reword the text (e.g., describe in-place editing conceptually or avoid literal `-i` flags) to satisfy the guard.
-
