@@ -9,10 +9,10 @@
 
 ## 1. Summary of Changes & Achievements
 
-Phase 4 completed full live deployment of `ambient-agent-registry-demo` to Google Cloud Platform (`cloud-assist-fde-7`, `us-central1`, global skill registry), followed by live end-to-end hot-reload validation, negative boundary verification, and Cloud Logging audit.
+Phase 4 completed full live deployment of `ambient-agent-registry-demo` to Google Cloud Platform (`<PROJECT_ID>`, `us-central1`, global skill registry), followed by live end-to-end hot-reload validation, negative boundary verification, and Cloud Logging audit.
 
 ### 1. Terraform Infrastructure Provisioning (`infra/terraform/`)
-- Initialized remote state backend in GCS bucket `cloud-assist-fde-7-tfstate` under prefix `ambient-agent-registry-demo`.
+- Initialized remote state backend in GCS bucket `<PROJECT_ID>-tfstate` under prefix `ambient-agent-registry-demo`.
 - Provisioned Artifact Registry repository `ambient-docker-repo` using staged plan `tfplan-ar`.
 - Provisioned full infrastructure using staged plan `tfplan-full` without `-auto-approve`:
   - Service accounts: `ambient-agent-sa` and `ambient-calc-sa`.
@@ -22,8 +22,8 @@ Phase 4 completed full live deployment of `ambient-agent-registry-demo` to Googl
 
 ### 2. Container Build & Packaging
 - Built and published production Docker images to Artifact Registry via Google Cloud Build:
-  - `us-central1-docker.pkg.dev/cloud-assist-fde-7/ambient-docker-repo/ambient-calculator-service:latest` (digest: `sha256:77b8f4cd5b00aba3722df67e2535c4e19fa116b27ac0637304c465c11c729335`)
-  - `us-central1-docker.pkg.dev/cloud-assist-fde-7/ambient-docker-repo/ambient-agent-service:latest` (digest: `sha256:b49c853f5c9fdc70b9a9b9d19ce2564a1ea202a3cbbf80b0e6b5da84c255ec28`)
+  - `us-central1-docker.pkg.dev/<PROJECT_ID>/ambient-docker-repo/ambient-calculator-service:latest` (digest: `sha256:77b8f4cd5b00aba3722df67e2535c4e19fa116b27ac0637304c465c11c729335`)
+  - `us-central1-docker.pkg.dev/<PROJECT_ID>/ambient-docker-repo/ambient-agent-service:latest` (digest: `sha256:b49c853f5c9fdc70b9a9b9d19ce2564a1ea202a3cbbf80b0e6b5da84c255ec28`)
 
 ### 3. Registry Registration & Skill Publishing
 - Registered FastMCP tool `ambient-calculator` in Agent Registry (`us-central1`).
@@ -82,11 +82,11 @@ Phase 4 completed full live deployment of `ambient-agent-registry-demo` to Googl
 
 | Resource | Value / Identifier |
 |---|---|
-| **GCP Project** | `cloud-assist-fde-7` |
+| **GCP Project** | `<PROJECT_ID>` |
 | **Region** | `us-central1` |
 | **Agent Cloud Run Service** | `https://ambient-agent-service-btcbwtmvvq-uc.a.run.app` |
 | **Calculator Cloud Run Service** | `https://ambient-calculator-service-btcbwtmvvq-uc.a.run.app` |
-| **Artifact Registry** | `us-central1-docker.pkg.dev/cloud-assist-fde-7/ambient-docker-repo` |
-| **Agent Registry Skill** | `projects/cloud-assist-fde-7/locations/global/skills/private-ambient-privilege-audit-skill` |
-| **Agent Registry Tool Service** | `projects/cloud-assist-fde-7/locations/us-central1/services/ambient-calculator` |
-| **Terraform Remote State** | `gs://cloud-assist-fde-7-tfstate/ambient-agent-registry-demo` |
+| **Artifact Registry** | `us-central1-docker.pkg.dev/<PROJECT_ID>/ambient-docker-repo` |
+| **Agent Registry Skill** | `projects/<PROJECT_ID>/locations/global/skills/private-ambient-privilege-audit-skill` |
+| **Agent Registry Tool Service** | `projects/<PROJECT_ID>/locations/us-central1/services/ambient-calculator` |
+| **Terraform Remote State** | `gs://<PROJECT_ID>-tfstate/ambient-agent-registry-demo` |
