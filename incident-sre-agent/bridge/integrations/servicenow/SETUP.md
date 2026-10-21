@@ -9,7 +9,7 @@ This guide describes how to configure ServiceNow Flow Designer and REST steps to
 When an incident is created or updated to an eligible severity in ServiceNow:
 1. **Flow Designer** executes a trigger matching incident criteria.
 2. An **Outbound REST Action** delivers the incident payload to Incident Bridge at `POST /webhook/servicenow`.
-3. **Incident Bridge** validates the bearer token or basic authentication, acknowledges the incident, sets the state to `In Progress` (`state=2`), and posts an initial work note.
+3. **Incident Bridge** validates the bearer token, acknowledges the incident, sets the state to `In Progress` (`state=2`), and posts an initial work note.
 4. **SRE Agent** conducts autonomous investigation across GCP telemetry and posts back the final report.
 5. **Incident Bridge** updates the incident with an HTML work note (using `[code]...[/code]`) and attaches a comprehensive HTML diagnostic report (`sre_investigation_report_INCxxxxxx.html`).
 
@@ -17,18 +17,22 @@ When an incident is created or updated to an eligible severity in ServiceNow:
 
 ## 2. Prerequisites
 
-1. **Active ServiceNow Instance**: Enterprise or Developer instance (Vancouver, Washington DC, or Xanadu release).
+1. **Active ServiceNow Instance**: Enterprise or Developer instance, Vancouver release or later (verified on Brazil).
+   - For a Personal Developer Instance (PDI), open it from the developer portal and sign in as `admin`. The admin password is under the portal's profile menu → **Manage instance password**.
 2. **Dedicated Service Account**:
    - Username: `svc_sre_agent`
    - Roles: `itil` (permits updating incidents, adding work notes, and attaching files).
-   - Flag: Check **Web service access only** on the sys_user record.
+   - Flag: Check **Internal Integration User** on the sys_user record (called **Web service access only** on older releases).
+   - **Identity type:** `Machine`. Without it, newer releases deny every basic-auth API call for the user, so the bridge gets `401` on the acknowledgement and on the report write-back. The instance's System Log shows `SNCRestrictBasicAuthUserAuthenticationGate: denied basic-auth API call for interactive-login user`.
+   - **Set Password** ticks **Password needs reset** ("Require password change on next login") by default. Untick it, or API sign-in fails.
 3. **System Property Configuration**:
-   - Verify `glide.ui.security.allow_codetag` is set to `true` (default in most instances) under `sys_properties.list`. This allows work notes containing `[code]...[/code]` tags to render formatted HTML.
-4. **Deployed Incident Bridge URL**:
+   - Verify `glide.ui.security.allow_codetag` is `true` under `sys_properties.list`. It usually already exists and is `true` by default, so this is just a check. It allows work notes containing `[code]...[/code]` tags to render formatted HTML.
+4. **IntegrationHub**: the REST step in Step 2 needs the IntegrationHub plugin. On a PDI, activate **IntegrationHub Starter Pack Installer**; the larger packs are not needed. Without it, the Workflow Studio step picker shows only "To enable Action Steps for integrations, the IntegrationHub plugin is required" under Integrations.
+5. **Deployed Incident Bridge URL**:
    - Public Cloud Run URL, e.g. `https://incident-bridge-xyz-uc.a.run.app`.
-5. **Shared Secret / Webhook Token**:
-   - High-entropy bearer token stored in Secret Manager under `bridge-servicenow-webhook-token`.
-   - Alternatively, HTTP Basic Authentication using `bridge-servicenow-username` and `bridge-servicenow-password`.
+6. **Shared Secret / Webhook Token**:
+   - High-entropy bearer token stored in Secret Manager under `bridge-servicenow-webhook-token`. The webhook accepts only `Authorization: Bearer <token>`.
+   - `bridge-servicenow-username` and `bridge-servicenow-password` are not used for the webhook. The bridge uses them (HTTP Basic) for its own outbound calls to the ServiceNow REST API, as `svc_sre_agent`.
 
 ---
 
@@ -56,32 +60,34 @@ The Incident Bridge normalizes incoming ServiceNow payloads into the canonical `
 
 ### Step 1: Create Connection & Credential Alias
 
-1. In ServiceNow, navigate to **Connections & Credentials > Connection & Credential Aliases**.
-2. Click **New**:
+1. Create the credential first. Navigate to **Connections & Credentials > Credentials** (`discovery_credentials.list`), click **New**, and select **API Key Credentials**:
+   - **Name:** `IncidentBridgeWebhookToken`
+   - **API Key:** `<your-servicenow-webhook-token>`
+   - **API Key Header:** `Authorization`
+   - **API Key Prefix:** `Bearer ` (with a trailing space)
+   - With these set, ServiceNow sends `Authorization: Bearer <token>` itself, so the token does not appear in plain text in the REST step. Older releases without these fields need a manual `Authorization` header in the REST step instead (see Step 2).
+   - Click **Submit**.
+2. Navigate to **Connections & Credentials > Connection & Credential Aliases** and click **New**:
    - **Name:** `IncidentBridgeAlias`
    - **Type:** `Connection & Credential`
    - **Connection Type:** `HTTP`
-3. Click **Submit**.
-4. Under the **Credentials** related list, click **New**:
-   - Select **API Key Credentials**.
-   - **Name:** `IncidentBridgeWebhookToken`
-   - **API Key:** `<your-servicenow-webhook-token>`
-   - Click **Submit**.
-5. Under the **Connections** related list, click **New**:
+   - **Configuration Template:** optional; leave it blank and ignore the hint box next to it.
+3. Click **Submit**, then reopen the alias. Its tabs are **Connections**, **Connection Attributes** and **Child Aliases** (newer releases no longer have a **Credentials** related list here).
+4. On the **Connections** tab, click **New** and choose **HTTP(s) Connection**:
    - **Name:** `IncidentBridgeConnection`
-   - **Connection URL:** `https://<your-bridge-url>`
    - **Credential:** Select `IncidentBridgeWebhookToken`
+   - **Connection URL:** `https://<your-bridge-url>`, the bare bridge origin with no trailing slash or path. The REST step adds `/webhook/servicenow`.
    - Click **Submit**.
 
 ### Step 2: Create Custom Flow Designer Action
 
-1. Navigate to **Process Automation > Flow Designer**.
+1. Navigate to **Process Automation > Workflow Studio** (called **Flow Designer** on older releases).
 2. Click **New > Action**:
    - **Action Name:** `Trigger GCP SRE Agent Investigation`
    - **Application:** `Global`
    - **Category:** `Incident Management`
 3. Define **Inputs**:
-   - `sys_id` (String, Mandatory)
+   - `incident_sys_id` (String, Mandatory). `sys_id` is a restricted input name; saving fails with "Invalid input name(s) 'sys_id' containing restricted keyword(s)".
    - `number` (String, Mandatory)
    - `short_description` (String, Mandatory)
    - `description` (String)
@@ -99,11 +105,11 @@ The Incident Bridge normalizes incoming ServiceNow payloads into the canonical `
    - **Resource Path:** `/webhook/servicenow`
    - **HTTP Headers:**
      - `Content-Type`: `application/json`
-     - `Authorization`: `Bearer <your-servicenow-webhook-token>`
+     - Only on releases whose API Key credential has no Header/Prefix fields: `Authorization`: `Bearer <your-servicenow-webhook-token>`
    - **Request Body (JSON):**
      ```json
      {
-       "sys_id": "{{inputs.sys_id}}",
+       "sys_id": "{{inputs.incident_sys_id}}",
        "number": "{{inputs.number}}",
        "short_description": "{{inputs.short_description}}",
        "description": "{{inputs.description}}",
@@ -116,23 +122,22 @@ The Incident Bridge normalizes incoming ServiceNow payloads into the canonical `
        "opened_at": "{{inputs.opened_at}}"
      }
      ```
+     The `{{inputs.x}}` placeholders are illustrative. In the editor, type the JSON and drag the matching input data pill into each value. String pills are inserted as-is, not JSON-escaped, so a quote, backslash or newline in a field such as `description` produces invalid JSON and the bridge rejects the request.
 5. Click **Save** and **Publish**.
 
 ### Step 3: Create Trigger Flow
 
-1. In Flow Designer, click **New > Flow**:
+1. In **Process Automation > Workflow Studio**, click **New > Flow**:
    - **Flow Name:** `Incident - Automated SRE Investigation`
    - **Run As:** `System User`
 2. **Trigger**:
-   - **Trigger Type:** `Record Created or Updated`
+   - **Trigger Type:** `Created`
    - **Table:** `Incident [incident]`
-   - **Condition:**
-     - `Priority` is one of `1 - Critical`, `2 - High`, `3 - Moderate`
-     - AND `State` is `1 - New`
+   - **Condition:** `Priority` is one of `1 - Critical`, `2 - High`, `3 - Moderate`. (A "less than or is" condition with a typed value did not save in the condition builder.)
 3. **Actions**:
    - Click **Add an Action** → select `Trigger GCP SRE Agent Investigation`.
-   - Drag data pills from the **Trigger - Record Created or Updated** section to match action inputs:
-     - `sys_id` ← `Trigger -> Incident Record -> Sys ID`
+   - Map each action input with the data-pill picker (**Trigger - Record Created → Incident Record → field**). Typing `{{trigger.current.x}}` text instead produces pills with blank labels. Configuration item and Caller map as reference pills.
+     - `incident_sys_id` ← `Trigger -> Incident Record -> Sys ID`
      - `number` ← `Trigger -> Incident Record -> Number`
      - `short_description` ← `Trigger -> Incident Record -> Short description`
      - `description` ← `Trigger -> Incident Record -> Description`
@@ -143,7 +148,7 @@ The Incident Bridge normalizes incoming ServiceNow payloads into the canonical `
      - `cmdb_ci` ← `Trigger -> Incident Record -> Configuration item`
      - `caller_id` ← `Trigger -> Incident Record -> Caller -> Name`
      - `opened_at` ← `Trigger -> Incident Record -> Opened`
-4. Click **Save** and **Activate**.
+4. Click **Save** and **Activate**. On a slow PDI the flow can run anywhere from a few seconds to about 4 minutes after the incident is created.
 
 ---
 
@@ -171,20 +176,7 @@ curl -X POST "https://<your-bridge-url>/webhook/servicenow" \
   }'
 ```
 
-### Basic Authentication
-```bash
-curl -X POST "https://<your-bridge-url>/webhook/servicenow" \
-  -H "Content-Type: application/json" \
-  -u "<servicenow-username>:<servicenow-password>" \
-  -d '{
-    "sys_id": "a1b2c3d4e5f67890123456789abcdef0",
-    "number": "INC0019482",
-    "short_description": "Elevated 500 errors on shop-api checkout",
-    "description": "High failure rate on checkout transactions.",
-    "priority": "1",
-    "opened_at": "2026-10-09T05:00:00Z"
-  }'
-```
+The webhook does not accept HTTP Basic authentication; a request without a valid `Authorization: Bearer` header gets `401`.
 
 ### Expected Response
 ```json
@@ -226,7 +218,7 @@ curl -X POST "https://<your-bridge-url>/webhook/servicenow" \
 
 ### 2. HTTP 401 Unauthorized / 403 Forbidden
 - **Cause**: Webhook token mismatch or missing credentials in Secret Manager.
-- **Fix**: Check `SERVICENOW_WEBHOOK_TOKEN` in Secret Manager. Ensure the Authorization header matches: `Authorization: Bearer <token>`. If using Basic auth, verify `SERVICENOW_USERNAME` and `SERVICENOW_PASSWORD`.
+- **Fix**: Check `SERVICENOW_WEBHOOK_TOKEN` in Secret Manager. Ensure the Authorization header matches: `Authorization: Bearer <token>`. Basic auth is not accepted on the webhook. `SERVICENOW_USERNAME` and `SERVICENOW_PASSWORD` only matter if the bridge's own calls back to ServiceNow (acknowledgement, work notes, attachments) fail.
 
 ### 3. Outbound REST Step Fails with Connection Refused or Timeout
 - **Cause**: Network egress restrictions or invalid Incident Bridge URL.
