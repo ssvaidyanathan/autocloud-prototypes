@@ -95,7 +95,8 @@ All agent settings are defined in `agent/app/config.py` via `AgentConfig`. Every
 | `allowed_callback_hosts` | `ALLOWED_CALLBACK_HOSTS` | Comma-delimited wildcard hosts allowed for HTTP callbacks | `["*.run.app"]` | Both (`.env`, `tfvars`) | No |
 | `timeout_seconds` | `TIMEOUT_SECONDS` | General investigation timeout in seconds | `600` | Both (`.env`, `tfvars`) | No |
 | `investigation_timeout_seconds` | `INVESTIGATION_TIMEOUT_SECONDS` | Specific investigation timeout override (if set) | `None` | Both (`.env`, `tfvars`) | No |
-| `investigation_budget_seconds` | `INVESTIGATION_BUDGET_SECONDS` | Maximum cumulative time allocated for specialist investigations | `300.0` | `.env` | No |
+| `investigation_budget_seconds` | `INVESTIGATION_BUDGET_SECONDS` | **Not yet enforced.** Intended cap on cumulative specialist work (initial fan-out, review follow-up, dependency inspection) so synthesis always has time left | `300.0` | `.env` | No |
+| `specialist_timeout_seconds` | `SPECIALIST_TIMEOUT_SECONDS` | Wall-clock limit on each specialist's Pass 1 (LLM drill-down) in the initial fan-out; the baseline sweep is not bounded | `120.0` | `.env` | No |
 | `max_review_rounds` | `MAX_REVIEW_ROUNDS` | Maximum review loops in investigation pipeline | `1` | `.env` | No |
 | `specialist_query_limit` | `SPECIALIST_QUERY_LIMIT` | Maximum queries permitted per specialist | `5` | `.env` | No |
 | `specialist_max_entries` | `SPECIALIST_MAX_ENTRIES` | Maximum telemetry entries fetched per tool query | `50` | `.env` | No |
