@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
 import httpx
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
 from google.adk.cli.api_server import ApiServer
 from google.adk.cli.fast_api import get_fast_api_app
@@ -152,6 +153,58 @@ def create_app() -> FastAPI:
             "Could not extract ADK ApiServer instance from FastAPI routes. "
             "Runner cache eviction during hot reload may be impaired."
         )
+
+    # Middleware to enrich /run responses with provenance metadata (skill, revision, MCP server)
+    @fastapi_app.middleware("http")
+    async def attach_provenance_middleware(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/run" and response.status_code == 200:
+            try:
+                body = b"".join([chunk async for chunk in response.body_iterator])
+                payload = json.loads(body.decode("utf-8"))
+                if isinstance(payload, list) and payload:
+                    loader = get_agent_loader()
+                    skill = getattr(loader, "last_resolved_skill", None)
+                    mcp_url = getattr(loader.tool_registry_manager, "endpoint_url", "")
+                    skill_meta = {}
+                    skill_rev = "unknown"
+                    skill_uri = ""
+                    if skill is not None:
+                        skill_uri = getattr(skill, "_uri", "") or ""
+                        if "/revisions/" in skill_uri:
+                            skill_rev = skill_uri.split("/revisions/")[-1].replace("rev-", "")
+                        fm = getattr(skill, "frontmatter", None)
+                        fm_name = fm.name if fm else ""
+                        skill_name = getattr(skill, "name", "") or fm_name or settings.skill_name
+                        skill_meta = {
+                            "name": skill_name,
+                            "revision": skill_rev,
+                            "resource_name": skill_uri,
+                        }
+
+                    provenance = {
+                        "skill": skill_meta,
+                        "skill_revision": skill_rev,
+                        "mcp_server": mcp_url,
+                    }
+                    for item in payload:
+                        if isinstance(item, dict):
+                            existing_meta = item.get("custom_metadata") or {}
+                            existing_meta.update(provenance)
+                            item["custom_metadata"] = existing_meta
+
+                    new_body = json.dumps(payload).encode("utf-8")
+                    headers = dict(response.headers)
+                    headers.pop("content-length", None)
+                    return Response(
+                        content=new_body,
+                        status_code=response.status_code,
+                        headers=headers,
+                        media_type="application/json",
+                    )
+            except Exception as exc:
+                logger.warning("Failed to enrich /run response with provenance: %s", exc)
+        return response
 
     # Custom administrative route for cache invalidation & hot-reload
     @fastapi_app.post(

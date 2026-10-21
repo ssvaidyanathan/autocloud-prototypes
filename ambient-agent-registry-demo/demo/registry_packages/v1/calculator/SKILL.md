@@ -2,13 +2,9 @@
 name: ambient-privilege-audit-skill
 description: Privilege audit & precision arithmetic calculation skill.
 allowed-tools: add multiply
-adk_additional_tools:
-  - add
-  - multiply
 metadata:
   version: "1.0.0"
   tools: "add,multiply"
-  adk_additional_tools: "add,multiply"
 ---
 # Ambient Privilege Audit & Precision Calculator Skill (v1)
 

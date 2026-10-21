@@ -10,3 +10,4 @@ __pycache__/
 *.tfstate.*
 backend.hcl
 terraform.tfvars
+*tfplan*

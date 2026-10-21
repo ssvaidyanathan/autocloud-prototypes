@@ -265,7 +265,7 @@ else
     --location="${SKILL_LOCATION}" \
     --display-name="Precision Calculator Skill" \
     --description="Precision arithmetic calculation skill" \
-    --target-state=active
+    --target-state=draft
   if gcloud alpha agent-registry skills describe "private-${SKILL_NAME}" --project="${PROJECT_ID}" --location="${SKILL_LOCATION}" >/dev/null 2>&1; then
     ACTUAL_SKILL_NAME="private-${SKILL_NAME}"
   fi

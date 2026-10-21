@@ -104,7 +104,24 @@ class GCPSkillRegistryClient(GCPSkillRegistry):
                 f"{self.base_url}/projects/{self.project_id}/"
                 f"locations/{self.location}/skills/{quote(resolved_name, safe='')}"
             )
-            response = await self._make_request(client, skill_url)
+            try:
+                response = await self._make_request(client, skill_url)
+            except Exception as err:
+                err_str = str(err).lower()
+                cause = getattr(err, "__cause__", None)
+                is_status_404 = (
+                    isinstance(cause, httpx.HTTPStatusError)
+                    and cause.response.status_code == 404
+                )
+                is_404 = "404" in err_str or "not found" in err_str or is_status_404
+                if is_404 and not resolved_name.startswith("private-"):
+                    alt_url = (
+                        f"{self.base_url}/projects/{self.project_id}/"
+                        f"locations/{self.location}/skills/private-{quote(resolved_name, safe='')}"
+                    )
+                    response = await self._make_request(client, alt_url)
+                else:
+                    raise
             skill_data = response.json()
 
             default_revision = skill_data.get("defaultRevision") or skill_data.get(
