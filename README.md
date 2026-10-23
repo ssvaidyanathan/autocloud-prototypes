@@ -3,7 +3,7 @@ A repo of Autocloud prototypes
 
 ## Prototypes
 
-### [Agent Registry Demo](agent-registry-demo/)
+### [Agent Registry Demo](agent-registry-demo/) (@ssvaidyanathan)
 
 | Specification | Details |
 | :--- | :--- |
@@ -14,7 +14,7 @@ A repo of Autocloud prototypes
 | **State & Persistence** | Pure in-memory ZIP unpacking (zero local disk persistence for skills); TTL in-memory cache with explicit invalidation |
 | **Docs & Quick-Start** | [Documentation](agent-registry-demo/) • [Hot-Reload Demo](agent-registry-demo/#8-hot-reload-demonstration-scenarios) |
 
-### [Ambient Agent Registry Demo](ambient-agent-registry-demo/)
+### [Ambient Agent Registry Demo](ambient-agent-registry-demo/) (@ssvaidyanathan)
 
 | Specification | Details |
 | :--- | :--- |
@@ -25,7 +25,7 @@ A repo of Autocloud prototypes
 | **State & Persistence** | Pure in-memory ZIP unpacking (zero local disk persistence for skills); in-memory TTL cache with explicit atomic invalidation |
 | **Docs & Quick-Start** | [Documentation](ambient-agent-registry-demo/) • [Hot-Reload Demo](ambient-agent-registry-demo/#8-live-demonstration-execution) |
 
-### [Incident SRE Agent](incident-sre-agent/)
+### [Incident SRE Agent](incident-sre-agent/) (@ssvaidyanathan)
 
 | Specification | Details |
 | :--- | :--- |
@@ -36,7 +36,7 @@ A repo of Autocloud prototypes
 | **State & Persistence** | Stateless Cloud Run services; Cloud Tasks asynchronous queue; standalone HTML dossier generation |
 | **Docs & Quick-Start** | [Documentation](incident-sre-agent/) • [Deployment Script](incident-sre-agent/#10-master-automated-deployment-script) |
 
-### [GitHub Actions Deployment Failure Investigator](gha-deploy-investigator/)
+### [GitHub Actions Deployment Failure Investigator](gha-deploy-investigator/) (@ssvaidyanathan)
 
 | Specification | Details |
 | :--- | :--- |
