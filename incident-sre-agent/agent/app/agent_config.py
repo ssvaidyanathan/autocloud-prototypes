@@ -107,12 +107,12 @@ class RootAgentConfig(BaseModel):
         if template_name is None:
             # Check root prompt templates first
             if self.prompt_templates and name_or_template in self.prompt_templates:
-                return self.prompt_templates[name_or_template].strip()
+                return self.prompt_templates[name_or_template]
             # Search across all sub-agents
             index = self._build_node_index()
             for agent_node in index.values():
                 if agent_node.prompt_templates and name_or_template in agent_node.prompt_templates:
-                    return agent_node.prompt_templates[name_or_template].strip()
+                    return agent_node.prompt_templates[name_or_template]
             raise AgentConfigError(f"Prompt template '{name_or_template}' not found in agent.yaml.")
 
         agent = self.get_agent(name_or_template)
@@ -121,7 +121,7 @@ class RootAgentConfig(BaseModel):
                 f"Prompt template '{template_name}' not found for agent "
                 f"'{name_or_template}' in agent.yaml."
             )
-        return agent.prompt_templates[template_name].strip()
+        return agent.prompt_templates[template_name]
 
     def format_prompt(
         self, name_or_template: str, template_name: Optional[str] = None, **kwargs: Any

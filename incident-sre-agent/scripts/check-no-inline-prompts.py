@@ -19,7 +19,7 @@ import ast
 import os
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 FORBIDDEN_KEYWORD_ARGS = {
     "instruction",
@@ -120,7 +120,7 @@ def check_file(file_path: Path) -> List[Tuple[int, str]]:
                         )
 
                 # Part(text=...)
-                if func_name in ("Part", "types.Part") and arg_name == "text":
+                if func_name == "Part" and arg_name == "text":
                     if is_string_or_fstring_or_concat(kw.value):
                         violations.append(
                             (
@@ -169,35 +169,57 @@ def check_file(file_path: Path) -> List[Tuple[int, str]]:
     return violations
 
 
-def main() -> int:
+def main(argv: Optional[List[str]] = None) -> int:
+    args = argv if argv is not None else sys.argv[1:]
     script_dir = Path(__file__).resolve().parent
     repo_root = script_dir.parent
-    agent_app_dir = repo_root / "agent" / "app"
 
-    if not agent_app_dir.is_dir():
-        print(f"Error: Target directory not found: {agent_app_dir}", file=sys.stderr)
-        return 1
+    if args:
+        target_paths = [Path(p) for p in args]
+    else:
+        target_paths = [repo_root / "agent" / "app"]
 
     print("========================================================")
-    print("Checking for inline instructions and prompts in agent/app...")
+    print("Checking for inline instructions and prompts in Python files...")
     print("========================================================")
 
     total_violations = 0
     scanned_files = 0
 
-    for root, _, files in os.walk(agent_app_dir):
-        for file in sorted(files):
-            if not file.endswith(".py"):
-                continue
+    for target in target_paths:
+        if target.is_file() and target.name.endswith(".py"):
             scanned_files += 1
-            file_path = Path(root) / file
-            rel_path = file_path.relative_to(repo_root)
-
-            violations = check_file(file_path)
+            rel_path = target
+            try:
+                rel_path = target.relative_to(repo_root)
+            except ValueError:
+                pass
+            violations = check_file(target)
             if violations:
                 for line_no, msg in violations:
                     print(f"[FAIL] {rel_path}:{line_no} -> {msg}", file=sys.stderr)
                     total_violations += 1
+        elif target.is_dir():
+            for root, _, files in os.walk(target):
+                for file in sorted(files):
+                    if not file.endswith(".py"):
+                        continue
+                    scanned_files += 1
+                    file_path = Path(root) / file
+                    rel_path = file_path
+                    try:
+                        rel_path = file_path.relative_to(repo_root)
+                    except ValueError:
+                        pass
+
+                    violations = check_file(file_path)
+                    if violations:
+                        for line_no, msg in violations:
+                            print(f"[FAIL] {rel_path}:{line_no} -> {msg}", file=sys.stderr)
+                            total_violations += 1
+        else:
+            print(f"Error: Target path not found: {target}", file=sys.stderr)
+            return 1
 
     if total_violations > 0:
         print(

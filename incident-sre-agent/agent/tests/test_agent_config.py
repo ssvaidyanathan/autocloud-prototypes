@@ -10,8 +10,8 @@ Verifies:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
-import subprocess
 from pathlib import Path
 from typing import Dict, Iterator
 from unittest.mock import patch
@@ -53,23 +53,70 @@ EXPECTED_INSTRUCTION_LENGTHS: Dict[str, int] = {
 }
 
 
-def _get_git_historical_prompt(filename: str) -> str:
-    """Retrieve historical prompt string from git main or HEAD."""
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    rel_path = f"incident-sre-agent/agent/app/prompts/{filename}"
-    try:
-        cmd = ["git", "show", f"HEAD~1:{rel_path}"]
-        res = subprocess.run(cmd, cwd=str(repo_root), capture_output=True, text=True, check=True)
-        return res.stdout.strip()
-    except Exception:
-        try:
-            cmd = ["git", "show", f"origin/main:{rel_path}"]
-            res = subprocess.run(
-                cmd, cwd=str(repo_root), capture_output=True, text=True, check=True
-            )
-            return res.stdout.strip()
-        except Exception:
-            return ""
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "golden_prompts"
+
+
+def load_fixture(filename: str) -> str:
+    """Load golden fixture text captured from base commit 8122eef, failing loudly if not found."""
+    fixture_path = FIXTURES_DIR / filename
+    if not fixture_path.exists():
+        raise FileNotFoundError(f"Missing required golden fixture: {fixture_path}")
+    return fixture_path.read_text(encoding="utf-8")
+
+
+# Fixed sample data matching fixtures/golden_prompts assembled fixtures
+SAMPLE_INCIDENT = {
+    "id": "inc-sample-1234",
+    "external_key": "INC-SAMPLE-1234",
+    "title": "Checkout latency degradation and error spike",
+    "description": (
+        "P99 latency elevated to 4200ms with intermittent 500 errors across checkout workers."
+    ),
+    "severity": "P1",
+    "service_hint": "checkoutservice",
+    "opened_at": "2026-10-23T00:00:00+00:00",
+}
+
+SAMPLE_PLAN = {
+    "affected_service": "checkoutservice",
+    "symptoms": ["HTTP 500 spike", "Latency P99 > 4000ms"],
+    "initial_hypotheses": [
+        "Redis cache connection pool exhausted",
+        "CPU throttling on checkout workers",
+    ],
+    "start_time": "2026-10-22T23:00:00+00:00",
+    "end_time": "2026-10-23T00:00:00+00:00",
+}
+
+SAMPLE_PLAYBOOK_INSTRUCTIONS = (
+    "1. Check cloud monitoring latency dashboards.\n2. Correlate with recent Cloud Run revisions."
+)
+
+SAMPLE_STYLE_GUIDELINES = (
+    "Present an executive summary followed by chronological evidence and actionable mitigation."
+)
+
+SAMPLE_LOGS_SECTION = (
+    "  - [Log] 502 Bad Gateway observed in checkoutservice proxy\n"
+    "  - [Log] ConnectionTimeout to payment-gateway"
+)
+
+SAMPLE_METRICS_SECTION = (
+    "  - [Metric] run.googleapis.com/request_latencies p99 reached 4500ms\n"
+    "  - [Anomaly] CPU utilization at 98%"
+)
+
+SAMPLE_DEP_SECTION = (
+    "  - Downstream dependency 'paymentservice': FAILING/ERRORS (4 errors, 2 anomalies). "
+    "Probable root cause originates in this downstream dependency.\n"
+    "  - Downstream dependency 'currencyservice': HEALTHY (0 errors, no anomalies). "
+    "Delay originates in primary service request processing path, not downstream dependencies."
+)
+
+SAMPLE_FINDINGS_SUMMARY = {
+    "logs": {"summary": "Observed 42 HTTP 500 errors in checkoutservice"},
+    "changes": {"summary": "Revision rev-checkout-004 deployed 12 minutes before onset"},
+}
 
 
 @pytest.fixture(autouse=True)
@@ -92,17 +139,201 @@ def test_agent_yaml_golden_byte_identity() -> None:
         assert len(instruction) == EXPECTED_INSTRUCTION_LENGTHS[agent_name]
 
 
-def test_git_historical_prompts_match_golden_base() -> None:
-    """Verify that git historical text files match base text in YAML if git is available."""
-    git_triage = _get_git_historical_prompt("triage.txt")
-    if git_triage:
-        config = get_agent_yaml_config()
-        assert config.get_instruction("triage") == git_triage
+def test_golden_fixtures_loaded_instructions_byte_identity() -> None:
+    """Verify EVERY loaded instruction matches base 8122eef golden fixtures byte-for-byte."""
+    config = get_agent_yaml_config()
+    for agent_name in EXPECTED_INSTRUCTION_HASHES:
+        expected = load_fixture(f"instruction_{agent_name}.txt")
+        actual = config.get_instruction(agent_name)
+        assert actual == expected, (
+            f"Instruction mismatch for {agent_name}: loaded YAML differs from golden fixture"
+        )
 
-    git_synth = _get_git_historical_prompt("synthesizer.txt")
-    if git_synth:
-        config = get_agent_yaml_config()
-        assert config.get_instruction("synthesizer") == git_synth
+
+def test_golden_fixtures_loaded_templates_byte_identity() -> None:
+    """Verify EVERY loaded prompt template matches base 8122eef golden fixtures byte-for-byte."""
+    config = get_agent_yaml_config()
+
+    # Root templates
+    assert config.get_prompt_template("tool_prune_conclusive_instruction") == load_fixture(
+        "template_tool_prune_conclusive_instruction.txt"
+    )
+    assert config.get_prompt_template("symptoms_entry") == load_fixture(
+        "template_symptoms_entry.txt"
+    )
+    assert config.get_prompt_template("hypotheses_entry") == load_fixture(
+        "template_hypotheses_entry.txt"
+    )
+
+    # Triage templates
+    assert config.get_prompt_template("triage", "triage_plan_user_prompt") == load_fixture(
+        "template_triage_plan_user_prompt.txt"
+    )
+    assert config.get_prompt_template("triage", "triage_playbook_prefix") == load_fixture(
+        "template_triage_playbook_prefix.txt"
+    )
+
+    # Specialist investigation prompt templates
+    for agent_name in [
+        "changes_specialist",
+        "logs_specialist",
+        "metrics_specialist",
+        "resources_specialist",
+    ]:
+        assert config.get_prompt_template(agent_name, "investigation_prompt") == load_fixture(
+            f"template_{agent_name.replace('_specialist', '')}_investigation_prompt.txt"
+        )
+
+    # Synthesizer templates
+    synth_templates = [
+        "report_style_prefix",
+        "dep_failing_template",
+        "dep_healthy_template",
+        "dep_none_recorded",
+        "dep_none_inspected",
+        "prior_incident_evidence_tag",
+        "synthesis_report_user_prompt",
+        "probable_root_cause_prompt",
+    ]
+    for tmpl in synth_templates:
+        assert config.get_prompt_template("synthesizer", tmpl) == load_fixture(
+            f"template_{tmpl}.txt"
+        )
+
+
+def test_golden_fixtures_assembled_prompts_byte_identity() -> None:
+    """Verify assembled system_instruction & prompts match base 8122eef fixtures."""
+    cfg = get_agent_yaml_config()
+
+    # 1. Triage system instruction (with and without skill)
+    triage_inst = cfg.get_instruction("triage")
+    triage_playbook = cfg.format_prompt(
+        "triage",
+        "triage_playbook_prefix",
+        instructions=SAMPLE_PLAYBOOK_INSTRUCTIONS,
+    )
+    assembled_triage_sys_with_skill = triage_inst + triage_playbook
+    assembled_triage_sys_without_skill = triage_inst
+    assert assembled_triage_sys_with_skill == load_fixture(
+        "assembled_triage_system_instruction_with_skill.txt"
+    )
+    assert assembled_triage_sys_without_skill == load_fixture(
+        "assembled_triage_system_instruction_without_skill.txt"
+    )
+
+    # 2. Triage user content
+    triage_user = cfg.format_prompt(
+        "triage",
+        "triage_plan_user_prompt",
+        id=SAMPLE_INCIDENT["id"],
+        external_key=SAMPLE_INCIDENT["external_key"],
+        title=SAMPLE_INCIDENT["title"],
+        description=SAMPLE_INCIDENT["description"],
+        severity=SAMPLE_INCIDENT["severity"],
+        service_hint=SAMPLE_INCIDENT["service_hint"],
+        opened_at=SAMPLE_INCIDENT["opened_at"],
+    )
+    assert triage_user == load_fixture("assembled_triage_user_content.txt")
+
+    # 3. Specialists investigation prompts (with & without symptoms/hypotheses)
+    symptoms_entry = "\n" + cfg.format_prompt(
+        "symptoms_entry", symptoms=", ".join(SAMPLE_PLAN["symptoms"])
+    )
+    hypotheses_entry = "\n" + cfg.format_prompt(
+        "hypotheses_entry", hypotheses=", ".join(SAMPLE_PLAN["initial_hypotheses"])
+    )
+
+    for mod in ["changes", "logs", "metrics", "resources"]:
+        spec_name = f"{mod}_specialist"
+
+        # With symptoms & hypotheses
+        prompt_with = cfg.format_prompt(
+            spec_name,
+            "investigation_prompt",
+            incident_id=SAMPLE_INCIDENT["id"],
+            title=SAMPLE_INCIDENT["title"],
+            description=SAMPLE_INCIDENT["description"],
+            severity=SAMPLE_INCIDENT["severity"],
+            target_service=SAMPLE_PLAN["affected_service"],
+            window_start=SAMPLE_PLAN["start_time"],
+            window_end=SAMPLE_PLAN["end_time"],
+            symptoms_line=symptoms_entry,
+            hypotheses_line=hypotheses_entry,
+        )
+        assert prompt_with == load_fixture(
+            f"assembled_{mod}_investigation_prompt_with_symptoms_and_hypotheses.txt"
+        )
+
+        # Without symptoms & hypotheses
+        prompt_without = cfg.format_prompt(
+            spec_name,
+            "investigation_prompt",
+            incident_id=SAMPLE_INCIDENT["id"],
+            title=SAMPLE_INCIDENT["title"],
+            description=SAMPLE_INCIDENT["description"],
+            severity=SAMPLE_INCIDENT["severity"],
+            target_service=SAMPLE_PLAN["affected_service"],
+            window_start=SAMPLE_PLAN["start_time"],
+            window_end=SAMPLE_PLAN["end_time"],
+            symptoms_line="",
+            hypotheses_line="",
+        )
+        assert prompt_without == load_fixture(
+            f"assembled_{mod}_investigation_prompt_without_symptoms_and_hypotheses.txt"
+        )
+
+    # 4. Synthesizer system instruction (with and without style)
+    synth_inst = cfg.get_instruction("synthesizer")
+    synth_style = cfg.format_prompt(
+        "synthesizer",
+        "report_style_prefix",
+        instructions=SAMPLE_STYLE_GUIDELINES,
+    )
+    assembled_synth_sys_with_style = synth_inst + synth_style
+    assembled_synth_sys_without_style = synth_inst
+    assert assembled_synth_sys_with_style == load_fixture(
+        "assembled_synthesizer_system_instruction_with_style.txt"
+    )
+    assert assembled_synth_sys_without_style == load_fixture(
+        "assembled_synthesizer_system_instruction_without_style.txt"
+    )
+
+    # 5. Synthesizer user content
+    synth_user = cfg.format_prompt(
+        "synthesizer",
+        "synthesis_report_user_prompt",
+        external_key=SAMPLE_INCIDENT["external_key"],
+        title=SAMPLE_INCIDENT["title"],
+        severity=SAMPLE_INCIDENT["severity"],
+        affected_service=SAMPLE_PLAN["affected_service"],
+        symptoms=SAMPLE_PLAN["symptoms"],
+        window_start=SAMPLE_PLAN["start_time"],
+        window_end=SAMPLE_PLAN["end_time"],
+        logs_section=SAMPLE_LOGS_SECTION,
+        metrics_section=SAMPLE_METRICS_SECTION,
+        dep_section=SAMPLE_DEP_SECTION,
+        findings_summary=json.dumps(SAMPLE_FINDINGS_SUMMARY, default=str, indent=2),
+    )
+    assert synth_user == load_fixture("assembled_synthesizer_user_content.txt")
+
+    # 6. Probable root cause prompt
+    prc_prompt = cfg.format_prompt(
+        "synthesizer",
+        "probable_root_cause_prompt",
+        affected_service=SAMPLE_PLAN["affected_service"],
+        findings_summary=json.dumps(SAMPLE_FINDINGS_SUMMARY, default=str),
+    )
+    assert prc_prompt == load_fixture("assembled_probable_root_cause_prompt.txt")
+
+    # 7. Tool prune conclusive instruction
+    tool_prune = cfg.get_prompt_template("tool_prune_conclusive_instruction")
+    assert tool_prune == load_fixture("assembled_tool_prune_conclusive_instruction.txt")
+
+
+def test_golden_fixtures_fail_loudly_when_fixture_missing() -> None:
+    """Verify that fixture loading fails loudly if a required fixture file is missing."""
+    with pytest.raises(FileNotFoundError, match="Missing required golden fixture"):
+        load_fixture("non_existent_fixture_file_12345.txt")
 
 
 def test_load_prompt_backward_compatibility() -> None:

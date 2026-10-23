@@ -1,0 +1,1 @@
+  - Downstream dependency '{dep_svc}': FAILING/ERRORS ({errors_count} errors, {anomalies_count} anomalies). Probable root cause originates in this downstream dependency.

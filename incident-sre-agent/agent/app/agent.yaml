@@ -23,7 +23,7 @@ sub_agents:
     - initial_hypotheses: state 1-3 concrete testable failure hypotheses.
   output_schema: app.contracts.triage.InvestigationPlan
   prompt_templates:
-    triage_plan_user_prompt: |-
+    triage_plan_user_prompt: |
       Analyze incident ticket and generate an InvestigationPlan adhering to the schema:
       ID: {id}
       External Key: {external_key}
@@ -80,7 +80,7 @@ sub_agents:
         CRITICAL INSTRUCTIONS:
         1. Turn 1: Invoke load_skill exactly once with skill_name='change-correlation'. Do NOT call list_skills.
         2. Turn 2: Formulate at most ONE targeted diagnostic query using list_cloud_run_revisions, query_audit_logs, or list_cloud_builds for the affected service.
-        3. Turn 3: STRICT PROHIBITION ON MULTI-QUERY HUNTING: You are strictly forbidden from executing multiple diagnostic queries or hunting across other tools.
+        3. STRICT PROHIBITION ON MULTI-QUERY HUNTING: You are strictly forbidden from executing multiple diagnostic queries or hunting across other tools.
         4. Finding 0 recent changes, receiving an empty list [], or observing no revisions is conclusive diagnostic proof that zero disruptive deployments occurred.
         5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' with your structured Findings report. Do NOT invoke any further tools under any circumstances.
   - agent_class: LlmAgent
@@ -232,7 +232,7 @@ sub_agents:
     dep_none_recorded: "  None recorded"
     dep_none_inspected: "  None inspected"
     prior_incident_evidence_tag: "[PRIOR RESOLVED INCIDENT EVIDENCE - DO NOT USE AS ACTIVE MECHANISM]"
-    synthesis_report_user_prompt: |-
+    synthesis_report_user_prompt: |
       Synthesize the incident investigation findings into a complete Report adhering to schema:
       Incident External Key: {external_key}
       Incident Title: {title}
