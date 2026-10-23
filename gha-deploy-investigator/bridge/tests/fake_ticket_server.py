@@ -96,7 +96,6 @@ async def create_servicenow_incident(request: Request) -> dict[str, Any]:
     incident = {
         "sys_id": sys_id,
         "number": number,
-        "state": "1",
         **body,
     }
     state.servicenow_incidents[sys_id] = incident
@@ -111,7 +110,6 @@ async def patch_servicenow_incident(sys_id: str, request: Request) -> dict[str, 
         {
             "sys_id": sys_id,
             "number": f"INC{sys_id[:7]}",
-            "state": "1",
             "work_notes": [],
         },
     )
@@ -127,10 +125,13 @@ async def patch_servicenow_incident(sys_id: str, request: Request) -> dict[str, 
     if "description" in body:
         incident["description"] = str(body["description"])
     if "work_notes" in body:
-        if isinstance(incident.get("work_notes"), list):
-            incident["work_notes"].append(body["work_notes"])
+        wn = str(body["work_notes"])
+        if "work_notes" not in incident or not incident["work_notes"]:
+            incident["work_notes"] = wn
+        elif isinstance(incident["work_notes"], list):
+            incident["work_notes"].append(wn)
         else:
-            incident["work_notes"] = [body["work_notes"]]
+            incident["work_notes"] = [incident["work_notes"], wn]
 
     return {"result": incident}
 

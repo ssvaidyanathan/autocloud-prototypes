@@ -172,35 +172,7 @@ class ServiceNowAdapter(BaseAdapter):
                     )
                     raise
 
-    def _transition_incident_state(
-        self, client: Any, table_endpoint: str, sys_id: str, number: str
-    ) -> None:
-        target_state = getattr(self.config, "servicenow_incident_state_after_report", "2")
-        if not target_state:
-            return
-        patch_endpoint = f"{table_endpoint}/{sys_id}"
-        try:
-            resp = client.patch(patch_endpoint, json={"state": target_state})
-            resp.raise_for_status()
-            logger.info("Transitioned incident %s (%s) to state '%s'", number, sys_id, target_state)
-        except httpx.HTTPStatusError as state_err:
-            error_body = state_err.response.text
-            logger.error(
-                "ServiceNow rejected transition to state '%s' for %s: %s (response: %s)",
-                target_state,
-                number,
-                state_err,
-                error_body,
-            )
-            raise
-        except Exception as state_exc:
-            logger.error(
-                "Failed to transition ServiceNow incident %s to state '%s': %s",
-                number,
-                target_state,
-                state_exc,
-            )
-            raise
+
 
     def verify(self, request: Request, payload: bytes) -> bool:
         """Verify inbound webhook Bearer token."""
@@ -303,16 +275,24 @@ class ServiceNowAdapter(BaseAdapter):
 
                 description = self.build_description(incident, report)
 
+                target_state = getattr(
+                    self.config,
+                    "servicenow_incident_state_after_report",
+                    "2",
+                )
+
                 if existing_incident:
                     sys_id = existing_incident.get("sys_id", "mock-sys-id")
                     number = existing_incident.get("number", sys_id)
-
                     patch_endpoint = f"{table_endpoint}/{sys_id}"
+
+                    # 1. Update existing incident facts-only metadata and state if needed
                     patch_body: dict[str, Any] = {
                         "short_description": short_description,
                         "description": description,
-                        "work_notes": work_notes,
                     }
+                    if target_state and existing_incident.get("state") != target_state:
+                        patch_body["state"] = target_state
                     if caller_id:
                         patch_body["caller_id"] = caller_id
                     if assignment_group:
@@ -321,13 +301,26 @@ class ServiceNowAdapter(BaseAdapter):
                     patch_resp = client.patch(patch_endpoint, json=patch_body)
                     patch_resp.raise_for_status()
 
-                    # Upload standalone report as attachment
+                    # 2. Post findings as work notes
+                    notes_resp = client.patch(patch_endpoint, json={"work_notes": work_notes})
+                    notes_resp.raise_for_status()
+
+                    # 3. Upload standalone dossier report as attachment
+                    ref = IncidentRef(
+                        id=f"sn-{sys_id}",
+                        source="servicenow",
+                        external_id=sys_id,
+                        external_key=number,
+                        external_url=f"{base_url}/nav_to.do?uri=incident.do?sys_id={sys_id}",
+                    )
                     attachment_endpoint = (
                         f"{base_url}/api/now/attachment/file"
                         f"?table_name=incident&table_sys_id={sys_id}"
                         f"&file_name=ci_cd_investigation_report_{number}.html"
                     )
-                    standalone_html = render_standalone_html(report)
+                    standalone_html = render_standalone_html(
+                        report, incident_ref=ref, incident=incident, config=self.config
+                    )
                     att_resp = client.post(
                         attachment_endpoint,
                         content=standalone_html.encode("utf-8"),
@@ -335,38 +328,32 @@ class ServiceNowAdapter(BaseAdapter):
                     )
                     att_resp.raise_for_status()
 
-                    self._transition_incident_state(client, table_endpoint, sys_id, number)
-
                     logger.info(
                         "Found existing ServiceNow incident %s (%s) for correlation_id=%s; "
-                        "patched description, work notes, caller, state, and attached report",
+                        "updated incident, posted notes, attached report",
                         number,
                         sys_id,
                         correlation_id,
                     )
 
-                    return IncidentRef(
-                        id=f"sn-{sys_id}",
-                        source="servicenow",
-                        external_id=sys_id,
-                        external_key=number,
-                        external_url=f"{base_url}/nav_to.do?uri=incident.do?sys_id={sys_id}",
-                    )
+                    return ref
 
                 sev_to_num = {"P1": "1", "P2": "2", "P3": "3", "P4": "4"}
                 urgency = sev_to_num.get(incident.severity, "3")
                 impact = sev_to_num.get(incident.severity, "3")
 
+                # 1. Create incident directly with configured state (facts-only description)
                 incident_body = {
                     "short_description": short_description,
                     "description": description,
                     "category": "DevOps",
                     "urgency": urgency,
                     "impact": impact,
-                    "work_notes": work_notes,
                     "correlation_display": correlation_display,
                     "correlation_id": correlation_id,
                 }
+                if target_state:
+                    incident_body["state"] = target_state
                 if caller_id:
                     incident_body["caller_id"] = caller_id
                 if assignment_group:
@@ -377,14 +364,28 @@ class ServiceNowAdapter(BaseAdapter):
                 res_json = resp.json().get("result", {})
                 sys_id = res_json.get("sys_id", "mock-sys-id")
                 number = res_json.get("number", "INC0019482")
+                patch_endpoint = f"{table_endpoint}/{sys_id}"
 
-                # Upload standalone report as attachment
+                # 2. Post findings as work notes
+                notes_resp = client.patch(patch_endpoint, json={"work_notes": work_notes})
+                notes_resp.raise_for_status()
+
+                # 3. Upload standalone dossier report as attachment
+                ref = IncidentRef(
+                    id=f"sn-{sys_id}",
+                    source="servicenow",
+                    external_id=sys_id,
+                    external_key=number,
+                    external_url=f"{base_url}/nav_to.do?uri=incident.do?sys_id={sys_id}",
+                )
                 attachment_endpoint = (
                     f"{base_url}/api/now/attachment/file"
                     f"?table_name=incident&table_sys_id={sys_id}"
                     f"&file_name=ci_cd_investigation_report_{number}.html"
                 )
-                standalone_html = render_standalone_html(report)
+                standalone_html = render_standalone_html(
+                    report, incident_ref=ref, incident=incident, config=self.config
+                )
                 att_resp = client.post(
                     attachment_endpoint,
                     content=standalone_html.encode("utf-8"),
@@ -392,19 +393,16 @@ class ServiceNowAdapter(BaseAdapter):
                 )
                 att_resp.raise_for_status()
 
-                self._transition_incident_state(client, table_endpoint, sys_id, number)
-
                 logger.info(
-                    "Created ServiceNow incident %s (%s) with report attachment", number, sys_id
+                    "Created ServiceNow incident %s (%s) directly in state '%s', "
+                    "posted work notes, and attached report dossier",
+                    number,
+                    sys_id,
+                    target_state,
                 )
 
-                return IncidentRef(
-                    id=f"sn-{sys_id}",
-                    source="servicenow",
-                    external_id=sys_id,
-                    external_key=number,
-                    external_url=f"{base_url}/nav_to.do?uri=incident.do?sys_id={sys_id}",
-                )
+                return ref
+
 
         return self._execute_with_retry(_do_create_or_patch)
 
