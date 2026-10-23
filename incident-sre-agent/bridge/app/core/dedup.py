@@ -43,6 +43,11 @@ class CallbackDedupRegistry:
             self._entries[key] = now
             return True
 
+    def release(self, incident_id: str, status: str) -> None:
+        """Forget (incident_id, status) so a retry after a failed delivery is processed."""
+        with self._lock:
+            self._entries.pop((incident_id, status), None)
+
     def clear(self) -> None:
         """Clear all entries (e.g. for testing)."""
         with self._lock:

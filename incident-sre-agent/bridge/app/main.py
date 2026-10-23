@@ -156,22 +156,27 @@ async def handle_callback_report(
             "incident_id": result.incident_id,
         }
 
-    # 3. Look up adapter and deliver report or failure
+    # 3. Look up adapter and deliver report or failure. If delivery fails, release the
+    # dedup key so the agent's retry re-attempts it instead of being dropped as a duplicate.
     try:
-        adapter = get_adapter(result.incident_source, settings)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            adapter = get_adapter(result.incident_source, settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    ref = IncidentRef.from_result(result)
+        ref = IncidentRef.from_result(result)
 
-    if result.status == "completed":
-        if result.report is None:
-            raise HTTPException(status_code=400, detail="Missing report for completed result")
-        adapter.post_report(ref, result.report)
-    elif result.status == "failed":
-        if not result.error:
-            raise HTTPException(status_code=400, detail="Missing error for failed result")
-        adapter.post_failure(ref, result.error)
+        if result.status == "completed":
+            if result.report is None:
+                raise HTTPException(status_code=400, detail="Missing report for completed result")
+            adapter.post_report(ref, result.report)
+        elif result.status == "failed":
+            if not result.error:
+                raise HTTPException(status_code=400, detail="Missing error for failed result")
+            adapter.post_failure(ref, result.error)
+    except Exception:
+        dedup.release(result.incident_id, result.status)
+        raise
 
     return {"status": "ok"}
 

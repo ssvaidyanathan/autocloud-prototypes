@@ -132,6 +132,42 @@ def test_callback_dedup_duplicate_failure_dropped(
     assert mock_post_failure.call_count == 1
 
 
+def test_callback_dedup_retry_after_post_failure_redelivers(
+    bridge_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ticket write-back must not mark the report as seen, so a retry re-posts it."""
+    mock_post_report = MagicMock(side_effect=[RuntimeError("ticket write failed"), None])
+    monkeypatch.setattr(ServiceNowAdapter, "post_report", mock_post_report)
+
+    auth_token = create_mock_oidc_token(
+        audience="https://bridge.example.com/callback/report",
+        email="agent-sa@test-project.iam.gserviceaccount.com",
+    )
+    headers = {"Authorization": f"Bearer {auth_token}"}
+
+    payload = {
+        "investigation_id": "inv-dedup-103",
+        "incident_id": "inc-dedup-103",
+        "incident_source": "servicenow",
+        "incident_external_id": "SNOW-103",
+        "incident_external_key": "INC00103",
+        "status": "completed",
+        "report": _sample_report().model_dump(mode="json"),
+    }
+
+    # 1. First delivery: ticket write-back raises, bridge returns 500
+    client = TestClient(app, raise_server_exceptions=False)
+    resp1 = client.post("/callback/report", json=payload, headers=headers)
+    assert resp1.status_code == 500
+    assert mock_post_report.call_count == 1
+
+    # 2. Agent retry: must re-attempt delivery rather than be dropped as a duplicate
+    resp2 = bridge_client.post("/callback/report", json=payload, headers=headers)
+    assert resp2.status_code == 200
+    assert resp2.json() == {"status": "ok"}
+    assert mock_post_report.call_count == 2
+
+
 def test_callback_dedup_ttl_expiration() -> None:
     """Entries expire after TTL and can be processed again."""
     registry = CallbackDedupRegistry(ttl_seconds=10.0)
