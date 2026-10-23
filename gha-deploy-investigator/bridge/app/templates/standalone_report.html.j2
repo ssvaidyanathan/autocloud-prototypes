@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Autocloud CI/CD Deployment Investigation Report - {{ incident_key if incident_key else 'Dossier' }}</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 24px;
+      background-color: #f6f8fa;
+      color: #1f2328;
+      line-height: 1.6;
+    }
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      background: #ffffff;
+      padding: 32px;
+      border-radius: 8px;
+      border: 1px solid #d0d7de;
+      box-shadow: 0 1px 3px rgba(31,35,40,0.12);
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 2px solid #0969da;
+      padding-bottom: 16px;
+      margin-bottom: 20px;
+    }
+    .header-titles h1 {
+      margin: 0;
+      color: #0969da;
+      font-size: 24px;
+    }
+    .header-titles .subheading {
+      font-size: 13px;
+      color: #57606a;
+      margin-top: 4px;
+      font-weight: 500;
+    }
+    .badge {
+      background: #ddf4ff;
+      color: #0969da;
+      padding: 6px 14px;
+      border-radius: 16px;
+      font-weight: 600;
+      font-size: 13px;
+      border: 1px solid #54aeff66;
+      white-space: nowrap;
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 14px 16px;
+      margin-bottom: 24px;
+      font-size: 13px;
+    }
+    .meta-item {
+      display: flex;
+      flex-direction: column;
+    }
+    .meta-label {
+      font-weight: 600;
+      color: #57606a;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 2px;
+    }
+    .meta-value {
+      color: #1f2328;
+      word-break: break-all;
+    }
+    .section {
+      margin-bottom: 28px;
+    }
+    h2, .section-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #1f2328;
+      border-bottom: 1px solid #d0d7de;
+      padding-bottom: 6px;
+      margin-top: 24px;
+      margin-bottom: 12px;
+    }
+    .section-subtitle {
+      font-size: 13px;
+      color: #57606a;
+      margin-top: -6px;
+      margin-bottom: 12px;
+    }
+    .root-cause-box {
+      background-color: #fff8c5;
+      border-left: 4px solid #bf8700;
+      padding: 16px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+    }
+    .root-cause-title {
+      font-weight: 700;
+      color: #7d4e00;
+      margin-bottom: 6px;
+      font-size: 15px;
+    }
+    .caveats-box {
+      background-color: #ffebe9;
+      border-left: 4px solid #cf222e;
+      padding: 16px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+    }
+    .caveats-title {
+      font-weight: 700;
+      color: #a40e26;
+      margin-bottom: 6px;
+      font-size: 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      margin-bottom: 16px;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 10px 12px;
+      border: 1px solid #d0d7de;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background-color: #f6f8fa;
+      font-weight: 600;
+      color: #24292f;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      padding: 8px 10px;
+      border-radius: 4px;
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      overflow-x: auto;
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 85%;
+    }
+    .action-list {
+      padding-left: 20px;
+      margin: 0;
+    }
+    .action-list li {
+      margin-bottom: 8px;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .status-completed {
+      background-color: #dafbe1;
+      color: #1a7f37;
+    }
+    .status-failed {
+      background-color: #ffebe9;
+      color: #cf222e;
+    }
+    .status-skipped {
+      background-color: #f6f8fa;
+      color: #57606a;
+      border: 1px solid #d0d7de;
+    }
+    .annotation-notice {
+      background-color: #ddf4ff;
+      color: #0969da;
+    }
+    .annotation-warning {
+      background-color: #fff8c5;
+      color: #7d4e00;
+    }
+    .annotation-failure {
+      background-color: #ffebe9;
+      color: #cf222e;
+    }
+    .footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px solid #d0d7de;
+      font-size: 12px;
+      color: #57606a;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    a {
+      color: #0969da;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    .quick-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 8px;
+    }
+    .quick-link-btn {
+      display: inline-block;
+      padding: 6px 12px;
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      color: #0969da;
+    }
+    .quick-link-btn:hover {
+      background: #f3f4f6;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-titles">
+        <h1>Autocloud CI/CD Deployment Investigation Report</h1>
+        <div class="subheading">Diagnostic Investigation Dossier</div>
+      </div>
+      <span class="badge">Autocloud CI/CD Investigator</span>
+    </div>
+
+    <div class="meta-grid">
+      {% if incident_key %}
+      <div class="meta-item">
+        <span class="meta-label">Incident Key</span>
+        <span class="meta-value"><strong>{{ incident_key }}</strong></span>
+      </div>
+      {% endif %}
+      {% if repo %}
+      <div class="meta-item">
+        <span class="meta-label">Repository</span>
+        <span class="meta-value">{{ repo }}</span>
+      </div>
+      {% endif %}
+      {% if branch %}
+      <div class="meta-item">
+        <span class="meta-label">Branch</span>
+        <span class="meta-value"><code>{{ branch }}</code></span>
+      </div>
+      {% endif %}
+      {% if short_sha %}
+      <div class="meta-item">
+        <span class="meta-label">Commit SHA</span>
+        <span class="meta-value"><code>{{ short_sha }}</code></span>
+      </div>
+      {% endif %}
+      {% if actor %}
+      <div class="meta-item">
+        <span class="meta-label">Triggered By</span>
+        <span class="meta-value">{{ actor }}</span>
+      </div>
+      {% endif %}
+      {% if failing_stage %}
+      <div class="meta-item">
+        <span class="meta-label">Failing Stage</span>
+        <span class="meta-value"><strong>{{ failing_stage }}</strong></span>
+      </div>
+      {% endif %}
+      {% if severity %}
+      <div class="meta-item">
+        <span class="meta-label">Severity</span>
+        <span class="meta-value">{{ severity }}</span>
+      </div>
+      {% endif %}
+      {% if run_id %}
+      <div class="meta-item">
+        <span class="meta-label">Run ID</span>
+        <span class="meta-value">{{ run_id }}</span>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="section">
+      <h2>Executive Summary</h2>
+      <p>{{ report.summary }}</p>
+      {% if report.impact %}
+      <p><strong>Impact Assessment:</strong> {{ report.impact }}</p>
+      {% endif %}
+    </div>
+
+    {% if report.probable_root_cause %}
+    <div class="root-cause-box">
+      <div class="root-cause-title">
+        Probable Root Cause (Confidence: {{ (report.probable_root_cause.confidence * 100)|round|int }}%)
+      </div>
+      <div>{{ report.probable_root_cause.text }}</div>
+    </div>
+    {% endif %}
+
+    {% if report.caveats %}
+    <div class="caveats-box">
+      <div class="caveats-title">
+        Investigation Caveats &amp; Telemetry Limitations
+      </div>
+      <ul style="padding-left: 20px; margin: 0;">
+        {% for caveat in report.caveats %}
+        <li style="margin-bottom: 4px;">{{ caveat }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% set remediation_list = report.causal_remediation if report.causal_remediation else report.recommended_actions %}
+    {% if remediation_list %}
+    <div class="section">
+      <h2>Recommended Remediation Actions</h2>
+      <ol class="action-list">
+        {% for action in remediation_list %}
+        <li>{{ action }}</li>
+        {% endfor %}
+      </ol>
+      {% if report.causal_remediation and report.recommended_actions and report.causal_remediation != report.recommended_actions %}
+      <div style="margin-top: 14px;">
+        <div style="font-weight: 600; font-size: 13px; color: #57606a; margin-bottom: 6px;">Additional Recommended Steps:</div>
+        <ol class="action-list">
+          {% for action in report.recommended_actions %}
+          {% if action not in report.causal_remediation %}
+          <li>{{ action }}</li>
+          {% endif %}
+          {% endfor %}
+        </ol>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% if report.unrelated_observations %}
+    <div class="section">
+      <h2>Unrelated Observations</h2>
+      <div class="section-subtitle">
+        The following items were identified during triage but are not causal to the primary deployment failure:
+      </div>
+      <ul style="padding-left: 20px; margin: 0;">
+        {% for obs in report.unrelated_observations %}
+        <li style="margin-bottom: 6px;">{{ obs }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if report.evidence_by_area %}
+    <div class="section">
+      <h2>Telemetry &amp; Specialist Evidence</h2>
+      {% for area, items in report.evidence_by_area.items() %}
+      <h3 style="font-size: 14px; text-transform: uppercase; color: #57606a; margin: 16px 0 8px 0; letter-spacing: 0.5px;">
+        {{ area|replace('_', ' ')|title }} Evidence
+      </h3>
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 15%;">Kind</th>
+            <th>Evidence Excerpt</th>
+            <th style="width: 18%; text-align: center;">Source / Link</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in items %}
+          <tr>
+            <td><code>{{ item.kind }}</code></td>
+            <td><pre><code>{{ item.excerpt }}</code></pre></td>
+            <td style="text-align: center;">
+              {% if item.console_url %}
+              <a href="{{ item.console_url }}" target="_blank" rel="noopener">View Source</a>
+              {% else %}
+              -
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if report.annotations %}
+    <div class="section">
+      <h2>Check Run Annotations</h2>
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 25%;">File Path</th>
+            <th style="width: 12%;">Lines</th>
+            <th style="width: 12%;">Level</th>
+            <th>Message</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for ann in report.annotations %}
+          <tr>
+            <td><code>{{ ann.path }}</code></td>
+            <td style="font-family: monospace;">{{ ann.start_line }}-{{ ann.end_line }}</td>
+            <td><span class="status-badge annotation-{{ ann.annotation_level }}">{{ ann.annotation_level }}</span></td>
+            <td>
+              {% if ann.title %}<strong>{{ ann.title }}:</strong> {% endif %}
+              {{ ann.message }}
+              {% if ann.raw_details %}<pre style="margin-top: 6px;"><code>{{ ann.raw_details }}</code></pre>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if report.specialists_status %}
+    <div class="section">
+      <h2>Specialist Investigation Coverage</h2>
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 35%;">Specialist Area</th>
+            <th style="width: 20%;">Status</th>
+            <th>Diagnostic Notes / Errors</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in report.specialists_status %}
+          <tr>
+            <td><strong>{{ s.specialist }}</strong></td>
+            <td>
+              {% if s.status == 'completed' %}
+              <span class="status-badge status-completed">Completed</span>
+              {% elif s.status == 'failed' %}
+              <span class="status-badge status-failed">Failed</span>
+              {% else %}
+              <span class="status-badge status-skipped">Skipped</span>
+              {% endif %}
+            </td>
+            <td>{{ s.error if s.error else '-' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if report.timeline %}
+    <div class="section">
+      <h2>Timeline</h2>
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 25%;">Timestamp (UTC)</th>
+            <th>Event Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in report.timeline %}
+          <tr>
+            <td style="font-family: monospace; white-space: nowrap;">{{ item.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') if item.timestamp else '-' }}</td>
+            <td>{{ item.description }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if report.recent_changes %}
+    <div class="section">
+      <h2>Recent Changes &amp; Deployments</h2>
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 25%;">Timestamp (UTC)</th>
+            <th>Change Description</th>
+            <th style="width: 20%;">Author</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for change in report.recent_changes %}
+          <tr>
+            <td style="font-family: monospace; white-space: nowrap;">{{ change.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') if change.timestamp else '-' }}</td>
+            <td>
+              {{ change.description }}
+              {% if change.console_url %} (<a href="{{ change.console_url }}" target="_blank" rel="noopener">diff</a>){% endif %}
+            </td>
+            <td>{{ change.author if change.author else 'System' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if report.queries_appendix %}
+    <div class="section">
+      <h2>Queries Run Appendix</h2>
+      {% for specialist, queries in report.queries_appendix.items() %}
+      <div style="font-weight: 600; font-size: 13px; margin: 10px 0 4px 0;">{{ specialist }}</div>
+      <ul style="padding-left: 20px; margin: 0;">
+        {% for q in queries %}
+        <li style="margin-bottom: 4px;"><code>{{ q }}</code></li>
+        {% endfor %}
+      </ul>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if run_url or check_run_url or servicenow_url %}
+    <div class="section">
+      <h2>Quick Reference Links</h2>
+      <div class="quick-links">
+        {% if run_url %}
+        <a class="quick-link-btn" href="{{ run_url }}" target="_blank" rel="noopener">GitHub Workflow Run</a>
+        {% endif %}
+        {% if check_run_url %}
+        <a class="quick-link-btn" href="{{ check_run_url }}" target="_blank" rel="noopener">Check Run &amp; Commit Checks</a>
+        {% endif %}
+        {% if servicenow_url %}
+        <a class="quick-link-btn" href="{{ servicenow_url }}" target="_blank" rel="noopener">ServiceNow Incident Record</a>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="footer">
+      <div>Autocloud CI/CD Deployment Investigator v0.1.0</div>
+      {% if model_name %}
+      <div>Model: <code>{{ model_name }}</code></div>
+      {% endif %}
+      <div>Generated: {{ generated_at }}</div>
+      <div>Skills: {{ report.skills_used|join(', ') if report.skills_used else 'standard' }}</div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,7 +1,23 @@
 import html
+import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
+from jinja2 import Environment, FileSystemLoader
+
+from ..contracts.incident import Incident
 from ..contracts.report import Report
+
+_TEMPLATES_DIR = Path(__file__).resolve().parent
+
+# Configure Jinja2 environment with strict autoescaping
+_jinja_env = Environment(
+    loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+    autoescape=True,
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
 
 
 def render_servicenow_html(report: Report) -> str:
@@ -156,135 +172,94 @@ def chunk_servicenow_work_note(html_content: str, max_chars: int = 12000) -> lis
     return [f"[code]<div>{safe_text}</div>[/code]"]
 
 
-def render_standalone_html(report: Report, incident_ref: Optional[Any] = None) -> str:
-    """Render standalone full HTML report for ticket attachments."""
-    root_cause_html = ""
-    if report.probable_root_cause:
-        conf_pct = int(report.probable_root_cause.confidence * 100)
-        root_cause_html = f"""
-        <div class="callout warning">
-            <h3>Probable Root Cause</h3>
-            <p>{html.escape(report.probable_root_cause.text)}</p>
-            <p class="meta">Confidence: <strong>{conf_pct}%</strong></p>
-        </div>
-        """
+def render_standalone_html(
+    report: Report,
+    incident_ref: Optional[Any] = None,
+    incident: Optional[Incident] = None,
+    config: Optional[Any] = None,
+    generated_at: Optional[datetime] = None,
+) -> str:
+    """Render standalone elaborate diagnostic dossier HTML report for ticket attachments."""
+    if incident is None and isinstance(incident_ref, Incident):
+        incident = incident_ref
 
-    timeline_html = ""
-    if report.timeline:
-        items = "\n".join(
-            f"<li><code>{item.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}</code>: "
-            f"{html.escape(item.description)}</li>"
-            for item in report.timeline
-        )
-        timeline_html = f"""
-        <div class="section">
-            <h2>Timeline</h2>
-            <ul>{items}</ul>
-        </div>
-        """
+    template = _jinja_env.get_template("standalone_report.html.j2")
 
-    remediation_actions = report.causal_remediation or report.recommended_actions
-    actions_html = ""
-    if remediation_actions:
-        items = "\n".join(f"<li>{html.escape(a)}</li>" for a in remediation_actions)
-        actions_html = f"""
-        <div class="section">
-            <h2>Recommended Remediation Actions</h2>
-            <ol>{items}</ol>
-        </div>
-        """
+    # Resolve incident fields safely
+    ext_key = None
+    if incident_ref and hasattr(incident_ref, "external_key"):
+        ext_key = incident_ref.external_key
+    elif incident and incident.external_key:
+        ext_key = incident.external_key
 
-    unrelated_html = ""
-    if report.unrelated_observations:
-        items = "\n".join(f"<li>{html.escape(o)}</li>" for o in report.unrelated_observations)
-        unrelated_html = f"""
-        <div class="section">
-            <h2>Unrelated Observations</h2>
-            <ul>{items}</ul>
-        </div>
-        """
+    ext_url = None
+    if incident_ref and hasattr(incident_ref, "external_url"):
+        ext_url = incident_ref.external_url
+    elif incident and incident.external_url:
+        ext_url = incident.external_url
 
-    ref_info = ""
-    if incident_ref:
-        ref_key = getattr(incident_ref, "external_key", str(incident_ref))
-        ref_info = f"<p>Target Incident: <strong>{html.escape(ref_key)}</strong></p>"
+    repo = incident.github_repo if incident else None
+    branch = incident.github_branch if incident else None
+    head_sha = incident.github_head_sha if incident else None
+    short_sha = head_sha[:8] if head_sha else None
+    actor = (incident.github_actor or incident.reporter) if incident else None
+    stage_from_meta = report.metadata.get("failing_stage") if report and report.metadata else None
+    failing_stage = (incident.github_failing_stage if incident else None) or stage_from_meta
+    severity = incident.severity if incident else "P3"
+    run_id = incident.github_run_id if incident else None
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>CI/CD Deployment Investigation Report</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            color: #24292f;
-            background: #f6f8fa;
-            margin: 0;
-            padding: 24px;
-        }}
-        .container {{
-            max-width: 900px;
-            margin: 0 auto;
-            background: #ffffff;
-            border: 1px solid #d0d7de;
-            border-radius: 6px;
-            padding: 32px;
-            box-shadow: 0 1px 3px rgba(31,35,40,0.12);
-        }}
-        h1 {{
-            color: #0969da;
-            margin-top: 0;
-            font-size: 24px;
-            border-bottom: 1px solid #d0d7de;
-            padding-bottom: 12px;
-        }}
-        h2 {{
-            font-size: 18px;
-            margin-top: 24px;
-            margin-bottom: 8px;
-            color: #1f2328;
-        }}
-        .callout {{
-            padding: 16px;
-            border-radius: 6px;
-            margin: 16px 0;
-        }}
-        .callout.warning {{
-            background-color: #fff8c5;
-            border-left: 5px solid #bf8700;
-        }}
-        .callout h3 {{
-            margin-top: 0;
-            color: #7d4e00;
-        }}
-        .meta {{
-            font-size: 12px;
-            color: #57606a;
-        }}
-        code {{
-            background: #f6f8fa;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 85%;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Autocloud CI/CD Deployment Investigation Report</h1>
-        {ref_info}
-        <div class="section">
-            <h2>Executive Summary</h2>
-            <p>{html.escape(report.summary)}</p>
-        </div>
-        {root_cause_html}
-        {timeline_html}
-        {actions_html}
-        {unrelated_html}
-    </div>
-</body>
-</html>
-"""
+    # Resolve links
+    run_url = None
+    if incident and incident.external_url and "github.com" in incident.external_url:
+        run_url = incident.external_url
+    elif repo and run_id:
+        run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+
+    check_run_url = None
+    if repo and head_sha:
+        check_run_url = f"https://github.com/{repo}/commit/{head_sha}/checks"
+
+    servicenow_url = None
+    if ext_url and "nav_to.do" in ext_url:
+        servicenow_url = ext_url
+    elif incident_ref and hasattr(incident_ref, "external_id") and config:
+        base_url = (getattr(config, "servicenow_instance_url", None) or "").rstrip("/")
+        if base_url:
+            sys_id = incident_ref.external_id
+            servicenow_url = f"{base_url}/nav_to.do?uri=incident.do?sys_id={sys_id}"
+
+    # Resolve model name safely from config or metadata (zero hardcoded literals)
+    model_name = None
+    if config and hasattr(config, "gemini_model") and config.gemini_model:
+        model_name = config.gemini_model
+    elif report.metadata and "model" in report.metadata:
+        model_name = report.metadata["model"]
+    elif "GEMINI_MODEL" in os.environ:
+        model_name = os.environ["GEMINI_MODEL"]
+
+    gen_time = (
+        (generated_at or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M:%S UTC")
+    )
+
+    return template.render(
+        report=report,
+        incident=incident,
+        incident_ref=incident_ref,
+        incident_key=ext_key,
+        repo=repo,
+        branch=branch,
+        head_sha=head_sha,
+        short_sha=short_sha,
+        actor=actor,
+        failing_stage=failing_stage,
+        severity=severity,
+        run_id=run_id,
+        run_url=run_url,
+        check_run_url=check_run_url,
+        servicenow_url=servicenow_url,
+        model_name=model_name,
+        generated_at=gen_time,
+    )
 
 
 __all__ = [
@@ -292,3 +267,4 @@ __all__ = [
     "render_servicenow_html",
     "render_standalone_html",
 ]
+
