@@ -47,6 +47,10 @@ A repo of Autocloud prototypes
 | **State & Persistence** | Stateless event processing; Cloud Tasks asynchronous queue; in-memory query cache |
 | **Docs & Quick-Start** | [Documentation](gha-deploy-investigator/) • [Deployment Walkthrough](gha-deploy-investigator/#9-full-step-by-step-gcp-deployment-walkthrough) |
 
+## Shared Utilities
+
+Repo-wide scripts live in [`scripts/`](scripts/). See [`scripts/README.md`](scripts/README.md) for the list and usage of each.
+
 ## Development Guidelines
 
 ### Shell Script Portability
