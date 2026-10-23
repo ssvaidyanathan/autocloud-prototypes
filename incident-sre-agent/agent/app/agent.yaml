@@ -1,6 +1,11 @@
 agent_class: BaseAgent
 name: dispatcher
 description: Multi-agent SRE investigation orchestrator
+prompt_templates:
+  tool_prune_conclusive_instruction: |-
+    Evidence collection is finished. Zero infrastructure defects exist. On Turn 3, you MUST invoke 'set_model_response' immediately with your structured Findings. You are strictly forbidden from calling load_skill or any further tools.
+  symptoms_entry: "Observed Symptoms: {symptoms}"
+  hypotheses_entry: "Triage Hypotheses: {hypotheses}"
 sub_agents:
 - agent_class: LlmAgent
   name: triage
@@ -17,6 +22,21 @@ sub_agents:
     - selected_specialists: choose which specialists to run (logs, metrics, changes, resources). For P1/P2, select all four.
     - initial_hypotheses: state 1-3 concrete testable failure hypotheses.
   output_schema: app.contracts.triage.InvestigationPlan
+  prompt_templates:
+    triage_plan_user_prompt: |-
+      Analyze incident ticket and generate an InvestigationPlan adhering to the schema:
+      ID: {id}
+      External Key: {external_key}
+      Title: {title}
+      Description: {description}
+      Severity: {severity}
+      Service Hint: {service_hint}
+      Opened At (UTC): {opened_at}
+    triage_playbook_prefix: |-
+      
+
+      Applicable Playbook Instructions:
+      {instructions}
 - agent_class: ParallelAgent
   name: specialists_parallel
   description: Parallel diagnostic specialist sub-agents
@@ -49,6 +69,20 @@ sub_agents:
       4. Finding 0 recent changes, receiving an empty list [], or observing no revisions is conclusive diagnostic proof that zero disruptive deployments occurred.
       5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' with your structured Findings report. Do NOT invoke any further tools.
     output_schema: app.contracts.findings.Findings
+    prompt_templates:
+      investigation_prompt: |-
+        Investigate incident {incident_id}: {title}
+        Description: {description}
+        Severity: {severity}
+        Target Service: {target_service}
+        Time Window: {window_start} to {window_end}{symptoms_line}{hypotheses_line}
+
+        CRITICAL INSTRUCTIONS:
+        1. Turn 1: Invoke load_skill exactly once with skill_name='change-correlation'. Do NOT call list_skills.
+        2. Turn 2: Formulate at most ONE targeted diagnostic query using list_cloud_run_revisions, query_audit_logs, or list_cloud_builds for the affected service.
+        3. Turn 3: STRICT PROHIBITION ON MULTI-QUERY HUNTING: You are strictly forbidden from executing multiple diagnostic queries or hunting across other tools.
+        4. Finding 0 recent changes, receiving an empty list [], or observing no revisions is conclusive diagnostic proof that zero disruptive deployments occurred.
+        5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' with your structured Findings report. Do NOT invoke any further tools under any circumstances.
   - agent_class: LlmAgent
     name: logs_specialist
     model: ${MODEL_SPECIALIST}
@@ -68,6 +102,18 @@ sub_agents:
       2. On Turn 2, execute at most ONE diagnostic query (such as summarize_error_groups or query_logs) for the affected service.
       3. On Turn 3, conclude immediately by invoking 'set_model_response' with your structured Findings response. Do NOT invoke any other tools. Zero log entries or empty error groups is a conclusive finding confirming service health. Conclude immediately without trying alternative queries or performing exhaustive scans.
     output_schema: app.contracts.findings.Findings
+    prompt_templates:
+      investigation_prompt: |-
+        Investigate incident {incident_id}: {title}
+        Description: {description}
+        Severity: {severity}
+        Target Service: {target_service}
+        Time Window: {window_start} to {window_end}{symptoms_line}{hypotheses_line}
+
+        CRITICAL INSTRUCTIONS:
+        1. Turn 1: Invoke load_skill exactly once with skill_name='cloud-logging-queries'. Do NOT call list_skills.
+        2. Turn 2: Execute at most ONE diagnostic query using query_logs or summarize_error_groups focusing on the affected service.
+        3. Turn 3: Conclude immediately by invoking 'set_model_response' with your structured Findings report. Do NOT invoke any other tools. Zero log entries or empty results is a conclusive finding confirming service health. Do not loop or try alternative queries.
   - agent_class: LlmAgent
     name: metrics_specialist
     model: ${MODEL_SPECIALIST}
@@ -87,6 +133,18 @@ sub_agents:
       2. On Turn 2, execute at most ONE diagnostic query (such as list_open_alerts or compare_to_baseline) for the affected service.
       3. On Turn 3, conclude immediately by invoking 'set_model_response' with your structured Findings response. Do NOT invoke any other tools. Empty metric points or normal baseline comparison is a conclusive finding confirming service health. Conclude immediately without trying alternative queries or performing exhaustive scans.
     output_schema: app.contracts.findings.Findings
+    prompt_templates:
+      investigation_prompt: |-
+        Investigate incident {incident_id}: {title}
+        Description: {description}
+        Severity: {severity}
+        Target Service: {target_service}
+        Time Window: {window_start} to {window_end}{symptoms_line}{hypotheses_line}
+
+        CRITICAL INSTRUCTIONS:
+        1. Turn 1: Invoke load_skill exactly once with skill_name='cloud-monitoring-metrics'. Do NOT call list_skills.
+        2. Turn 2: Formulate at most ONE targeted diagnostic query using query_time_series, compare_to_baseline, or alert tools for the affected service.
+        3. Turn 3: Conclude immediately by invoking 'set_model_response' with your structured Findings report. Do NOT invoke any other tools. Empty metric points or normal baselines is a conclusive finding confirming service health. Do not loop or try alternative queries.
   - agent_class: LlmAgent
     name: resources_specialist
     model: ${MODEL_SPECIALIST}
@@ -109,6 +167,19 @@ sub_agents:
       4. Receiving 'status': 'NOT_FOUND' or 'conclusive': True, finding 0 resources, or observing normal status means the investigation is complete and conclusive. Zero infrastructure defects exist. You are strictly forbidden from calling load_skill again under any circumstances.
       5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' with your structured Findings report. You are strictly forbidden from calling load_skill, describe_cloud_run_service, or any other tool after receiving a conclusive or NOT_FOUND result. Your ONLY valid action on Turn 3 is to invoke 'set_model_response'.
     output_schema: app.contracts.findings.Findings
+    prompt_templates:
+      investigation_prompt: |-
+        Investigate incident {incident_id}: {title}
+        Description: {description}
+        Severity: {severity}
+        Target Service: {target_service}
+        Time Window: {window_start} to {window_end}{symptoms_line}{hypotheses_line}
+
+        CRITICAL INSTRUCTIONS:
+        1. Turn 1: Invoke load_skill exactly once with an assigned domain skill ('cloud-run-troubleshooting', 'gke-troubleshooting', or 'cloud-sql-troubleshooting'). Do NOT call list_skills.
+        2. Turn 2: Formulate at most ONE targeted diagnostic query (e.g. describe_cloud_run_service for a Cloud Run service hint).
+        3. Turn 3: Conclude immediately by invoking 'set_model_response' with your structured Findings report. Receiving 'status': 'NOT_FOUND', 'conclusive': True, or finding 0 resources is definitive diagnostic proof that zero infrastructure defects exist. Do NOT invoke any further tools. Your ONLY valid action on Turn 3 is to invoke 'set_model_response'.
+        4. STRICT PROHIBITION ON CROSS-PLATFORM HUNTING: If investigating a Cloud Run service, you are strictly forbidden from searching GKE clusters, Compute Engine instances, or Cloud SQL instances.
 - agent_class: LlmAgent
   name: synthesizer
   model: ${MODEL_SYNTHESIZER}
@@ -150,3 +221,48 @@ sub_agents:
     - queries_appendix: dictionary of queries executed by each specialist.
     - metadata: incident and synthesis context.
   output_schema: app.contracts.report.Report
+  prompt_templates:
+    report_style_prefix: |-
+      
+
+      Report Style Guidelines:
+      {instructions}
+    dep_failing_template: "  - Downstream dependency '{dep_svc}': FAILING/ERRORS ({errors_count} errors, {anomalies_count} anomalies). Probable root cause originates in this downstream dependency."
+    dep_healthy_template: "  - Downstream dependency '{dep_svc}': HEALTHY (0 errors, no anomalies). Delay originates in primary service request processing path, not downstream dependencies."
+    dep_none_recorded: "  None recorded"
+    dep_none_inspected: "  None inspected"
+    prior_incident_evidence_tag: "[PRIOR RESOLVED INCIDENT EVIDENCE - DO NOT USE AS ACTIVE MECHANISM]"
+    synthesis_report_user_prompt: |-
+      Synthesize the incident investigation findings into a complete Report adhering to schema:
+      Incident External Key: {external_key}
+      Incident Title: {title}
+      Severity: {severity}
+      Affected Service: {affected_service}
+      Symptoms: {symptoms}
+      Window Start: {window_start}
+      Window End: {window_end}
+
+      Collected Logs Telemetry:
+      {logs_section}
+
+      Collected Metrics Telemetry:
+      {metrics_section}
+
+      Downstream Dependency Health Status:
+      {dep_section}
+
+      Specialist Findings:
+      {findings_summary}
+
+      CRITICAL INSTRUCTIONS:
+      1. 'probable_root_cause' MUST accurately name the failing service, the affected endpoint, and the specific failure symptom.
+      2. Never return null or an empty object for probable_root_cause.
+      3. Do not use formulaic templates like 'Regression introduced by recent change (...)'. Write professional, natural SRE prose.
+      4. If a downstream dependency was inspected and verified healthy (0 errors, no anomalies), do NOT attribute root cause to that downstream dependency; the delay originates in the primary service's request processing path.
+      5. CRITICAL: Evidence and error logs belonging to prior resolved incidents (occurring before detected onset) must NEVER be used as the root cause mechanism for the active incident. If the active incident is pure latency with 0 HTTP errors, attribute root cause to primary service internal request processing delay/thread starvation, never resolved database pool exhaustion or prior exceptions.
+      6. Never include Kubernetes/GKE endpoints (e.g. /api/v1/namespaces/...) when diagnosing Cloud Run services.
+    probable_root_cause_prompt: |-
+      Based on the following incident evidence for service '{affected_service}', write 1-2 fluent, professional sentences of natural SRE prose explaining the technical failure mechanism, triggering deployment (citing Cloud Run revision and author if present), and user impact. Do NOT use formulaic templates like 'Regression introduced by recent change (...)', parenthetical dumps, or bullet points. CRITICAL: Evidence and error logs belonging to prior resolved incidents (occurring before detected onset) must NEVER be used as root cause mechanism for the active incident. If the active incident is pure latency with 0 HTTP errors, attribute root cause to primary service internal request processing delay/thread starvation, never resolved database pool exhaustion or prior exceptions. Return ONLY the prose text.
+
+      Findings:
+      {findings_summary}

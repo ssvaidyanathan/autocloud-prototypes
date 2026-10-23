@@ -39,6 +39,9 @@ class AgentNodeConfig(BaseModel):
     )
     instruction: Optional[str] = Field(default=None, description="System instruction prompt")
     output_schema: Optional[str] = Field(default=None, description="Import path for output schema")
+    prompt_templates: Optional[Dict[str, str]] = Field(
+        default=None, description="Prompt templates and text fragments for the agent"
+    )
     sub_agents: Optional[List[AgentNodeConfig]] = Field(
         default=None, description="Child agent nodes for composite/parallel agents"
     )
@@ -52,6 +55,9 @@ class RootAgentConfig(BaseModel):
     agent_class: str = Field(..., description="Root agent class name (BaseAgent)")
     name: str = Field(..., description="Root agent name (dispatcher)")
     description: str = Field(..., description="High-level orchestrator description")
+    prompt_templates: Optional[Dict[str, str]] = Field(
+        default=None, description="Global prompt templates and shared text fragments"
+    )
     sub_agents: List[AgentNodeConfig] = Field(..., description="Top-level sub-agent list")
 
     def _build_node_index(self) -> Dict[str, AgentNodeConfig]:
@@ -93,6 +99,42 @@ class RootAgentConfig(BaseModel):
                 f"Agent '{agent.name}' has no system instruction configured in agent.yaml."
             )
         return agent.instruction.strip()
+
+    def get_prompt_template(
+        self, name_or_template: str, template_name: Optional[str] = None
+    ) -> str:
+        """Retrieve a prompt template by (agent_name, template_name) or (template_name)."""
+        if template_name is None:
+            # Check root prompt templates first
+            if self.prompt_templates and name_or_template in self.prompt_templates:
+                return self.prompt_templates[name_or_template].strip()
+            # Search across all sub-agents
+            index = self._build_node_index()
+            for agent_node in index.values():
+                if agent_node.prompt_templates and name_or_template in agent_node.prompt_templates:
+                    return agent_node.prompt_templates[name_or_template].strip()
+            raise AgentConfigError(f"Prompt template '{name_or_template}' not found in agent.yaml.")
+
+        agent = self.get_agent(name_or_template)
+        if not agent.prompt_templates or template_name not in agent.prompt_templates:
+            raise AgentConfigError(
+                f"Prompt template '{template_name}' not found for agent "
+                f"'{name_or_template}' in agent.yaml."
+            )
+        return agent.prompt_templates[template_name].strip()
+
+    def format_prompt(
+        self, name_or_template: str, template_name: Optional[str] = None, **kwargs: Any
+    ) -> str:
+        """Format a prompt template with kwargs, raising AgentConfigError on missing keys."""
+        template = self.get_prompt_template(name_or_template, template_name)
+        try:
+            return template.format(**kwargs)
+        except KeyError as exc:
+            target = template_name or name_or_template
+            raise AgentConfigError(
+                f"Missing required placeholder {exc} when formatting prompt template '{target}'."
+            ) from exc
 
     def get_model(self, name: str) -> Optional[str]:
         """Retrieve model string with dynamic environment or config resolution."""

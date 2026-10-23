@@ -55,6 +55,7 @@ jobs:
           bash scripts/check-no-demo-overfit.sh
           python3 scripts/check-no-rootcause-overrides.py
           python3 scripts/check-no-demo-log-hints.py
+          python3 scripts/check-no-inline-prompts.py
 
   lint-and-typecheck:
     name: Lint & Typecheck

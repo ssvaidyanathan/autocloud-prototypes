@@ -237,3 +237,58 @@ def test_agent_classes_instantiation_fails_when_yaml_missing(tmp_path: Path) -> 
             MetricsSpecialist()
         with pytest.raises(AgentConfigError):
             ResourcesSpecialist()
+
+
+def test_prompt_templates_loading_and_formatting() -> None:
+    """Verify that prompt templates are properly loaded and formatted from agent.yaml."""
+    cfg = get_agent_yaml_config()
+
+    # Root prompt templates
+    conclusive = cfg.get_prompt_template("tool_prune_conclusive_instruction")
+    assert "Evidence collection is finished" in conclusive
+    assert "On Turn 3, you MUST invoke 'set_model_response'" in conclusive
+
+    symptoms_entry = cfg.format_prompt("symptoms_entry", symptoms="5xx, latency")
+    assert symptoms_entry == "Observed Symptoms: 5xx, latency"
+
+    # Specialist investigation prompts
+    logs_prompt = cfg.format_prompt(
+        "logs_specialist",
+        "investigation_prompt",
+        incident_id="inc-123",
+        title="Payment failures",
+        description="High 500 error rate",
+        severity="P1",
+        target_service="payment-svc",
+        window_start="2026-10-23T00:00:00Z",
+        window_end="2026-10-23T01:00:00Z",
+        symptoms_line="\nObserved Symptoms: 5xx errors",
+        hypotheses_line="\nTriage Hypotheses: database timeout",
+    )
+    assert "Investigate incident inc-123: Payment failures" in logs_prompt
+    assert "Target Service: payment-svc" in logs_prompt
+    assert "Observed Symptoms: 5xx errors" in logs_prompt
+    assert "cloud-logging-queries" in logs_prompt
+
+    # Triage plan prompt
+    triage_prompt = cfg.format_prompt(
+        "triage",
+        "triage_plan_user_prompt",
+        id="inc-456",
+        external_key="INC-456",
+        title="Cart latency",
+        description="Cart is slow",
+        severity="P2",
+        service_hint="cart-svc",
+        opened_at="2026-10-23T00:00:00Z",
+    )
+    assert "Analyze incident ticket and generate an InvestigationPlan" in triage_prompt
+    assert "ID: inc-456" in triage_prompt
+
+    # Missing template error
+    with pytest.raises(AgentConfigError, match="not found"):
+        cfg.get_prompt_template("non_existent_template")
+
+    # Missing placeholder error
+    with pytest.raises(AgentConfigError, match="Missing required placeholder"):
+        cfg.format_prompt("symptoms_entry")

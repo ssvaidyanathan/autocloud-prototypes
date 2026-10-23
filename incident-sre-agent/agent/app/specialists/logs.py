@@ -268,43 +268,30 @@ class LogsSpecialist(BaseSpecialist):
             getattr(plan, "initial_hypotheses", []) or getattr(plan, "hypotheses", []) or []
         )
 
-        prompt_lines = [
-            f"Investigate incident {incident.id}: {incident.title}",
-            f"Description: {incident.description}",
-            f"Severity: {incident.severity}",
-            f"Target Service: {effective_service or 'all services'}",
-            f"Time Window: {start_time_dt.isoformat()} to {end_time_dt.isoformat()}",
-        ]
-        if symptoms:
-            prompt_lines.append(f"Observed Symptoms: {', '.join(symptoms)}")
-        if hypotheses:
-            prompt_lines.append(f"Triage Hypotheses: {', '.join(hypotheses)}")
-
-        prompt_lines.extend(
-            [
-                "",
-                "CRITICAL INSTRUCTIONS:",
-                (
-                    "1. Turn 1: Invoke load_skill exactly once with "
-                    "skill_name='cloud-logging-queries'. Do NOT call list_skills."
-                ),
-            ]
+        cfg = get_agent_yaml_config()
+        symptoms_line = (
+            "\n" + cfg.format_prompt("symptoms_entry", symptoms=", ".join(symptoms))
+            if symptoms
+            else ""
         )
-        prompt_lines.extend(
-            [
-                (
-                    "2. Turn 2: Execute at most ONE diagnostic query using "
-                    "query_logs or summarize_error_groups focusing on the affected service."
-                ),
-                (
-                    "3. Turn 3: Conclude immediately by invoking 'set_model_response' with your "
-                    "structured Findings report. Do NOT invoke any other tools. Zero log entries "
-                    "or empty results is a conclusive finding confirming service health. Do not "
-                    "loop or try alternative queries."
-                ),
-            ]
+        hypotheses_line = (
+            "\n" + cfg.format_prompt("hypotheses_entry", hypotheses=", ".join(hypotheses))
+            if hypotheses
+            else ""
         )
-        prompt_text = "\n".join(prompt_lines)
+        prompt_text = cfg.format_prompt(
+            "logs_specialist",
+            "investigation_prompt",
+            incident_id=incident.id,
+            title=incident.title,
+            description=incident.description,
+            severity=incident.severity,
+            target_service=effective_service or "all services",
+            window_start=start_time_dt.isoformat(),
+            window_end=end_time_dt.isoformat(),
+            symptoms_line=symptoms_line,
+            hypotheses_line=hypotheses_line,
+        )
 
         session_service = InMemorySessionService()
         session = await session_service.create_session(

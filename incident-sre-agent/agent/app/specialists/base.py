@@ -8,6 +8,7 @@ from typing import Any, List, Optional, Union
 
 from google.adk.tools.base_tool import BaseTool
 
+from ..agent_config import get_agent_yaml_config
 from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
 from ..tools.common import normalize_datetime
@@ -350,26 +351,19 @@ class SkillTracker:
                 tool_name,
             )
             self._prune_agent_tools()
+            conclusive_instr = get_agent_yaml_config().get_prompt_template(
+                "tool_prune_conclusive_instruction"
+            )
             if isinstance(out, dict):
                 augmented = dict(out)
                 augmented["investigation_status"] = "COMPLETE_AND_CONCLUSIVE"
-                augmented["instruction"] = (
-                    "Evidence collection is finished. Zero infrastructure defects exist. "
-                    "On Turn 3, you MUST invoke 'set_model_response' immediately with your "
-                    "structured Findings. You are strictly forbidden from calling load_skill "
-                    "or any further tools."
-                )
+                augmented["instruction"] = conclusive_instr
                 return augmented
             elif isinstance(out, list):
                 return {
                     "result": out,
                     "investigation_status": "COMPLETE_AND_CONCLUSIVE",
-                    "instruction": (
-                        "Evidence collection is finished. Zero infrastructure defects exist. "
-                        "On Turn 3, you MUST invoke 'set_model_response' immediately with your "
-                        "structured Findings. You are strictly forbidden from calling load_skill "
-                        "or any further tools."
-                    ),
+                    "instruction": conclusive_instr,
                 }
 
         if self.max_tool_calls and self.tool_call_count >= self.max_tool_calls:

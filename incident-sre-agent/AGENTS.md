@@ -43,15 +43,18 @@ Dispatcher (BaseAgent)
 
 All runtime system instructions, prompt templates, and agent definitions are externalized from Python code:
 
-- **Declarative Architecture & System Instructions**: [`agent/app/agent.yaml`](agent/app/agent.yaml)
+- **Declarative Architecture & Instructions**: [`agent/app/agent.yaml`](agent/app/agent.yaml)
   - Defines the ADK agent tree, agent names, models, descriptions, output schemas, and system instructions.
-  - Single source of truth for `triage`, `changes_specialist`, `logs_specialist`, `metrics_specialist`, `resources_specialist`, and `synthesizer` instructions.
+  - Contains all 6 system instructions (`triage`, `changes_specialist`, `logs_specialist`, `metrics_specialist`, `resources_specialist`, `synthesizer`).
+  - Contains all prompt templates and turn protocol instructions (`prompt_templates`). Zero instructions or prompt strings are hardcoded in Python.
   - Uses model environment references (`${MODEL_DISPATCHER}`, `${MODEL_SPECIALIST}`, `${MODEL_SYNTHESIZER}`) with zero hardcoded model literals.
 - **Configuration Loader**: [`agent/app/agent_config.py`](agent/app/agent_config.py)
-  - Loads and strictly validates `agent.yaml` using `yaml.safe_load`.
+  - Loads and strictly validates `agent.yaml` using `yaml.safe_load` into typed Pydantic v2 models.
+  - Provides `get_instruction(name)`, `get_prompt_template(name, template_key)`, and `format_prompt(name, template_key, **kwargs)`.
   - Enforces fail-fast startup: if `agent.yaml` is missing, unreadable, or malformed, the service immediately raises `AgentConfigError` at startup. No silent defaults or fallbacks.
-- **Runbook Skills (Progressive Disclosure)**: [`agent/skills/*/SKILL.md`](agent/skills/)
-  - Domain-specific runbooks loaded on-demand by specialists via ADK `SkillToolset`.
+- **Runbook Skills (Domain Knowledge — Kept as Skills)**: [`agent/skills/*/SKILL.md`](agent/skills/)
+  - Troubleshooting runbooks stay as skills because they represent domain knowledge rather than agent architecture or instructions.
+  - Loaded separately on-demand by specialists via `SkillsLoader` and ADK `SkillToolset`.
 
 ---
 
@@ -112,6 +115,9 @@ python3 scripts/check-no-rootcause-overrides.py
 # Verify zero demo log hints in logging statements:
 python3 scripts/check-no-demo-log-hints.py
 
+# Verify zero inline instructions, prompt templates, or f-string prompts in Python:
+python3 scripts/check-no-inline-prompts.py
+
 # Verify all relative markdown links resolve successfully:
 python3 scripts/check-markdown-links.py
 
@@ -136,11 +142,13 @@ bash scripts/check-portable-sed.sh
    - Pydantic models in `bridge/app/contracts/` and `agent/app/contracts/` must remain byte-identical (`check-contracts.sh`).
 6. **No Fallbacks for Missing or Malformed `agent.yaml`**:
    - If `agent.yaml` is absent or malformed, the agent must fail immediately at startup with `AgentConfigError`. Never provide silent defaults or inline Python fallback prompts.
-7. **Single Follow-Up Review Cap**:
+7. **Zero Hardcoded Instructions or Prompts in Python**:
+   - Every system instruction, prompt template, and turn protocol instruction MUST live in `agent.yaml`. An AST guard (`check-no-inline-prompts.py`) enforces that no string literals or f-strings are passed to instruction or prompt parameters in `agent/app/`.
+8. **Single Follow-Up Review Cap**:
    - `ReviewEvaluator.max_rounds` must never exceed `1` to avoid unbounded query loops.
-8. **Strict Read-Only Guarantee**:
+9. **Strict Read-Only Guarantee**:
    - All diagnostic specialist tools must be read-only (`assert_all_readonly()`). Mutating tools are strictly forbidden.
-9. **Portable Shell Syntax**:
+10. **Portable Shell Syntax**:
    - Scripts must follow `scripts/check-portable-sed.sh` rules: never use non-portable GNU `sed -i` extensions without portable argument handling (`sedi_args`).
 
 ---
