@@ -144,3 +144,103 @@ def test_app_loggers_configured_with_json_formatter() -> None:
     ]
     assert len(inv_formatters) >= 1
     assert inv_formatters[0].service == "inventory-svc"
+
+
+ERROR_EVENT_TYPE = (
+    "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"
+)
+
+
+@pytest.mark.parametrize(
+    "formatter_cls,service_name",
+    [
+        (ShopJsonLogFormatter, "shop-api"),
+        (InventoryJsonLogFormatter, "inventory-svc"),
+    ],
+)
+@pytest.mark.parametrize(
+    "level,expect_error_event",
+    [
+        (logging.INFO, False),
+        (logging.WARNING, False),
+        (logging.ERROR, True),
+        (logging.CRITICAL, True),
+    ],
+)
+def test_json_log_formatter_marks_error_reporting_events(
+    formatter_cls: type[ShopJsonLogFormatter | InventoryJsonLogFormatter],
+    service_name: str,
+    level: int,
+    expect_error_event: bool,
+) -> None:
+    formatter = formatter_cls(service=service_name)
+    record = logging.LogRecord(
+        name=service_name,
+        level=level,
+        pathname="app.py",
+        lineno=7,
+        msg="Downstream dependency returned HTTP 403 Forbidden",
+        args=(),
+        exc_info=None,
+    )
+
+    data = json.loads(formatter.format(record))
+
+    if expect_error_event:
+        assert data["@type"] == ERROR_EVENT_TYPE
+    else:
+        assert "@type" not in data
+    assert "stack_trace" not in data
+
+
+def test_json_log_formatter_exposes_traceback_as_stack_trace() -> None:
+    formatter = ShopJsonLogFormatter(service="shop-api")
+    try:
+        raise ValueError("Simulated database timeout")
+    except ValueError:
+        import sys
+
+        exc_info = sys.exc_info()
+
+    record = logging.LogRecord(
+        name="shop-api",
+        level=logging.ERROR,
+        pathname="app.py",
+        lineno=99,
+        msg="Database operation failed",
+        args=(),
+        exc_info=exc_info,
+    )
+
+    data = json.loads(formatter.format(record))
+
+    assert data["@type"] == ERROR_EVENT_TYPE
+    assert data["stack_trace"].startswith("Traceback (most recent call last):")
+    assert data["stack_trace"].rstrip().endswith("ValueError: Simulated database timeout")
+    # message keeps the summary and the trace for log readers
+    assert data["message"].startswith("Database operation failed\nTraceback")
+
+
+def test_json_log_formatter_extracts_traceback_embedded_in_message() -> None:
+    formatter = ShopJsonLogFormatter(service="shop-api")
+    trace = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/shop_app.py", line 210, in checkout\n'
+        "    db_conn = await pool.acquire(timeout=5.0)\n"
+        "TimeoutError: pool acquire timed out"
+    )
+    record = logging.LogRecord(
+        name="shop-api",
+        level=logging.ERROR,
+        pathname="app.py",
+        lineno=404,
+        msg="%s\n%s",
+        args=("Checkout failed", trace),
+        exc_info=None,
+    )
+
+    data = json.loads(formatter.format(record))
+
+    assert data["@type"] == ERROR_EVENT_TYPE
+    assert data["stack_trace"] == trace
+    assert data["message"] == f"Checkout failed\n{trace}"

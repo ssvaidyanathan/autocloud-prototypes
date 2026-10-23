@@ -15,6 +15,11 @@ import httpx
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
+ERROR_EVENT_TYPE = (
+    "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"
+)
+TRACEBACK_HEADER = "Traceback (most recent call last):"
+
 
 class JsonLogFormatter(logging.Formatter):
     """Structured JSON log formatter for Cloud Logging and observability."""
@@ -34,12 +39,19 @@ class JsonLogFormatter(logging.Formatter):
             message = f"{message}\n{self.formatStack(record.stack_info)}"
 
         timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()
-        payload = {
+        payload: Dict[str, Any] = {
             "severity": record.levelname,
             "message": message,
             "timestamp": timestamp,
             "serviceContext": {"service": self.service},
         }
+        if record.levelno >= logging.ERROR:
+            # Mark ERROR+ entries as Error Reporting events and expose any Python traceback
+            # in stack_trace, since Error Reporting only parses a trace at the start of a field.
+            payload["@type"] = ERROR_EVENT_TYPE
+            trace_start = message.find(TRACEBACK_HEADER)
+            if trace_start != -1:
+                payload["stack_trace"] = message[trace_start:]
         return json.dumps(payload)
 
 
