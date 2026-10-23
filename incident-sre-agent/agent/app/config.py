@@ -71,9 +71,9 @@ class AgentConfig(BaseSettings):
     gcp_project: Optional[str] = None
     gcp_region: str = "us-central1"
     vertex_location: str = "global"
-    model_dispatcher: str = "gemini-3.8-flash"
-    model_specialist: str = "gemini-3.8-flash"
-    model_synthesizer: str = "gemini-3.8-flash"
+    model_dispatcher: str
+    model_specialist: str
+    model_synthesizer: str
     gemini_pro_model: Optional[str] = None
     gemini_flash_model: Optional[str] = None
     app_env: str = "production"
@@ -103,6 +103,29 @@ class AgentConfig(BaseSettings):
     dependency_fanout_max_depth: int = 2
     dependency_max_services: int = 3
     prior_incident_quiescent_minutes: int = 5
+
+    def __init__(self, **values: Any) -> None:
+        super().__init__(**values)
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_model_aliases_before(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            lookup = {k.lower(): k for k in data.keys()}
+            pro_key = lookup.get("gemini_pro_model")
+            flash_key = lookup.get("gemini_flash_model")
+            pro = data.get(pro_key) if pro_key else None
+            flash = data.get(flash_key) if flash_key else None
+
+            if pro and isinstance(pro, str) and pro.strip():
+                if not data.get("model_dispatcher"):
+                    data["model_dispatcher"] = pro
+                if not data.get("model_synthesizer"):
+                    data["model_synthesizer"] = pro
+            if flash and isinstance(flash, str) and flash.strip():
+                if not data.get("model_specialist"):
+                    data["model_specialist"] = flash
+        return data
 
     @model_validator(mode="after")
     def apply_model_aliases_and_resolve_project(self) -> "AgentConfig":

@@ -12,9 +12,9 @@ def test_agent_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.gcp_project == "local-project"
     assert config.gcp_region == "us-central1"
     assert config.vertex_location == "global"
-    assert config.model_dispatcher == "gemini-3.8-flash"
-    assert config.model_specialist == "gemini-3.8-flash"
-    assert config.model_synthesizer == "gemini-3.8-flash"
+    assert config.model_dispatcher == "test-model-dispatcher"
+    assert config.model_specialist == "test-model-specialist"
+    assert config.model_synthesizer == "test-model-synthesizer"
     assert config.allowed_callback_hosts == ["*.run.app"]
     assert config.timeout_seconds == 600
     assert config.specialist_timeout_seconds == 120.0
@@ -109,3 +109,79 @@ def test_get_settings_singleton() -> None:
     s1 = get_settings()
     s2 = get_settings()
     assert s1 is s2
+
+
+def test_agent_config_fails_when_model_env_vars_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in [
+        "MODEL_DISPATCHER",
+        "MODEL_SPECIALIST",
+        "MODEL_SYNTHESIZER",
+        "GEMINI_PRO_MODEL",
+        "GEMINI_FLASH_MODEL",
+    ]:
+        monkeypatch.delenv(var, raising=False)
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc_info:
+        AgentConfig()
+
+    errors = exc_info.value.errors()
+    missing_fields = {e["loc"][0] for e in errors if e["type"] == "missing"}
+    assert "model_dispatcher" in missing_fields
+    assert "model_specialist" in missing_fields
+    assert "model_synthesizer" in missing_fields
+
+
+@pytest.mark.asyncio
+async def test_startup_fails_when_model_env_vars_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent.app.main import app, lifespan
+    from pydantic import ValidationError
+
+    for var in [
+        "MODEL_DISPATCHER",
+        "MODEL_SPECIALIST",
+        "MODEL_SYNTHESIZER",
+        "GEMINI_PRO_MODEL",
+        "GEMINI_FLASH_MODEL",
+    ]:
+        monkeypatch.delenv(var, raising=False)
+
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError):
+        async with lifespan(app):
+            pass
+
+
+def test_agent_config_model_aliases_satisfy_required_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for var in [
+        "MODEL_DISPATCHER",
+        "MODEL_SPECIALIST",
+        "MODEL_SYNTHESIZER",
+        "GEMINI_PRO_MODEL",
+        "GEMINI_FLASH_MODEL",
+    ]:
+        monkeypatch.delenv(var, raising=False)
+
+    monkeypatch.setenv("GEMINI_PRO_MODEL", "custom-pro-model")
+    monkeypatch.setenv("GEMINI_FLASH_MODEL", "custom-flash-model")
+
+    config = AgentConfig()
+    assert config.model_dispatcher == "custom-pro-model"
+    assert config.model_synthesizer == "custom-pro-model"
+    assert config.model_specialist == "custom-flash-model"
+
+
+def test_agent_config_model_alias_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_DISPATCHER", "orig-dispatcher")
+    monkeypatch.setenv("MODEL_SPECIALIST", "orig-specialist")
+    monkeypatch.setenv("MODEL_SYNTHESIZER", "orig-synthesizer")
+    monkeypatch.setenv("GEMINI_PRO_MODEL", "override-pro")
+    monkeypatch.setenv("GEMINI_FLASH_MODEL", "override-flash")
+
+    config = AgentConfig()
+    assert config.model_dispatcher == "override-pro"
+    assert config.model_synthesizer == "override-pro"
+    assert config.model_specialist == "override-flash"
