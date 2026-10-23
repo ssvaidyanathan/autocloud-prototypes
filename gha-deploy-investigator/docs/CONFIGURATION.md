@@ -59,7 +59,7 @@ The agent service runs behind internal ingress, coordinates autonomous ADK multi
 | `GITHUB_APP_ID` | String | `None` | Yes (for GitHub App) | `var.github_app_id` | Numeric GitHub App ID used for authenticated repo API queries |
 | `GITHUB_APP_PRIVATE_KEY` | String (Secret) | `None` | Yes (for GitHub App) | Secret `${var.name_prefix}-github-app-private-key` | PEM-encoded RSA private key for GitHub App authentication |
 | `GITHUB_TOKEN` | String (Secret) | `None` | No | Secret / Environment | Optional fallback personal access token |
-| `GEMINI_MODEL` | String | `gemini-2.5-flash` | No | `var.gemini_model` | Vertex AI Gemini model name for diagnostic synthesis |
+| `GEMINI_MODEL` | String | *None* | Yes | `var.gemini_model` | Vertex AI Gemini model name for diagnostic synthesis |
 | `VERTEX_AI_LOCATION` | String | `us-central1` | No | `var.vertex_ai_location` | GCP region for Vertex AI Gemini API endpoint |
 
 #### LLM & SDK Inference Settings (Read in `base.py` & Tool Clients)

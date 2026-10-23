@@ -24,6 +24,7 @@ def test_container_import_without_agent_top_level_module() -> None:
         "PATH": os.environ.get("PATH", ""),
         "APP_ENV": "test",
         "ENVIRONMENT": "test",
+        "GEMINI_MODEL": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
     }
     if "SYSTEMROOT" in os.environ:
         env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]

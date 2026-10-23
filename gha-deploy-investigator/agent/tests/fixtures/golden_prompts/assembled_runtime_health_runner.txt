@@ -1,0 +1,12 @@
+Investigate Cloud Run deploy failure for incident 202: Cloud Run container OOM
+Job: deploy (ID: 54321), Step: deploy-to-cloud-run
+Repository: owner/repo, Run ID: 98765, Head SHA: def5678abc1234
+Target Service: order-service, Region: us-central1
+Revision: order-service-00002
+Runner Log Excerpt:
+Memory limit of 512MiB exceeded with 513MiB used.
+
+CRITICAL INSTRUCTIONS:
+1. Turn 1: Invoke load_skill exactly once with skill_name='cloudrun-deploy-troubleshooting'.
+2. Turn 2: Invoke get_commit_diff(repo, head_sha) to inspect commit changes, fetch_job_logs(repo, job_id) to inspect deployment logs, and/or describe_service / describe_cloud_run_revision for runtime telemetry.
+3. Turn 3: Conclude immediately by invoking set_model_response with your Findings report.

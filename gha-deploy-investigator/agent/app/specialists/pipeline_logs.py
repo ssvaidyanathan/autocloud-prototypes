@@ -162,10 +162,12 @@ class PipelineLogsSpecialist(BaseSpecialist):
             FunctionTool(fetch_workflow_run_jobs),
             FunctionTool(get_commit_diff),
         ]
+        from ..agent_config import get_agent_config
+
         self.llm_agent = llm_agent or LlmAgent(
             name="pipeline_logs_specialist",
             model=self.model or "default",
-            instruction="You are a specialist investigating CI pipeline logs (lint, test, build).",
+            instruction=get_agent_config().get_instruction("pipeline_logs_specialist"),
             tools=self.adk_tools,
             output_schema=Findings,
         )
@@ -209,17 +211,10 @@ class PipelineLogsSpecialist(BaseSpecialist):
             FunctionTool(_bound_fetch_workflow_run_jobs),
             FunctionTool(_bound_get_commit_diff),
         ]
-        instruction = (
-            "You are a CI/CD pipeline logs diagnostic specialist.\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            f"1. On Turn 1, invoke 'load_skill' exactly once with skill_name='{skill_name}'. "
-            "Do NOT invoke list_skills or load other skills.\n"
-            "2. On Turn 2, invoke at least one read-only data tool ('get_commit_diff' or "
-            "'fetch_job_logs') to inspect repository changes or execution logs.\n"
-            "3. On Turn 3, conclude immediately by invoking 'set_model_response' with your "
-            "structured Findings report. Incorporate the data tool output directly into your "
-            "findings."
-        )
+        from ..agent_config import get_agent_config
+
+        template = get_agent_config().get_drilldown_instruction("pipeline_logs_specialist")
+        instruction = template.format(skill_name=skill_name)
         model_to_use = (
             getattr(self.llm_agent, "model", None)
             if self.llm_agent
@@ -320,25 +315,25 @@ class PipelineLogsSpecialist(BaseSpecialist):
         # Attempt Pass 1: ADK Runner execution if LLM is available
         if self._is_llm_available():
             try:
+                from ..agent_config import get_agent_config
                 from .base import run_sync
 
                 agent = self._build_agent(skill, client=client, config=config)
-                prompt_lines = [
-                    f"Investigate pipeline failure for incident {incident.id}: {incident.title}",
-                    f"Job: {job_name} (ID: {job_id}), Step: {step_name}",
-                    f"Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}",
-                    f"Failing Step Sub-Stage: {sub_stage}",
-                    f"Error log excerpt:\n{log_text[:2000]}",
-                    "",
-                    "CRITICAL INSTRUCTIONS:",
-                    f"1. Turn 1: Invoke load_skill exactly once with skill_name='{skill}'.",
-                    (
-                        "2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect "
-                        "logs or diff."
-                    ),
-                    "3. Turn 3: Conclude immediately by invoking set_model_response with Findings.",
-                ]
-                findings = run_sync(self._execute_adk_runner(agent, "\n".join(prompt_lines)))
+                template = get_agent_config().get_prompt_template("pipeline_logs_runner")
+                runner_prompt = template.format(
+                    incident_id=incident.id,
+                    incident_title=incident.title,
+                    job_name=job_name,
+                    job_id=job_id,
+                    step_name=step_name,
+                    repo=repo,
+                    run_id=run_id,
+                    head_sha=head_sha,
+                    sub_stage=sub_stage,
+                    log_excerpt=log_text[:2000],
+                    skill_name=skill,
+                )
+                findings = run_sync(self._execute_adk_runner(agent, runner_prompt))
                 if findings and (self.skill_tracker.queries_run or findings.queries_run):
                     return self._findings_to_diagnostic_result(
                         findings, incident, failing_job, failing_step, log_text, sub_stage

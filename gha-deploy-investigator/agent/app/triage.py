@@ -94,10 +94,9 @@ class TriageAgent:
             "dispatcher", skills_dir=self.skills_loader.skills_dir
         )
         self.skill_toolset = toolset
-        instruction = (
-            "You are a CI/CD Triage Agent. Analyze failure context and logs to formulate "
-            "an InvestigationPlan selecting specialized agents and runbook skills."
-        )
+        from .agent_config import get_agent_config
+
+        instruction = get_agent_config().get_instruction("triage")
         self.llm_agent = llm_agent or LlmAgent(
             name="triage",
             model=self.model or "default",

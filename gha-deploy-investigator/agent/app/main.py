@@ -5,12 +5,16 @@ from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI
 
+from .agent_config import get_agent_config
 from .config import AgentConfig, get_settings
 from .contracts.request import InvestigationRequest
 from .contracts.result import InvestigationResult
 from .dispatcher import InvestigationDispatcher
 
 logger = logging.getLogger(__name__)
+
+# Ensure agent instructions YAML is valid at startup (fail fast if missing or malformed)
+get_agent_config()
 
 app = FastAPI(
     title="GitHub Actions Deployment Investigator Agent",

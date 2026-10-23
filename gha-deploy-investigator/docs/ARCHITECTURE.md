@@ -99,6 +99,12 @@ The `RootCauseSynthesizer` correlates findings across specialists and generates 
 - `suggested_action`: Actionable, copy-pasteable remediation commands.
 - **AST Static Guard**: The codebase is protected by `scripts/check-no-rootcause-overrides.py`, enforcing that post-LLM logic cannot overwrite root causes or artificially inflate confidence outside labeled automated fallback paths.
 
+### 3.4 Declarative Agent Instructions & ADK Hybrid Model
+System instructions, agent descriptions, multi-turn drill-down protocols, and synthesis prompt templates are externalized from Python code into [`agent/app/agent.yaml`](../agent/app/agent.yaml):
+- **Hybrid Pattern**: Declarative YAML configures agent hierarchies, model references (`${GEMINI_MODEL}`), schemas, and instructions, while Python retains runtime client dependency injection, tool callbacks (`SkillTracker`), and FastAPI routes.
+- **Typed Loader & Startup Fail-Fast**: The loader in [`agent/app/agent_config.py`](../agent/app/agent_config.py) validates the schema using typed Pydantic models. If `agent.yaml` is missing or malformed, the service fails fast at startup with zero silent defaults.
+- **AI Coding Assistant Guide**: Operational conventions, guardrails, and test commands are documented in [`AGENTS.md`](../AGENTS.md).
+
 ---
 
 ## 4. Reverse ServiceNow & GitHub Write-Back Flow

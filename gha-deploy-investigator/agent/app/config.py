@@ -22,7 +22,7 @@ class AgentConfig(BaseSettings):
     gcp_project: Optional[str] = None
     bridge_service_url: str = ""
     vertex_ai_location: str = "us-central1"
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str
 
     # GitHub API configuration
     github_api_url: str = "https://api.github.com"

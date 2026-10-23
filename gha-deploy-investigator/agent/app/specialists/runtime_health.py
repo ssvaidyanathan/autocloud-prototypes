@@ -143,12 +143,12 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             FunctionTool(describe_service),
             FunctionTool(list_service_revisions),
         ]
+        from ..agent_config import get_agent_config
+
         self.llm_agent = llm_agent or LlmAgent(
             name="runtime_health_specialist",
             model=self.model or "default",
-            instruction=(
-                "You are a specialist investigating Cloud Run deployment and runtime health."
-            ),
+            instruction=get_agent_config().get_instruction("runtime_health_specialist"),
             tools=self.adk_tools,
             output_schema=Findings,
         )
@@ -245,29 +245,9 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             FunctionTool(_bound_describe_revision),
             FunctionTool(_bound_query_logging),
         ]
-        instruction = (
-            "You are a Cloud Run deployment and runtime health diagnostic specialist.\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            "1. On Turn 1, invoke 'load_skill' exactly once with "
-            "skill_name='cloudrun-deploy-troubleshooting'. Do NOT invoke other skills.\n"
-            "2. On Turn 2, invoke decisive read-only diagnostic data tools for the failure:\n"
-            "   - Invoke 'get_commit_diff' (repo, head_sha) to inspect repository or deployment "
-            "configuration changes introduced by the commit (e.g. resource limits, "
-            "environment variables, configuration changes).\n"
-            "   - Invoke 'fetch_job_logs' (repo, job_id) to inspect the deployment step runner "
-            "logs containing the decisive failure error.\n"
-            "   - And/or invoke 'describe_service', 'list_service_revisions', or "
-            "'describe_cloud_run_revision' to inspect runtime telemetry and revision history.\n"
-            "   NOTE ON LIVE STATE: 'describe_service' reports live cluster state. "
-            "Compare revision creation timestamps from 'list_service_revisions' against the "
-            "run failure window. If no revision existed at failure time, note that no revision "
-            "existed at failure time and current status reflects revisions created subsequent "
-            "to the failure event. If a prior revision existed at failure time, dynamically note "
-            "the active revision name at failure time. Do NOT present current health as success "
-            "of the failed deployment.\n"
-            "3. On Turn 3, conclude immediately by invoking 'set_model_response' with your "
-            "structured Findings report citing the tool outputs."
-        )
+        from ..agent_config import get_agent_config
+
+        instruction = get_agent_config().get_drilldown_instruction("runtime_health_specialist")
         model_to_use = (
             getattr(self.llm_agent, "model", None)
             if self.llm_agent
@@ -407,37 +387,26 @@ class RuntimeHealthSpecialist(BaseSpecialist):
         # Attempt Pass 1: ADK Runner execution if LLM is available
         if self._is_llm_available():
             try:
+                from ..agent_config import get_agent_config
                 from .base import run_sync
 
                 agent = self._build_agent(client=client, config=config)
-                prompt_lines = [
-                    (
-                        f"Investigate Cloud Run deploy failure for incident {incident.id}: "
-                        f"{incident.title}"
-                    ),
-                    f"Job: {failing_job.get('name', 'deploy')} (ID: {job_id}), Step: {step_name}",
-                    f"Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}",
-                    f"Target Service: {service_name}, Region: {region}",
-                    f"Revision: {revision_name or 'None (failed pre-revision)'}",
-                    f"Runner Log Excerpt:\n{log_text[:2000]}",
-                    "",
-                    "CRITICAL INSTRUCTIONS:",
-                    (
-                        "1. Turn 1: Invoke load_skill exactly once with "
-                        "skill_name='cloudrun-deploy-troubleshooting'."
-                    ),
-                    (
-                        "2. Turn 2: Invoke get_commit_diff(repo, head_sha) to inspect commit "
-                        "changes, fetch_job_logs(repo, job_id) to inspect deployment logs, "
-                        "and/or describe_service / describe_cloud_run_revision for "
-                        "runtime telemetry."
-                    ),
-                    (
-                        "3. Turn 3: Conclude immediately by invoking set_model_response "
-                        "with your Findings report."
-                    ),
-                ]
-                findings = run_sync(self._execute_adk_runner(agent, "\n".join(prompt_lines)))
+                template = get_agent_config().get_prompt_template("runtime_health_runner")
+                runner_prompt = template.format(
+                    incident_id=incident.id,
+                    incident_title=incident.title,
+                    job_name=failing_job.get("name", "deploy") if failing_job else "deploy",
+                    job_id=job_id,
+                    step_name=step_name,
+                    repo=repo,
+                    run_id=run_id,
+                    head_sha=head_sha,
+                    service_name=service_name,
+                    region=region,
+                    revision_name=revision_name or "None (failed pre-revision)",
+                    log_excerpt=log_text[:2000],
+                )
+                findings = run_sync(self._execute_adk_runner(agent, runner_prompt))
                 if findings and (self.skill_tracker.queries_run or findings.queries_run):
                     return self._findings_to_diagnostic_result(
                         findings,

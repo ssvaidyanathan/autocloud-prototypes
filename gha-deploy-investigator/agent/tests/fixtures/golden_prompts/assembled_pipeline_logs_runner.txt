@@ -1,0 +1,12 @@
+Investigate pipeline failure for incident 101: Lint failure in CI
+Job: lint-job (ID: 12345), Step: ruff check
+Repository: owner/repo, Run ID: 67890, Head SHA: abc1234def5678
+Failing Step Sub-Stage: lint
+Error log excerpt:
+error: expected token
+line 42
+
+CRITICAL INSTRUCTIONS:
+1. Turn 1: Invoke load_skill exactly once with skill_name='lint-troubleshooting'.
+2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect logs or diff.
+3. Turn 3: Conclude immediately by invoking set_model_response with Findings.
