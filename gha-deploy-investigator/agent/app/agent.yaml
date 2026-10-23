@@ -90,3 +90,42 @@ prompt_templates:
     7. Do NOT invent or hallucinate revision numbers, resource names, or projects not in the logs.
     8. Provide actionable remediation steps addressing each distinct violation directly.
     9. Respond with valid JSON with keys: 'root_cause' (string), 'causal_remediation' (list of strings), 'unrelated_observations' (list of strings), 'confidence' (float between 0.0 and 1.0).
+
+  pipeline_logs_runner: |-
+    Investigate pipeline failure for incident {incident_id}: {incident_title}
+    Job: {job_name} (ID: {job_id}), Step: {step_name}
+    Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}
+    Failing Step Sub-Stage: {sub_stage}
+    Error log excerpt:
+    {log_excerpt}
+
+    CRITICAL INSTRUCTIONS:
+    1. Turn 1: Invoke load_skill exactly once with skill_name='{skill_name}'.
+    2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect logs or diff.
+    3. Turn 3: Conclude immediately by invoking set_model_response with Findings.
+
+  runtime_health_runner: |-
+    Investigate Cloud Run deploy failure for incident {incident_id}: {incident_title}
+    Job: {job_name} (ID: {job_id}), Step: {step_name}
+    Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}
+    Target Service: {service_name}, Region: {region}
+    Revision: {revision_name}
+    Runner Log Excerpt:
+    {log_excerpt}
+
+    CRITICAL INSTRUCTIONS:
+    1. Turn 1: Invoke load_skill exactly once with skill_name='cloudrun-deploy-troubleshooting'.
+    2. Turn 2: Invoke get_commit_diff(repo, head_sha) to inspect commit changes, fetch_job_logs(repo, job_id) to inspect deployment logs, and/or describe_service / describe_cloud_run_revision for runtime telemetry.
+    3. Turn 3: Conclude immediately by invoking set_model_response with your Findings report.
+
+  iac_config_runner: |-
+    Investigate IaC failure for incident {incident_id}: {incident_title}
+    Job: {job_name}, Step: {step_name}
+    Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}
+    Log Excerpt:
+    {log_excerpt}
+
+    CRITICAL INSTRUCTIONS:
+    1. Turn 1: Invoke load_skill exactly once with skill_name='cloudrun-deploy-troubleshooting'.
+    2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect IaC changes.
+    3. Turn 3: Conclude immediately by invoking set_model_response with your Findings report.

@@ -146,6 +146,49 @@ GOLDEN_SRE_SYNTHESIS_TEMPLATE = (
     "'confidence' (float between 0.0 and 1.0).\n"
 )
 
+GOLDEN_PIPELINE_LOGS_RUNNER_TEMPLATE = (
+    "Investigate pipeline failure for incident {incident_id}: {incident_title}\n"
+    "Job: {job_name} (ID: {job_id}), Step: {step_name}\n"
+    "Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}\n"
+    "Failing Step Sub-Stage: {sub_stage}\n"
+    "Error log excerpt:\n"
+    "{log_excerpt}\n\n"
+    "CRITICAL INSTRUCTIONS:\n"
+    "1. Turn 1: Invoke load_skill exactly once with skill_name='{skill_name}'.\n"
+    "2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect logs or diff.\n"
+    "3. Turn 3: Conclude immediately by invoking set_model_response with Findings."
+)
+
+GOLDEN_RUNTIME_HEALTH_RUNNER_TEMPLATE = (
+    "Investigate Cloud Run deploy failure for incident {incident_id}: {incident_title}\n"
+    "Job: {job_name} (ID: {job_id}), Step: {step_name}\n"
+    "Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}\n"
+    "Target Service: {service_name}, Region: {region}\n"
+    "Revision: {revision_name}\n"
+    "Runner Log Excerpt:\n"
+    "{log_excerpt}\n\n"
+    "CRITICAL INSTRUCTIONS:\n"
+    "1. Turn 1: Invoke load_skill exactly once with "
+    "skill_name='cloudrun-deploy-troubleshooting'.\n"
+    "2. Turn 2: Invoke get_commit_diff(repo, head_sha) to inspect commit changes, "
+    "fetch_job_logs(repo, job_id) to inspect deployment logs, and/or describe_service / "
+    "describe_cloud_run_revision for runtime telemetry.\n"
+    "3. Turn 3: Conclude immediately by invoking set_model_response with your Findings report."
+)
+
+GOLDEN_IAC_CONFIG_RUNNER_TEMPLATE = (
+    "Investigate IaC failure for incident {incident_id}: {incident_title}\n"
+    "Job: {job_name}, Step: {step_name}\n"
+    "Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}\n"
+    "Log Excerpt:\n"
+    "{log_excerpt}\n\n"
+    "CRITICAL INSTRUCTIONS:\n"
+    "1. Turn 1: Invoke load_skill exactly once with "
+    "skill_name='cloudrun-deploy-troubleshooting'.\n"
+    "2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect IaC changes.\n"
+    "3. Turn 3: Conclude immediately by invoking set_model_response with your Findings report."
+)
+
 
 @pytest.fixture(autouse=True)
 def clean_config_cache() -> Generator[None, None, None]:
@@ -196,6 +239,168 @@ class TestAgentYamlByteIdentity:
         # 7. SRE synthesis prompt template
         sre_template = cfg.get_prompt_template("sre_synthesis")
         assert sre_template.encode("utf-8") == GOLDEN_SRE_SYNTHESIS_TEMPLATE.encode("utf-8")
+
+        # 8. Pipeline logs runner prompt template
+        pls_runner = cfg.get_prompt_template("pipeline_logs_runner")
+        assert pls_runner.encode("utf-8") == GOLDEN_PIPELINE_LOGS_RUNNER_TEMPLATE.encode("utf-8")
+
+        # 9. Runtime health runner prompt template
+        rhs_runner = cfg.get_prompt_template("runtime_health_runner")
+        assert rhs_runner.encode("utf-8") == GOLDEN_RUNTIME_HEALTH_RUNNER_TEMPLATE.encode("utf-8")
+
+        # 10. IaC config runner prompt template
+        iac_runner = cfg.get_prompt_template("iac_config_runner")
+        assert iac_runner.encode("utf-8") == GOLDEN_IAC_CONFIG_RUNNER_TEMPLATE.encode("utf-8")
+
+    def test_assembled_prompt_byte_identity(self) -> None:
+        """Verify that final assembled prompts formatted with runtime arguments
+        match byte-for-byte against base commit (8122eef) expected prompt strings."""
+        cfg = get_agent_config()
+
+        # 1. Pipeline logs runner assembled prompt
+        pls_tmpl = cfg.get_prompt_template("pipeline_logs_runner")
+        pls_kwargs = {
+            "incident_id": 101,
+            "incident_title": "Lint failure in CI",
+            "job_name": "lint-job",
+            "job_id": 12345,
+            "step_name": "ruff check",
+            "repo": "owner/repo",
+            "run_id": 67890,
+            "head_sha": "abc1234def5678",
+            "sub_stage": "lint",
+            "log_excerpt": "error: expected token\nline 42",
+            "skill_name": "lint-troubleshooting",
+        }
+        assembled_pls = pls_tmpl.format(**pls_kwargs)
+        expected_pls = "\n".join([
+            (
+                f"Investigate pipeline failure for incident {pls_kwargs['incident_id']}: "
+                f"{pls_kwargs['incident_title']}"
+            ),
+            (
+                f"Job: {pls_kwargs['job_name']} (ID: {pls_kwargs['job_id']}), "
+                f"Step: {pls_kwargs['step_name']}"
+            ),
+            (
+                f"Repository: {pls_kwargs['repo']}, Run ID: {pls_kwargs['run_id']}, "
+                f"Head SHA: {pls_kwargs['head_sha']}"
+            ),
+            f"Failing Step Sub-Stage: {pls_kwargs['sub_stage']}",
+            f"Error log excerpt:\n{pls_kwargs['log_excerpt']}",
+            "",
+            "CRITICAL INSTRUCTIONS:",
+            (
+                f"1. Turn 1: Invoke load_skill exactly once with "
+                f"skill_name='{pls_kwargs['skill_name']}'."
+            ),
+            "2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect logs or diff.",
+            "3. Turn 3: Conclude immediately by invoking set_model_response with Findings.",
+        ])
+        assert assembled_pls.encode("utf-8") == expected_pls.encode("utf-8")
+
+        # 2. Runtime health runner assembled prompt
+        rhs_tmpl = cfg.get_prompt_template("runtime_health_runner")
+        rhs_kwargs = {
+            "incident_id": 202,
+            "incident_title": "Cloud Run container OOM",
+            "job_name": "deploy",
+            "job_id": 54321,
+            "step_name": "deploy-to-cloud-run",
+            "repo": "owner/repo",
+            "run_id": 98765,
+            "head_sha": "def5678abc1234",
+            "service_name": "order-service",
+            "region": "us-central1",
+            "revision_name": "order-service-00002",
+            "log_excerpt": "Memory limit of 512MiB exceeded with 513MiB used.",
+        }
+        assembled_rhs = rhs_tmpl.format(**rhs_kwargs)
+        expected_rhs = "\n".join([
+            (
+                f"Investigate Cloud Run deploy failure for incident {rhs_kwargs['incident_id']}: "
+                f"{rhs_kwargs['incident_title']}"
+            ),
+            (
+                f"Job: {rhs_kwargs['job_name']} (ID: {rhs_kwargs['job_id']}), "
+                f"Step: {rhs_kwargs['step_name']}"
+            ),
+            (
+                f"Repository: {rhs_kwargs['repo']}, Run ID: {rhs_kwargs['run_id']}, "
+                f"Head SHA: {rhs_kwargs['head_sha']}"
+            ),
+            f"Target Service: {rhs_kwargs['service_name']}, Region: {rhs_kwargs['region']}",
+            f"Revision: {rhs_kwargs['revision_name']}",
+            f"Runner Log Excerpt:\n{rhs_kwargs['log_excerpt']}",
+            "",
+            "CRITICAL INSTRUCTIONS:",
+            (
+                "1. Turn 1: Invoke load_skill exactly once with "
+                "skill_name='cloudrun-deploy-troubleshooting'."
+            ),
+            (
+                "2. Turn 2: Invoke get_commit_diff(repo, head_sha) to inspect commit changes, "
+                "fetch_job_logs(repo, job_id) to inspect deployment logs, "
+                "and/or describe_service / describe_cloud_run_revision for runtime telemetry."
+            ),
+            (
+                "3. Turn 3: Conclude immediately by invoking set_model_response "
+                "with your Findings report."
+            ),
+        ])
+        assert assembled_rhs.encode("utf-8") == expected_rhs.encode("utf-8")
+
+        # 3. IaC config runner assembled prompt
+        iac_tmpl = cfg.get_prompt_template("iac_config_runner")
+        iac_kwargs = {
+            "incident_id": 303,
+            "incident_title": "Terraform syntax error",
+            "job_name": "iac",
+            "step_name": "terraform apply",
+            "repo": "owner/repo",
+            "run_id": 11223,
+            "head_sha": "7890abcdef1234",
+            "log_excerpt": "Error: Invalid reference in main.tf line 15",
+        }
+        assembled_iac = iac_tmpl.format(**iac_kwargs)
+        expected_iac = "\n".join([
+            (
+                f"Investigate IaC failure for incident {iac_kwargs['incident_id']}: "
+                f"{iac_kwargs['incident_title']}"
+            ),
+            f"Job: {iac_kwargs['job_name']}, Step: {iac_kwargs['step_name']}",
+            (
+                f"Repository: {iac_kwargs['repo']}, Run ID: {iac_kwargs['run_id']}, "
+                f"Head SHA: {iac_kwargs['head_sha']}"
+            ),
+            f"Log Excerpt:\n{iac_kwargs['log_excerpt']}",
+            "",
+            "CRITICAL INSTRUCTIONS:",
+            (
+                "1. Turn 1: Invoke load_skill exactly once with "
+                "skill_name='cloudrun-deploy-troubleshooting'."
+            ),
+            "2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect IaC changes.",
+            (
+                "3. Turn 3: Conclude immediately by invoking set_model_response "
+                "with your Findings report."
+            ),
+        ])
+        assert assembled_iac.encode("utf-8") == expected_iac.encode("utf-8")
+
+        # 4. SRE synthesis assembled prompt
+        sre_tmpl = cfg.get_prompt_template("sre_synthesis")
+        sre_kwargs = {
+            "job_name": "test-suite",
+            "step_name": "pytest",
+            "findings_context": (
+                "\nSpecialist Analysis & Findings:\n- Probable cause: test assertion\n"
+            ),
+            "log_excerpt": "FAILED tests/test_math.py::test_add - assert 1 + 1 == 3",
+        }
+        assembled_sre = sre_tmpl.format(**sre_kwargs)
+        expected_sre = GOLDEN_SRE_SYNTHESIS_TEMPLATE.format(**sre_kwargs)
+        assert assembled_sre.encode("utf-8") == expected_sre.encode("utf-8")
 
     def test_live_agent_instances_byte_identity(self) -> None:
         """Verify that instantiated agent instances receive exact byte-identical instructions."""
@@ -331,7 +536,7 @@ prompt_templates:
             load_agent_config(bad_file)
 
     def test_missing_prompt_template_raises_value_error(self, tmp_path: Path) -> None:
-        bad_yaml = """
+        base_yaml = """
 agent_class: BaseAgent
 name: dispatcher
 description: "Orchestrator"
@@ -354,12 +559,26 @@ sub_agents:
     name: iac_config_specialist
     instruction: "Valid"
     drilldown_instruction: "Valid"
-prompt_templates: {}
+prompt_templates:
+  sre_synthesis: "Valid"
+  pipeline_logs_runner: "Valid"
+  runtime_health_runner: "Valid"
+  iac_config_runner: "Valid"
 """
-        bad_file = tmp_path / "no_template.yaml"
-        bad_file.write_text(bad_yaml, encoding="utf-8")
-        with pytest.raises(ValueError, match="Missing required prompt template 'sre_synthesis'"):
-            load_agent_config(bad_file)
+        for missing_tmpl in [
+            "sre_synthesis",
+            "pipeline_logs_runner",
+            "runtime_health_runner",
+            "iac_config_runner",
+        ]:
+            bad_yaml = base_yaml.replace(f"  {missing_tmpl}: \"Valid\"\n", "")
+            bad_file = tmp_path / f"no_{missing_tmpl}.yaml"
+            bad_file.write_text(bad_yaml, encoding="utf-8")
+            with pytest.raises(
+                ValueError,
+                match=f"Missing required prompt template '{missing_tmpl}'",
+            ):
+                load_agent_config(bad_file)
 
 
 class TestAgentYamlEnvExpansion:
@@ -394,6 +613,9 @@ sub_agents:
     drilldown_instruction: "Valid"
 prompt_templates:
   sre_synthesis: "Template"
+  pipeline_logs_runner: "Template"
+  runtime_health_runner: "Template"
+  iac_config_runner: "Template"
 """
         yaml_file = tmp_path / "test_env.yaml"
         yaml_file.write_text(raw_yaml, encoding="utf-8")
@@ -407,3 +629,82 @@ prompt_templates:
         monkeypatch.setenv("TEST_MODEL", "custom-model")
         cfg2 = load_agent_config(yaml_file, reload=True)
         assert cfg2.get_agent("triage").model == "custom-model"
+
+
+class TestAstPromptGuard:
+    """Verifies that the AST static check enforces zero hardcoded instructions and prompts."""
+
+    @pytest.fixture
+    def guard_module(self) -> object:
+        import importlib.util
+
+        script_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "scripts"
+            / "check-no-hardcoded-prompts.py"
+        )
+        spec = importlib.util.spec_from_file_location("check_no_hardcoded_prompts", script_path)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_zero_hardcoded_prompts_in_agent_app(self, guard_module: object) -> None:
+        """Verify that check_file_ast finds zero violations across all agent/app Python files."""
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        app_dir = repo_root / "gha-deploy-investigator" / "agent" / "app"
+        if not app_dir.exists():
+            app_dir = repo_root / "agent" / "app"
+
+        files = guard_module.find_agent_python_files(app_dir)  # type: ignore[attr-defined]
+        assert len(files) > 0, f"Found no files to scan in {app_dir}"
+
+        all_violations = []
+        for f in files:
+            violations = guard_module.check_file_ast(f)  # type: ignore[attr-defined]
+            for line_no, msg in violations:
+                all_violations.append(f"{f.name}:{line_no}: {msg}")
+
+        assert not all_violations, (
+            "Hardcoded instructions or prompt templates found:\n"
+            + "\n".join(all_violations)
+        )
+
+    def test_guard_catches_hardcoded_instruction_in_call(
+        self, guard_module: object, tmp_path: Path
+    ) -> None:
+        """Verify that passing string literal as instruction= triggers a violation."""
+        snippet = tmp_path / "bad_kw.py"
+        snippet.write_text(
+            'agent = LlmAgent(name="test", instruction="You are an agent.")\n',
+            encoding="utf-8",
+        )
+        violations = guard_module.check_file_ast(snippet)  # type: ignore[attr-defined]
+        assert len(violations) == 1
+        assert "instruction" in violations[0][1]
+
+    def test_guard_catches_hardcoded_prompt_in_runner_call(
+        self, guard_module: object, tmp_path: Path
+    ) -> None:
+        """Verify that passing string literal / f-string to _execute_adk_runner triggers."""
+        snippet = tmp_path / "bad_runner.py"
+        snippet.write_text(
+            'run_sync(self._execute_adk_runner(agent, f"Investigate {incident}"))\n',
+            encoding="utf-8",
+        )
+        violations = guard_module.check_file_ast(snippet)  # type: ignore[attr-defined]
+        assert len(violations) == 1
+        assert "_execute_adk_runner" in violations[0][1]
+
+    def test_guard_catches_hardcoded_prompt_variable_assignment(
+        self, guard_module: object, tmp_path: Path
+    ) -> None:
+        """Verify that assigning string literal or f-string to prompt variable triggers."""
+        snippet = tmp_path / "bad_assign.py"
+        snippet.write_text(
+            'prompt_lines = [\n    f"Investigate {incident}",\n    "CRITICAL INSTRUCTIONS:",\n]\n',
+            encoding="utf-8",
+        )
+        violations = guard_module.check_file_ast(snippet)  # type: ignore[attr-defined]
+        assert len(violations) == 1
+        assert "prompt_lines" in violations[0][1]

@@ -107,10 +107,17 @@ class AgentYamlConfig(BaseModel):
                 )
 
         # Enforce required prompt templates
-        if "sre_synthesis" not in self.prompt_templates:
-            raise ValueError("Missing required prompt template 'sre_synthesis'")
-        if not self.prompt_templates["sre_synthesis"].strip():
-            raise ValueError("Prompt template 'sre_synthesis' must be a non-empty string")
+        required_templates = [
+            "sre_synthesis",
+            "pipeline_logs_runner",
+            "runtime_health_runner",
+            "iac_config_runner",
+        ]
+        for tmpl_name in required_templates:
+            if tmpl_name not in self.prompt_templates:
+                raise ValueError(f"Missing required prompt template '{tmpl_name}'")
+            if not self.prompt_templates[tmpl_name].strip():
+                raise ValueError(f"Prompt template '{tmpl_name}' must be a non-empty string")
 
         return self
 

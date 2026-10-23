@@ -44,8 +44,12 @@ All agent system instructions and prompt templates are externalized and managed 
   - **No Fallbacks**: If `agent.yaml` is missing or malformed, the agent **fails fast at startup** with `FileNotFoundError` or `ValueError`. No silent defaults or inline copies of prompts are permitted in Python code.
 - **Domain Diagnostic Runbooks**: [`agent/skills/{skill_name}/SKILL.md`](agent/skills/)
   - Markdown-based progressive disclosure playbooks (`lint-troubleshooting`, `test-failure-triage`, `container-build-troubleshooting`, `cloudrun-deploy-troubleshooting`).
-- **SRE Synthesis Prompt Template**: Key `prompt_templates.sre_synthesis` in [`agent/app/agent.yaml`](agent/app/agent.yaml)
-  - Formatted at runtime with runtime arguments (`job_name`, `step_name`, `findings_context`, `log_excerpt`) in [`agent/app/llm.py`](agent/app/llm.py).
+  - **Runbooks Stay as Skills**: `SKILL.md` runbooks represent domain troubleshooting knowledge loaded dynamically on Turn 1 via `SkillsLoader` / `load_skill`, distinct from agent identity and behavioral instructions. They remain as standalone skills rather than being merged into `agent.yaml`.
+- **Specialist Runner & SRE Synthesis Prompt Templates**: Key `prompt_templates` in [`agent/app/agent.yaml`](agent/app/agent.yaml)
+  - `sre_synthesis`: Formatted at runtime with runtime arguments (`job_name`, `step_name`, `findings_context`, `log_excerpt`) in [`agent/app/llm.py`](agent/app/llm.py).
+  - `pipeline_logs_runner`: Formatted at runtime in [`agent/app/specialists/pipeline_logs.py`](agent/app/specialists/pipeline_logs.py) with incident and error details.
+  - `runtime_health_runner`: Formatted at runtime in [`agent/app/specialists/runtime_health.py`](agent/app/specialists/runtime_health.py) with target service, region, and revision coordinates.
+  - `iac_config_runner`: Formatted at runtime in [`agent/app/specialists/iac_config.py`](agent/app/specialists/iac_config.py) with incident and IaC log excerpt.
 
 ---
 
@@ -63,22 +67,25 @@ bash scripts/check-contracts.sh
 # 2. AST static guard against post-LLM root cause template overrides
 python3 scripts/check-no-rootcause-overrides.py
 
-# 3. Anti-tamper de-overfitting guard across agent source, YAML, and skills
+# 3. AST static guard against hardcoded system instructions and prompt templates
+python3 scripts/check-no-hardcoded-prompts.py
+
+# 4. Anti-tamper de-overfitting guard across agent source, YAML, and skills
 bash scripts/check-no-demo-overfit.sh
 
-# 4. Forbidden literal scanner & markdown relative link checker
+# 5. Forbidden literal scanner & markdown relative link checker
 bash scripts/check-no-literal-projects.sh
 
-# 5. Automated test suite (unit and component tests across bridge, agent, demo)
+# 6. Automated test suite (unit and component tests across bridge, agent, demo)
 pytest bridge/tests agent/tests demo/tests
 
-# 6. Linting checks
+# 7. Linting checks
 ruff check bridge agent demo
 
-# 7. Portable sed syntax check (run from repository root)
+# 8. Portable sed syntax check (run from repository root)
 ../scripts/check-portable-sed.sh
 
-# 8. Terraform formatting and validation across stacks
+# 9. Terraform formatting and validation across stacks
 for stack in agent/infra/terraform bridge/infra/terraform demo/infra/terraform; do
   (cd "$stack" && terraform fmt -check && terraform init -backend=false && terraform validate)
 done

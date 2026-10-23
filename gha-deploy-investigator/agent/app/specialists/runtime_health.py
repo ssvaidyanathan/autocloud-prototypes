@@ -387,37 +387,26 @@ class RuntimeHealthSpecialist(BaseSpecialist):
         # Attempt Pass 1: ADK Runner execution if LLM is available
         if self._is_llm_available():
             try:
+                from ..agent_config import get_agent_config
                 from .base import run_sync
 
                 agent = self._build_agent(client=client, config=config)
-                prompt_lines = [
-                    (
-                        f"Investigate Cloud Run deploy failure for incident {incident.id}: "
-                        f"{incident.title}"
-                    ),
-                    f"Job: {failing_job.get('name', 'deploy')} (ID: {job_id}), Step: {step_name}",
-                    f"Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}",
-                    f"Target Service: {service_name}, Region: {region}",
-                    f"Revision: {revision_name or 'None (failed pre-revision)'}",
-                    f"Runner Log Excerpt:\n{log_text[:2000]}",
-                    "",
-                    "CRITICAL INSTRUCTIONS:",
-                    (
-                        "1. Turn 1: Invoke load_skill exactly once with "
-                        "skill_name='cloudrun-deploy-troubleshooting'."
-                    ),
-                    (
-                        "2. Turn 2: Invoke get_commit_diff(repo, head_sha) to inspect commit "
-                        "changes, fetch_job_logs(repo, job_id) to inspect deployment logs, "
-                        "and/or describe_service / describe_cloud_run_revision for "
-                        "runtime telemetry."
-                    ),
-                    (
-                        "3. Turn 3: Conclude immediately by invoking set_model_response "
-                        "with your Findings report."
-                    ),
-                ]
-                findings = run_sync(self._execute_adk_runner(agent, "\n".join(prompt_lines)))
+                template = get_agent_config().get_prompt_template("runtime_health_runner")
+                runner_prompt = template.format(
+                    incident_id=incident.id,
+                    incident_title=incident.title,
+                    job_name=failing_job.get("name", "deploy") if failing_job else "deploy",
+                    job_id=job_id,
+                    step_name=step_name,
+                    repo=repo,
+                    run_id=run_id,
+                    head_sha=head_sha,
+                    service_name=service_name,
+                    region=region,
+                    revision_name=revision_name or "None (failed pre-revision)",
+                    log_excerpt=log_text[:2000],
+                )
+                findings = run_sync(self._execute_adk_runner(agent, runner_prompt))
                 if findings and (self.skill_tracker.queries_run or findings.queries_run):
                     return self._findings_to_diagnostic_result(
                         findings,

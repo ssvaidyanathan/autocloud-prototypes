@@ -315,25 +315,25 @@ class PipelineLogsSpecialist(BaseSpecialist):
         # Attempt Pass 1: ADK Runner execution if LLM is available
         if self._is_llm_available():
             try:
+                from ..agent_config import get_agent_config
                 from .base import run_sync
 
                 agent = self._build_agent(skill, client=client, config=config)
-                prompt_lines = [
-                    f"Investigate pipeline failure for incident {incident.id}: {incident.title}",
-                    f"Job: {job_name} (ID: {job_id}), Step: {step_name}",
-                    f"Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}",
-                    f"Failing Step Sub-Stage: {sub_stage}",
-                    f"Error log excerpt:\n{log_text[:2000]}",
-                    "",
-                    "CRITICAL INSTRUCTIONS:",
-                    f"1. Turn 1: Invoke load_skill exactly once with skill_name='{skill}'.",
-                    (
-                        "2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect "
-                        "logs or diff."
-                    ),
-                    "3. Turn 3: Conclude immediately by invoking set_model_response with Findings.",
-                ]
-                findings = run_sync(self._execute_adk_runner(agent, "\n".join(prompt_lines)))
+                template = get_agent_config().get_prompt_template("pipeline_logs_runner")
+                runner_prompt = template.format(
+                    incident_id=incident.id,
+                    incident_title=incident.title,
+                    job_name=job_name,
+                    job_id=job_id,
+                    step_name=step_name,
+                    repo=repo,
+                    run_id=run_id,
+                    head_sha=head_sha,
+                    sub_stage=sub_stage,
+                    log_excerpt=log_text[:2000],
+                    skill_name=skill,
+                )
+                findings = run_sync(self._execute_adk_runner(agent, runner_prompt))
                 if findings and (self.skill_tracker.queries_run or findings.queries_run):
                     return self._findings_to_diagnostic_result(
                         findings, incident, failing_job, failing_step, log_text, sub_stage

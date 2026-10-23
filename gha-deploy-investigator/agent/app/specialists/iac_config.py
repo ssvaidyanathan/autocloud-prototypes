@@ -182,27 +182,22 @@ class IaCConfigSpecialist(BaseSpecialist):
         # Attempt Pass 1: ADK Runner execution if LLM is available
         if self._is_llm_available():
             try:
+                from ..agent_config import get_agent_config
                 from .base import run_sync
 
                 agent = self._build_agent(client=client, config=config)
-                prompt_lines = [
-                    f"Investigate IaC failure for incident {incident.id}: {incident.title}",
-                    f"Job: {failing_job.get('name', 'iac')}, Step: {step_name}",
-                    f"Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}",
-                    f"Log Excerpt:\n{log_text[:2000]}",
-                    "",
-                    "CRITICAL INSTRUCTIONS:",
-                    (
-                        "1. Turn 1: Invoke load_skill exactly once with "
-                        "skill_name='cloudrun-deploy-troubleshooting'."
-                    ),
-                    "2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect IaC changes.",
-                    (
-                        "3. Turn 3: Conclude immediately by invoking set_model_response "
-                        "with your Findings report."
-                    ),
-                ]
-                findings = run_sync(self._execute_adk_runner(agent, "\n".join(prompt_lines)))
+                template = get_agent_config().get_prompt_template("iac_config_runner")
+                runner_prompt = template.format(
+                    incident_id=incident.id,
+                    incident_title=incident.title,
+                    job_name=failing_job.get("name", "iac") if failing_job else "iac",
+                    step_name=step_name,
+                    repo=repo,
+                    run_id=run_id,
+                    head_sha=head_sha,
+                    log_excerpt=log_text[:2000],
+                )
+                findings = run_sync(self._execute_adk_runner(agent, runner_prompt))
                 if findings and (self.skill_tracker.queries_run or findings.queries_run):
                     return self._findings_to_diagnostic_result(
                         findings, incident, failing_job, failing_step
