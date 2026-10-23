@@ -101,7 +101,7 @@ The `RootCauseSynthesizer` correlates findings across specialists and generates 
 
 ### 3.4 Declarative Agent Instructions & ADK Hybrid Model
 System instructions, agent descriptions, multi-turn drill-down protocols, and synthesis prompt templates are externalized from Python code into [`agent/app/agent.yaml`](../agent/app/agent.yaml):
-- **Hybrid Pattern**: Declarative YAML configures agent hierarchies, model references (`${GEMINI_MODEL:-default}`), schemas, and instructions, while Python retains runtime client dependency injection, tool callbacks (`SkillTracker`), and FastAPI routes.
+- **Hybrid Pattern**: Declarative YAML configures agent hierarchies, model references (`${GEMINI_MODEL}`), schemas, and instructions, while Python retains runtime client dependency injection, tool callbacks (`SkillTracker`), and FastAPI routes.
 - **Typed Loader & Startup Fail-Fast**: The loader in [`agent/app/agent_config.py`](../agent/app/agent_config.py) validates the schema using typed Pydantic models. If `agent.yaml` is missing or malformed, the service fails fast at startup with zero silent defaults.
 - **AI Coding Assistant Guide**: Operational conventions, guardrails, and test commands are documented in [`AGENTS.md`](../AGENTS.md).
 

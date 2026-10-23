@@ -1,0 +1,10 @@
+Investigate IaC failure for incident {incident_id}: {incident_title}
+Job: {job_name}, Step: {step_name}
+Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}
+Log Excerpt:
+{log_excerpt}
+
+CRITICAL INSTRUCTIONS:
+1. Turn 1: Invoke load_skill exactly once with skill_name='cloudrun-deploy-troubleshooting'.
+2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect IaC changes.
+3. Turn 3: Conclude immediately by invoking set_model_response with your Findings report.

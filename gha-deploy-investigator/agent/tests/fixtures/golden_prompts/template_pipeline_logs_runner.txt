@@ -1,0 +1,11 @@
+Investigate pipeline failure for incident {incident_id}: {incident_title}
+Job: {job_name} (ID: {job_id}), Step: {step_name}
+Repository: {repo}, Run ID: {run_id}, Head SHA: {head_sha}
+Failing Step Sub-Stage: {sub_stage}
+Error log excerpt:
+{log_excerpt}
+
+CRITICAL INSTRUCTIONS:
+1. Turn 1: Invoke load_skill exactly once with skill_name='{skill_name}'.
+2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect logs or diff.
+3. Turn 3: Conclude immediately by invoking set_model_response with Findings.

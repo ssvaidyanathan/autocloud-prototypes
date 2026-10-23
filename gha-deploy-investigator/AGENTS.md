@@ -38,7 +38,7 @@ The system uses Google ADK in a hybrid declarative/orchestrated structure:
 All agent system instructions and prompt templates are externalized and managed through declarative configuration:
 
 - **Declarative Agent Instructions**: [`agent/app/agent.yaml`](agent/app/agent.yaml)
-  - Defines the agent hierarchy (`dispatcher`, `triage`, `specialists_parallel`, `synthesizer`), agent descriptions, model references (`${GEMINI_MODEL:-default}`), default `LlmAgent` instructions, 3-turn drill-down protocols, and prompt templates.
+  - Defines the agent hierarchy (`dispatcher`, `triage`, `specialists_parallel`, `synthesizer`), agent descriptions, model references (`${GEMINI_MODEL}`), default `LlmAgent` instructions, 3-turn drill-down protocols, and prompt templates.
 - **Configuration Loader & Schema Validation**: [`agent/app/agent_config.py`](agent/app/agent_config.py)
   - Loads, validates, and indexes `agent.yaml` using typed Pydantic models.
   - **No Fallbacks**: If `agent.yaml` is missing or malformed, the agent **fails fast at startup** with `FileNotFoundError` or `ValueError`. No silent defaults or inline copies of prompts are permitted in Python code.
@@ -68,7 +68,7 @@ bash scripts/check-contracts.sh
 python3 scripts/check-no-rootcause-overrides.py
 
 # 3. AST static guard against hardcoded system instructions and prompt templates
-python3 scripts/check-no-hardcoded-prompts.py
+python3 scripts/check-no-inline-prompts.py
 
 # 4. Anti-tamper de-overfitting guard across agent source, YAML, and skills
 bash scripts/check-no-demo-overfit.sh
@@ -97,7 +97,7 @@ done
 
 1. **No Hardcoded Project IDs or Model Literals**:
    - Zero `gemini-[0-9]` literals in code, skills, or `agent.yaml`.
-   - Model names belong only in `config.py` defaults or environment variable references (`${GEMINI_MODEL:-default}`).
+   - Model names belong only in environment variable references (`${GEMINI_MODEL}`).
    - Scanned and enforced by `scripts/check-no-literal-projects.sh`.
 2. **De-Overfit & Anti-Tamper Rules**:
    - Zero hardcoded demo scenarios, project names (`sample-pipeline-app`), memory numbers (`2048`, `256Mi`), or canned answers in `agent/app/` (including `agent.yaml`) or `agent/skills/`.

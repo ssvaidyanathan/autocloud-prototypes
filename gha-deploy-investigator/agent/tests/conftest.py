@@ -1,3 +1,8 @@
+import os
+
+# Ensure GEMINI_MODEL is set during test discovery and module imports
+os.environ.setdefault("GEMINI_MODEL", "test-gemini-model")
+
 from datetime import datetime, timezone
 from typing import Generator
 
@@ -9,6 +14,13 @@ from agent.app.contracts.request import InvestigationRequest
 from bridge.tests.fake_github_server import app as fake_github_app
 from bridge.tests.fake_github_server import state as github_state
 from starlette.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def ensure_gemini_model_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure GEMINI_MODEL is set in the test environment unless specifically unset."""
+    if "GEMINI_MODEL" not in os.environ:
+        monkeypatch.setenv("GEMINI_MODEL", "test-gemini-model")
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +41,7 @@ def fake_github_client() -> Generator[TestClient, None, None]:
 def agent_settings() -> AgentConfig:
     return AgentConfig(
         app_env="test",
+        gemini_model="test-gemini-model",
         github_api_url="https://api.github.com",
         github_token="ghp_test_token_123",
     )

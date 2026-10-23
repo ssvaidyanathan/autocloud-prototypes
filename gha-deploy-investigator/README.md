@@ -312,7 +312,7 @@ Configuration is managed strictly through environment variables and Google Secre
 | **Resource Prefix** | `NAME_PREFIX` | `"gdi"` | No | Resource name prefix |
 | **GCP Project** | `GCP_PROJECT` | *(ADC / Metadata)* | Yes (in GCP) | Target Google Cloud Platform project ID |
 | **Bridge URL** | `BRIDGE_SERVICE_URL` | `""` | Yes (in GCP) | URL of `gdi-bridge` callback endpoint |
-| **Gemini Model** | `GEMINI_MODEL` | `gemini-2.5-flash` | No | Vertex AI Gemini model name for diagnostic synthesis |
+| **Gemini Model** | `GEMINI_MODEL` | *None* | Yes | Vertex AI Gemini model name for diagnostic synthesis |
 | **Vertex AI Location** | `VERTEX_AI_LOCATION` | `us-central1` | No | GCP region for Vertex AI Gemini API endpoint |
 | **GitHub App ID** | `GITHUB_APP_ID` | *None* | Yes (for App) | Numeric GitHub App ID for authenticated repo API queries |
 

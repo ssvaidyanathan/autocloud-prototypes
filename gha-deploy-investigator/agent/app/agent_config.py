@@ -19,12 +19,22 @@ _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
 def _expand_env_vars(raw_text: str) -> str:
-    """Expand ${VAR:-default} and ${VAR} patterns using os.environ."""
+    """Expand ${VAR} and ${VAR:-default} patterns using os.environ, failing if unset."""
 
     def _replace(match: re.Match[str]) -> str:
         var_name = match.group(1)
-        default_val = match.group(2) if match.group(2) is not None else ""
-        return os.environ.get(var_name, default_val)
+        has_default = match.group(2) is not None
+        default_val = match.group(2) if has_default else None
+
+        if var_name in os.environ and os.environ[var_name].strip():
+            return os.environ[var_name].strip()
+
+        if default_val is not None and default_val.strip():
+            return default_val.strip()
+
+        raise ValueError(
+            f"Referenced environment variable '{var_name}' is unset or empty."
+        )
 
     return _ENV_VAR_PATTERN.sub(_replace, raw_text)
 

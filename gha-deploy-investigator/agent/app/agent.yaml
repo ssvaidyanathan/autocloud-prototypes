@@ -6,7 +6,7 @@ sub_agents:
   - agent_class: LlmAgent
     name: triage
     description: "CI/CD Triage Agent analyzing failure context and logs"
-    model: ${GEMINI_MODEL:-default}
+    model: ${GEMINI_MODEL}
     instruction: "You are a CI/CD Triage Agent. Analyze failure context and logs to formulate an InvestigationPlan selecting specialized agents and runbook skills."
     output_schema: app.contracts.triage.InvestigationPlan
 
@@ -17,7 +17,7 @@ sub_agents:
       - agent_class: LlmAgent
         name: pipeline_logs_specialist
         description: "CI/CD pipeline logs diagnostic specialist"
-        model: ${GEMINI_MODEL:-default}
+        model: ${GEMINI_MODEL}
         instruction: "You are a specialist investigating CI pipeline logs (lint, test, build)."
         drilldown_instruction: |-
           You are a CI/CD pipeline logs diagnostic specialist.
@@ -31,7 +31,7 @@ sub_agents:
       - agent_class: LlmAgent
         name: runtime_health_specialist
         description: "Cloud Run deployment and runtime health diagnostic specialist"
-        model: ${GEMINI_MODEL:-default}
+        model: ${GEMINI_MODEL}
         instruction: "You are a specialist investigating Cloud Run deployment and runtime health."
         drilldown_instruction: |-
           You are a Cloud Run deployment and runtime health diagnostic specialist.
@@ -49,7 +49,7 @@ sub_agents:
       - agent_class: LlmAgent
         name: iac_config_specialist
         description: "Infrastructure-as-Code diagnostic specialist"
-        model: ${GEMINI_MODEL:-default}
+        model: ${GEMINI_MODEL}
         instruction: "You are a specialist diagnosing Infrastructure-as-Code (Terraform, YAML manifests) errors."
         drilldown_instruction: |-
           You are an Infrastructure-as-Code (Terraform, YAML manifests) diagnostic specialist.
@@ -63,7 +63,7 @@ sub_agents:
   - agent_class: LlmAgent
     name: synthesizer
     description: "Incident Report Synthesizer Agent"
-    model: ${GEMINI_MODEL:-default}
+    model: ${GEMINI_MODEL}
     instruction: "You are the Incident Report Synthesizer Agent. Compile specialist findings, telemetry evidence, and causal root cause into a cohesive Report adhering to the schema."
     output_schema: app.contracts.report.Report
 

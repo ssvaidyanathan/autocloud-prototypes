@@ -1,0 +1,10 @@
+Investigate IaC failure for incident 303: Terraform syntax error
+Job: iac, Step: terraform apply
+Repository: owner/repo, Run ID: 11223, Head SHA: 7890abcdef1234
+Log Excerpt:
+Error: Invalid reference in main.tf line 15
+
+CRITICAL INSTRUCTIONS:
+1. Turn 1: Invoke load_skill exactly once with skill_name='cloudrun-deploy-troubleshooting'.
+2. Turn 2: Invoke fetch_job_logs (or get_commit_diff) to inspect IaC changes.
+3. Turn 3: Conclude immediately by invoking set_model_response with your Findings report.
