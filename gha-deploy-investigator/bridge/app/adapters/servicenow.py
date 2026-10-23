@@ -173,7 +173,6 @@ class ServiceNowAdapter(BaseAdapter):
                     raise
 
 
-
     def verify(self, request: Request, payload: bytes) -> bool:
         """Verify inbound webhook Bearer token."""
         expected_token = self.config.servicenow_webhook_token

@@ -203,12 +203,8 @@ def render_standalone_html(
     head_sha = incident.github_head_sha if incident else None
     short_sha = head_sha[:8] if head_sha else None
     actor = (incident.github_actor or incident.reporter) if incident else None
-    failing_stage = (
-        incident.github_failing_stage
-        or (report.metadata.get("failing_stage") if report and report.metadata else None)
-        if incident
-        else (report.metadata.get("failing_stage") if report and report.metadata else None)
-    )
+    stage_from_meta = report.metadata.get("failing_stage") if report and report.metadata else None
+    failing_stage = (incident.github_failing_stage if incident else None) or stage_from_meta
     severity = incident.severity if incident else "P3"
     run_id = incident.github_run_id if incident else None
 
