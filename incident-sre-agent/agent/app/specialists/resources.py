@@ -14,10 +14,10 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.skill_toolset import SkillToolset
 from google.genai import types
 
+from ..agent_config import get_agent_yaml_config
 from ..config import get_settings
 from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
-from ..prompts import load_prompt
 from ..skills_loader import get_skill_toolset_for_target
 from ..tools.common import normalize_datetime
 from ..tools.resources import (
@@ -65,27 +65,7 @@ class ResourcesSpecialist(BaseSpecialist):
         ]
         self.adk_tools = adk_tools
 
-        instruction = (
-            f"{load_prompt('resources')}\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            "1. On Turn 1, invoke 'load_skill' exactly once to load an assigned domain "
-            "skill ('cloud-run-troubleshooting', 'gke-troubleshooting', or "
-            "'cloud-sql-troubleshooting'). Do NOT invoke list_skills or load other skills.\n"
-            "2. On Turn 2, formulate at most ONE targeted diagnostic query (e.g. "
-            "describe_cloud_run_service for a Cloud Run service hint).\n"
-            "3. STRICT PROHIBITION ON CROSS-PLATFORM HUNTING: If investigating a Cloud Run "
-            "service, you are strictly forbidden from searching GKE clusters, Compute Engine "
-            "instances, or Cloud SQL instances.\n"
-            "4. Receiving 'status': 'NOT_FOUND' or 'conclusive': True, finding 0 resources, "
-            "or observing normal status means the investigation is complete and conclusive. "
-            "Zero infrastructure defects exist. You are strictly forbidden from calling "
-            "load_skill again under any circumstances.\n"
-            "5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' "
-            "with your structured Findings report. You are strictly forbidden from calling "
-            "load_skill, describe_cloud_run_service, or any other tool after receiving "
-            "a conclusive or NOT_FOUND result. Your ONLY valid action on Turn 3 is "
-            "to invoke 'set_model_response'."
-        )
+        instruction = get_agent_yaml_config().get_instruction("resources_specialist")
         default_agent = llm_agent or LlmAgent(
             name="resources_specialist",
             model=model or "default",
@@ -177,27 +157,7 @@ class ResourcesSpecialist(BaseSpecialist):
             FunctionTool(_bound_describe_cloud_sql_instances),
         ]
 
-        instruction = (
-            f"{load_prompt('resources')}\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            "1. On Turn 1, invoke 'load_skill' exactly once to load an assigned domain "
-            "skill ('cloud-run-troubleshooting', 'gke-troubleshooting', or "
-            "'cloud-sql-troubleshooting'). Do NOT invoke list_skills or load other skills.\n"
-            "2. On Turn 2, formulate at most ONE targeted diagnostic query (e.g. "
-            "describe_cloud_run_service for a Cloud Run service hint).\n"
-            "3. STRICT PROHIBITION ON CROSS-PLATFORM HUNTING: If investigating a Cloud Run "
-            "service, you are strictly forbidden from searching GKE clusters, Compute Engine "
-            "instances, or Cloud SQL instances.\n"
-            "4. Receiving 'status': 'NOT_FOUND' or 'conclusive': True, finding 0 resources, "
-            "or observing normal status means the investigation is complete and conclusive. "
-            "Zero infrastructure defects exist. You are strictly forbidden from calling "
-            "load_skill again under any circumstances.\n"
-            "5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' "
-            "with your structured Findings report. You are strictly forbidden from calling "
-            "load_skill, describe_cloud_run_service, or any other tool after receiving "
-            "a conclusive or NOT_FOUND result. Your ONLY valid action on Turn 3 is "
-            "to invoke 'set_model_response'."
-        )
+        instruction = get_agent_yaml_config().get_instruction("resources_specialist")
 
         model_to_use = (
             self.model

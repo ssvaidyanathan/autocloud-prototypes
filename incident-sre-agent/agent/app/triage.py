@@ -5,8 +5,8 @@ from typing import Any, List, Optional
 from google.adk.agents import LlmAgent
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .agent_config import get_agent_yaml_config
 from .contracts.incident import Incident
-from .prompts import load_prompt
 from .skills_loader import SkillsLoader
 
 VALID_SPECIALISTS = {"logs", "metrics", "changes", "resources"}
@@ -86,7 +86,7 @@ class TriageAgent:
         self.skills_loader = skills_loader or SkillsLoader()
         self.max_query_window_hours = max_query_window_hours
         self.llm_client = llm_client
-        instruction = load_prompt("triage")
+        instruction = get_agent_yaml_config().get_instruction("triage")
         from .skills_loader import get_skill_toolset_for_target
 
         toolset = get_skill_toolset_for_target(

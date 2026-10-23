@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Literal, Optional
 from google.genai import types
 from pydantic import Field
 
+from .agent_config import get_agent_yaml_config
 from .config import AgentConfig, get_settings
 from .contracts.findings import Findings
 from .contracts.incident import Incident
@@ -16,7 +17,6 @@ from .contracts.report import (
     Report,
     SpecialistStatus,
 )
-from .prompts import load_prompt
 from .skills_loader import SkillsLoader
 from .synthesizer import calibrate_report_confidence
 from .tools.clients import get_genai_client
@@ -70,7 +70,7 @@ class GeminiLlmClient:
 
     def generate_plan(self, incident: Incident) -> InvestigationPlan:
         """Generate structured InvestigationPlan using Gemini on Vertex AI."""
-        instruction = load_prompt("triage")
+        instruction = get_agent_yaml_config().get_instruction("triage")
         skill_text = ""
         try:
             skill_content = self.skills_loader.get_skill_content("triage-playbook")
@@ -151,7 +151,7 @@ class GeminiLlmClient:
         skills_used: Optional[List[str]] = None,
     ) -> Report:
         """Synthesize specialist findings into a structured Report using Gemini on Vertex AI."""
-        instruction = load_prompt("synthesizer")
+        instruction = get_agent_yaml_config().get_instruction("synthesizer")
         skill_text = ""
         try:
             skill_content = self.skills_loader.get_skill_content("report-style")

@@ -192,6 +192,7 @@ sequenceDiagram
   - Dynamic skill loading and runbook application from `agent/skills/`.
   - Targeted follow-up rounds (capped at 1 round) to pursue emergent leads.
   - Vertex AI Gemini prompt synthesis into structured `Report` contracts.
+  - Agent instructions & configuration: System instructions, prompt templates, and agent hierarchies are externalized in [`agent/app/agent.yaml`](agent/app/agent.yaml) and loaded via [`agent/app/agent_config.py`](agent/app/agent_config.py). AI assistant conventions and developer guardrails are defined in [`AGENTS.md`](AGENTS.md).
   - Zero-trust callback delivery with Google ID token authentication.
 
 ### 3. `demo/` Microservices Stack

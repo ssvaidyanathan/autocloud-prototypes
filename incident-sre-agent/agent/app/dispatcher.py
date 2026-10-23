@@ -7,6 +7,7 @@ from typing import Any, Dict, Mapping, Optional
 from google.adk.agents import BaseAgent, ParallelAgent
 from pydantic import ConfigDict, Field
 
+from .agent_config import get_agent_yaml_config
 from .config import AgentConfig, get_settings
 from .contracts.findings import Findings
 from .contracts.request import InvestigationRequest
@@ -137,9 +138,10 @@ class Dispatcher(BaseAgent):
         if hasattr(synth, "llm_agent") and synth.llm_agent is not None:
             sub_agents.append(synth.llm_agent)
 
+        yaml_config = get_agent_yaml_config()
         super().__init__(
-            name="dispatcher",
-            description="Multi-agent SRE investigation orchestrator",
+            name=yaml_config.name,
+            description=yaml_config.description,
             sub_agents=sub_agents,
             **kwargs,
         )

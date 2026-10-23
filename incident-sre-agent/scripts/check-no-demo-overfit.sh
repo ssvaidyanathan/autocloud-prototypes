@@ -25,7 +25,7 @@ TARGET_DIR="agent/app"
 # - delay injection (literal)
 FORBIDDEN_PATTERN="shop-api|inventory-svc|PAYMENT_GATEWAY_KEY|sync-tenant-data|[Ss]cenario [0-9]|1024 [Mm]i[Bb]|1024 [Mm][Bb]|1057 [Mm]i[Bb]|\bcheckout\b|\bcatalog\b|[Dd]elay injection"
 
-MATCHES=$(grep -rnE "${FORBIDDEN_PATTERN}" "${TARGET_DIR}" --include="*.py" --include="*.txt" || true)
+MATCHES=$(grep -rnE "${FORBIDDEN_PATTERN}" "${TARGET_DIR}" --include="*.py" --include="*.txt" --include="*.yaml" --include="*.yml" || true)
 
 if [ -n "${MATCHES}" ]; then
     echo "ERROR: Forbidden demo identifier or scenario overfit found in ${TARGET_DIR}:" >&2

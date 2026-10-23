@@ -27,9 +27,10 @@ def test_agent_app_has_no_demo_overfit() -> None:
 
     violations: list[str] = []
 
+    target_exts = (".py", ".txt", ".yaml", ".yml")
     for root, _, files in os.walk(agent_app_dir):
         for file in files:
-            if not (file.endswith(".py") or file.endswith(".txt")):
+            if not file.endswith(target_exts):
                 continue
 
             file_path = Path(root) / file
