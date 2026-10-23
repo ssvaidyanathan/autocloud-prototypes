@@ -8,6 +8,8 @@ Repo-wide utilities shared across prototypes. Each script is documented below.
 | [`servicenow-cleanup.py`](servicenow-cleanup.py) | List and delete ServiceNow incidents (e.g. test/demo tickets) with filters; dry-run by default. |
 | [`jira-cleanup.py`](jira-cleanup.py) | List and delete Jira Cloud issues (e.g. test/demo issues) with JQL-safe filters; dry-run by default. |
 
+**Requirements:** Python 3.9+, no third-party packages (pytest only for running the tests).
+
 This section documents repo-wide standalone administration and maintenance utilities located under `scripts/`.
 
 ## ServiceNow Incident Cleanup Utility (`scripts/servicenow-cleanup.py`)
