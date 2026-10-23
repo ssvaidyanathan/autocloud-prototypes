@@ -726,4 +726,96 @@ class TestServiceNowReverse:
         assert '<div class="footer">' in dossier
         assert "Autocloud CI/CD Deployment Investigator v0.1.0" in dossier
 
+    def test_create_incident_missing_sys_id_in_response_raises_value_error(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify clear ValueError raised if ServiceNow response lacks sys_id."""
+        real_post = fake_ticket_client.post
+
+        def post_without_sys_id(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            resp = real_post(url, *args, **kwargs)
+            if "/api/now/table/incident" in str(url):
+                data = resp.json()
+                data["result"].pop("sys_id", None)
+                return httpx.Response(201, json=data, request=resp.request)
+            return resp
+
+        monkeypatch.setattr(fake_ticket_client, "post", post_without_sys_id)
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        with pytest.raises(ValueError, match="missing 'sys_id'"):
+            adapter.create_incident_with_report(sample_incident, sample_report)
+
+    def test_create_incident_missing_number_in_response_raises_value_error(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify clear ValueError raised if ServiceNow response lacks number."""
+        real_post = fake_ticket_client.post
+
+        def post_without_number(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            resp = real_post(url, *args, **kwargs)
+            if "/api/now/table/incident" in str(url):
+                data = resp.json()
+                data["result"].pop("number", None)
+                return httpx.Response(201, json=data, request=resp.request)
+            return resp
+
+        monkeypatch.setattr(fake_ticket_client, "post", post_without_number)
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+
+        with pytest.raises(ValueError, match="missing 'number'"):
+            adapter.create_incident_with_report(sample_incident, sample_report)
+
+    def test_existing_incident_missing_sys_id_raises_value_error(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        """Verify clear ValueError raised if existing incident lacks sys_id."""
+        corr_id = f"gdi:{sample_incident.github_repo}:{sample_incident.github_run_id}:1"
+        ticket_state.servicenow_incidents["corrupted_001"] = {
+            "sys_id": "",
+            "number": "INC0019999",
+            "correlation_id": corr_id,
+            "correlation_display": "gha-deploy-investigator",
+        }
+
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+        with pytest.raises(ValueError, match="missing 'sys_id'"):
+            adapter.create_incident_with_report(sample_incident, sample_report)
+
+    def test_existing_incident_missing_number_raises_value_error(
+        self,
+        bridge_settings: BridgeConfig,
+        fake_ticket_client: httpx.Client,
+        sample_incident: Incident,
+        sample_report: Report,
+    ) -> None:
+        """Verify clear ValueError raised if existing incident lacks number."""
+        corr_id = f"gdi:{sample_incident.github_repo}:{sample_incident.github_run_id}:1"
+        ticket_state.servicenow_incidents["corrupted_002"] = {
+            "sys_id": "sys_corrupted_002",
+            "number": "",
+            "correlation_id": corr_id,
+            "correlation_display": "gha-deploy-investigator",
+        }
+
+        adapter = ServiceNowAdapter(config=bridge_settings, http_client=fake_ticket_client)
+        with pytest.raises(ValueError, match="missing 'number'"):
+            adapter.create_incident_with_report(sample_incident, sample_report)
+
+
+
 

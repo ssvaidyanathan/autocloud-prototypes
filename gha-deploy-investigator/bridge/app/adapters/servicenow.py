@@ -282,8 +282,18 @@ class ServiceNowAdapter(BaseAdapter):
                 )
 
                 if existing_incident:
-                    sys_id = existing_incident.get("sys_id", "mock-sys-id")
-                    number = existing_incident.get("number", sys_id)
+                    sys_id = existing_incident.get("sys_id")
+                    if not sys_id:
+                        raise ValueError(
+                            "ServiceNow existing incident missing 'sys_id' "
+                            f"for correlation_id={correlation_id}"
+                        )
+                    number = existing_incident.get("number")
+                    if not number:
+                        raise ValueError(
+                            "ServiceNow existing incident missing 'number' "
+                            f"for correlation_id={correlation_id}"
+                        )
                     patch_endpoint = f"{table_endpoint}/{sys_id}"
 
                     # 1. Update existing incident facts-only metadata and state if needed
@@ -362,8 +372,16 @@ class ServiceNowAdapter(BaseAdapter):
                 resp = client.post(table_endpoint, json=incident_body)
                 resp.raise_for_status()
                 res_json = resp.json().get("result", {})
-                sys_id = res_json.get("sys_id", "mock-sys-id")
-                number = res_json.get("number", "INC0019482")
+                sys_id = res_json.get("sys_id")
+                number = res_json.get("number")
+                if not sys_id:
+                    raise ValueError(
+                        "ServiceNow incident creation response missing 'sys_id'"
+                    )
+                if not number:
+                    raise ValueError(
+                        "ServiceNow incident creation response missing 'number'"
+                    )
                 patch_endpoint = f"{table_endpoint}/{sys_id}"
 
                 # 2. Post findings as work notes
