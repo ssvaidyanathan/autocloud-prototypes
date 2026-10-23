@@ -24,7 +24,7 @@ TARGET_DIRS=("agent/app" "agent/skills")
 # - E402 / E702 / F401 as expected answers
 FORBIDDEN_PATTERN="sample-pipeline-app|discount_calculation|fake-order-service|shop-api|inventory-svc|PAYMENT_GATEWAY_KEY|sync-tenant-data|[Ss]cenario [0-9]|pre-?warm|Pre-warming|cache-warmup|2048|256Mi|MEMORY=|StarletteDeprecation|discount|75\.5|actAs|actas|serviceAccountUser|iam\.serviceaccounts|roles/iam|CACHE_PREWARM|E402|E702|F401"
 
-MATCHES=$(grep -rnIE "${FORBIDDEN_PATTERN}" "${TARGET_DIRS[@]}" --include="*.py" --include="*.txt" --include="*.md" || true)
+MATCHES=$(grep -rnIE "${FORBIDDEN_PATTERN}" "${TARGET_DIRS[@]}" --include="*.py" --include="*.txt" --include="*.md" --include="*.yaml" --include="*.yml" || true)
 
 if [ -n "${MATCHES}" ]; then
     echo "ERROR: Forbidden demo identifier or scenario overfit found in ${TARGET_DIRS[*]}:" >&2

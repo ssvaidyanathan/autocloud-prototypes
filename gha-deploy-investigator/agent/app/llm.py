@@ -98,48 +98,14 @@ def generate_gemini_synthesis(
     if findings_parts:
         findings_context = "\nSpecialist Analysis & Findings:\n" + "\n".join(findings_parts) + "\n"
 
-    prompt = (
-        "You are an automated Site Reliability Engineering diagnostic assistant.\n"
-        "Analyze the following failed GitHub Actions CI/CD pipeline step and raw runner logs:\n\n"
-        f"Job: {job_name}\n"
-        f"Step: {step_name}\n"
-        f"{findings_context}\n"
-        f"Runner Logs:\n```\n{log_excerpt}\n```\n\n"
-        "Instructions:\n"
-        "1. Identify the exact root cause grounded strictly in the provided runner log text and "
-        "specialist findings.\n"
-        "2. Incorporate the specialist's structured findings and exact error counts/codes. "
-        "List each distinct error code with its count and message. "
-        "Do NOT guess, approximate, or misattribute error counts, codes, or files. "
-        "Cite all codes and counts accurately.\n"
-        "3. Correlate findings with git diff hunks when available, explicitly distinguishing "
-        "violations introduced directly by modified lines from consequential violations "
-        "caused by line movements or cascading errors.\n"
-        "4. Diff-grounded test failure remediation: When Git Diff Context indicates the failure "
-        "was introduced in test code (e.g. failing assertion compares hardcoded literals or test "
-        "was modified in diff without app changes), the primary remediation MUST lead directly "
-        "with test code correction (fixing the test logic or correcting the assertion), NOT "
-        "advise investigating application business logic when the diff proves the test itself "
-        "is defective. Avoid hedging ('likely introduced by') when the diff is conclusive. "
-        "When the commit diff touches only test files and no application code changed, causal "
-        "remediation must target the test and must not recommend changing application code unless "
-        "tool evidence shows an application defect.\n"
-        "5. Warning segregation: Put non-causal warnings (e.g. deprecation or runtime warnings "
-        "not on the fatal path) into unrelated_observations, NEVER into causal_remediation. "
-        "Do not treat un-linked warnings as the primary root cause.\n"
-        "6. Deploy & runtime failure correlation: When container logs or runtime "
-        "telemetry indicate termination (e.g. out of memory / exit code 137, signal 9, or "
-        "health probe failure), the root cause MUST quote the exact decisive log line(s) before "
-        "termination (e.g. 'Memory limit of ... exceeded with ... used' or probe error) and "
-        "correlate directly with specific parameters modified in git diff hunks (e.g. memory "
-        "limits reduced or buffer allocations added). Primary remediation must lead directly "
-        "with reverting or adjusting the specific modified configuration in the diff.\n"
-        "7. Do NOT invent or hallucinate revision numbers, resource names, or "
-        "projects not in the logs.\n"
-        "8. Provide actionable remediation steps addressing each distinct violation directly.\n"
-        "9. Respond with valid JSON with keys: 'root_cause' (string), "
-        "'causal_remediation' (list of strings), 'unrelated_observations' (list of strings), "
-        "'confidence' (float between 0.0 and 1.0).\n"
+    from .agent_config import get_agent_config
+
+    prompt_template = get_agent_config().get_prompt_template("sre_synthesis")
+    prompt = prompt_template.format(
+        job_name=job_name,
+        step_name=step_name,
+        findings_context=findings_context,
+        log_excerpt=log_excerpt,
     )
 
     request_body = {

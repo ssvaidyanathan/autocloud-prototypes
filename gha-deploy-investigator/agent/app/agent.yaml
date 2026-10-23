@@ -1,0 +1,92 @@
+agent_class: BaseAgent
+name: dispatcher
+description: "Multi-agent CI/CD pipeline failure investigation orchestrator"
+
+sub_agents:
+  - agent_class: LlmAgent
+    name: triage
+    description: "CI/CD Triage Agent analyzing failure context and logs"
+    model: ${GEMINI_MODEL:-default}
+    instruction: "You are a CI/CD Triage Agent. Analyze failure context and logs to formulate an InvestigationPlan selecting specialized agents and runbook skills."
+    output_schema: app.contracts.triage.InvestigationPlan
+
+  - agent_class: ParallelAgent
+    name: specialists_parallel
+    description: "Parallel specialist execution group"
+    sub_agents:
+      - agent_class: LlmAgent
+        name: pipeline_logs_specialist
+        description: "CI/CD pipeline logs diagnostic specialist"
+        model: ${GEMINI_MODEL:-default}
+        instruction: "You are a specialist investigating CI pipeline logs (lint, test, build)."
+        drilldown_instruction: |-
+          You are a CI/CD pipeline logs diagnostic specialist.
+
+          CRITICAL WORKFLOW REQUIREMENT:
+          1. On Turn 1, invoke 'load_skill' exactly once with skill_name='{skill_name}'. Do NOT invoke list_skills or load other skills.
+          2. On Turn 2, invoke at least one read-only data tool ('get_commit_diff' or 'fetch_job_logs') to inspect repository changes or execution logs.
+          3. On Turn 3, conclude immediately by invoking 'set_model_response' with your structured Findings report. Incorporate the data tool output directly into your findings.
+        output_schema: app.contracts.findings.Findings
+
+      - agent_class: LlmAgent
+        name: runtime_health_specialist
+        description: "Cloud Run deployment and runtime health diagnostic specialist"
+        model: ${GEMINI_MODEL:-default}
+        instruction: "You are a specialist investigating Cloud Run deployment and runtime health."
+        drilldown_instruction: |-
+          You are a Cloud Run deployment and runtime health diagnostic specialist.
+
+          CRITICAL WORKFLOW REQUIREMENT:
+          1. On Turn 1, invoke 'load_skill' exactly once with skill_name='cloudrun-deploy-troubleshooting'. Do NOT invoke other skills.
+          2. On Turn 2, invoke decisive read-only diagnostic data tools for the failure:
+             - Invoke 'get_commit_diff' (repo, head_sha) to inspect repository or deployment configuration changes introduced by the commit (e.g. resource limits, environment variables, configuration changes).
+             - Invoke 'fetch_job_logs' (repo, job_id) to inspect the deployment step runner logs containing the decisive failure error.
+             - And/or invoke 'describe_service', 'list_service_revisions', or 'describe_cloud_run_revision' to inspect runtime telemetry and revision history.
+             NOTE ON LIVE STATE: 'describe_service' reports live cluster state. Compare revision creation timestamps from 'list_service_revisions' against the run failure window. If no revision existed at failure time, note that no revision existed at failure time and current status reflects revisions created subsequent to the failure event. If a prior revision existed at failure time, dynamically note the active revision name at failure time. Do NOT present current health as success of the failed deployment.
+          3. On Turn 3, conclude immediately by invoking 'set_model_response' with your structured Findings report citing the tool outputs.
+        output_schema: app.contracts.findings.Findings
+
+      - agent_class: LlmAgent
+        name: iac_config_specialist
+        description: "Infrastructure-as-Code diagnostic specialist"
+        model: ${GEMINI_MODEL:-default}
+        instruction: "You are a specialist diagnosing Infrastructure-as-Code (Terraform, YAML manifests) errors."
+        drilldown_instruction: |-
+          You are an Infrastructure-as-Code (Terraform, YAML manifests) diagnostic specialist.
+
+          CRITICAL WORKFLOW REQUIREMENT:
+          1. On Turn 1, invoke 'load_skill' exactly once with skill_name='cloudrun-deploy-troubleshooting'.
+          2. On Turn 2, invoke at least one read-only data tool ('get_commit_diff' or 'fetch_job_logs') to inspect commit changes and configuration files.
+          3. On Turn 3, conclude immediately by invoking 'set_model_response' with your structured Findings report.
+        output_schema: app.contracts.findings.Findings
+
+  - agent_class: LlmAgent
+    name: synthesizer
+    description: "Incident Report Synthesizer Agent"
+    model: ${GEMINI_MODEL:-default}
+    instruction: "You are the Incident Report Synthesizer Agent. Compile specialist findings, telemetry evidence, and causal root cause into a cohesive Report adhering to the schema."
+    output_schema: app.contracts.report.Report
+
+prompt_templates:
+  sre_synthesis: |
+    You are an automated Site Reliability Engineering diagnostic assistant.
+    Analyze the following failed GitHub Actions CI/CD pipeline step and raw runner logs:
+
+    Job: {job_name}
+    Step: {step_name}
+    {findings_context}
+    Runner Logs:
+    ```
+    {log_excerpt}
+    ```
+
+    Instructions:
+    1. Identify the exact root cause grounded strictly in the provided runner log text and specialist findings.
+    2. Incorporate the specialist's structured findings and exact error counts/codes. List each distinct error code with its count and message. Do NOT guess, approximate, or misattribute error counts, codes, or files. Cite all codes and counts accurately.
+    3. Correlate findings with git diff hunks when available, explicitly distinguishing violations introduced directly by modified lines from consequential violations caused by line movements or cascading errors.
+    4. Diff-grounded test failure remediation: When Git Diff Context indicates the failure was introduced in test code (e.g. failing assertion compares hardcoded literals or test was modified in diff without app changes), the primary remediation MUST lead directly with test code correction (fixing the test logic or correcting the assertion), NOT advise investigating application business logic when the diff proves the test itself is defective. Avoid hedging ('likely introduced by') when the diff is conclusive. When the commit diff touches only test files and no application code changed, causal remediation must target the test and must not recommend changing application code unless tool evidence shows an application defect.
+    5. Warning segregation: Put non-causal warnings (e.g. deprecation or runtime warnings not on the fatal path) into unrelated_observations, NEVER into causal_remediation. Do not treat un-linked warnings as the primary root cause.
+    6. Deploy & runtime failure correlation: When container logs or runtime telemetry indicate termination (e.g. out of memory / exit code 137, signal 9, or health probe failure), the root cause MUST quote the exact decisive log line(s) before termination (e.g. 'Memory limit of ... exceeded with ... used' or probe error) and correlate directly with specific parameters modified in git diff hunks (e.g. memory limits reduced or buffer allocations added). Primary remediation must lead directly with reverting or adjusting the specific modified configuration in the diff.
+    7. Do NOT invent or hallucinate revision numbers, resource names, or projects not in the logs.
+    8. Provide actionable remediation steps addressing each distinct violation directly.
+    9. Respond with valid JSON with keys: 'root_cause' (string), 'causal_remediation' (list of strings), 'unrelated_observations' (list of strings), 'confidence' (float between 0.0 and 1.0).

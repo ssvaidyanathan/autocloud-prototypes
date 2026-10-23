@@ -259,6 +259,7 @@ sequenceDiagram
   - Read-only tool execution via `@readonly_tool` cached registry (`QueryCache`).
   - Structured synthesis via `SynthesizerAgent`: invokes Vertex AI Gemini (`gemini-2.5-flash`) to generate structured `Report` contracts segregating causal fixes from unrelated warnings.
   - Authenticated callback delivery to `gdi-bridge` (`POST /callback/report`).
+  - **Agent Instructions**: System instructions, specialist turn protocols, and synthesis prompt templates are externalized into [`agent/app/agent.yaml`](agent/app/agent.yaml) and loaded at startup via [`agent/app/agent_config.py`](agent/app/agent_config.py). For developer conventions, guardrails, and AI assistant guidelines, see [`AGENTS.md`](AGENTS.md).
 
 ### 3. `demo/` Sample Pipeline App & Scenarios (`demo/`)
 - **Role**: Customer-grade e-commerce microservice and deterministic failure injection suite.

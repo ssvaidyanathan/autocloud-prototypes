@@ -162,10 +162,12 @@ class PipelineLogsSpecialist(BaseSpecialist):
             FunctionTool(fetch_workflow_run_jobs),
             FunctionTool(get_commit_diff),
         ]
+        from ..agent_config import get_agent_config
+
         self.llm_agent = llm_agent or LlmAgent(
             name="pipeline_logs_specialist",
             model=self.model or "default",
-            instruction="You are a specialist investigating CI pipeline logs (lint, test, build).",
+            instruction=get_agent_config().get_instruction("pipeline_logs_specialist"),
             tools=self.adk_tools,
             output_schema=Findings,
         )
@@ -209,17 +211,10 @@ class PipelineLogsSpecialist(BaseSpecialist):
             FunctionTool(_bound_fetch_workflow_run_jobs),
             FunctionTool(_bound_get_commit_diff),
         ]
-        instruction = (
-            "You are a CI/CD pipeline logs diagnostic specialist.\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            f"1. On Turn 1, invoke 'load_skill' exactly once with skill_name='{skill_name}'. "
-            "Do NOT invoke list_skills or load other skills.\n"
-            "2. On Turn 2, invoke at least one read-only data tool ('get_commit_diff' or "
-            "'fetch_job_logs') to inspect repository changes or execution logs.\n"
-            "3. On Turn 3, conclude immediately by invoking 'set_model_response' with your "
-            "structured Findings report. Incorporate the data tool output directly into your "
-            "findings."
-        )
+        from ..agent_config import get_agent_config
+
+        template = get_agent_config().get_drilldown_instruction("pipeline_logs_specialist")
+        instruction = template.format(skill_name=skill_name)
         model_to_use = (
             getattr(self.llm_agent, "model", None)
             if self.llm_agent

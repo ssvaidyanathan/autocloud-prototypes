@@ -143,12 +143,12 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             FunctionTool(describe_service),
             FunctionTool(list_service_revisions),
         ]
+        from ..agent_config import get_agent_config
+
         self.llm_agent = llm_agent or LlmAgent(
             name="runtime_health_specialist",
             model=self.model or "default",
-            instruction=(
-                "You are a specialist investigating Cloud Run deployment and runtime health."
-            ),
+            instruction=get_agent_config().get_instruction("runtime_health_specialist"),
             tools=self.adk_tools,
             output_schema=Findings,
         )
@@ -245,29 +245,9 @@ class RuntimeHealthSpecialist(BaseSpecialist):
             FunctionTool(_bound_describe_revision),
             FunctionTool(_bound_query_logging),
         ]
-        instruction = (
-            "You are a Cloud Run deployment and runtime health diagnostic specialist.\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            "1. On Turn 1, invoke 'load_skill' exactly once with "
-            "skill_name='cloudrun-deploy-troubleshooting'. Do NOT invoke other skills.\n"
-            "2. On Turn 2, invoke decisive read-only diagnostic data tools for the failure:\n"
-            "   - Invoke 'get_commit_diff' (repo, head_sha) to inspect repository or deployment "
-            "configuration changes introduced by the commit (e.g. resource limits, "
-            "environment variables, configuration changes).\n"
-            "   - Invoke 'fetch_job_logs' (repo, job_id) to inspect the deployment step runner "
-            "logs containing the decisive failure error.\n"
-            "   - And/or invoke 'describe_service', 'list_service_revisions', or "
-            "'describe_cloud_run_revision' to inspect runtime telemetry and revision history.\n"
-            "   NOTE ON LIVE STATE: 'describe_service' reports live cluster state. "
-            "Compare revision creation timestamps from 'list_service_revisions' against the "
-            "run failure window. If no revision existed at failure time, note that no revision "
-            "existed at failure time and current status reflects revisions created subsequent "
-            "to the failure event. If a prior revision existed at failure time, dynamically note "
-            "the active revision name at failure time. Do NOT present current health as success "
-            "of the failed deployment.\n"
-            "3. On Turn 3, conclude immediately by invoking 'set_model_response' with your "
-            "structured Findings report citing the tool outputs."
-        )
+        from ..agent_config import get_agent_config
+
+        instruction = get_agent_config().get_drilldown_instruction("runtime_health_specialist")
         model_to_use = (
             getattr(self.llm_agent, "model", None)
             if self.llm_agent

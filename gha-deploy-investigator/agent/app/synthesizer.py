@@ -52,11 +52,9 @@ class SynthesizerAgent:
             "dispatcher", skills_dir=self.skills_loader.skills_dir
         )
         self.skill_toolset = toolset
-        instruction = (
-            "You are the Incident Report Synthesizer Agent. Compile specialist findings, "
-            "telemetry evidence, and causal root cause into a cohesive Report "
-            "adhering to the schema."
-        )
+        from .agent_config import get_agent_config
+
+        instruction = get_agent_config().get_instruction("synthesizer")
         self.llm_agent = llm_agent or LlmAgent(
             name="synthesizer",
             model=self.model or "default",
