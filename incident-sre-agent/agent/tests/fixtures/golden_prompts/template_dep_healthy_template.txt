@@ -1,0 +1,1 @@
+  - Downstream dependency '{dep_svc}': HEALTHY (0 errors, no anomalies). Delay originates in primary service request processing path, not downstream dependencies.

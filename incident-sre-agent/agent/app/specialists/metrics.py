@@ -14,10 +14,10 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.skill_toolset import SkillToolset
 from google.genai import types
 
+from ..agent_config import get_agent_yaml_config
 from ..config import get_settings
 from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
-from ..prompts import load_prompt
 from ..skills_loader import get_skill_toolset_for_target
 from ..tools.common import normalize_datetime
 from ..tools.metrics import (
@@ -128,7 +128,7 @@ class MetricsSpecialist(BaseSpecialist):
         ]
         self.adk_tools = adk_tools
 
-        instruction = load_prompt("metrics")
+        instruction = get_agent_yaml_config().get_instruction("metrics_specialist")
         default_agent = llm_agent or LlmAgent(
             name="metrics_specialist",
             model=model or "default",
@@ -220,19 +220,7 @@ class MetricsSpecialist(BaseSpecialist):
             FunctionTool(_bound_list_open_alerts),
         ]
 
-        instruction = (
-            f"{load_prompt('metrics')}\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            "1. On Turn 1, invoke 'load_skill' exactly once to load your assigned domain skill "
-            "('cloud-monitoring-metrics'). Do NOT invoke list_skills or load other skills.\n"
-            "2. On Turn 2, execute at most ONE diagnostic query (such as list_open_alerts or "
-            "compare_to_baseline) for the affected service.\n"
-            "3. On Turn 3, conclude immediately by invoking 'set_model_response' with your "
-            "structured Findings response. Do NOT invoke any other tools. Empty metric points or "
-            "normal baseline comparison is a conclusive finding confirming service health. "
-            "Conclude immediately without trying alternative queries or performing exhaustive "
-            "scans."
-        )
+        instruction = get_agent_yaml_config().get_instruction("metrics_specialist")
 
         model_to_use = (
             self.model
@@ -330,44 +318,30 @@ class MetricsSpecialist(BaseSpecialist):
             getattr(plan, "initial_hypotheses", []) or getattr(plan, "hypotheses", []) or []
         )
 
-        prompt_lines = [
-            f"Investigate incident {incident.id}: {incident.title}",
-            f"Description: {incident.description}",
-            f"Severity: {incident.severity}",
-            f"Target Service: {effective_service or 'all services'}",
-            f"Time Window: {start_time_dt.isoformat()} to {end_time_dt.isoformat()}",
-        ]
-        if symptoms:
-            prompt_lines.append(f"Observed Symptoms: {', '.join(symptoms)}")
-        if hypotheses:
-            prompt_lines.append(f"Triage Hypotheses: {', '.join(hypotheses)}")
-
-        prompt_lines.extend(
-            [
-                "",
-                "CRITICAL INSTRUCTIONS:",
-                (
-                    "1. Turn 1: Invoke load_skill exactly once with "
-                    "skill_name='cloud-monitoring-metrics'. Do NOT call list_skills."
-                ),
-            ]
+        cfg = get_agent_yaml_config()
+        symptoms_line = (
+            "\n" + cfg.format_prompt("symptoms_entry", symptoms=", ".join(symptoms))
+            if symptoms
+            else ""
         )
-        prompt_lines.extend(
-            [
-                (
-                    "2. Turn 2: Formulate at most ONE targeted diagnostic query using "
-                    "query_time_series, compare_to_baseline, or alert tools for the affected "
-                    "service."
-                ),
-                (
-                    "3. Turn 3: Conclude immediately by invoking 'set_model_response' with your "
-                    "structured Findings report. Do NOT invoke any other tools. Empty metric "
-                    "points or normal baselines is a conclusive finding confirming service health. "
-                    "Do not loop or try alternative queries."
-                ),
-            ]
+        hypotheses_line = (
+            "\n" + cfg.format_prompt("hypotheses_entry", hypotheses=", ".join(hypotheses))
+            if hypotheses
+            else ""
         )
-        prompt_text = "\n".join(prompt_lines)
+        prompt_text = cfg.format_prompt(
+            "metrics_specialist",
+            "investigation_prompt",
+            incident_id=incident.id,
+            title=incident.title,
+            description=incident.description,
+            severity=incident.severity,
+            target_service=effective_service or "all services",
+            window_start=start_time_dt.isoformat(),
+            window_end=end_time_dt.isoformat(),
+            symptoms_line=symptoms_line,
+            hypotheses_line=hypotheses_line,
+        )
 
         session_service = InMemorySessionService()
         session = await session_service.create_session(

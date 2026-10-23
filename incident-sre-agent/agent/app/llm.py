@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Literal, Optional
 from google.genai import types
 from pydantic import Field
 
+from .agent_config import get_agent_yaml_config
 from .config import AgentConfig, get_settings
 from .contracts.findings import Findings
 from .contracts.incident import Incident
@@ -16,7 +17,6 @@ from .contracts.report import (
     Report,
     SpecialistStatus,
 )
-from .prompts import load_prompt
 from .skills_loader import SkillsLoader
 from .synthesizer import calibrate_report_confidence
 from .tools.clients import get_genai_client
@@ -70,23 +70,29 @@ class GeminiLlmClient:
 
     def generate_plan(self, incident: Incident) -> InvestigationPlan:
         """Generate structured InvestigationPlan using Gemini on Vertex AI."""
-        instruction = load_prompt("triage")
+        cfg = get_agent_yaml_config()
+        instruction = cfg.get_instruction("triage")
         skill_text = ""
         try:
             skill_content = self.skills_loader.get_skill_content("triage-playbook")
-            skill_text = f"\n\nApplicable Playbook Instructions:\n{skill_content.instructions}"
+            skill_text = cfg.format_prompt(
+                "triage",
+                "triage_playbook_prefix",
+                instructions=skill_content.instructions,
+            )
         except Exception:
             pass
 
-        user_content = (
-            f"Analyze incident ticket and generate an InvestigationPlan adhering to the schema:\n"
-            f"ID: {incident.id}\n"
-            f"External Key: {incident.external_key}\n"
-            f"Title: {incident.title}\n"
-            f"Description: {incident.description}\n"
-            f"Severity: {incident.severity}\n"
-            f"Service Hint: {incident.service_hint or 'None'}\n"
-            f"Opened At (UTC): {incident.opened_at.isoformat()}\n"
+        user_content = cfg.format_prompt(
+            "triage",
+            "triage_plan_user_prompt",
+            id=incident.id,
+            external_key=incident.external_key,
+            title=incident.title,
+            description=incident.description,
+            severity=incident.severity,
+            service_hint=incident.service_hint or "None",
+            opened_at=incident.opened_at.isoformat(),
         )
 
         response = self.client.models.generate_content(
@@ -151,11 +157,16 @@ class GeminiLlmClient:
         skills_used: Optional[List[str]] = None,
     ) -> Report:
         """Synthesize specialist findings into a structured Report using Gemini on Vertex AI."""
-        instruction = load_prompt("synthesizer")
+        cfg = get_agent_yaml_config()
+        instruction = cfg.get_instruction("synthesizer")
         skill_text = ""
         try:
             skill_content = self.skills_loader.get_skill_content("report-style")
-            skill_text = f"\n\nReport Style Guidelines:\n{skill_content.instructions}"
+            skill_text = cfg.format_prompt(
+                "synthesizer",
+                "report_style_prefix",
+                instructions=skill_content.instructions,
+            )
         except Exception:
             pass
 
@@ -177,19 +188,16 @@ class GeminiLlmClient:
                     return True
             return False
 
+        prior_tag = cfg.get_prompt_template("synthesizer", "prior_incident_evidence_tag")
+
         findings_summary: Dict[str, Any] = {}
         for spec_name, f in findings.items():
             ev_list = []
             for e in f.evidence:
                 dumped = e.model_dump(mode="json")
                 if is_prior_ev(e.excerpt, e.timestamp):
-                    dumped["prior_status"] = (
-                        "[PRIOR RESOLVED INCIDENT EVIDENCE - DO NOT USE AS ACTIVE MECHANISM]"
-                    )
-                    dumped["excerpt"] = (
-                        f"[PRIOR RESOLVED INCIDENT EVIDENCE - DO NOT USE AS ACTIVE MECHANISM] "
-                        f"{dumped.get('excerpt', '')}"
-                    )
+                    dumped["prior_status"] = prior_tag
+                    dumped["excerpt"] = f"{prior_tag} {dumped.get('excerpt', '')}"
                 ev_list.append(dumped)
             findings_summary[spec_name] = {
                 "summary": f.summary,
@@ -200,7 +208,6 @@ class GeminiLlmClient:
                 "queries_run": f.queries_run,
             }
 
-        prior_tag = "[PRIOR RESOLVED INCIDENT EVIDENCE - DO NOT USE AS ACTIVE MECHANISM]"
         logs_evidence = []
         if "logs" in findings:
             for ev in findings["logs"].evidence:
@@ -226,8 +233,10 @@ class GeminiLlmClient:
                 else:
                     metrics_evidence.append(f"  - [Anomaly] {anom}")
 
-        logs_section = "\n".join(logs_evidence) if logs_evidence else "  None recorded"
-        metrics_section = "\n".join(metrics_evidence) if metrics_evidence else "  None recorded"
+        none_recorded = cfg.get_prompt_template("synthesizer", "dep_none_recorded")
+        none_inspected = cfg.get_prompt_template("synthesizer", "dep_none_inspected")
+        logs_section = "\n".join(logs_evidence) if logs_evidence else none_recorded
+        metrics_section = "\n".join(metrics_evidence) if metrics_evidence else none_recorded
 
         dep_statuses: List[str] = []
         for dep_key, dep_f in findings.items():
@@ -235,51 +244,38 @@ class GeminiLlmClient:
                 dep_svc = dep_key.split(":", 1)[1]
                 if dep_f.anomalies or dep_f.errors:
                     dep_statuses.append(
-                        f"  - Downstream dependency '{dep_svc}': FAILING/ERRORS "
-                        f"({len(dep_f.errors)} errors, {len(dep_f.anomalies)} anomalies). "
-                        "Probable root cause originates in this downstream dependency."
+                        cfg.format_prompt(
+                            "synthesizer",
+                            "dep_failing_template",
+                            dep_svc=dep_svc,
+                            errors_count=len(dep_f.errors),
+                            anomalies_count=len(dep_f.anomalies),
+                        )
                     )
                 else:
                     dep_statuses.append(
-                        f"  - Downstream dependency '{dep_svc}': HEALTHY "
-                        "(0 errors, no anomalies). Delay originates in primary service "
-                        "request processing path, not downstream dependencies."
+                        cfg.format_prompt(
+                            "synthesizer",
+                            "dep_healthy_template",
+                            dep_svc=dep_svc,
+                        )
                     )
-        dep_section = "\n".join(dep_statuses) if dep_statuses else "  None inspected"
+        dep_section = "\n".join(dep_statuses) if dep_statuses else none_inspected
 
-        user_content = (
-            "Synthesize the incident investigation findings into a complete "
-            "Report adhering to schema:\n"
-            f"Incident External Key: {incident.external_key}\n"
-            f"Incident Title: {incident.title}\n"
-            f"Severity: {incident.severity}\n"
-            f"Affected Service: {plan.affected_service}\n"
-            f"Symptoms: {plan.symptoms}\n"
-            f"Window Start: {plan.start_time.isoformat()}\n"
-            f"Window End: {plan.end_time.isoformat()}\n\n"
-            "Collected Logs Telemetry:\n"
-            f"{logs_section}\n\n"
-            "Collected Metrics Telemetry:\n"
-            f"{metrics_section}\n\n"
-            "Downstream Dependency Health Status:\n"
-            f"{dep_section}\n\n"
-            f"Specialist Findings:\n{json.dumps(findings_summary, default=str, indent=2)}\n\n"
-            "CRITICAL INSTRUCTIONS:\n"
-            "1. 'probable_root_cause' MUST accurately name the failing service, the affected "
-            "endpoint, and the specific failure symptom.\n"
-            "2. Never return null or an empty object for probable_root_cause.\n"
-            "3. Do not use formulaic templates like 'Regression introduced by recent change "
-            "(...)'. Write professional, natural SRE prose.\n"
-            "4. If a downstream dependency was inspected and verified healthy "
-            "(0 errors, no anomalies), do NOT attribute root cause to that downstream dependency; "
-            "the delay originates in the primary service's request processing path.\n"
-            "5. CRITICAL: Evidence and error logs belonging to prior resolved incidents "
-            "(occurring before detected onset) must NEVER be used as the root cause mechanism for "
-            "the active incident. If the active incident is pure latency with 0 HTTP errors, "
-            "attribute root cause to primary service internal request processing delay/thread "
-            "starvation, never resolved database pool exhaustion or prior exceptions.\n"
-            "6. Never include Kubernetes/GKE endpoints (e.g. /api/v1/namespaces/...)"
-            " when diagnosing Cloud Run services.\n"
+        user_content = cfg.format_prompt(
+            "synthesizer",
+            "synthesis_report_user_prompt",
+            external_key=incident.external_key,
+            title=incident.title,
+            severity=incident.severity,
+            affected_service=plan.affected_service,
+            symptoms=plan.symptoms,
+            window_start=plan.start_time.isoformat(),
+            window_end=plan.end_time.isoformat(),
+            logs_section=logs_section,
+            metrics_section=metrics_section,
+            dep_section=dep_section,
+            findings_summary=json.dumps(findings_summary, default=str, indent=2),
         )
 
         model_synth = self.config.model_synthesizer or self.model
@@ -349,21 +345,11 @@ class GeminiLlmClient:
                 else 0.5
             )
             try:
-                prc_prompt = (
-                    f"Based on the following incident evidence for service "
-                    f"'{plan.affected_service}', write 1-2 fluent, professional "
-                    "sentences of natural SRE prose explaining the technical failure "
-                    "mechanism, triggering deployment (citing Cloud Run revision and author if "
-                    "present), and user impact. Do NOT use formulaic templates like "
-                    "'Regression introduced by recent change (...)', parenthetical dumps, "
-                    "or bullet points. "
-                    "CRITICAL: Evidence and error logs belonging to prior resolved incidents "
-                    "(occurring before detected onset) must NEVER be used as root cause mechanism "
-                    "for the active incident. If the active incident is pure latency with 0 HTTP "
-                    "errors, attribute root cause to primary service internal request processing "
-                    "delay/thread starvation, never resolved database pool exhaustion or prior "
-                    "exceptions. Return ONLY the prose text.\n\n"
-                    f"Findings:\n{json.dumps(findings_summary, default=str)}"
+                prc_prompt = cfg.format_prompt(
+                    "synthesizer",
+                    "probable_root_cause_prompt",
+                    affected_service=plan.affected_service,
+                    findings_summary=json.dumps(findings_summary, default=str),
                 )
                 prc_resp = self.client.models.generate_content(
                     model=model_synth,

@@ -14,10 +14,10 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.skill_toolset import SkillToolset
 from google.genai import types
 
+from ..agent_config import get_agent_yaml_config
 from ..config import get_settings
 from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
-from ..prompts import load_prompt
 from ..skills_loader import get_skill_toolset_for_target
 from ..tools.common import normalize_datetime
 from ..tools.resources import (
@@ -65,27 +65,7 @@ class ResourcesSpecialist(BaseSpecialist):
         ]
         self.adk_tools = adk_tools
 
-        instruction = (
-            f"{load_prompt('resources')}\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            "1. On Turn 1, invoke 'load_skill' exactly once to load an assigned domain "
-            "skill ('cloud-run-troubleshooting', 'gke-troubleshooting', or "
-            "'cloud-sql-troubleshooting'). Do NOT invoke list_skills or load other skills.\n"
-            "2. On Turn 2, formulate at most ONE targeted diagnostic query (e.g. "
-            "describe_cloud_run_service for a Cloud Run service hint).\n"
-            "3. STRICT PROHIBITION ON CROSS-PLATFORM HUNTING: If investigating a Cloud Run "
-            "service, you are strictly forbidden from searching GKE clusters, Compute Engine "
-            "instances, or Cloud SQL instances.\n"
-            "4. Receiving 'status': 'NOT_FOUND' or 'conclusive': True, finding 0 resources, "
-            "or observing normal status means the investigation is complete and conclusive. "
-            "Zero infrastructure defects exist. You are strictly forbidden from calling "
-            "load_skill again under any circumstances.\n"
-            "5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' "
-            "with your structured Findings report. You are strictly forbidden from calling "
-            "load_skill, describe_cloud_run_service, or any other tool after receiving "
-            "a conclusive or NOT_FOUND result. Your ONLY valid action on Turn 3 is "
-            "to invoke 'set_model_response'."
-        )
+        instruction = get_agent_yaml_config().get_instruction("resources_specialist")
         default_agent = llm_agent or LlmAgent(
             name="resources_specialist",
             model=model or "default",
@@ -177,27 +157,7 @@ class ResourcesSpecialist(BaseSpecialist):
             FunctionTool(_bound_describe_cloud_sql_instances),
         ]
 
-        instruction = (
-            f"{load_prompt('resources')}\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            "1. On Turn 1, invoke 'load_skill' exactly once to load an assigned domain "
-            "skill ('cloud-run-troubleshooting', 'gke-troubleshooting', or "
-            "'cloud-sql-troubleshooting'). Do NOT invoke list_skills or load other skills.\n"
-            "2. On Turn 2, formulate at most ONE targeted diagnostic query (e.g. "
-            "describe_cloud_run_service for a Cloud Run service hint).\n"
-            "3. STRICT PROHIBITION ON CROSS-PLATFORM HUNTING: If investigating a Cloud Run "
-            "service, you are strictly forbidden from searching GKE clusters, Compute Engine "
-            "instances, or Cloud SQL instances.\n"
-            "4. Receiving 'status': 'NOT_FOUND' or 'conclusive': True, finding 0 resources, "
-            "or observing normal status means the investigation is complete and conclusive. "
-            "Zero infrastructure defects exist. You are strictly forbidden from calling "
-            "load_skill again under any circumstances.\n"
-            "5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' "
-            "with your structured Findings report. You are strictly forbidden from calling "
-            "load_skill, describe_cloud_run_service, or any other tool after receiving "
-            "a conclusive or NOT_FOUND result. Your ONLY valid action on Turn 3 is "
-            "to invoke 'set_model_response'."
-        )
+        instruction = get_agent_yaml_config().get_instruction("resources_specialist")
 
         model_to_use = (
             self.model
@@ -297,47 +257,31 @@ class ResourcesSpecialist(BaseSpecialist):
             getattr(plan, "initial_hypotheses", []) or getattr(plan, "hypotheses", []) or []
         )
 
-        prompt_lines = [
-            f"Investigate incident {incident.id}: {incident.title}",
-            f"Description: {incident.description}",
-            f"Severity: {incident.severity}",
-            f"Target Service: {effective_service or 'all services'}",
-            f"Time Window: {start_time_dt.isoformat()} to {end_time_dt.isoformat()}",
-        ]
-        if symptoms:
-            prompt_lines.append(f"Observed Symptoms: {', '.join(symptoms)}")
-        if hypotheses:
-            prompt_lines.append(f"Triage Hypotheses: {', '.join(hypotheses)}")
-
-        tracker.single_service_target = bool(effective_service)
-        prompt_lines.extend(
-            [
-                "",
-                "CRITICAL INSTRUCTIONS:",
-                (
-                    "1. Turn 1: Invoke load_skill exactly once with an assigned domain skill "
-                    "('cloud-run-troubleshooting', 'gke-troubleshooting', or "
-                    "'cloud-sql-troubleshooting'). Do NOT call list_skills."
-                ),
-                (
-                    "2. Turn 2: Formulate at most ONE targeted diagnostic query (e.g. "
-                    "describe_cloud_run_service for a Cloud Run service hint)."
-                ),
-                (
-                    "3. Turn 3: Conclude immediately by invoking 'set_model_response' with your "
-                    "structured Findings report. Receiving 'status': 'NOT_FOUND', "
-                    "'conclusive': True, or finding 0 resources is definitive diagnostic proof "
-                    "that zero infrastructure defects exist. Do NOT invoke any further tools. "
-                    "Your ONLY valid action on Turn 3 is to invoke 'set_model_response'."
-                ),
-                (
-                    "4. STRICT PROHIBITION ON CROSS-PLATFORM HUNTING: If investigating a Cloud Run "
-                    "service, you are strictly forbidden from searching GKE clusters, Compute "
-                    "Engine instances, or Cloud SQL instances."
-                ),
-            ]
+        cfg = get_agent_yaml_config()
+        symptoms_line = (
+            "\n" + cfg.format_prompt("symptoms_entry", symptoms=", ".join(symptoms))
+            if symptoms
+            else ""
         )
-        prompt_text = "\n".join(prompt_lines)
+        hypotheses_line = (
+            "\n" + cfg.format_prompt("hypotheses_entry", hypotheses=", ".join(hypotheses))
+            if hypotheses
+            else ""
+        )
+        tracker.single_service_target = bool(effective_service)
+        prompt_text = cfg.format_prompt(
+            "resources_specialist",
+            "investigation_prompt",
+            incident_id=incident.id,
+            title=incident.title,
+            description=incident.description,
+            severity=incident.severity,
+            target_service=effective_service or "all services",
+            window_start=start_time_dt.isoformat(),
+            window_end=end_time_dt.isoformat(),
+            symptoms_line=symptoms_line,
+            hypotheses_line=hypotheses_line,
+        )
 
         session_service = InMemorySessionService()
         session = await session_service.create_session(

@@ -14,10 +14,10 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.skill_toolset import SkillToolset
 from google.genai import types
 
+from ..agent_config import get_agent_yaml_config
 from ..config import get_settings
 from ..contracts.findings import EvidenceItem, Findings
 from ..contracts.incident import Incident
-from ..prompts import load_prompt
 from ..skills_loader import get_skill_toolset_for_target
 from ..tools.changes import (
     diff_revisions,
@@ -149,20 +149,7 @@ class ChangesSpecialist(BaseSpecialist):
         ]
         self.adk_tools = adk_tools
 
-        instruction = (
-            f"{load_prompt('changes')}\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            "1. On Turn 1, invoke 'load_skill' exactly once with "
-            "skill_name='change-correlation'. Do NOT invoke list_skills or load other skills.\n"
-            "2. On Turn 2, execute at most ONE targeted diagnostic query (such as "
-            "list_cloud_run_revisions or query_audit_logs) for the affected service.\n"
-            "3. STRICT PROHIBITION ON MULTI-QUERY HUNTING: You are strictly forbidden from "
-            "executing multiple diagnostic queries or hunting across other tools.\n"
-            "4. Finding 0 recent changes, receiving an empty list [], or observing no revisions "
-            "is conclusive diagnostic proof that zero disruptive deployments occurred.\n"
-            "5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' "
-            "with your structured Findings report. Do NOT invoke any further tools."
-        )
+        instruction = get_agent_yaml_config().get_instruction("changes_specialist")
         default_agent = llm_agent or LlmAgent(
             name="changes_specialist",
             model=model or "default",
@@ -247,20 +234,7 @@ class ChangesSpecialist(BaseSpecialist):
             FunctionTool(_bound_list_cloud_builds),
         ]
 
-        instruction = (
-            f"{load_prompt('changes')}\n\n"
-            "CRITICAL WORKFLOW REQUIREMENT:\n"
-            "1. On Turn 1, invoke 'load_skill' exactly once with "
-            "skill_name='change-correlation'. Do NOT invoke list_skills or load other skills.\n"
-            "2. On Turn 2, execute at most ONE targeted diagnostic query (such as "
-            "list_cloud_run_revisions or query_audit_logs) for the affected service.\n"
-            "3. STRICT PROHIBITION ON MULTI-QUERY HUNTING: You are strictly forbidden from "
-            "executing multiple diagnostic queries or hunting across other tools.\n"
-            "4. Finding 0 recent changes, receiving an empty list [], or observing no revisions "
-            "is conclusive diagnostic proof that zero disruptive deployments occurred.\n"
-            "5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' "
-            "with your structured Findings report. Do NOT invoke any further tools."
-        )
+        instruction = get_agent_yaml_config().get_instruction("changes_specialist")
 
         model_to_use = (
             self.model
@@ -358,52 +332,30 @@ class ChangesSpecialist(BaseSpecialist):
             getattr(plan, "initial_hypotheses", []) or getattr(plan, "hypotheses", []) or []
         )
 
-        prompt_lines = [
-            f"Investigate incident {incident.id}: {incident.title}",
-            f"Description: {incident.description}",
-            f"Severity: {incident.severity}",
-            f"Target Service: {effective_service or 'all services'}",
-            f"Time Window: {start_time_dt.isoformat()} to {end_time_dt.isoformat()}",
-        ]
-        if symptoms:
-            prompt_lines.append(f"Observed Symptoms: {', '.join(symptoms)}")
-        if hypotheses:
-            prompt_lines.append(f"Triage Hypotheses: {', '.join(hypotheses)}")
-
-        prompt_lines.extend(
-            [
-                "",
-                "CRITICAL INSTRUCTIONS:",
-                (
-                    "1. Turn 1: Invoke load_skill exactly once with "
-                    "skill_name='change-correlation'. Do NOT call list_skills."
-                ),
-            ]
+        cfg = get_agent_yaml_config()
+        symptoms_line = (
+            "\n" + cfg.format_prompt("symptoms_entry", symptoms=", ".join(symptoms))
+            if symptoms
+            else ""
         )
-        prompt_lines.extend(
-            [
-                (
-                    "2. Turn 2: Formulate at most ONE targeted diagnostic query using "
-                    "list_cloud_run_revisions, query_audit_logs, or list_cloud_builds for "
-                    "the affected service."
-                ),
-                (
-                    "3. STRICT PROHIBITION ON MULTI-QUERY HUNTING: You are strictly forbidden from "
-                    "executing multiple diagnostic queries or hunting across other tools."
-                ),
-                (
-                    "4. Finding 0 recent changes, receiving an empty list [], or "
-                    "observing no revisions is conclusive diagnostic proof that zero "
-                    "disruptive deployments occurred."
-                ),
-                (
-                    "5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' "
-                    "with your structured Findings report. Do NOT invoke any further tools "
-                    "under any circumstances."
-                ),
-            ]
+        hypotheses_line = (
+            "\n" + cfg.format_prompt("hypotheses_entry", hypotheses=", ".join(hypotheses))
+            if hypotheses
+            else ""
         )
-        prompt_text = "\n".join(prompt_lines)
+        prompt_text = cfg.format_prompt(
+            "changes_specialist",
+            "investigation_prompt",
+            incident_id=incident.id,
+            title=incident.title,
+            description=incident.description,
+            severity=incident.severity,
+            target_service=effective_service or "all services",
+            window_start=start_time_dt.isoformat(),
+            window_end=end_time_dt.isoformat(),
+            symptoms_line=symptoms_line,
+            hypotheses_line=hypotheses_line,
+        )
 
         session_service = InMemorySessionService()
         session = await session_service.create_session(

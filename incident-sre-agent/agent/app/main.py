@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Lifespan context manager enforcing production fail-fast startup checks."""
+    # Enforce fail-fast startup check: agent.yaml must exist and validate
+    from .agent_config import get_agent_yaml_config
+
+    get_agent_yaml_config()
+
     settings = get_settings()
     app_env = os.getenv("APP_ENV", settings.app_env).strip().lower()
     keys_added = []

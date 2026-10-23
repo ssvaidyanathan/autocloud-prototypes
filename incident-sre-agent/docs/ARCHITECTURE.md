@@ -293,6 +293,13 @@ Upon receiving the verified callback, the bridge renders the findings into vendo
     - Monospaced code blocks showcasing sanitized stack traces.
   - Uploads the HTML report file (`sre_investigation_<KEY>.html`) as an attachment to the Jira issue.
 
+### 3.9 Declarative Agent Architecture & Instruction Externalization
+
+System instructions, prompt templates, and hierarchical agent definitions are externalized from Python code into declarative configuration:
+- **`agent/app/agent.yaml`**: Declarative configuration defining the root orchestrator (`Dispatcher`), specialist hierarchy (`changes_specialist`, `logs_specialist`, `metrics_specialist`, `resources_specialist`), `triage`, and `synthesizer`. System instructions reside directly in YAML `instruction` fields, referencing models via environment expressions (`${MODEL_SPECIALIST}`).
+- **`agent/app/agent_config.py`**: A typed loader using `yaml.safe_load` with schema validation. Enforces fail-fast startup: missing or malformed YAML raises `AgentConfigError` immediately at startup with zero silent defaults.
+- **Repository Guide (`AGENTS.md`)**: Full operational guide for AI coding assistants working on the repository, covering architecture maps, test execution, and non-negotiable guardrails.
+
 ---
 
 ## 4. Failure Modes & Resiliency Strategies

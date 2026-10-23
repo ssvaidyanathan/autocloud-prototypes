@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from google.adk.agents import LlmAgent
 
+from .agent_config import get_agent_yaml_config
 from .contracts.findings import EvidenceItem, Findings
 from .contracts.incident import Incident
 from .contracts.report import (
@@ -21,7 +22,6 @@ from .contracts.report import (
     SpecialistStatus,
     TimelineItem,
 )
-from .prompts import load_prompt
 from .skills_loader import SkillsLoader
 from .tools.changes import CLOUD_BUILD_STATUS_MAP
 from .triage import InvestigationPlan
@@ -676,7 +676,7 @@ class SynthesizerAgent:
 
         self.skills_loader = skills_loader or SkillsLoader()
         self.llm_client = llm_client
-        instruction = load_prompt("synthesizer")
+        instruction = get_agent_yaml_config().get_instruction("synthesizer")
         from .skills_loader import get_skill_toolset_for_target
 
         toolset = get_skill_toolset_for_target(
