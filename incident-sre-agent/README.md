@@ -221,9 +221,9 @@ Configuration flows strictly through documented settings with **zero hardcoding*
 | **Resource Prefix** | `NAME_PREFIX` | `"isa"` | Prefixes all GCP resources (`${NAME_PREFIX}-${base_name}`) to isolate multiple deployments in one GCP project. |
 | **Compute Region** | `GCP_REGION` | `"us-central1"` | Target region hosting Cloud Run services, Cloud Tasks queues, and Artifact Registry. |
 | **Vertex AI Location** | `VERTEX_LOCATION` | `"global"` | **Required**: Gemini 3.x models (`gemini-3.8-flash`) on Vertex AI are served **exclusively** via the `global` endpoint; calling regional endpoints like `us-central1` returns HTTP 404. |
-| **Dispatcher Model** | `MODEL_DISPATCHER` | `"gemini-3.8-flash"` | Gemini model used by Dispatcher Triage for planning and specialist routing. |
-| **Specialist Model** | `MODEL_SPECIALIST` | `"gemini-3.8-flash"` | Gemini model used by domain specialists for log parsing and metric analysis. |
-| **Synthesizer Model** | `MODEL_SYNTHESIZER` | `"gemini-3.8-flash"` | Gemini model used by Synthesizer for root cause reasoning and report formulation. |
+| **Dispatcher Model** | `MODEL_DISPATCHER` | *None* | **Required**: Gemini model used by Dispatcher Triage for planning and specialist routing. No code default; Terraform supplies the value. |
+| **Specialist Model** | `MODEL_SPECIALIST` | *None* | **Required**: Gemini model used by domain specialists for log parsing and metric analysis. No code default; Terraform supplies the value. |
+| **Synthesizer Model** | `MODEL_SYNTHESIZER` | *None* | **Required**: Gemini model used by Synthesizer for root cause reasoning and report formulation. No code default; Terraform supplies the value. |
 | **ServiceNow URL** | `SERVICENOW_INSTANCE_URL` | *None* | Base URL of ServiceNow instance (e.g. `https://your-instance.service-now.com`). |
 | **Jira Cloud URL** | `JIRA_INSTANCE_URL` | *None* | Base URL of Jira Cloud instance (e.g. `https://your-domain.atlassian.net`). |
 

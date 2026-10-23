@@ -87,9 +87,9 @@ All agent settings are defined in `agent/app/config.py` via `AgentConfig`. Every
 | `gcp_project` | `GCP_PROJECT` or `PROJECT_ID` | GCP Project ID for telemetry, Cloud Run, Vertex AI | Dynamic (env / ADC / metadata) | Both (`.env`, `tfvars`) | **Yes** (in prod) |
 | `gcp_region` | `GCP_REGION` | Regional location for GCP resources | `us-central1` | Both (`.env`, `tfvars`) | No |
 | `vertex_location` | `VERTEX_LOCATION` | Vertex AI regional endpoint for GenAI SDK (`global` for Gemini 3.x) | `global` | Both (`.env`, `tfvars`) | No |
-| `model_dispatcher` | `MODEL_DISPATCHER` | Gemini model for top-level investigation coordination | `gemini-3.8-flash` | Both (`.env`, `tfvars`) | No |
-| `model_specialist` | `MODEL_SPECIALIST` | Gemini model for domain specialist subagents | `gemini-3.8-flash` | Both (`.env`, `tfvars`) | No |
-| `model_synthesizer` | `MODEL_SYNTHESIZER` | Gemini model for root cause synthesis | `gemini-3.8-flash` | Both (`.env`, `tfvars`) | No |
+| `model_dispatcher` | `MODEL_DISPATCHER` | Gemini model for top-level investigation coordination | None (Terraform supplies value) | Both (`.env`, `tfvars`) | **Yes** |
+| `model_specialist` | `MODEL_SPECIALIST` | Gemini model for domain specialist subagents | None (Terraform supplies value) | Both (`.env`, `tfvars`) | **Yes** |
+| `model_synthesizer` | `MODEL_SYNTHESIZER` | Gemini model for root cause synthesis | None (Terraform supplies value) | Both (`.env`, `tfvars`) | **Yes** |
 | `gemini_pro_model` | `GEMINI_PRO_MODEL` | Alias override for dispatcher & synthesizer models | `None` | `.env` | No |
 | `gemini_flash_model` | `GEMINI_FLASH_MODEL` | Alias override for specialist models | `None` | `.env` | No |
 | `allowed_callback_hosts` | `ALLOWED_CALLBACK_HOSTS` | Comma-delimited wildcard hosts allowed for HTTP callbacks | `["*.run.app"]` | Both (`.env`, `tfvars`) | No |
