@@ -14,10 +14,6 @@ This section documents repo-wide standalone administration and maintenance utili
 
 A cross-prototype standalone administration tool to inspect and safely purge incident records from ServiceNow.
 
-> [!WARNING]
-> **Shared Environment Safety Warning:**
-> ServiceNow instances are often shared across teams and agent prototypes. When filtering by age alone (e.g. `--older-than N`), this tool matches tickets from **all sources** created prior to that cutoff. Always inspect the dry-run output carefully or supply narrowing filters (such as `--created-by`, `--number-from`/`--number-to`, `--caller`, or `--state`) to avoid deleting tickets belonging to other prototypes or human engineers.
-
 ### Operational Model & Defaults
 
 1. **Dry-Run by Default:**
@@ -34,13 +30,6 @@ A cross-prototype standalone administration tool to inspect and safely purge inc
 
 5. **Filter Guardrail:**
    At least one filter criterion is required. If no filter is specified, `--older-than 7` is applied as a default. Multiple filters are combined with logical `AND` (`^`).
-
-### Security Architecture
-
-- **No Secrets in Logs or History:** Passwords are never logged, echoed, or persisted. Log output automatically sanitizes authorization tokens and secret strings.
-- **No `--password` CLI Flag:** The script deliberately omits a `--password` flag to prevent credentials from landing in shell history files or process tables (`ps aux`). Passwords must be provided via the `SNOW_PASSWORD` environment variable or entered securely when prompted interactively via `getpass`.
-- **Standalone Lightweight Dependencies:** Built strictly using Python standard library and `requests`. Does not require Google Cloud SDK or Secret Manager dependencies.
-- **Mocks Only for Agent Testing:** Automated agent suites test this utility exclusively with mocks and recorded fixtures; real credentials or live instances are never touched by development agents.
 
 ### CLI Parameters
 
@@ -110,11 +99,6 @@ A standalone administration utility to inspect (dry-run) and safely purge incide
 |---|---|---|---|
 | `scripts/jira-cleanup.py` | Jira Cloud REST API v3 | Audit & purge stale demo/test issues | `--site-url`, `--email`, `JIRA_API_TOKEN` |
 
-> [!WARNING]
-> **Shared Instance Safety Warning:**
-> Jira Cloud sites are frequently shared across teams, projects, and prototypes. Running this tool without `--project` or with broad criteria will match issues across **all accessible projects** on the instance.
-> Always specify `--project KEY` and inspect dry-run output carefully before applying deletions.
-
 ### Operational Model & Defaults
 
 1. **Dry-Run by Default:**
@@ -133,15 +117,6 @@ A standalone administration utility to inspect (dry-run) and safely purge incide
 
 5. **Filter Guardrail:**
    At least one filter criterion is mandatory to prevent accidental mass deletion. Providing `--project KEY` is strongly recommended; omitting `--project` triggers a prominent warning. Multiple filters are combined with logical `AND`.
-
-### Security Architecture
-
-- **No Secrets in History or Logs:** The API token is read strictly via the `JIRA_API_TOKEN` environment variable or an interactive hidden `getpass` prompt. CLI flags for tokens or passwords (`--token`, `--api-token`, `--password`) are rejected.
-- **Log Masking:** `SensitiveDataFilter` automatically redacts authentication tokens, passwords, and HTTP `Basic` authorization headers from logging output.
-- **JQL Injection Prevention:** All string inputs are quoted and escaped (escaping backslashes and double quotes), and newline/carriage return characters are rejected so malicious clauses remain harmless string literals.
-- **Rate Limit & Transient Error Handling:** Issues deleted individually honor HTTP 429 `Retry-After` headers and apply exponential backoff with randomized jitter on transient server errors (5xx) and rate limit retries to prevent thundering herds.
-- **Standalone Lightweight Implementation:** Built strictly on the Python standard library and `requests`. Zero dependencies on Google Cloud Secret Manager or internal agent packages.
-- **Mocks Only for Agent Testing:** Automated tests verify functionality using mock HTTP fixtures; agents never handle or connect to live Jira credentials.
 
 ### CLI Parameters
 
