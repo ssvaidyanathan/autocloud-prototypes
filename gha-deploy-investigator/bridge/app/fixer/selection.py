@@ -84,8 +84,23 @@ def select_fix_proposal(
 ) -> Optional[FixProposal]:
     """Return the proposal to execute, or None when nothing actionable is available."""
     agent_proposal = report.fix_proposal
-    if agent_proposal is not None and agent_proposal.status == "proposed":
+    if agent_proposal is None:
+        logger.info("autofix.candidate incident=%s candidate=agent result=absent", incident.id)
+    elif agent_proposal.status == "proposed":
+        logger.info(
+            "autofix.chosen incident=%s candidate=agent strategy=%s patches=%d",
+            incident.id,
+            agent_proposal.strategy,
+            len(agent_proposal.patches),
+        )
         return agent_proposal
+    else:
+        logger.info(
+            "autofix.candidate incident=%s candidate=agent result=rejected status=%s rationale=%s",
+            incident.id,
+            agent_proposal.status,
+            agent_proposal.rationale,
+        )
 
     fallbacks: list[tuple[str, Callable[[], Optional[FixProposal]]]] = [
         ("deterministic_linter", lambda: _lint_proposal(incident, report, fetch_file)),
@@ -95,14 +110,37 @@ def select_fix_proposal(
         try:
             proposal = build()
         except Exception as exc:
-            logger.warning("Deterministic fixer %s failed for %s: %s", name, incident.id, exc)
-            continue
-        if proposal is not None and proposal.status == "proposed":
-            return proposal
-        if proposal is not None:
-            logger.info(
-                "Deterministic fixer %s: %s (%s)", name, proposal.status, proposal.rationale
+            logger.warning(
+                "autofix.candidate incident=%s candidate=%s result=error error=%s",
+                incident.id,
+                name,
+                exc,
             )
+            continue
+        if proposal is None:
+            logger.info(
+                "autofix.candidate incident=%s candidate=%s result=not_applicable",
+                incident.id,
+                name,
+            )
+            continue
+        if proposal.status == "proposed":
+            logger.info(
+                "autofix.chosen incident=%s candidate=%s strategy=%s patches=%d",
+                incident.id,
+                name,
+                proposal.strategy,
+                len(proposal.patches),
+            )
+            return proposal
+        logger.info(
+            "autofix.candidate incident=%s candidate=%s result=rejected status=%s rationale=%s",
+            incident.id,
+            name,
+            proposal.status,
+            proposal.rationale,
+        )
+    logger.info("autofix.chosen incident=%s candidate=none", incident.id)
     return None
 
 

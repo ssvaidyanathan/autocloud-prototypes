@@ -35,13 +35,9 @@ class FixBranchExistsError(RuntimeError):
 
 def committed_line_delta(before: str, after: str) -> int:
     """Count lines added plus removed between two file versions."""
-    matcher = difflib.SequenceMatcher(
-        None, before.splitlines(), after.splitlines(), autojunk=False
-    )
+    matcher = difflib.SequenceMatcher(None, before.splitlines(), after.splitlines(), autojunk=False)
     return sum(
-        (i2 - i1) + (j2 - j1)
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
-        if tag != "equal"
+        (i2 - i1) + (j2 - j1) for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != "equal"
     )
 
 
@@ -188,8 +184,7 @@ class FixPRWriter(FixPRWriterBase):
             resolved.append(FilePatch(path=clean_path, action=patch.action, content=final_content))
         if total_delta > MAX_LINE_DELTA:
             raise ValueError(
-                f"Committed change ({total_delta} lines) exceeds maximum allowed "
-                f"({MAX_LINE_DELTA})"
+                f"Committed change ({total_delta} lines) exceeds maximum allowed ({MAX_LINE_DELTA})"
             )
         return resolved
 
@@ -306,12 +301,13 @@ class FixPRWriter(FixPRWriterBase):
         self, incident: Incident, report: Report, proposal: FixProposal
     ) -> Optional[PullRequestRef]:
         if self.config.autofix_enabled is not True:
-            logger.info("Auto-fix disabled by kill switch; skipping incident %s", incident.id)
+            logger.info("autofix.writer incident=%s outcome=skipped reason=disabled", incident.id)
             return None
 
         if proposal.status != "proposed" or not proposal.patches:
             logger.info(
-                "Fix proposal for incident %s not actionable (status=%s, patches=%d)",
+                "autofix.writer incident=%s outcome=skipped reason=not_actionable "
+                "status=%s patches=%d",
                 incident.id,
                 proposal.status,
                 len(proposal.patches),
@@ -320,21 +316,26 @@ class FixPRWriter(FixPRWriterBase):
 
         valid, reason = validate_fix_guardrails(proposal)
         if not valid:
-            logger.warning("Fix proposal for incident %s rejected: %s", incident.id, reason)
+            logger.warning(
+                "autofix.guardrail incident=%s result=rejected reason=%s", incident.id, reason
+            )
             return None
+        logger.info("autofix.guardrail incident=%s result=passed", incident.id)
 
         if is_autofix_branch(incident.github_branch) or is_autofix_branch(
             proposal.target_branch_base
         ):
             logger.warning(
-                "Refusing to auto-fix a failure on autofix branch for incident %s", incident.id
+                "autofix.guardrail incident=%s result=rejected reason=autofix_branch_loop",
+                incident.id,
             )
             return None
 
         repo_parts = _split_repo(incident.github_repo)
         if repo_parts is None or incident.github_run_id is None or not incident.github_head_sha:
             logger.warning(
-                "Incident %s lacks repo/run_id/head_sha; cannot open fix PR", incident.id
+                "autofix.writer incident=%s outcome=skipped reason=missing_repo_run_or_sha",
+                incident.id,
             )
             return None
         owner, repo = repo_parts
@@ -346,8 +347,17 @@ class FixPRWriter(FixPRWriterBase):
                 owner, repo, incident.github_head_sha, proposal
             )
         except Exception as exc:
-            logger.warning("Fix proposal for incident %s rejected: %s", incident.id, exc)
+            logger.warning(
+                "autofix.guardrail incident=%s result=rejected stage=resolve reason=%s",
+                incident.id,
+                exc,
+            )
             return None
+        logger.info(
+            "autofix.guardrail incident=%s result=passed stage=resolve files=%d",
+            incident.id,
+            len(resolved_patches),
+        )
 
         try:
             branch = self.create_fix_branch(owner, repo, incident.github_head_sha, run_id)
@@ -355,23 +365,40 @@ class FixPRWriter(FixPRWriterBase):
             existing_branch = build_autofix_branch_name(run_id)
             existing = self.find_existing_pull_request(owner, repo, existing_branch)
             logger.info(
-                "Autofix already attempted for run %s (existing PR: %s); not retrying",
+                "autofix.branch incident=%s run=%s outcome=exists branch=%s existing_pr=%s",
+                incident.id,
                 run_id,
+                existing_branch,
                 existing.pr_url if existing else "none",
             )
             return existing
         except Exception as exc:
-            logger.error("Failed to create autofix branch for run %s: %s", run_id, exc)
+            logger.error(
+                "autofix.branch incident=%s run=%s outcome=error error=%s", incident.id, run_id, exc
+            )
             return None
+        logger.info(
+            "autofix.branch incident=%s run=%s outcome=created branch=%s",
+            incident.id,
+            run_id,
+            branch,
+        )
 
         try:
             for patch in resolved_patches:
-                self.commit_patch(
+                commit_sha = self.commit_patch(
                     owner,
                     repo,
                     branch,
                     patch,
                     f"fix: {proposal.strategy} remediation for {patch.path} (run {run_id})",
+                )
+                logger.info(
+                    "autofix.commit incident=%s branch=%s path=%s sha=%s",
+                    incident.id,
+                    branch,
+                    patch.path,
+                    commit_sha,
                 )
             pr = self.create_pull_request(
                 owner,
@@ -382,11 +409,25 @@ class FixPRWriter(FixPRWriterBase):
                 base_branch=proposal.target_branch_base,
             )
         except Exception as exc:
-            logger.error("Auto-fix for run %s failed; removing partial branch: %s", run_id, exc)
+            logger.error(
+                "autofix.pr incident=%s run=%s outcome=error branch=%s error=%s; "
+                "removing partial branch",
+                incident.id,
+                run_id,
+                branch,
+                exc,
+            )
             self._delete_branch(owner, repo, branch)
             return None
 
-        logger.info("Opened auto-fix PR #%d for run %s: %s", pr.pr_number, run_id, pr.pr_url)
+        logger.info(
+            "autofix.pr incident=%s run=%s outcome=opened pr_number=%d pr_url=%s branch=%s",
+            incident.id,
+            run_id,
+            pr.pr_number,
+            pr.pr_url,
+            branch,
+        )
         return pr
 
     @staticmethod

@@ -16,7 +16,12 @@ from .fixer.interface import FixPRWriterBase, is_autofix_branch
 from .fixer.selection import select_fix_proposal
 from .fixer.writer import FixPRWriter
 
+# Ensure INFO-level decision logs (e.g. auto-fix outcomes) reach Cloud Run / Cloud Logging.
+# No-op when the hosting process has already configured root handlers.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logging.getLogger("bridge.app.fixer").setLevel(logging.INFO)
 
 app = FastAPI(
     title="GitHub Actions Deployment Investigator Bridge",
@@ -94,6 +99,13 @@ def _bind_fetch_file(
     return fetch_file
 
 
+# Deterministic fallback fixers, keyed by the strategy they emit (for decision logging).
+_DETERMINISTIC_SOURCES: dict[str, str] = {
+    "deterministic_linter": "deterministic_s1_lint",
+    "config_tuning": "deterministic_s4_config",
+}
+
+
 def _maybe_open_fix_pr(
     result: InvestigationResult, settings: BridgeConfig
 ) -> Optional[PullRequestRef]:
@@ -103,9 +115,20 @@ def _maybe_open_fix_pr(
     config (S4) fixers are tried. Never raises: auto-fix is best-effort and must not block
     ticket creation.
     """
-    if settings.autofix_enabled is not True:
+    incident_id = result.incident_id
+    enabled = settings.autofix_enabled is True
+    logger.info("autofix.decision incident=%s stage=enabled enabled=%s", incident_id, enabled)
+    if not enabled:
+        logger.info("autofix.skipped incident=%s reason=disabled", incident_id)
         return None
     if result.report is None or result.incident is None:
+        logger.info(
+            "autofix.skipped incident=%s reason=missing_report_or_incident "
+            "has_report=%s has_incident=%s",
+            incident_id,
+            result.report is not None,
+            result.incident is not None,
+        )
         return None
     try:
         writer = get_fix_pr_writer(settings)
@@ -113,12 +136,43 @@ def _maybe_open_fix_pr(
             result.incident, result.report, _bind_fetch_file(writer, result)
         )
         if proposal is None:
+            logger.info(
+                "autofix.selection incident=%s source=none; autofix.skipped reason=no_proposal",
+                incident_id,
+            )
             return None
+        if result.report.fix_proposal is proposal:
+            source = "agent"
+        else:
+            source = _DETERMINISTIC_SOURCES.get(proposal.strategy, "deterministic")
+        logger.info(
+            "autofix.selection incident=%s source=%s strategy=%s patches=%d files=%s",
+            incident_id,
+            source,
+            proposal.strategy,
+            len(proposal.patches),
+            ",".join(p.path for p in proposal.patches),
+        )
         if result.report.fix_proposal is not proposal:
             result.report.fix_proposal = proposal
-        return writer.execute_fix_proposal(result.incident, result.report, proposal)
+        pr_ref = writer.execute_fix_proposal(result.incident, result.report, proposal)
+        if pr_ref is None:
+            logger.info(
+                "autofix.writer incident=%s outcome=no_pr strategy=%s",
+                incident_id,
+                proposal.strategy,
+            )
+        else:
+            logger.info(
+                "autofix.writer incident=%s outcome=pr_opened pr_number=%d pr_url=%s branch=%s",
+                incident_id,
+                pr_ref.pr_number,
+                pr_ref.pr_url,
+                pr_ref.branch_name,
+            )
+        return pr_ref
     except Exception as exc:
-        logger.error("Auto-fix PR execution failed for %s: %s", result.incident_id, exc)
+        logger.error("autofix.writer incident=%s outcome=error error=%s", incident_id, exc)
         return None
 
 

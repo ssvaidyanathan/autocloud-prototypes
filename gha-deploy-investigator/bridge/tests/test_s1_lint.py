@@ -14,6 +14,7 @@ from bridge.app.fixer.s1_lint import (
     LintDiagnostic,
     UnsafeFixError,
     collect_diagnostics,
+    extract_import_names,
     fix_source,
     generate_lint_fix,
     parse_lint_diagnostics,
@@ -293,3 +294,151 @@ class TestGenerateLintFix:
         assert proposal.status == "proposed", proposal.rationale
         patch = proposal.patches[0]
         assert resolve_patch_content(patch, original) == patch.content
+
+
+class TestImportNameExtraction:
+    @pytest.mark.parametrize(
+        "message, expected",
+        [
+            ("[*] `os` imported but unused", ["os"]),
+            ("'os' imported but unused", ["os"]),
+            ('"os" imported but unused', ["os"]),
+            ("Linter Violation: F401: math imported but unused", ["math"]),
+            ("Linter Violation: F401 math imported but unused", ["math"]),
+            ("os.path imported but unused", ["os.path"]),
+            ("`typing.Optional` imported but unused", ["typing.Optional"]),
+            ("`.sibling` imported but unused", [".sibling"]),
+            ("F401 'collections.abc' imported but unused", ["collections.abc"]),
+            ("Unused import", []),
+        ],
+    )
+    def test_extracts_names(self, message: str, expected: list[str]) -> None:
+        assert extract_import_names(message) == expected
+
+
+# Annotation shape emitted by the pipeline-logs specialist for live GitHub check runs:
+# the rule code lives in the title and the message carries no quoting around the name.
+LIVE_SOURCE = "import math\nimport sys\n\n\ndef main() -> None:\n    print(sys.argv)\n"
+LIVE_EXPECTED = "import sys\n\n\ndef main() -> None:\n    print(sys.argv)\n"
+
+
+def _live_annotation(message: str, title: Optional[str] = "Linter Violation: F401") -> Report:
+    return Report(
+        summary="lint failed",
+        annotations=[
+            CheckRunAnnotation(
+                path="app/main.py",
+                start_line=1,
+                end_line=1,
+                annotation_level="failure",
+                title=title,
+                message=message,
+            )
+        ],
+    )
+
+
+class TestUnquotedAndQuotedNames:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Linter Violation: F401: math imported but unused",
+            "math imported but unused",
+            "'math' imported but unused",
+            '"math" imported but unused',
+            "`math` imported but unused",
+        ],
+    )
+    def test_fix_source_accepts_message_variants(self, message: str) -> None:
+        diag = LintDiagnostic("app/main.py", 1, "F401", message)
+        assert fix_source(LIVE_SOURCE, [diag]) == LIVE_EXPECTED
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "app/main.py:1:8: F401 [*] math imported but unused",
+            "app/main.py:1:8: F401 'math' imported but unused",
+            'app/main.py:1:8: F401 "math" imported but unused',
+        ],
+    )
+    def test_concise_log_variants(self, line: str) -> None:
+        diags = parse_lint_diagnostics(line)
+        assert [(d.path, d.line, d.code) for d in diags] == [("app/main.py", 1, "F401")]
+        assert extract_import_names(diags[0].message) == ["math"]
+        assert fix_source(LIVE_SOURCE, diags) == LIVE_EXPECTED
+
+    def test_full_format_unquoted(self) -> None:
+        log = "F401 [*] math imported but unused\n --> app/main.py:1:8\n"
+        diags = parse_lint_diagnostics(log)
+        assert fix_source(LIVE_SOURCE, diags) == LIVE_EXPECTED
+
+    def test_unquoted_name_selects_alias_in_multi_name_import(self) -> None:
+        src = "from typing import Any, Optional\n\nx: Any = 1\n"
+        diag = LintDiagnostic("m.py", 1, "F401", "typing.Optional imported but unused")
+        assert fix_source(src, [diag]) == "from typing import Any\n\nx: Any = 1\n"
+
+
+class TestAstFallback:
+    def test_single_binding_used_when_message_has_no_name(self) -> None:
+        diag = LintDiagnostic("app/main.py", 1, "F401", "Unused import")
+        assert fix_source(LIVE_SOURCE, [diag]) == LIVE_EXPECTED
+
+    def test_single_binding_used_when_message_name_mismatches(self) -> None:
+        diag = LintDiagnostic("app/main.py", 1, "F401", "`something.else` imported but unused")
+        assert fix_source(LIVE_SOURCE, [diag]) == LIVE_EXPECTED
+
+    def test_single_from_import_binding(self) -> None:
+        src = "from pathlib import Path\nimport sys\n\nprint(sys)\n"
+        diag = LintDiagnostic("m.py", 1, "F401", "unused import")
+        assert fix_source(src, [diag]) == "import sys\n\nprint(sys)\n"
+
+    def test_multi_name_import_without_name_is_unsafe(self) -> None:
+        src = "from typing import Any, Optional\n\nx: Any = 1\n"
+        diag = LintDiagnostic("m.py", 1, "F401", "unused import")
+        with pytest.raises(UnsafeFixError, match="Cannot locate unused import"):
+            fix_source(src, [diag])
+
+    def test_star_import_without_name_is_unsafe(self) -> None:
+        diag = LintDiagnostic("m.py", 1, "F401", "unused import")
+        with pytest.raises(UnsafeFixError):
+            fix_source("from os import *\n", [diag])
+
+    def test_no_import_at_line_is_unsafe(self) -> None:
+        diag = LintDiagnostic("m.py", 1, "F401", "math imported but unused")
+        with pytest.raises(UnsafeFixError, match="Cannot locate unused import at line 1"):
+            fix_source("x = 1\n", [diag])
+
+
+class TestLiveAnnotationEndToEnd:
+    def test_collects_unquoted_annotation(self) -> None:
+        diags = collect_diagnostics(_live_annotation("math imported but unused"))
+        assert len(diags) == 1
+        assert (diags[0].path, diags[0].line, diags[0].code) == ("app/main.py", 1, "F401")
+        assert extract_import_names(diags[0].message) == ["math"]
+
+    @pytest.mark.parametrize(
+        "title, message",
+        [
+            ("Linter Violation: F401", "math imported but unused"),
+            ("Linter Violation", "F401: math imported but unused"),
+            ("Linter Violation: F401", "'math' imported but unused"),
+            ("Linter Violation: F401", '"math" imported but unused'),
+            (None, "Linter Violation: F401: math imported but unused"),
+        ],
+    )
+    def test_generate_lint_fix_from_live_annotation(
+        self, title: Optional[str], message: str
+    ) -> None:
+        proposal = generate_lint_fix(
+            _incident(),
+            _live_annotation(message, title=title),
+            _fetch({"app/main.py": LIVE_SOURCE}),
+        )
+        assert proposal.status == "proposed", proposal.rationale
+        assert proposal.strategy == "deterministic_linter"
+        patch = proposal.patches[0]
+        assert patch.path == "app/main.py"
+        assert patch.content == LIVE_EXPECTED
+        assert patch.diff and "-import math" in patch.diff
+        assert resolve_patch_content(patch, LIVE_SOURCE) == LIVE_EXPECTED
+        assert validate_fix_guardrails(proposal) == (True, "")

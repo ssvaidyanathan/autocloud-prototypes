@@ -35,7 +35,15 @@ _CONCISE_RE = re.compile(
 _FULL_HEADER_RE = re.compile(r"^\s*(?:error\[)?" + _CODE + r"\]?:?\s+(?P<msg>.*)$")
 _FULL_LOCATION_RE = re.compile(r"^\s*-->\s*(?P<path>[\w./\-]+\.py):(?P<line>\d+):(?P<col>\d+)")
 _ANNOTATION_CODE_RE = re.compile(r"\b" + _CODE + r"\b")
-_BACKTICK_NAME_RE = re.compile(r"`([^`]+)`")
+_DOTTED_NAME = r"\.*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+# Import names in diagnostic messages, most explicit first: ruff uses backticks, flake8 uses
+# single quotes, some formatters use double quotes, and GitHub annotations may be unquoted.
+_IMPORT_NAME_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"`(" + _DOTTED_NAME + r")`"),
+    re.compile(r"'(" + _DOTTED_NAME + r")'"),
+    re.compile(r'"(' + _DOTTED_NAME + r')"'),
+    re.compile(r"(?<![\w.])(" + _DOTTED_NAME + r")\s+imported but unused\b"),
+)
 
 
 @dataclass(frozen=True)
@@ -150,6 +158,31 @@ def _alias_matches(node: ast.Import | ast.ImportFrom, alias: ast.alias, name: st
         module = "." * node.level + (node.module or "")
         candidates.add(f"{module}.{alias.name}" if node.module else f"{module}{alias.name}")
     return name in candidates
+
+
+def extract_import_names(message: str) -> list[str]:
+    """Return candidate import names mentioned in a diagnostic message, in priority order."""
+    names: list[str] = []
+    for pattern in _IMPORT_NAME_RES:
+        for name in pattern.findall(message):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _resolve_unused_name(node: ast.Import | ast.ImportFrom, message: str) -> Optional[str]:
+    """Pick the import binding a diagnostic refers to.
+
+    A name from the message is used when it matches an alias of the import statement.
+    Otherwise, if the statement binds exactly one (non-star) name, the diagnostic can only
+    refer to that binding, so it is taken from the AST.
+    """
+    for name in extract_import_names(message):
+        if any(_alias_matches(node, alias, name) for alias in node.names):
+            return name
+    if len(node.names) == 1 and node.names[0].name != "*":
+        return node.names[0].name
+    return None
 
 
 def _render_import(node: ast.Import | ast.ImportFrom, indent: str) -> str:
@@ -290,11 +323,11 @@ def fix_source(source: str, diagnostics: list[LintDiagnostic]) -> str:
     for diag in diagnostics:
         if diag.code != RULE_UNUSED_IMPORT:
             continue
-        names = _BACKTICK_NAME_RE.findall(diag.message)
         node = _import_at_line(tree, diag.line)
-        if not names or node is None:
+        name = _resolve_unused_name(node, diag.message) if node is not None else None
+        if node is None or name is None:
             raise UnsafeFixError(f"Cannot locate unused import at line {diag.line}")
-        unused.append((ast.dump(node), names[0]))
+        unused.append((ast.dump(node), name))
 
     hoist_keys: list[str] = []
     for diag in diagnostics:
@@ -432,6 +465,7 @@ __all__ = [
     "SUPPORTED_RULES",
     "UnsafeFixError",
     "collect_diagnostics",
+    "extract_import_names",
     "fix_source",
     "generate_lint_fix",
     "parse_lint_diagnostics",
