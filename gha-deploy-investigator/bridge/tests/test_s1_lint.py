@@ -9,6 +9,7 @@ import pytest
 from bridge.app.contracts.findings import EvidenceItem
 from bridge.app.contracts.incident import Incident
 from bridge.app.contracts.report import CheckRunAnnotation, Report
+from bridge.app.fixer import s1_lint
 from bridge.app.fixer.interface import validate_fix_guardrails
 from bridge.app.fixer.s1_lint import (
     LintDiagnostic,
@@ -17,6 +18,7 @@ from bridge.app.fixer.s1_lint import (
     extract_import_names,
     fix_source,
     generate_lint_fix,
+    organize_imports,
     parse_lint_diagnostics,
 )
 from bridge.app.fixer.writer import resolve_patch_content
@@ -59,6 +61,13 @@ def handler(value: Any) -> None:
     print(value, sys.argv, re, counter, total)
     return None
 '''
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ruff(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise the AST transformations alone unless a test class opts in to ruff."""
+    if not getattr(request.cls, "uses_ruff", False):
+        monkeypatch.setattr(s1_lint, "_ruff_executable", lambda: None)
 
 
 def _incident(branch: str = "feature/x") -> Incident:
@@ -451,3 +460,226 @@ class TestLiveAnnotationEndToEnd:
         assert patch.diff and "-import math" in patch.diff
         assert resolve_patch_content(patch, LIVE_SOURCE) == LIVE_EXPECTED
         assert validate_fix_guardrails(proposal) == (True, "")
+
+
+# --------------------------------------------------------------------------- ruff I001
+
+RUFF = shutil.which("ruff")
+requires_ruff = pytest.mark.skipif(RUFF is None, reason="ruff CLI not installed")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SAMPLE_APP = REPO_ROOT / "demo" / "sample-pipeline-app"
+# Defect injected by demo/scripts/trigger-lint-failure.sh, prepended to app/main.py.
+S1_INJECTION = (
+    "import math\n"
+    "\n"
+    "\n"
+    "def format_order_currency(value: float) -> str:\n"
+    '    formatted_val = round(value, 2); return f"${formatted_val:.2f}"\n'
+    "\n"
+)
+# Diagnostics reported by `ruff check --output-format concise` on the injected file.
+S1_LOG = """\
+app/main.py:1:8: F401 [*] `math` imported but unused
+app/main.py:5:36: E702 Multiple statements on one line (semicolon)
+app/main.py:7:1: E402 Module level import not at top of file
+app/main.py:8:1: E402 Module level import not at top of file
+app/main.py:9:1: E402 Module level import not at top of file
+app/main.py:10:1: E402 Module level import not at top of file
+app/main.py:12:1: E402 Module level import not at top of file
+app/main.py:13:1: E402 Module level import not at top of file
+app/main.py:15:1: E402 Module level import not at top of file
+Found 9 errors.
+"""
+
+
+def _ruff_lint(source: str, project: Path, rel_path: str, tmp_path: Path) -> str:
+    """Lint source as rel_path inside a copy of project's ruff config; return diagnostics."""
+    target = tmp_path / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(source.encode())
+    shutil.copy(project / "pyproject.toml", tmp_path / "pyproject.toml")
+    assert RUFF is not None
+    result = subprocess.run(
+        [RUFF, "check", "--select", "E,F,I,W", "--output-format", "concise", rel_path],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode in (0, 1), result.stderr
+    return result.stdout if result.returncode else ""
+
+
+class _FakeCompleted:
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+@requires_ruff
+class TestRuffImportOrganization:
+    uses_ruff = True
+
+    def test_fix_source_sorts_and_sections_hoisted_imports(self) -> None:
+        src = (
+            "import os\n\nprint(os)\n"
+            "from .local import helper\nimport fastapi\nimport json\n\n"
+            "print(helper, fastapi, json)\n"
+        )
+        diags = [
+            LintDiagnostic("pkg/m.py", line, "E402", "Module level import not at top of file")
+            for line in (4, 5, 6)
+        ]
+        assert fix_source(src, diags) == (
+            "import json\nimport os\n\nimport fastapi\n\nfrom .local import helper\n\n"
+            "print(os)\n\nprint(helper, fastapi, json)\n"
+        )
+
+    def test_combined_fix_output_is_i001_clean(self, tmp_path: Path) -> None:
+        fixed = fix_source(SOURCE, parse_lint_diagnostics(CONCISE_LOG))
+        assert "import re\nimport sys\nfrom typing import Any\n" in fixed
+        assert _ruff_lint(fixed, REPO_ROOT / "bridge", "pkg/mod.py", tmp_path) == ""
+
+    def test_s1_demo_injection_fix_passes_ruff(self, tmp_path: Path) -> None:
+        original = S1_INJECTION + (SAMPLE_APP / "app" / "main.py").read_text()
+        assert "I001" not in _ruff_lint(original, SAMPLE_APP, "app/main.py", tmp_path)
+        proposal = generate_lint_fix(
+            _incident(), _report_with_log(S1_LOG), _fetch({"app/main.py": original})
+        )
+        assert proposal.status == "proposed", proposal.rationale
+        patch = proposal.patches[0]
+        assert patch.content is not None
+        assert _ruff_lint(patch.content, SAMPLE_APP, "app/main.py", tmp_path) == ""
+        assert resolve_patch_content(patch, original) == patch.content
+        assert "import math" not in patch.content
+        assert "    formatted_val = round(value, 2)\n    return " in patch.content
+        assert validate_fix_guardrails(proposal) == (True, "")
+
+    def test_crlf_preserved(self, tmp_path: Path) -> None:
+        original = "import os\r\n\r\nprint(os)\r\nimport sys\r\nimport json\r\n\r\nprint(sys)\r\n"
+        log = (
+            "pkg/crlf.py:4:1: E402 Module level import not at top of file\n"
+            "pkg/crlf.py:5:1: E402 Module level import not at top of file\n"
+            "pkg/crlf.py:5:8: F401 `json` imported but unused\n"
+        )
+        proposal = generate_lint_fix(
+            _incident(), _report_with_log(log), _fetch({"pkg/crlf.py": original})
+        )
+        assert proposal.status == "proposed", proposal.rationale
+        patch = proposal.patches[0]
+        expected = "import os\r\nimport sys\r\n\r\nprint(os)\r\n\r\nprint(sys)\r\n"
+        assert patch.content == expected
+        assert resolve_patch_content(patch, original) == expected
+        assert "\n" not in patch.content.replace("\r\n", "")
+
+    def test_crlf_without_trailing_newline_preserved(self) -> None:
+        original = "import os\r\nimport sys\r\nprint(sys); x = 1"
+        log = (
+            "pkg/crlf.py:1:8: F401 `os` imported but unused\n"
+            "pkg/crlf.py:3:11: E702 Multiple statements on one line (semicolon)\n"
+        )
+        proposal = generate_lint_fix(
+            _incident(), _report_with_log(log), _fetch({"pkg/crlf.py": original})
+        )
+        assert proposal.status == "proposed", proposal.rationale
+        patch = proposal.patches[0]
+        assert patch.content == "import sys\r\n\r\nprint(sys)\r\nx = 1"
+        assert resolve_patch_content(patch, original) == patch.content
+
+    def test_organize_imports_uses_stdin_path_for_relative_imports(self) -> None:
+        src = "from .config import cfg\nimport os\n\nprint(os, cfg)\n"
+        assert organize_imports(src, "app/main.py") == (
+            "import os\n\nfrom .config import cfg\n\nprint(os, cfg)\n"
+        )
+
+    def test_organize_imports_ignores_invoking_directory_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.ruff.lint.isort]\nforce-single-line = true\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        src = "from typing import Optional, Any\n\nprint(Any, Optional)\n"
+        assert organize_imports(src, "m.py") == (
+            "from typing import Any, Optional\n\nprint(Any, Optional)\n"
+        )
+
+
+class TestRuffFallback:
+    SRC = "import sys\nimport os\n\nprint(os, sys)\n"
+
+    def test_missing_ruff_returns_source(self, caplog: pytest.LogCaptureFixture) -> None:
+        assert organize_imports(self.SRC, "m.py") == self.SRC
+        assert "ruff CLI not found" in caplog.text
+
+    def test_missing_ruff_fix_source_still_fixes(self) -> None:
+        diag = LintDiagnostic("m.py", 4, "E402", "Module level import not at top of file")
+        assert fix_source("import os\n\nprint(os)\nimport sys\n", [diag]) == (
+            "import os\nimport sys\n\nprint(os)\n"
+        )
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            _FakeCompleted(2, stderr="error: boom"),
+            _FakeCompleted(1, stdout="import sys\n", stderr="invalid-syntax"),
+            _FakeCompleted(0, stdout=""),
+            _FakeCompleted(0, stdout="import os\nimport sys\n\nprint(os)\n"),  # code altered
+            _FakeCompleted(0, stdout="import os\nimport sys\n\nprint(os, sys\n"),  # unparsable
+            subprocess.TimeoutExpired(cmd="ruff", timeout=10),
+            FileNotFoundError("ruff"),
+        ],
+    )
+    def test_ruff_failure_returns_source(
+        self,
+        outcome: object,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            calls.append({"cmd": cmd, **kwargs})
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(s1_lint, "_ruff_executable", lambda: "/usr/bin/ruff")
+        monkeypatch.setattr(s1_lint.subprocess, "run", fake_run)
+        assert organize_imports(self.SRC, "pkg/m.py") == self.SRC
+        assert "ruff import organization" in caplog.text
+        assert calls[0]["timeout"] == 10
+        assert calls[0]["input"] == self.SRC
+        cmd = calls[0]["cmd"]
+        assert isinstance(cmd, list)
+        assert cmd[-3:] == ["--stdin-filename", "pkg/m.py", "-"]
+        assert "--isolated" in cmd and "--fix" in cmd
+
+    def test_generate_lint_fix_passes_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[str] = []
+
+        def fake_organize(source: str, path: str) -> str:
+            seen.append(path)
+            return source
+
+        monkeypatch.setattr(s1_lint, "organize_imports", fake_organize)
+        log = "pkg/mod.py:2:8: F401 `os` imported but unused\n"
+        files = {"pkg/mod.py": "import sys\nimport os\n\nprint(sys)\n"}
+        proposal = generate_lint_fix(_incident(), _report_with_log(log), _fetch(files))
+        assert proposal.status == "proposed", proposal.rationale
+        assert seen == ["pkg/mod.py"]
+
+    def test_fix_source_path_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[str] = []
+
+        def fake_organize(source: str, path: str) -> str:
+            seen.append(path)
+            return source
+
+        monkeypatch.setattr(s1_lint, "organize_imports", fake_organize)
+        diag = LintDiagnostic("pkg/a.py", 1, "F401", "`os` imported but unused")
+        fix_source("import os\nx = 1\n", [diag])
+        fix_source("import os\nx = 1\n", [diag], path="explicit/b.py")
+        fix_source("x = 1\n", [])
+        assert seen == ["pkg/a.py", "explicit/b.py", "module.py"]

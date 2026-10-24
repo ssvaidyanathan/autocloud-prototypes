@@ -5,11 +5,19 @@ evidence excerpts). Each supported rule maps to a generic, AST-verified source
 transformation. If any diagnostic in a file cannot be fixed safely, the whole
 proposal degrades to ``no_safe_fix`` - partial fixes are never proposed because
 they cannot turn the pipeline green.
+
+After the AST transformations, import blocks are organized with the ``ruff`` CLI (rule
+``I001``) when it is available, so relocated imports satisfy isort-style sectioning. Any
+ruff failure falls back to the unorganized AST result.
 """
 
 import ast
 import difflib
+import logging
 import re
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
@@ -18,6 +26,8 @@ from ..contracts.report import FilePatch, FixProposal, Report
 from .diff_apply import detect_crlf
 from .interface import MAX_CHANGED_FILES, validate_fix_guardrails
 
+logger = logging.getLogger(__name__)
+
 # Rule identifiers follow pycodestyle / pyflakes numbering as reported by ruff and flake8.
 RULE_UNUSED_IMPORT = "F401"
 RULE_MULTIPLE_STATEMENTS = "E702"
@@ -25,6 +35,9 @@ RULE_IMPORT_NOT_AT_TOP = "E402"
 SUPPORTED_RULES: frozenset[str] = frozenset(
     {RULE_UNUSED_IMPORT, RULE_MULTIPLE_STATEMENTS, RULE_IMPORT_NOT_AT_TOP}
 )
+RULE_IMPORT_ORDER = "I001"
+RUFF_TIMEOUT_SECONDS = 10
+DEFAULT_STDIN_FILENAME = "module.py"
 
 _CODE = r"(?P<code>[A-Z]{1,3}\d{3,4})"
 # Concise format: path/to/file.py:12:1: F401 [*] `os` imported but unused
@@ -304,8 +317,81 @@ def _hoist_import(lines: list[str], tree: ast.Module, key: str) -> list[str]:
     return without[:insert_after] + moved + without[insert_after:]
 
 
-def fix_source(source: str, diagnostics: list[LintDiagnostic]) -> str:
-    """Apply deterministic fixes for diagnostics in a single file. Raises UnsafeFixError."""
+def _ruff_executable() -> Optional[str]:
+    return shutil.which("ruff")
+
+
+def _non_import_statements(source: str) -> list[str]:
+    tree = ast.parse(source)
+    return [ast.dump(s) for s in tree.body if not isinstance(s, (ast.Import, ast.ImportFrom))]
+
+
+def organize_imports(source: str, path: str) -> str:
+    """Sort and section import blocks with ``ruff --select I001``; unchanged source on failure.
+
+    Ruff runs with ``--isolated`` from an empty directory so neither the bridge's own ruff
+    configuration nor packages next to its working directory influence the result. The
+    output keeps the line-ending style and trailing-newline state of ``source``.
+    """
+    ruff = _ruff_executable()
+    if ruff is None:
+        logger.warning("ruff CLI not found; import blocks left unorganized for %s", path)
+        return source
+    cmd = [
+        ruff,
+        "check",
+        "--isolated",
+        "--fix",
+        "--quiet",
+        "--select",
+        RULE_IMPORT_ORDER,
+        "--stdin-filename",
+        path,
+        "-",
+    ]
+    try:
+        with tempfile.TemporaryDirectory() as workdir:
+            result = subprocess.run(
+                cmd,
+                input=source,
+                capture_output=True,
+                text=True,
+                timeout=RUFF_TIMEOUT_SECONDS,
+                cwd=workdir,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("ruff import organization failed for %s: %s", path, exc)
+        return source
+    if result.returncode != 0 or not result.stdout.strip():
+        logger.warning(
+            "ruff import organization failed for %s (exit %s): %s",
+            path,
+            result.returncode,
+            result.stderr.strip()[:500],
+        )
+        return source
+
+    # Normalize line endings: text mode may translate them, and ruff's choice is not ours.
+    eol = "\r\n" if detect_crlf(source) else "\n"
+    organized = eol.join(result.stdout.splitlines())
+    if source.endswith("\n"):
+        organized += eol
+    try:
+        unchanged = _non_import_statements(organized) == _non_import_statements(source)
+    except SyntaxError:
+        unchanged = False
+    if not unchanged:
+        logger.warning("ruff import organization altered non-import code for %s; ignored", path)
+        return source
+    return organized
+
+
+def fix_source(source: str, diagnostics: list[LintDiagnostic], path: Optional[str] = None) -> str:
+    """Apply deterministic fixes for diagnostics in a single file. Raises UnsafeFixError.
+
+    ``path`` is the file's repository path, used so ruff classifies the file correctly when
+    organizing imports; it defaults to the first diagnostic's path.
+    """
     unsupported = sorted({d.code for d in diagnostics} - SUPPORTED_RULES)
     if unsupported:
         raise UnsafeFixError(f"Unsupported lint rules: {', '.join(unsupported)}")
@@ -373,7 +459,8 @@ def fix_source(source: str, diagnostics: list[LintDiagnostic]) -> str:
         ast.parse(fixed)
     except SyntaxError as exc:  # pragma: no cover - defensive
         raise UnsafeFixError(f"Fixed source does not parse: {exc}") from exc
-    return fixed
+    stdin_path = path or (diagnostics[0].path if diagnostics else DEFAULT_STDIN_FILENAME)
+    return organize_imports(fixed, stdin_path)
 
 
 def _unified_diff(path: str, before: str, after: str) -> str:
@@ -433,7 +520,7 @@ def generate_lint_fix(
         if original is None:
             return _no_safe_fix(f"Could not read source for {path}.", base)
         try:
-            fixed = fix_source(original, by_path[path])
+            fixed = fix_source(original, by_path[path], path=path)
         except UnsafeFixError as exc:
             return _no_safe_fix(f"{path}: {exc}", base)
         if fixed == original:
@@ -470,5 +557,6 @@ __all__ = [
     "extract_import_names",
     "fix_source",
     "generate_lint_fix",
+    "organize_imports",
     "parse_lint_diagnostics",
 ]
