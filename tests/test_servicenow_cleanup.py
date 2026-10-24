@@ -701,3 +701,21 @@ class TestHttpSession:
         session = snow.HttpSession()
         with pytest.raises(snow.RequestError, match="Network error: Connection refused"):
             session.get("https://test.service-now.com/api/test")
+
+    @patch("urllib.request.urlopen")
+    def test_https_scheme_case_insensitive(self, mock_urlopen):
+        """TLS verification context is created for HTTPS scheme regardless of casing."""
+        mock_urlopen.return_value = make_mock_response(status=200, json_data={"result": []})
+        session = snow.HttpSession()
+
+        session.get("HTTPS://test.service-now.com/api/test")
+        context_upper = mock_urlopen.call_args[1].get("context")
+        assert context_upper is not None
+
+        session.get("Https://test.service-now.com/api/test")
+        context_mixed = mock_urlopen.call_args[1].get("context")
+        assert context_mixed is not None
+
+        session.get("http://test.service-now.com/api/test")
+        context_http = mock_urlopen.call_args[1].get("context")
+        assert context_http is None

@@ -358,7 +358,7 @@ class HttpSession:
         req = urllib.request.Request(req_url, data=req_body, headers=req_headers, method=method)
 
         # TLS verification on by default with standard CA certificates
-        context = ssl.create_default_context() if req_url.startswith("https://") else None
+        context = ssl.create_default_context() if urlparse(req_url).scheme.lower() == "https" else None
 
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=context) as response:
