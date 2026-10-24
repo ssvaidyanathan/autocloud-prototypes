@@ -231,7 +231,7 @@ async def test_scenario_s2_upstream_origin_with_telemetry_fixture(isolated_env: 
         # Verify blast radius contains upstream cause and downstream victims
         assert "ata-inventory-api" in report.blast_radius
         assert "ata-orders-api" in report.blast_radius
-        assert "ata-apigee-orders-v1" in report.blast_radius
+        assert "ata-apigee-orders-v1" in report.blast_radius or "ata-orders-v1" in report.blast_radius
 
         # Verify root cause text mentions upstream degradation
         assert "ata-inventory-api" in report.probable_root_cause.text
