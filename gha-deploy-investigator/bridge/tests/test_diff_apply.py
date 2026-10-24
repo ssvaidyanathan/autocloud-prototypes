@@ -1,8 +1,9 @@
 import difflib
+import logging
 
 import pytest
 from bridge.app.fixer import apply_unified_diff
-from bridge.app.fixer.diff_apply import detect_crlf
+from bridge.app.fixer.diff_apply import detect_crlf, reconcile_hunk_headers
 
 ORIGINAL = "".join(f"line {i}\n" for i in range(1, 21))
 
@@ -58,8 +59,12 @@ class TestApplyUnifiedDiff:
         with pytest.raises(ValueError, match="ambiguous"):
             apply_unified_diff(original, diff)
 
-    def test_hunk_count_mismatch_raises(self) -> None:
+    def test_miscounted_hunk_header_is_reconciled_and_applied(self) -> None:
         diff = "--- a/m.py\n+++ b/m.py\n@@ -1,3 +1,3 @@\n-import os\n x = 1\n"
+        assert apply_unified_diff("import os\nx = 1\n", diff) == "x = 1\n"
+
+    def test_empty_hunk_body_raises(self) -> None:
+        diff = "--- a/m.py\n+++ b/m.py\n@@ -1,3 +1,3 @@\n"
         with pytest.raises(ValueError, match="counts"):
             apply_unified_diff("import os\nx = 1\n", diff)
 
@@ -71,6 +76,9 @@ class TestApplyUnifiedDiff:
             "garbage\n@@ -1 +1 @@\n-a\n+b\n",
             "--- a/m\n+++ b/m\n@@ -1 +1 @@\n-a\n+b\n--- a/n\n+++ b/n\n@@ -1 +1 @@\n-a\n+b\n",
             "--- a/m\n+++ b/m\n@@ -1 +1 @@\n*a\n+b\n",
+            "--- a/m\n+++ b/m\n@@ -1,4 +1,4 @@\n-a\n?b\n+c\n",
+            "--- a/m\n+++ b/m\n@@ -1,4 +1,4 @@\n",
+            "--- a/m\n+++ b/m\n@@ -1,9 +1,9 @@\n-a\n+b\n--- a/n\n+++ b/n\n@@ -1 +1 @@\n-a\n+b\n",
         ],
     )
     def test_malformed_diff_raises(self, diff: str) -> None:
@@ -121,6 +129,61 @@ class TestApplyUnifiedDiff:
             "\\ No newline at end of file\n+B\n\\ No newline at end of file\n"
         )
         assert apply_unified_diff(original, diff) == "a\r\nB"
+
+
+class TestReconcileHunkHeaders:
+    def test_rewrites_counts_and_preserves_heading_and_body(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -3,10 +3,1 @@ def run():\n x\n-y\n+Y\n+Z\n"
+        assert reconcile_hunk_headers(diff) == (
+            "--- a/f\n+++ b/f\n@@ -3,2 +3,3 @@ def run():\n x\n-y\n+Y\n+Z\n"
+        )
+
+    def test_omitted_counts_are_reconciled(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -2 +2 @@\n a\n-b\n+B\n"
+        assert "@@ -2,2 +2,2 @@\n" in reconcile_hunk_headers(diff)
+
+    def test_valid_difflib_diff_is_unchanged(self) -> None:
+        after = ORIGINAL.replace("line 2\n", "line two\n").replace("line 18\n", "")
+        diff = _difflib(ORIGINAL, after)
+        assert reconcile_hunk_headers(diff) == diff
+
+    def test_rewrite_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -1,5 +1,5 @@\n-a\n+b\n"
+        with caplog.at_level(logging.INFO, logger="bridge.app.fixer.diff_apply"):
+            reconcile_hunk_headers(diff)
+        assert [r.getMessage() for r in caplog.records] == [
+            "Normalised hunk header from @@ -1,5 +1,5 @@ to @@ -1,1 +1,1 @@"
+        ]
+
+    def test_apply_with_inaccurate_counts(self) -> None:
+        after = ORIGINAL.replace("line 5\n", "line five\n")
+        diff = "--- a/x\n+++ b/x\n@@ -4,7 +4,9 @@\n line 4\n-line 5\n+line five\n line 6\n"
+        assert apply_unified_diff(ORIGINAL, diff) == after
+
+    def test_apply_multi_hunk_with_miscounted_lines(self) -> None:
+        after = ORIGINAL.replace("line 2\n", "line two\n").replace("line 18\n", "")
+        diff = (
+            "--- a/x\n+++ b/x\n"
+            "@@ -1 +1 @@\n line 1\n-line 2\n+line two\n line 3\n"
+            "@@ -17,6 +17,6 @@\n line 17\n-line 18\n line 19\n"
+        )
+        assert apply_unified_diff(ORIGINAL, diff) == after
+
+    def test_apply_no_newline_marker_with_miscounted_lines(self) -> None:
+        diff = (
+            "--- a/f\n+++ b/f\n@@ -1,5 +1,5 @@\n a\n-b\n"
+            "\\ No newline at end of file\n+B\n\\ No newline at end of file\n"
+        )
+        assert apply_unified_diff("a\nb", diff) == "a\nB"
+
+    def test_apply_miscounted_marker_adds_trailing_newline(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n a\n-b\n\\ No newline at end of file\n+B\n"
+        assert apply_unified_diff("a\nb", diff) == "a\nB\n"
+
+    def test_miscounted_hunk_with_wrong_context_still_raises(self) -> None:
+        diff = "--- a/x\n+++ b/x\n@@ -4,9 +4,9 @@\n line 4\n-line 99\n+x\n"
+        with pytest.raises(ValueError, match="context not found"):
+            apply_unified_diff(ORIGINAL, diff)
 
 
 @pytest.mark.parametrize(

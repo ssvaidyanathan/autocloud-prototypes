@@ -9,6 +9,7 @@ declared line number is wrong, the hunk is relocated only if its old-side lines 
 at exactly one later position; ambiguous or missing matches raise ``ValueError``.
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
 
@@ -24,6 +25,8 @@ _HEADER_PREFIXES: tuple[str, ...] = (
     "new mode",
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class _Hunk:
@@ -38,6 +41,111 @@ class _Hunk:
     @property
     def old_lines(self) -> list[str]:
         return [text for kind, text in self.lines if kind != "+"]
+
+
+def _is_file_header(lines: list[str], idx: int) -> bool:
+    """True if ``lines[idx]`` starts a new file section of a multi-file diff."""
+    line = lines[idx]
+    if line.startswith("diff --git "):
+        return True
+    return line.startswith("--- ") and idx + 1 < len(lines) and lines[idx + 1].startswith("+++ ")
+
+
+def _header_counts_fit(lines: list[str], idx: int, old_left: int, new_left: int) -> bool:
+    """True if the declared counts consume the hunk body exactly as a strict parser would.
+
+    Such headers are left untouched, so diffs that are already valid (including ones
+    whose removed/added lines resemble ``---``/``+++`` file headers) never change.
+    """
+    while idx < len(lines) and (old_left > 0 or new_left > 0):
+        body = lines[idx].rstrip("\r")
+        if body.startswith(_NO_EOL_MARKER):
+            idx += 1
+            continue
+        if body.startswith("+"):
+            new_left -= 1
+        elif body.startswith("-"):
+            old_left -= 1
+        elif body.startswith(" ") or body == "":
+            old_left -= 1
+            new_left -= 1
+        else:
+            return False
+        idx += 1
+    if old_left != 0 or new_left != 0:
+        return False
+    while idx < len(lines) and (lines[idx].startswith(_NO_EOL_MARKER) or not lines[idx].strip()):
+        idx += 1
+    return (
+        idx == len(lines) or bool(_HUNK_HEADER_RE.match(lines[idx])) or _is_file_header(lines, idx)
+    )
+
+
+def _count_hunk_body(body: list[str]) -> tuple[int, int] | None:
+    """Return actual ``(old, new)`` line counts of a hunk body, or None if uncountable.
+
+    Trailing empty lines are treated as separator whitespace rather than context.
+    Returns None for an empty body or any line with an invalid prefix, so the strict
+    validator still rejects it.
+    """
+    lines = [line.rstrip("\r") for line in body]
+    while lines and lines[-1] == "":
+        lines.pop()
+    old = new = 0
+    counted = False
+    for line in lines:
+        if line.startswith(_NO_EOL_MARKER):  # "\ No newline at end of file" is not a hunk line
+            continue
+        if line.startswith("+"):
+            new += 1
+        elif line.startswith("-"):
+            old += 1
+        elif line.startswith(" ") or line == "":
+            old += 1
+            new += 1
+        else:
+            return None
+        counted = True
+    return (old, new) if counted else None
+
+
+def reconcile_hunk_headers(diff: str) -> str:
+    """Rewrite hunk header line counts to match the actual hunk bodies.
+
+    LLM-generated diffs often miscount ``@@ -a,b +c,d @@`` header counts. This is a
+    deterministic normalisation: only the counts in a header are changed; start
+    lines, trailing headings, and every body line are preserved verbatim. Headers
+    that already fit their body, and hunks whose body is empty or contains an
+    invalid line, are left unchanged so strict validation can still reject them.
+    """
+    lines = diff.split("\n")
+    idx = 0
+    while idx < len(lines):
+        match = _HUNK_HEADER_RE.match(lines[idx])
+        if not match:
+            idx += 1
+            continue
+        header_idx = idx
+        idx += 1
+        declared_old = int(match.group(2)) if match.group(2) is not None else 1
+        declared_new = int(match.group(4)) if match.group(4) is not None else 1
+        if _header_counts_fit(lines, idx, declared_old, declared_new):
+            continue
+        end = idx
+        while end < len(lines) and not (
+            _HUNK_HEADER_RE.match(lines[end]) or _is_file_header(lines, end)
+        ):
+            end += 1
+        counts = _count_hunk_body(lines[idx:end])
+        if counts is None:
+            continue
+        old_header = lines[header_idx]
+        heading = old_header[match.end() :]
+        new_header = f"@@ -{match.group(1)},{counts[0]} +{match.group(3)},{counts[1]} @@{heading}"
+        if new_header != old_header:
+            lines[header_idx] = new_header
+            logger.info("Normalised hunk header from %s to %s", old_header, new_header)
+    return "\n".join(lines)
 
 
 def _parse_hunks(diff: str) -> list[_Hunk]:
@@ -144,9 +252,11 @@ def _locate(original: list[str], hunk: _Hunk, pos: int) -> int:
 def apply_unified_diff(original: str, diff: str) -> str:
     """Apply a single-file unified diff to ``original`` and return the new content.
 
-    Raises ``ValueError`` if the diff is malformed or does not apply cleanly.
+    Hunk header line counts are first reconciled with the hunk bodies (see
+    :func:`reconcile_hunk_headers`). Raises ``ValueError`` if the diff is malformed
+    or does not apply cleanly.
     """
-    hunks = _parse_hunks(diff)
+    hunks = _parse_hunks(reconcile_hunk_headers(diff))
 
     if original == "":
         orig_lines: list[str] = []
@@ -197,4 +307,4 @@ def apply_unified_diff(original: str, diff: str) -> str:
     return "\n".join(out) + ("\n" if result_eol else "")
 
 
-__all__ = ["apply_unified_diff", "detect_crlf"]
+__all__ = ["apply_unified_diff", "detect_crlf", "reconcile_hunk_headers"]

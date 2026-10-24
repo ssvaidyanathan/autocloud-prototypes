@@ -1,6 +1,7 @@
 """Unit tests for LLM patch extraction and pre-flight validation (strategy llm_patch)."""
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Generator
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from agent.app.patch_extractor import (
     MIN_PATCH_CONFIDENCE,
     PatchValidationError,
     extract_fix_proposal,
+    reconcile_hunk_headers,
     split_multi_file_diff,
     validate_unified_diff,
 )
@@ -227,7 +229,8 @@ class TestInvalidPatchSyntax:
             "+++ b/src/a.py\n@@ -1,1 +1,1 @@\n-a\n+b",  # missing ---
             "--- a/src/a.py\n@@ -1,1 +1,1 @@\n-a\n+b",  # missing +++
             "--- a/src/a.py\n+++ b/src/a.py\n",  # no hunks
-            "--- a/src/a.py\n+++ b/src/a.py\n@@ -1,3 +1,3 @@\n-a\n+b",  # counts mismatch
+            "--- a/src/a.py\n+++ b/src/a.py\n@@ -1,3 +1,3 @@\n",  # empty hunk body
+            "--- a/src/a.py\n+++ b/src/a.py\n@@ -1,3 +1,3 @@\n-a\n?b",  # miscount + bad line
             "--- a/src/a.py\n+++ b/src/a.py\n@@ -1,1 +1,1 @@\n-a\n*b",  # bad body line
         ],
     )
@@ -309,6 +312,153 @@ class TestDiffHelpers:
 
     def test_split_multi_file_diff_returns_one_section_per_file(self) -> None:
         assert len(split_multi_file_diff(_diff("a.py") + "\n" + _diff("b.py"))) == 2
+
+
+class TestReconcileHunkHeaders:
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            ("@@ -10,9 +10,12 @@", "@@ -10,3 +10,3 @@"),  # over-estimated
+            ("@@ -10,1 +10,2 @@", "@@ -10,3 +10,3 @@"),  # under-estimated
+            ("@@ -10,5 +10,1 @@", "@@ -10,3 +10,3 @@"),  # mixed
+            ("@@ -10 +10 @@", "@@ -10,3 +10,3 @@"),  # omitted counts
+        ],
+    )
+    def test_rewrites_wrong_counts(self, header: str, expected: str) -> None:
+        body = " ctx\n-old\n+new\n ctx2"
+        diff = f"--- a/f.py\n+++ b/f.py\n{header}\n{body}"
+
+        assert reconcile_hunk_headers(diff) == f"--- a/f.py\n+++ b/f.py\n{expected}\n{body}"
+
+    def test_correct_header_is_unchanged(self) -> None:
+        diff = _diff("src/a.py", added=2, removed=1)
+
+        assert reconcile_hunk_headers(diff) == diff
+
+    def test_omitted_counts_that_fit_are_unchanged(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -3 +3 @@\n-a\n+b\n"
+
+        assert reconcile_hunk_headers(diff) == diff
+
+    def test_multiple_hunks_are_reconciled_independently(self) -> None:
+        diff = (
+            "--- a/f\n+++ b/f\n"
+            "@@ -2,7 +2,7 @@\n a\n-b\n+B\n"
+            "@@ -20,2 +20,3 @@\n x\n+y\n z\n"
+            "@@ -40,1 +40,1 @@\n-p\n-q\n+r\n"
+        )
+
+        result = reconcile_hunk_headers(diff)
+
+        assert result == (
+            "--- a/f\n+++ b/f\n"
+            "@@ -2,2 +2,2 @@\n a\n-b\n+B\n"
+            "@@ -20,2 +20,3 @@\n x\n+y\n z\n"
+            "@@ -40,2 +40,1 @@\n-p\n-q\n+r\n"
+        )
+
+    def test_trailing_heading_is_preserved(self) -> None:
+        diff = (
+            "--- a/t.py\n+++ b/t.py\n@@ -10,5 +10,5 @@ def test_foo():\n     x = 1\n-    y\n+    z"
+        )
+
+        result = reconcile_hunk_headers(diff)
+
+        assert "@@ -10,2 +10,2 @@ def test_foo():\n" in result
+
+    def test_no_newline_marker_is_preserved_and_not_counted(self) -> None:
+        body = " a\n-b\n\\ No newline at end of file\n+B\n\\ No newline at end of file\n"
+        diff = "--- a/f\n+++ b/f\n@@ -1,4 +1,4 @@\n" + body
+
+        assert reconcile_hunk_headers(diff) == "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n" + body
+
+    def test_trailing_blank_lines_are_not_counted_as_context(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -1,9 +1,9 @@\n-a\n+b\n\n\n"
+
+        assert reconcile_hunk_headers(diff).startswith("--- a/f\n+++ b/f\n@@ -1,1 +1,1 @@\n")
+
+    def test_interior_blank_line_counts_as_context(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -1,9 +1,9 @@\n a\n\n-c\n+C"
+
+        assert "@@ -1,3 +1,3 @@" in reconcile_hunk_headers(diff)
+
+    def test_body_lines_are_never_altered(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -1,8 +1,1 @@\n ctx\n--- not a header\n+new\n"
+
+        result = reconcile_hunk_headers(diff)
+
+        assert result.split("\n")[3:] == diff.split("\n")[3:]
+        assert "@@ -1,2 +1,2 @@" in result
+
+    def test_removed_and_added_lines_resembling_file_headers_keep_valid_header(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n--- old\n+++ new\n x\n"
+
+        assert reconcile_hunk_headers(diff) == diff
+
+    @pytest.mark.parametrize(
+        "diff",
+        [
+            "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n",  # empty body
+            "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n-a\n*b\n",  # invalid prefix
+        ],
+    )
+    def test_uncountable_hunks_are_left_for_strict_rejection(self, diff: str) -> None:
+        assert reconcile_hunk_headers(diff) == diff
+        with pytest.raises(PatchValidationError):
+            validate_unified_diff(diff)
+
+    def test_reconciled_diff_passes_strict_validation(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -1,10 +1,8 @@\n a\n-b\n+B\n+C\n d"
+
+        with pytest.raises(PatchValidationError, match="counts"):
+            validate_unified_diff(diff)
+        assert validate_unified_diff(reconcile_hunk_headers(diff))[2] == 3
+
+    def test_rewrite_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -1,10 +1,10 @@\n-a\n+b"
+
+        with caplog.at_level(logging.INFO, logger="agent.app.patch_extractor"):
+            reconcile_hunk_headers(diff)
+
+        assert any(
+            r.levelno == logging.INFO
+            and r.getMessage() == "Normalised hunk header from @@ -1,10 +1,10 @@ to @@ -1,1 +1,1 @@"
+            for r in caplog.records
+        )
+
+    def test_unchanged_header_is_not_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.INFO, logger="agent.app.patch_extractor"):
+            reconcile_hunk_headers(_diff())
+
+        assert not [r for r in caplog.records if "Normalised hunk header" in r.getMessage()]
+
+    def test_extract_fix_proposal_accepts_miscounted_llm_patch(self) -> None:
+        miscounted = (
+            "--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+            "@@ -10,10 +10,10 @@ def test_add():\n"
+            "     result = add(1, 2)\n-    assert result == 4\n+    assert result == 3\n"
+        )
+
+        proposal = extract_fix_proposal(
+            _raw([{"path": "tests/test_calc.py", "diff": miscounted}]), BASE
+        )
+
+        assert proposal.status == "proposed"
+        stored = proposal.patches[0].diff
+        assert stored is not None
+        assert "@@ -10,2 +10,2 @@ def test_add():" in stored
+        assert validate_unified_diff(stored)[2] == 2
+
+    def test_extract_fix_proposal_reconciles_multi_file_diff_field(self) -> None:
+        def section(path: str) -> str:
+            return f"--- a/{path}\n+++ b/{path}\n@@ -1,7 +1,7 @@\n-x\n+y"
+
+        raw = {"confidence": 0.9, "diff": section("a.py") + "\n" + section("b.py")}
+
+        proposal = extract_fix_proposal(raw, BASE)
+
+        assert proposal.status == "proposed"
+        assert all("@@ -1,1 +1,1 @@" in (p.diff or "") for p in proposal.patches)
 
 
 # --------------------------------------------------------------------------------------
