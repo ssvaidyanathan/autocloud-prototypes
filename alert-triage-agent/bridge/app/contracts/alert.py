@@ -94,7 +94,7 @@ def normalize_resource_name(
         if m:
             return m.group(1).strip()
 
-        # If it's a resource path e.g. projects/.../services/ata-inventory-api
+        # If it's a resource path e.g. projects/.../services/service-name
         if " " not in raw_str and "{" not in raw_str and "/" in raw_str:
             return raw_str.split("/")[-1].strip()
 
