@@ -20,6 +20,10 @@ import importlib.util
 import io
 import json
 import logging
+import os
+import ssl
+import sys
+import types
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -719,3 +723,246 @@ class TestHttpSession:
         session.get("http://test.service-now.com/api/test")
         context_http = mock_urlopen.call_args[1].get("context")
         assert context_http is None
+
+
+class TestTLSCertificateHandling:
+    """Tests for CA bundle resolution, TLS verification enforcement, and cert verification error hints."""
+
+    def test_cafile_precedence_flag_over_env_and_certifi(self, monkeypatch):
+        """CLI flag takes precedence over environment variables and certifi."""
+        monkeypatch.setenv("SSL_CERT_FILE", "/env/ssl_cert.pem")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/env/requests_ca.pem")
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+
+        resolved = snow.resolve_ca_bundle(ca_bundle="/flag/custom_ca.pem")
+        assert resolved == "/flag/custom_ca.pem"
+
+    def test_cafile_precedence_env_ssl_cert_file_over_requests_ca_bundle_and_certifi(self, monkeypatch):
+        """SSL_CERT_FILE takes precedence over REQUESTS_CA_BUNDLE and certifi when no flag is given."""
+        monkeypatch.setenv("SSL_CERT_FILE", "/env/ssl_cert.pem")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/env/requests_ca.pem")
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+
+        resolved = snow.resolve_ca_bundle(ca_bundle=None)
+        assert resolved == "/env/ssl_cert.pem"
+
+    def test_cafile_precedence_env_requests_ca_bundle_over_certifi(self, monkeypatch):
+        """REQUESTS_CA_BUNDLE takes precedence over certifi when SSL_CERT_FILE is unset."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/env/requests_ca.pem")
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+
+        resolved = snow.resolve_ca_bundle(ca_bundle=None)
+        assert resolved == "/env/requests_ca.pem"
+
+    def test_cafile_precedence_env_empty_or_whitespace_falls_through(self, monkeypatch):
+        """Empty or whitespace-only environment variables are ignored and stripped, falling through."""
+        # 1. Whitespace in SSL_CERT_FILE falls through to valid REQUESTS_CA_BUNDLE (and strips whitespace)
+        monkeypatch.setenv("SSL_CERT_FILE", "   ")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "  /env/requests_ca.pem  ")
+        assert snow.resolve_ca_bundle(ca_bundle=None) == "/env/requests_ca.pem"
+
+        # 2. Both empty/whitespace falls through to certifi
+        monkeypatch.setenv("SSL_CERT_FILE", "")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "   \t\n  ")
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+        assert snow.resolve_ca_bundle(ca_bundle=None) == "/certifi/where.pem"
+
+        # 3. SSL_CERT_FILE with padding whitespace is stripped
+        monkeypatch.setenv("SSL_CERT_FILE", "  /env/ssl_cert.pem  ")
+        assert snow.resolve_ca_bundle(ca_bundle=None) == "/env/ssl_cert.pem"
+
+    def test_cafile_precedence_certifi_over_default(self, monkeypatch):
+        """certifi.where() is used when no flag or environment variables are provided."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+
+        resolved = snow.resolve_ca_bundle(ca_bundle=None)
+        assert resolved == "/certifi/where.pem"
+
+    def test_cafile_precedence_default_when_no_certifi(self, monkeypatch):
+        """Returns None (system default) when no flag, no env, certifi is missing, and not macOS with cert.pem."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.setitem(sys.modules, "certifi", None)
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        resolved = snow.resolve_ca_bundle(ca_bundle=None)
+        assert resolved is None
+
+    def test_cafile_precedence_macos_etc_ssl_cert_pem_over_default(self, monkeypatch):
+        """On macOS, falls back to /etc/ssl/cert.pem if certifi is not importable."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.setitem(sys.modules, "certifi", None)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(os.path, "exists", lambda p: p == "/etc/ssl/cert.pem")
+
+        resolved = snow.resolve_ca_bundle(ca_bundle=None)
+        assert resolved == "/etc/ssl/cert.pem"
+
+    def test_cafile_precedence_macos_etc_ssl_cert_pem_ignored_on_non_darwin(self, monkeypatch):
+        """On non-Darwin platforms, /etc/ssl/cert.pem is not used as an automatic fallback."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.setitem(sys.modules, "certifi", None)
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(os.path, "exists", lambda p: p == "/etc/ssl/cert.pem")
+
+        resolved = snow.resolve_ca_bundle(ca_bundle=None)
+        assert resolved is None
+
+    def test_cafile_precedence_certifi_over_macos_etc_ssl_cert_pem(self, monkeypatch):
+        """certifi takes precedence over macOS /etc/ssl/cert.pem fallback."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(os.path, "exists", lambda p: p == "/etc/ssl/cert.pem")
+
+        resolved = snow.resolve_ca_bundle(ca_bundle=None)
+        assert resolved == "/certifi/where.pem"
+
+    @patch("ssl.create_default_context")
+    def test_create_ssl_context_calls_create_default_context_with_cafile(self, mock_create_ctx):
+        """create_ssl_context resolves bundle and passes cafile to ssl.create_default_context."""
+        mock_ctx = MagicMock()
+        mock_create_ctx.return_value = mock_ctx
+
+        ctx = snow.create_ssl_context(ca_bundle="/path/to/my_bundle.pem")
+        mock_create_ctx.assert_called_once_with(cafile="/path/to/my_bundle.pem")
+        assert ctx == mock_ctx
+
+    def test_tls_verification_never_disabled(self):
+        """TLS certificate verification and hostname checking are never disabled."""
+        ctx_default = snow.create_ssl_context(ca_bundle=None)
+        assert ctx_default.verify_mode == ssl.CERT_REQUIRED
+        assert ctx_default.check_hostname is True
+
+        # Insecure bypass flags must NOT exist
+        parser = snow.build_arg_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--insecure"])
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--no-verify"])
+        with pytest.raises(SystemExit):
+            parser.parse_args(["-k"])
+
+    def test_is_cert_verification_error_detection(self):
+        """is_cert_verification_error correctly identifies SSL verification errors across structures."""
+        cert_err = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        url_err = urllib.error.URLError(cert_err)
+        req_err = snow.RequestError(f"Network error: {url_err.reason}")
+        req_err.__cause__ = url_err
+
+        assert snow.is_cert_verification_error(cert_err) is True
+        assert snow.is_cert_verification_error(url_err) is True
+        assert snow.is_cert_verification_error(req_err) is True
+        assert snow.is_cert_verification_error(snow.RequestError("Network error: [SSL: CERTIFICATE_VERIFY_FAILED] ...")) is True
+
+        # Non-verification errors should return False
+        assert snow.is_cert_verification_error(snow.RequestError("Network error: Connection refused")) is False
+        assert snow.is_cert_verification_error(urllib.error.URLError("Connection reset")) is False
+        assert snow.is_cert_verification_error(ValueError("Invalid argument")) is False
+
+    @patch("urllib.request.urlopen")
+    def test_cert_verification_failure_in_main_prints_hint_and_no_traceback(self, mock_urlopen, capsys, monkeypatch):
+        """main exits non-zero and prints macOS/certifi/ca-bundle hint with no traceback on CERTIFICATE_VERIFY_FAILED."""
+        monkeypatch.setenv("SNOW_PASSWORD", "secret")
+        cert_err = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed (_ssl.c:1029)")
+        mock_urlopen.side_effect = urllib.error.URLError(cert_err)
+
+        exit_code = snow.main([
+            "--instance-url", "https://test.service-now.com",
+            "--username", "admin",
+            "--older-than", "10",
+        ])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        err_out = captured.err
+
+        # Check required hint contents
+        assert "Install Certificates.command" in err_out
+        assert "/etc/ssl/cert.pem" in err_out
+        assert "pip install certifi" in err_out
+        assert "--ca-bundle" in err_out
+        assert "SSL_CERT_FILE" in err_out
+
+        # Verify NO traceback is output
+        assert "Traceback (most recent call last)" not in err_out
+        assert "Traceback (most recent call last)" not in captured.out
+
+    def test_missing_ca_bundle_file_in_main_exits_nonzero(self, capsys):
+        """Specifying a nonexistent CA bundle file exits non-zero with a clear error."""
+        exit_code = snow.main([
+            "--instance-url", "https://test.service-now.com",
+            "--username", "admin",
+            "--older-than", "10",
+            "--ca-bundle", "/path/to/definitely_nonexistent_bundle.pem",
+        ])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Configuration Error: CA bundle file not found" in captured.err
+
+    @patch("urllib.request.urlopen")
+    def test_cert_verification_failure_in_delete_prints_hint(self, mock_urlopen, capsys):
+        """delete_incidents detects cert failure, prints hint, and aborts immediately without retrying."""
+        cert_err = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        mock_urlopen.side_effect = urllib.error.URLError(cert_err)
+
+        session = snow.HttpSession()
+        successful, failures = snow.delete_incidents(
+            session=session,
+            instance_url="https://test.service-now.com",
+            incidents=[{"sys_id": "sys123", "number": "INC001"}],
+        )
+
+        assert len(successful) == 0
+        assert len(failures) == 1
+        assert "CERTIFICATE_VERIFY_FAILED" in failures[0]["error"]
+        assert mock_urlopen.call_count == 1  # No wasteful retries on cert failure
+
+        captured = capsys.readouterr()
+        assert "Install Certificates.command" in captured.err
+        assert "pip install certifi" in captured.err
+
+    def test_ca_bundle_arg_passed_to_session(self, tmp_path, monkeypatch):
+        """Valid --ca-bundle file is configured on HttpSession in main."""
+        monkeypatch.setenv("SNOW_PASSWORD", "secret")
+        fake_ca = tmp_path / "custom_ca.pem"
+        fake_ca.write_text("-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n")
+
+        session_instances = []
+        original_init = snow.HttpSession.__init__
+
+        def mock_session_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            session_instances.append(self)
+
+        monkeypatch.setattr(snow.HttpSession, "__init__", mock_session_init)
+        monkeypatch.setattr(snow, "fetch_incidents", lambda *args, **kwargs: [])
+
+        exit_code = snow.main([
+            "--instance-url", "https://test.service-now.com",
+            "--username", "admin",
+            "--older-than", "10",
+            "--ca-bundle", str(fake_ca),
+        ])
+
+        assert exit_code == 0
+        assert len(session_instances) == 1
+        assert session_instances[0].ca_bundle == str(fake_ca)

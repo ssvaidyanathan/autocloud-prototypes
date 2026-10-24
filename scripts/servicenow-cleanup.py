@@ -77,11 +77,11 @@ def setup_logger(verbose: bool = False, secrets_to_mask: Optional[List[str]] = N
     logger = logging.getLogger("servicenow_cleanup")
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
 
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stderr)
-        formatter = logging.Formatter("[%(levelname)s] %(message)s")
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
+    logger.handlers.clear()
+    handler = logging.StreamHandler(sys.stderr)
+    formatter = logging.Formatter("[%(levelname)s] %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
     sanitizer = SensitiveDataFilter(secrets_to_mask=secrets_to_mask)
     logger.addFilter(sanitizer)
@@ -299,13 +299,85 @@ class RequestError(Exception):
 # Backward compatibility alias
 RequestException = RequestError
 
+SSL_VERIFY_HINT = (
+    "TLS certificate verification failed.\n"
+    "Hints to resolve CA certificate verification issues:\n"
+    "  - On macOS: run 'Install Certificates.command' for your Python version\n"
+    "    (e.g., /Applications/Python 3.x/Install Certificates.command)\n"
+    "  - Or use the macOS system certificate bundle: --ca-bundle /etc/ssl/cert.pem\n"
+    "  - Or install certifi: pip install certifi\n"
+    "  - Or specify custom CA bundle via --ca-bundle PATH or SSL_CERT_FILE / REQUESTS_CA_BUNDLE"
+)
+
+
+def resolve_ca_bundle(ca_bundle: Optional[str] = None) -> Optional[str]:
+    """
+    Resolve CA certificate bundle path following precedence:
+    1. Explicit CLI flag (--ca-bundle)
+    2. Environment variables: SSL_CERT_FILE or REQUESTS_CA_BUNDLE
+    3. certifi.where() if certifi is installed
+    4. /etc/ssl/cert.pem on macOS (if present)
+    5. None (system default)
+    """
+    if ca_bundle and ca_bundle.strip():
+        return ca_bundle.strip()
+
+    for env_var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        val = os.environ.get(env_var)
+        if val and val.strip():
+            return val.strip()
+
+    try:
+        import certifi  # type: ignore[import-untyped]
+        return certifi.where()
+    except ImportError:
+        pass
+
+    if sys.platform == "darwin" and os.path.exists("/etc/ssl/cert.pem"):
+        return "/etc/ssl/cert.pem"
+
+    return None
+
+
+def create_ssl_context(ca_bundle: Optional[str] = None) -> ssl.SSLContext:
+    """Create an SSLContext with TLS verification strictly enforced."""
+    cafile = resolve_ca_bundle(ca_bundle)
+    return ssl.create_default_context(cafile=cafile)
+
+
+def is_cert_verification_error(exc: BaseException) -> bool:
+    """Determine whether an exception was caused by SSL/TLS certificate verification failure."""
+    curr: Optional[BaseException] = exc
+    visited = set()
+    while curr is not None and id(curr) not in visited:
+        visited.add(id(curr))
+        if isinstance(curr, ssl.SSLCertVerificationError):
+            return True
+        reason = getattr(curr, "reason", None)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return True
+        if reason and "CERTIFICATE_VERIFY_FAILED" in str(reason):
+            return True
+        if "CERTIFICATE_VERIFY_FAILED" in str(curr):
+            return True
+        curr = curr.__cause__ or curr.__context__
+    return False
+
+
+def print_ssl_cert_hint(exc: Optional[BaseException] = None) -> None:
+    """Print clear troubleshooting hint for TLS certificate verification failure."""
+    if exc:
+        sys.stderr.write(f"Error: {exc}\n")
+    sys.stderr.write(f"{SSL_VERIFY_HINT}\n")
+
 
 class HttpSession:
     """Lightweight HTTP client built on urllib.request."""
 
-    def __init__(self) -> None:
+    def __init__(self, ca_bundle: Optional[str] = None) -> None:
         self.headers: Dict[str, str] = {}
         self._auth: Optional[Tuple[str, str]] = None
+        self.ca_bundle = ca_bundle
 
     def set_basic_auth(self, username: str, password: str) -> None:
         self._auth = (username, password)
@@ -335,6 +407,7 @@ class HttpSession:
         data: Optional[bytes] = None,
         headers: Optional[Dict[str, str]] = None,
         timeout: float = 30.0,
+        ca_bundle: Optional[str] = None,
     ) -> HTTPResponse:
         req_url = url
         if params:
@@ -358,7 +431,8 @@ class HttpSession:
         req = urllib.request.Request(req_url, data=req_body, headers=req_headers, method=method)
 
         # TLS verification on by default with standard CA certificates
-        context = ssl.create_default_context() if urlparse(req_url).scheme.lower() == "https" else None
+        bundle_to_use = ca_bundle if ca_bundle is not None else self.ca_bundle
+        context = create_ssl_context(bundle_to_use) if urlparse(req_url).scheme.lower() == "https" else None
 
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=context) as response:
@@ -533,6 +607,12 @@ def delete_incidents(
                 break
 
             except (RequestError, urllib.error.URLError, TimeoutError, OSError) as exc:
+                if is_cert_verification_error(exc):
+                    if logger:
+                        logger.error("TLS certificate verification failed during deletion: %s", exc)
+                    print_ssl_cert_hint(exc)
+                    failures.append({"number": number, "sys_id": sys_id, "error": str(exc)})
+                    return successful, failures
                 last_error = str(exc)
                 if attempt < max_retries:
                     if logger:
@@ -701,6 +781,12 @@ Note:
         "--username",
         default=None,
         help="ServiceNow username (or set SNOW_USERNAME).",
+    )
+    parser.add_argument(
+        "--ca-bundle",
+        default=None,
+        metavar="PATH",
+        help="Path to custom CA certificate bundle file (or set SSL_CERT_FILE / REQUESTS_CA_BUNDLE).",
     )
 
     # Filtering Options (Combinable with AND)
@@ -921,9 +1007,13 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return args
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    """Main CLI execution flow."""
+def _run_servicenow_cleanup(argv: Optional[List[str]] = None) -> int:
+    """Internal execution flow for ServiceNow cleanup."""
     args = parse_arguments(argv)
+
+    if args.ca_bundle and not os.path.isfile(args.ca_bundle):
+        sys.stderr.write(f"Configuration Error: CA bundle file not found: {args.ca_bundle}\n")
+        return 1
 
     # Credential Resolution
     try:
@@ -962,7 +1052,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.debug("Constructed ServiceNow encoded query: %s", encoded_query)
 
     # Initialize authenticated HTTP session
-    session = HttpSession()
+    session = HttpSession(ca_bundle=args.ca_bundle)
     session.set_basic_auth(username, password)
     session.headers.update(
         {
@@ -985,6 +1075,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger=logger,
         )
     except Exception as exc:
+        if is_cert_verification_error(exc):
+            print_ssl_cert_hint(exc)
+            return 1
         logger.error("Error communicating with ServiceNow Table API: %s", exc)
         return 1
 
@@ -1063,6 +1156,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Main CLI execution flow."""
+    try:
+        return _run_servicenow_cleanup(argv)
+    except Exception as exc:
+        if is_cert_verification_error(exc):
+            print_ssl_cert_hint(exc)
+            return 1
+        raise
 
 
 if __name__ == "__main__":
