@@ -574,24 +574,67 @@ class TestRuffImportOrganization:
         assert "\n" not in patch.content.replace("\r\n", "")
 
     def test_crlf_without_trailing_newline_preserved(self) -> None:
-        original = "import os\r\nimport sys\r\nprint(sys); x = 1"
+        original = "import os\r\n\r\nprint(os)\r\nimport sys\r\nprint(sys); x = 1"
         log = (
-            "pkg/crlf.py:1:8: F401 `os` imported but unused\n"
-            "pkg/crlf.py:3:11: E702 Multiple statements on one line (semicolon)\n"
+            "pkg/crlf.py:4:1: E402 Module level import not at top of file\n"
+            "pkg/crlf.py:5:11: E702 Multiple statements on one line (semicolon)\n"
         )
         proposal = generate_lint_fix(
             _incident(), _report_with_log(log), _fetch({"pkg/crlf.py": original})
         )
         assert proposal.status == "proposed", proposal.rationale
         patch = proposal.patches[0]
-        assert patch.content == "import sys\r\n\r\nprint(sys)\r\nx = 1"
+        assert patch.content == "import os\r\nimport sys\r\n\r\nprint(os)\r\nprint(sys)\r\nx = 1"
         assert resolve_patch_content(patch, original) == patch.content
+
+    def test_unhoisted_fix_keeps_layout_ruff_rejects_in_original(self) -> None:
+        # No blank line after the imports: ruff's defaults reject the original layout, so the
+        # target evidently uses settings ruff cannot see; a fix that moves no import keeps it.
+        original = "import os\r\nimport sys\r\nprint(sys); x = 1"
+        diags = [
+            LintDiagnostic("pkg/crlf.py", 1, "F401", "`os` imported but unused"),
+            LintDiagnostic("pkg/crlf.py", 3, "E702", "Multiple statements on one line"),
+        ]
+        assert fix_source(original, diags) == "import sys\r\nprint(sys)\r\nx = 1"
+
+    def test_unhoisted_fix_resections_emptied_section(self, tmp_path: Path) -> None:
+        # Removing the only third-party import leaves two blank lines; ruff accepts the
+        # original layout, so the result is re-sectioned to stay I001-clean.
+        original = "import os\n\nimport fastapi\n\nfrom app.config import cfg\n\nprint(os, cfg)\n"
+        diag = LintDiagnostic("app/main.py", 3, "F401", "`fastapi` imported but unused")
+        fixed = fix_source(original, [diag])
+        (tmp_path / "app").mkdir()
+        (tmp_path / "app" / "__init__.py").touch()
+        assert fixed == "import os\n\nfrom app.config import cfg\n\nprint(os, cfg)\n"
+        assert _ruff_lint(fixed, SAMPLE_APP, "app/main.py", tmp_path) == ""
 
     def test_organize_imports_uses_stdin_path_for_relative_imports(self) -> None:
         src = "from .config import cfg\nimport os\n\nprint(os, cfg)\n"
         assert organize_imports(src, "app/main.py") == (
             "import os\n\nfrom .config import cfg\n\nprint(os, cfg)\n"
         )
+
+    @pytest.mark.parametrize("path", ["app/main.py", "src/app/main.py", "app/api/routes.py"])
+    def test_absolute_first_party_import_gets_own_section(self, path: str) -> None:
+        src = "from app.config import cfg\nimport fastapi\nimport os\n\nprint(os, fastapi, cfg)\n"
+        assert organize_imports(src, path) == (
+            "import os\n\nimport fastapi\n\nfrom app.config import cfg\n\nprint(os, fastapi, cfg)\n"
+        )
+
+    def test_first_party_detection_is_not_hardcoded(self) -> None:
+        src = "import requests\nfrom mypkg.util import x\n\nprint(requests, x)\n"
+        expected = "import requests\n\nfrom mypkg.util import x\n\nprint(requests, x)\n"
+        assert organize_imports(src, "mypkg/core.py") == expected
+        # Outside its own package, the import is third-party and shares the section.
+        assert organize_imports(src, "other/core.py") == (
+            "import requests\nfrom mypkg.util import x\n\nprint(requests, x)\n"
+        )
+
+    @pytest.mark.parametrize("path", ["../escape/m.py", "/abs/pkg/m.py", "my-dir/m.py"])
+    def test_unsafe_paths_are_not_mirrored(self, path: str) -> None:
+        assert s1_lint._package_dirs(path) == []
+        src = "import sys\nimport os\n\nprint(os, sys)\n"
+        assert organize_imports(src, path) == "import os\nimport sys\n\nprint(os, sys)\n"
 
     def test_organize_imports_ignores_invoking_directory_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -604,6 +647,71 @@ class TestRuffImportOrganization:
         assert organize_imports(src, "m.py") == (
             "from typing import Any, Optional\n\nprint(Any, Optional)\n"
         )
+
+
+FIRST_PARTY_SOURCE = (
+    "import json\nimport os\n\nimport fastapi\n\nfrom app.config import cfg\n\n"
+    "print(os, fastapi, cfg)\n"
+)
+
+
+@requires_ruff
+class TestAbsoluteFirstPartyImports:
+    """Regression for review finding R1: first-party imports must keep their own section."""
+
+    uses_ruff = True
+
+    @pytest.fixture(autouse=True)
+    def _app_package(self, tmp_path: Path) -> None:
+        # The lint checker sees the target's own package on disk, as in the sample app.
+        (tmp_path / "app").mkdir()
+        (tmp_path / "app" / "__init__.py").touch()
+
+    def test_original_is_i001_clean(self, tmp_path: Path) -> None:
+        diagnostics = _ruff_lint(FIRST_PARTY_SOURCE, SAMPLE_APP, "app/main.py", tmp_path)
+        assert "F401" in diagnostics and "I001" not in diagnostics
+
+    def test_f401_only_fix_passes_ruff(self, tmp_path: Path) -> None:
+        diag = LintDiagnostic("app/main.py", 1, "F401", "`json` imported but unused")
+        fixed = fix_source(FIRST_PARTY_SOURCE, [diag])
+        assert fixed == (
+            "import os\n\nimport fastapi\n\nfrom app.config import cfg\n\nprint(os, fastapi, cfg)\n"
+        )
+        assert _ruff_lint(fixed, SAMPLE_APP, "app/main.py", tmp_path) == ""
+
+    def test_e402_hoist_passes_ruff(self, tmp_path: Path) -> None:
+        original = (
+            "import os\n\nimport fastapi\n\nprint(os, fastapi)\n"
+            "from app.config import cfg\nimport json\n\nprint(cfg, json)\n"
+        )
+        diags = [
+            LintDiagnostic("app/main.py", line, "E402", "Module level import not at top of file")
+            for line in (6, 7)
+        ]
+        fixed = fix_source(original, diags)
+        assert fixed == (
+            "import json\nimport os\n\nimport fastapi\n\nfrom app.config import cfg\n\n"
+            "print(os, fastapi)\n\nprint(cfg, json)\n"
+        )
+        assert _ruff_lint(fixed, SAMPLE_APP, "app/main.py", tmp_path) == ""
+
+    def test_src_layout_hoist_passes_ruff(self, tmp_path: Path) -> None:
+        project = tmp_path / "config"
+        project.mkdir()
+        (project / "pyproject.toml").write_text('[tool.ruff]\nsrc = ["src"]\n')
+        (tmp_path / "src" / "app").mkdir(parents=True)
+        (tmp_path / "src" / "app" / "__init__.py").touch()
+        original = (
+            "import os\n\nprint(os)\nfrom app.config import cfg\nimport fastapi\n\n"
+            "print(cfg, fastapi)\n"
+        )
+        diags = [
+            LintDiagnostic("src/app/main.py", line, "E402", "Module level import not at top")
+            for line in (4, 5)
+        ]
+        fixed = fix_source(original, diags)
+        assert "import fastapi\n\nfrom app.config import cfg\n" in fixed
+        assert _ruff_lint(fixed, project, "src/app/main.py", tmp_path) == ""
 
 
 class TestRuffFallback:
@@ -627,8 +735,10 @@ class TestRuffFallback:
             _FakeCompleted(0, stdout=""),
             _FakeCompleted(0, stdout="import os\nimport sys\n\nprint(os)\n"),  # code altered
             _FakeCompleted(0, stdout="import os\nimport sys\n\nprint(os, sys\n"),  # unparsable
+            _FakeCompleted(0, stdout="import sys\n\nprint(os, sys)\n"),  # import dropped
             subprocess.TimeoutExpired(cmd="ruff", timeout=10),
             FileNotFoundError("ruff"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
         ],
     )
     def test_ruff_failure_returns_source(
@@ -651,10 +761,26 @@ class TestRuffFallback:
         assert "ruff import organization" in caplog.text
         assert calls[0]["timeout"] == 10
         assert calls[0]["input"] == self.SRC
+        assert calls[0]["encoding"] == "utf-8"
         cmd = calls[0]["cmd"]
         assert isinstance(cmd, list)
         assert cmd[-3:] == ["--stdin-filename", "pkg/m.py", "-"]
         assert "--isolated" in cmd and "--fix" in cmd
+        assert cmd[cmd.index("--config") + 1] == 'lint.isort.known-first-party = ["pkg"]'
+
+    def test_top_level_file_passes_no_first_party_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            calls.append(cmd)
+            return _FakeCompleted(0, stdout=self.SRC)
+
+        monkeypatch.setattr(s1_lint, "_ruff_executable", lambda: "/usr/bin/ruff")
+        monkeypatch.setattr(s1_lint.subprocess, "run", fake_run)
+        assert organize_imports(self.SRC, "m.py") == self.SRC
+        assert "--config" not in calls[0]
 
     def test_generate_lint_fix_passes_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: list[str] = []

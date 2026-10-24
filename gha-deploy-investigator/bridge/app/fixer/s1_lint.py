@@ -8,7 +8,8 @@ they cannot turn the pipeline green.
 
 After the AST transformations, import blocks are organized with the ``ruff`` CLI (rule
 ``I001``) when it is available, so relocated imports satisfy isort-style sectioning. Any
-ruff failure falls back to the unorganized AST result.
+ruff failure falls back to the unorganized AST result. Fixes that move no import are only
+re-sectioned when ruff's view of the original file agrees with its layout (do no harm).
 """
 
 import ast
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Optional
 
 from ..contracts.incident import Incident
@@ -326,40 +328,75 @@ def _non_import_statements(source: str) -> list[str]:
     return [ast.dump(s) for s in tree.body if not isinstance(s, (ast.Import, ast.ImportFrom))]
 
 
+def _imported_bindings(source: str) -> set[tuple[str, str, Optional[str], int]]:
+    """Return every ``(module, name, asname, level)`` imported anywhere in ``source``."""
+    bindings: set[tuple[str, str, Optional[str], int]] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            bindings.update(("", a.name, a.asname, 0) for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            bindings.update((node.module or "", a.name, a.asname, node.level) for a in node.names)
+    return bindings
+
+
+def _package_dirs(path: str) -> list[str]:
+    """Return the directory components of a relative repository path, or [] if unsafe.
+
+    Only plain relative paths whose directories are valid Python identifiers are mirrored,
+    so a crafted path can never escape the temporary directory.
+    """
+    pure = PurePosixPath(path)
+    if pure.is_absolute():
+        return []
+    dirs = list(pure.parts[:-1])
+    if not all(part.isidentifier() for part in dirs):
+        return []
+    return dirs
+
+
+def _ruff_import_command(ruff: str, path: str, first_party: list[str]) -> list[str]:
+    cmd = [ruff, "check", "--isolated"]
+    if first_party:
+        names = ", ".join(f'"{name}"' for name in first_party)
+        cmd += ["--config", f"lint.isort.known-first-party = [{names}]"]
+    cmd += ["--fix", "--quiet", "--select", RULE_IMPORT_ORDER, "--stdin-filename", path, "-"]
+    return cmd
+
+
 def organize_imports(source: str, path: str) -> str:
     """Sort and section import blocks with ``ruff --select I001``; unchanged source on failure.
 
-    Ruff runs with ``--isolated`` from an empty directory so neither the bridge's own ruff
+    Ruff runs with ``--isolated`` from a temporary directory so neither the bridge's own ruff
     configuration nor packages next to its working directory influence the result. The
-    output keeps the line-ending style and trailing-newline state of ``source``.
+    file's package directories are mirrored there (with ``__init__.py`` files) and declared
+    as ``known-first-party``, so absolute imports of the target's own packages (e.g. ``app``
+    for ``app/main.py`` or ``src/app/main.py``) land in the first-party section, as the
+    target's own ruff run would place them. The output keeps the line-ending style and
+    trailing-newline state of ``source``.
     """
     ruff = _ruff_executable()
     if ruff is None:
         logger.warning("ruff CLI not found; import blocks left unorganized for %s", path)
         return source
-    cmd = [
-        ruff,
-        "check",
-        "--isolated",
-        "--fix",
-        "--quiet",
-        "--select",
-        RULE_IMPORT_ORDER,
-        "--stdin-filename",
-        path,
-        "-",
-    ]
+    dirs = _package_dirs(path)
+    cmd = _ruff_import_command(ruff, path, sorted(set(dirs)))
     try:
         with tempfile.TemporaryDirectory() as workdir:
+            package = Path(workdir)
+            for part in dirs:
+                package = package / part
+                package.mkdir(exist_ok=True)
+                (package / "__init__.py").touch()
             result = subprocess.run(
                 cmd,
                 input=source,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=RUFF_TIMEOUT_SECONDS,
                 cwd=workdir,
             )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
         logger.warning("ruff import organization failed for %s: %s", path, exc)
         return source
     if result.returncode != 0 or not result.stdout.strip():
@@ -377,11 +414,13 @@ def organize_imports(source: str, path: str) -> str:
     if source.endswith("\n"):
         organized += eol
     try:
-        unchanged = _non_import_statements(organized) == _non_import_statements(source)
+        unchanged = _non_import_statements(organized) == _non_import_statements(source) and (
+            _imported_bindings(organized) == _imported_bindings(source)
+        )
     except SyntaxError:
         unchanged = False
     if not unchanged:
-        logger.warning("ruff import organization altered non-import code for %s; ignored", path)
+        logger.warning("ruff import organization altered code or imports for %s; ignored", path)
         return source
     return organized
 
@@ -448,10 +487,13 @@ def fix_source(source: str, diagnostics: list[LintDiagnostic], path: Optional[st
         hoist_keys = [replacement if k == key else k for k in hoist_keys]
 
     # 3. Relocate remaining late imports to the leading import block.
+    hoisted = False
     for key in hoist_keys:
         if not key:
             continue
-        lines = _hoist_import(lines, tree, key)
+        moved = _hoist_import(lines, tree, key)
+        hoisted = hoisted or moved != lines
+        lines = moved
         tree = ast.parse("\n".join(lines))
 
     fixed = eol.join(lines) + (eol if trailing_newline else "")
@@ -460,7 +502,15 @@ def fix_source(source: str, diagnostics: list[LintDiagnostic], path: Optional[st
     except SyntaxError as exc:  # pragma: no cover - defensive
         raise UnsafeFixError(f"Fixed source does not parse: {exc}") from exc
     stdin_path = path or (diagnostics[0].path if diagnostics else DEFAULT_STDIN_FILENAME)
-    return organize_imports(fixed, stdin_path)
+    organized = organize_imports(fixed, stdin_path)
+    if hoisted or organized == fixed:
+        return organized
+    # No import was moved. Re-section only when ruff accepts the original layout as-is, so
+    # a target whose isort settings ruff cannot see never gets untouched blocks rearranged.
+    if organize_imports(source, stdin_path) == source:
+        return organized
+    logger.info("Original import layout differs from ruff defaults for %s; kept as-is", stdin_path)
+    return fixed
 
 
 def _unified_diff(path: str, before: str, after: str) -> str:
