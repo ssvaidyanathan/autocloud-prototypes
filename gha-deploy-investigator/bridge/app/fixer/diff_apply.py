@@ -103,6 +103,20 @@ def _parse_hunks(diff: str) -> list[_Hunk]:
     return hunks
 
 
+def detect_crlf(text: str) -> bool:
+    """Return True if every newline-terminated line of ``text`` ends with ``\\r``.
+
+    Unterminated content after the last newline is ignored, so a CRLF file without a
+    trailing newline is still detected as CRLF. Text with no newline is not CRLF.
+    """
+    if "\n" not in text:
+        return False
+    lines = text.split("\n")
+    # The final element is either "" (trailing newline) or unterminated content.
+    lines.pop()
+    return bool(lines) and all(line.endswith("\r") for line in lines)
+
+
 def _matches(original: list[str], start: int, expected: list[str]) -> bool:
     if start < 0 or start + len(expected) > len(original):
         return False
@@ -142,7 +156,7 @@ def apply_unified_diff(original: str, diff: str) -> str:
         ends_with_eol = orig_lines[-1] == ""
         if ends_with_eol:
             orig_lines.pop()
-    crlf = bool(orig_lines) and all(line.endswith("\r") for line in orig_lines)
+    crlf = detect_crlf(original)
 
     out: list[str] = []
     pos = 0
@@ -173,7 +187,14 @@ def apply_unified_diff(original: str, diff: str) -> str:
 
     if not out:
         return ""
+    if crlf:
+        # Every terminated line ends with CRLF. The original's unterminated last line
+        # has no ``\r`` and needs one if it is no longer last; an unterminated final
+        # output line carries no line ending at all.
+        out = [line if line.endswith("\r") else line + "\r" for line in out]
+        if not result_eol:
+            out[-1] = out[-1][:-1]
     return "\n".join(out) + ("\n" if result_eol else "")
 
 
-__all__ = ["apply_unified_diff"]
+__all__ = ["apply_unified_diff", "detect_crlf"]

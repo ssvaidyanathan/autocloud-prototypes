@@ -15,6 +15,7 @@ from typing import Callable, Iterable, Optional
 
 from ..contracts.incident import Incident
 from ..contracts.report import FilePatch, FixProposal, Report
+from .diff_apply import detect_crlf
 from .interface import MAX_CHANGED_FILES, validate_fix_guardrails
 
 # Rule identifiers follow pycodestyle / pyflakes numbering as reported by ruff and flake8.
@@ -282,8 +283,7 @@ def fix_source(source: str, diagnostics: list[LintDiagnostic]) -> str:
     trailing_newline = source.endswith("\n")
     lines = source.splitlines()
     # Preserve CRLF using the same rule as ``apply_unified_diff`` so content and diff agree.
-    physical = source.split("\n")[:-1] if trailing_newline else source.split("\n")
-    eol = "\r\n" if physical and all(line.endswith("\r") for line in physical) else "\n"
+    eol = "\r\n" if detect_crlf(source) else "\n"
 
     # Resolve position-independent targets against the original tree.
     unused: list[tuple[str, str]] = []

@@ -2,6 +2,7 @@ import difflib
 
 import pytest
 from bridge.app.fixer import apply_unified_diff
+from bridge.app.fixer.diff_apply import detect_crlf
 
 ORIGINAL = "".join(f"line {i}\n" for i in range(1, 21))
 
@@ -105,3 +106,34 @@ class TestApplyUnifiedDiff:
     def test_crlf_original_preserves_line_endings(self) -> None:
         diff = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n a\n-b\n+B\n"
         assert apply_unified_diff("a\r\nb\r\n", diff) == "a\r\nB\r\n"
+
+    def test_crlf_original_without_trailing_newline_stays_uniform(self) -> None:
+        original = "a\r\nb\r\nc"
+        diff = (
+            "--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n a\n-b\n+B\n c\n+d\n\\ No newline at end of file\n"
+        )
+        assert apply_unified_diff(original, diff) == "a\r\nB\r\nc\r\nd"
+
+    def test_crlf_original_without_trailing_newline_edit_last_line(self) -> None:
+        original = "a\r\nb"
+        diff = (
+            "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n a\n-b\n"
+            "\\ No newline at end of file\n+B\n\\ No newline at end of file\n"
+        )
+        assert apply_unified_diff(original, diff) == "a\r\nB"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a\r\nb\r\n", True),
+        ("a\r\nb", True),
+        ("a\nb\n", False),
+        ("a\r\nb\nc", False),
+        ("a", False),
+        ("a\r", False),
+        ("", False),
+    ],
+)
+def test_detect_crlf_ignores_unterminated_last_line(text: str, expected: bool) -> None:
+    assert detect_crlf(text) is expected

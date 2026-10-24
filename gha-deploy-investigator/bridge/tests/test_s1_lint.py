@@ -270,6 +270,20 @@ class TestGenerateLintFix:
         assert patch.content is not None and "\r\n" in patch.content
         assert resolve_patch_content(patch, original) == patch.content
 
+    def test_s1_diff_roundtrips_crlf_source_no_trailing_newline(self) -> None:
+        original = "import os\r\nimport sys\r\nprint(sys); x = 1"
+        log = (
+            "pkg/crlf.py:1:8: F401 `os` imported but unused\n"
+            "pkg/crlf.py:3:11: E702 Multiple statements on one line (semicolon)\n"
+        )
+        proposal = generate_lint_fix(
+            _incident(), _report_with_log(log), _fetch({"pkg/crlf.py": original})
+        )
+        assert proposal.status == "proposed", proposal.rationale
+        patch = proposal.patches[0]
+        assert patch.content == "import sys\r\nprint(sys)\r\nx = 1"
+        assert resolve_patch_content(patch, original) == patch.content
+
     def test_s1_diff_roundtrips_no_trailing_newline_eof_edit(self) -> None:
         original = "x = 1; y = 2"
         log = "pkg/eof.py:1:6: E702 Multiple statements on one line (semicolon)\n"
