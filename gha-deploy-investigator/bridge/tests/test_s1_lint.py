@@ -237,9 +237,9 @@ class TestGenerateLintFix:
         proposal = generate_lint_fix(_incident(), _report_with_log(log), _fetch(files))
         assert proposal.status == "no_safe_fix"
 
-    def test_default_branch_base_is_no_safe_fix(self) -> None:
+    def test_autofix_branch_base_is_no_safe_fix(self) -> None:
         proposal = generate_lint_fix(
-            _incident(branch="main"),
+            _incident(branch="autofix/run-9"),
             _report_with_log(CONCISE_LOG),
             _fetch({"pkg/mod.py": SOURCE}),
         )

@@ -239,8 +239,8 @@ class TestExecuteFixProposal:
         assert fake_gh.deleted_refs == ["refs/heads/autofix/run-555"]
         assert fake_gh.pulls == []
 
-    @pytest.mark.parametrize("base", ["main", "master", ""])
-    def test_refuses_default_branch_target(self, fake_gh: FakeGitHub, base: str) -> None:
+    @pytest.mark.parametrize("base", ["autofix/run-1", "refs/heads/autofix/run-1", "", "  "])
+    def test_refuses_autofix_or_empty_branch_target(self, fake_gh: FakeGitHub, base: str) -> None:
         result = _writer(fake_gh).execute_fix_proposal(
             _incident(), _report(), _proposal(target_branch_base=base)
         )

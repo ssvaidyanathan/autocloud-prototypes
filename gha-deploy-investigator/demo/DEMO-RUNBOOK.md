@@ -96,8 +96,8 @@ Each scenario follows a standardized operational cycle:
 2. `git pull origin main` to ensure a pristine local branch.
 3. Inject defect and commit: `../autocloud-prototypes/gha-deploy-investigator/demo/scenarios/trigger-<scenario>-failure.sh . --commit && git push origin main`
 4. Observe the pipeline failure and autonomous investigation on ServiceNow and GitHub.
-5. Reset: `git revert HEAD --no-edit && git push origin main`
-6. Confirm the pipeline completes with all jobs green before moving to the next scenario.
+5. Reset by **merging the auto-fix PR** once its CI is green (see [Section 4A](#a-primary-reset-merge-the-auto-fix-pr)). If no fix PR is opened, or its CI fails, fall back to `git revert` (see [Section 4B](#b-fallback-reset-git-revert)).
+6. Confirm the pipeline on `main` completes with all jobs green before moving to the next scenario.
 
 ---
 
@@ -146,10 +146,19 @@ git pull origin main
 - **Unrelated Observations**: Empty or notes any non-fatal pre-existing tooling warnings.
 
 #### Step 6: Reset
-```bash
-cd gdi-sample-pipeline-app
-git revert HEAD --no-edit && git push origin main
-```
+1. **Primary — merge the auto-fix PR.** Wait for the `autofix/run-<run_id>` PR's CI to go green
+   (ServiceNow gets an `[Auto-Fix Verification] ... PASSED` work note), then merge it:
+   ```bash
+   cd gdi-sample-pipeline-app
+   gh pr list --head autofix/run-<run_id>
+   gh pr merge <pr_number> --squash --delete-branch
+   git pull origin main
+   ```
+2. **Fallback — revert.** If no fix PR was opened, or its CI failed:
+   ```bash
+   cd gdi-sample-pipeline-app
+   git revert HEAD --no-edit && git push origin main
+   ```
 *Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 ---
@@ -196,10 +205,19 @@ git pull origin main
 - **Warning Segregation**: Non-fatal runtime warnings (e.g., deprecation warnings from test frameworks) appear strictly under **Unrelated Observations**, never in causal remediation.
 
 #### Step 6: Reset
-```bash
-cd gdi-sample-pipeline-app
-git revert HEAD --no-edit && git push origin main
-```
+1. **Primary — merge the auto-fix PR.** Wait for the `autofix/run-<run_id>` PR's CI to go green
+   (ServiceNow gets an `[Auto-Fix Verification] ... PASSED` work note), then merge it:
+   ```bash
+   cd gdi-sample-pipeline-app
+   gh pr list --head autofix/run-<run_id>
+   gh pr merge <pr_number> --squash --delete-branch
+   git pull origin main
+   ```
+2. **Fallback — revert.** If no fix PR was opened, or its CI failed:
+   ```bash
+   cd gdi-sample-pipeline-app
+   git revert HEAD --no-edit && git push origin main
+   ```
 *Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 ---
@@ -244,10 +262,19 @@ git pull origin main
   - Remove the invalid `COPY` instruction from `Dockerfile`.
 
 #### Step 6: Reset
-```bash
-cd gdi-sample-pipeline-app
-git revert HEAD --no-edit && git push origin main
-```
+1. **Primary — merge the auto-fix PR.** Wait for the `autofix/run-<run_id>` PR's CI to go green
+   (ServiceNow gets an `[Auto-Fix Verification] ... PASSED` work note), then merge it:
+   ```bash
+   cd gdi-sample-pipeline-app
+   gh pr list --head autofix/run-<run_id>
+   gh pr merge <pr_number> --squash --delete-branch
+   git pull origin main
+   ```
+2. **Fallback — revert.** If no fix PR was opened, or its CI failed:
+   ```bash
+   cd gdi-sample-pipeline-app
+   git revert HEAD --no-edit && git push origin main
+   ```
 *Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 ---
@@ -294,17 +321,69 @@ git pull origin main
 - **Unrelated Observations**: Any auxiliary deployment warnings placed in separate section.
 
 #### Step 6: Reset
-```bash
-cd gdi-sample-pipeline-app
-git revert HEAD --no-edit && git push origin main
-```
+1. **Primary — merge the auto-fix PR.** Wait for the `autofix/run-<run_id>` PR's CI to go green
+   (ServiceNow gets an `[Auto-Fix Verification] ... PASSED` work note), then merge it:
+   ```bash
+   cd gdi-sample-pipeline-app
+   gh pr list --head autofix/run-<run_id>
+   gh pr merge <pr_number> --squash --delete-branch
+   git pull origin main
+   ```
+2. **Fallback — revert.** If no fix PR was opened, or its CI failed:
+   ```bash
+   cd gdi-sample-pipeline-app
+   git revert HEAD --no-edit && git push origin main
+   ```
 
 #### Note on Declarative Deployment Invariant
-`scripts/deploy.sh` enforces `--clear-env-vars` when `EXTRA_ENV_VARS` is empty. Reverting the commit automatically clears `CACHE_PREWARM_BUFFER_MB=2048` from the Cloud Run service, guaranteeing a clean return to baseline.
+`scripts/deploy.sh` enforces `--clear-env-vars` when `EXTRA_ENV_VARS` is empty. Merging the fix PR (or reverting the commit) automatically clears `CACHE_PREWARM_BUFFER_MB=2048` from the Cloud Run service, guaranteeing a clean return to baseline.
 
 ---
 
 ## 4. Reset & Cleanup Procedure
+
+The demo baseline is restored by the auto-fix PR itself. The full flow is:
+
+**trigger failure → fix PR created → fix PR CI runs and goes green → MERGE fix PR → baseline restored.**
+
+Prerequisite: the bridge must run with `AUTOFIX_ENABLED=true` and a GitHub App/token that can
+create branches and pull requests on the demo repository. With the kill switch off
+(`AUTOFIX_ENABLED=false`, the default) no fix PR is opened, so use the fallback in 4B.
+
+### A. Primary Reset: Merge the Auto-Fix PR
+
+1. After the investigation completes, the bridge opens a PR from `autofix/run-<run_id>` into the
+   failing branch (`main`). The PR link appears in:
+   - the ServiceNow incident work notes (`[Auto-Fix Initiated] Pull Request #<n> ...`), and
+   - the `Autocloud / ServiceNow Incident Link` Check Run on the failing commit.
+2. CI runs on the `autofix/*` branch. Those runs are verification only: the bridge records the
+   result on the original ServiceNow incident and **never** starts a new investigation or another
+   fix attempt for them.
+3. When the fix PR's CI is green (`[Auto-Fix Verification] ... PASSED` work note), review and merge it:
+   ```bash
+   cd gdi-sample-pipeline-app
+   gh pr merge <pr_number> --squash --delete-branch
+   git pull origin main
+   ```
+4. Confirm the pipeline on `main` completes green before starting the next scenario.
+
+### B. Fallback Reset: `git revert`
+
+Use this when **no fix PR was generated** (for example the proposal was `no_safe_fix` or
+`unsupported`, or guardrails rejected it), or when **the fix PR's CI fails**
+(`[Auto-Fix Verification] ... FAILED` work note):
+
+```bash
+cd gdi-sample-pipeline-app
+# Close the failed fix PR (if any) and delete its branch
+gh pr close <pr_number> --delete-branch
+# Revert the offending scenario commit on main
+git revert <offending_commit_sha> --no-edit && git push origin main
+```
+
+If the scenario commit is still `HEAD`, `git revert HEAD --no-edit` is equivalent.
+
+### C. Local Clean Slate
 
 If you injected defects locally or need an immediate clean slate across all files:
 

@@ -153,11 +153,111 @@ class TestGuardrails:
         assert ok is True
         assert reason == ""
 
-    @pytest.mark.parametrize("base", ["main", "master", ""])
+    @pytest.mark.parametrize(
+        "base",
+        ["", "   ", "refs/heads/", "autofix/run-1", "refs/heads/autofix/run-1"],
+    )
     def test_forbidden_target_branch(self, base: str) -> None:
         ok, reason = validate_fix_guardrails(_proposal([], base=base))
         assert ok is False
         assert "target branch" in reason
+
+    @pytest.mark.parametrize(
+        "base", ["main", "master", "refs/heads/main", "release/1.x", "feature/autofix/x"]
+    )
+    def test_pr_into_default_or_feature_branch_allowed(self, base: str) -> None:
+        patch = FilePatch(path="src/app.py", action="modify", diff=_diff(1, 1))
+        assert validate_fix_guardrails(_proposal([patch], base=base)) == (True, "")
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "./.github/workflows/ci.yml",
+            "src/../.github/workflows/ci.yml",
+            ".GITHUB/workflows/ci.yml",
+            "config/.ENV",
+            "certs/server.PEM",
+            ".//.github/x.yml",
+        ],
+    )
+    def test_forbidden_path_after_normalisation(self, path: str) -> None:
+        ok, reason = validate_fix_guardrails(_proposal([FilePatch(path=path, action="modify")]))
+        assert ok is False
+        assert "forbidden path" in reason or "Invalid patch path" in reason
+
+    @pytest.mark.parametrize(
+        ("path", "why"),
+        [
+            ("", "empty"),
+            ("   ", "empty"),
+            ("/.github/workflows/ci.yml", "absolute"),
+            ("/etc/passwd", "absolute"),
+            ("../outside.py", "traversal"),
+            ("src/../../x.py", "traversal"),
+            ("src\\app.py", "backslash"),
+            ("src/app\x00.py", "NUL"),
+            (".", "resolve"),
+            ("./", "resolve"),
+        ],
+    )
+    def test_invalid_path_rejected(self, path: str, why: str) -> None:
+        ok, reason = validate_fix_guardrails(_proposal([FilePatch(path=path, action="modify")]))
+        assert ok is False
+        assert "Invalid patch path" in reason
+        assert why in reason
+
+    def test_normalised_safe_path_allowed(self) -> None:
+        patch = FilePatch(path="./src/app.py", action="modify", diff=_diff(1))
+        assert validate_fix_guardrails(_proposal([patch]))[0] is True
+
+    def test_duplicate_paths_rejected(self) -> None:
+        patches = [
+            FilePatch(path="src/a.py", action="modify", diff=_diff(1)),
+            FilePatch(path="./src/a.py", action="modify", diff=_diff(1)),
+        ]
+        ok, reason = validate_fix_guardrails(_proposal(patches))
+        assert ok is False
+        assert "Duplicate" in reason
+
+    def test_create_content_counted(self) -> None:
+        at_limit = FilePatch(path="src/n.py", action="create", content="x\n" * MAX_LINE_DELTA)
+        over = FilePatch(path="src/n.py", action="create", content="x\n" * (MAX_LINE_DELTA + 1))
+        assert validate_fix_guardrails(_proposal([at_limit]))[0] is True
+        ok, reason = validate_fix_guardrails(_proposal([over]))
+        assert ok is False
+        assert "exceeds maximum" in reason
+
+    def test_modify_content_only_counted(self) -> None:
+        patch = FilePatch(path="src/a.py", action="modify", content="x\n" * 1000)
+        ok, reason = validate_fix_guardrails(_proposal([patch]))
+        assert ok is False
+        assert "exceeds maximum" in reason
+
+    def test_modify_prefers_diff_when_present(self) -> None:
+        patch = FilePatch(path="src/a.py", action="modify", content="x\n" * 1000, diff=_diff(2, 2))
+        assert validate_fix_guardrails(_proposal([patch]))[0] is True
+
+    def test_mixed_create_and_modify_sum_toward_limit(self) -> None:
+        patches = [
+            FilePatch(path="src/n.py", action="create", content="x\n" * 30),
+            FilePatch(path="src/a.py", action="modify", diff=_diff(MAX_LINE_DELTA - 30 + 1)),
+        ]
+        assert validate_fix_guardrails(_proposal(patches))[0] is False
+
+    def test_removed_lines_starting_with_dashes_counted(self) -> None:
+        header = ["--- a/q.sql", "+++ b/q.sql", "@@ -1,60 +1,0 @@"]
+        diff = "\n".join(header + ["--- comment"] * (MAX_LINE_DELTA + 1))
+        patch = FilePatch(path="db/q.sql", action="modify", diff=diff)
+        ok, reason = validate_fix_guardrails(_proposal([patch]))
+        assert ok is False
+        assert "exceeds maximum" in reason
+
+    def test_delete_patch_rejected(self) -> None:
+        ok, reason = validate_fix_guardrails(
+            _proposal([FilePatch(path="src/a.py", action="delete")])
+        )
+        assert ok is False
+        assert "Delete" in reason
 
     @pytest.mark.parametrize(
         "path",

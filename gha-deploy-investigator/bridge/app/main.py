@@ -1,17 +1,19 @@
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 
-from .adapters import IncidentRef, get_adapter
+from .adapters import GitHubAdapter, IncidentRef, ServiceNowAdapter, get_adapter
 from .config import BridgeConfig, get_settings
+from .contracts.report import PullRequestRef
 from .contracts.result import InvestigationResult
 from .core.auth import verify_oidc_token
 from .core.dedup import CallbackDedupRegistry, get_dedup_registry
 from .core.tasks import TaskDispatcher
 from .fixer.ci_listener import CIFeedbackListener
-from .fixer.interface import is_autofix_branch
+from .fixer.interface import FixPRWriterBase, is_autofix_branch
+from .fixer.writer import FixPRWriter
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,45 @@ def set_ci_feedback_listener(listener: Optional[CIFeedbackListener]) -> None:
     """Helper to set or reset the CIFeedbackListener instance (e.g. for testing)."""
     global _ci_listener
     _ci_listener = listener
+
+
+# Global auto-fix PR writer (overridable in tests)
+_fix_pr_writer: Optional[FixPRWriterBase] = None
+
+
+def get_fix_pr_writer(settings: BridgeConfig) -> FixPRWriterBase:
+    global _fix_pr_writer
+    if _fix_pr_writer is None:
+        _fix_pr_writer = FixPRWriter(config=settings)
+    return _fix_pr_writer
+
+
+def set_fix_pr_writer(writer: Optional[FixPRWriterBase]) -> None:
+    """Helper to set or reset the FixPRWriter instance (e.g. for testing)."""
+    global _fix_pr_writer
+    _fix_pr_writer = writer
+
+
+def _maybe_open_fix_pr(
+    result: InvestigationResult, settings: BridgeConfig
+) -> Optional[PullRequestRef]:
+    """Open an auto-fix PR for a completed GitHub investigation, if enabled and proposed.
+
+    Never raises: auto-fix is best-effort and must not block ticket creation.
+    """
+    if settings.autofix_enabled is not True:
+        return None
+    if result.report is None or result.incident is None:
+        return None
+    proposal = result.report.fix_proposal
+    if proposal is None or proposal.status != "proposed":
+        return None
+    try:
+        writer = get_fix_pr_writer(settings)
+        return writer.execute_fix_proposal(result.incident, result.report, proposal)
+    except Exception as exc:
+        logger.error("Auto-fix PR execution failed for %s: %s", result.incident_id, exc)
+        return None
 
 
 @app.get("/health")
@@ -248,24 +289,42 @@ async def handle_callback_report(
                 detail="Missing report or incident in completed result",
             )
 
-        servicenow_adapter = get_adapter("servicenow", settings)
-        sn_ref = servicenow_adapter.create_incident_with_report(result.incident, result.report)
+        # Auto-fix runs first so the PR link can be included in the ticket and Check Run.
+        pr_ref = _maybe_open_fix_pr(result, settings)
+        if pr_ref is not None:
+            result.pull_request = pr_ref
+
+        servicenow_adapter = cast(ServiceNowAdapter, get_adapter("servicenow", settings))
+        sn_ref = servicenow_adapter.create_incident_with_report(
+            result.incident, result.report, pull_request=pr_ref
+        )
         logger.info(
             "Successfully opened ServiceNow incident %s for GitHub failure", sn_ref.external_key
         )
 
+        if pr_ref is not None:
+            try:
+                servicenow_adapter.post_fix_pr_note(sn_ref, pr_ref)
+            except Exception as exc:
+                logger.warning("Failed to post fix PR work note to ServiceNow: %s", exc)
+
         if settings.enable_github_writeback:
             try:
-                github_adapter = get_adapter("github", settings)
-                github_adapter.post_report_link(result.incident, result.report, sn_ref)
+                github_adapter = cast(GitHubAdapter, get_adapter("github", settings))
+                github_adapter.post_report_link(
+                    result.incident, result.report, sn_ref, pull_request=pr_ref
+                )
             except Exception as exc:
                 logger.warning("Failed to post report link to GitHub Check Run: %s", exc)
 
-        return {
+        response_body: dict[str, Any] = {
             "status": "ok",
             "servicenow_ticket": sn_ref.external_key,
             "incident_id": result.incident_id,
         }
+        if pr_ref is not None:
+            response_body["fix_pr_url"] = pr_ref.pr_url
+        return response_body
 
     # Standard forward flow for ServiceNow or other sources
     try:

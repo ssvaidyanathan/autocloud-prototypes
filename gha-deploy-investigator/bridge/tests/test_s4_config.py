@@ -178,7 +178,9 @@ class TestNoSafeFixAndUnsupported:
         assert generate_memory_config_fix(_report(), {}, BASE).status == "no_safe_fix"
 
     def test_guardrail_failure_on_forbidden_base_branch_yields_no_safe_fix(self) -> None:
-        proposal = generate_memory_config_fix(_report(), {"scripts/deploy.sh": DEPLOY_SH}, "main")
+        proposal = generate_memory_config_fix(
+            _report(), {"scripts/deploy.sh": DEPLOY_SH}, "autofix/run-9"
+        )
 
         assert proposal.status == "no_safe_fix"
         assert "Guardrail" in proposal.rationale

@@ -1,3 +1,4 @@
+import posixpath
 import re
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -6,6 +7,9 @@ from ..contracts.incident import Incident
 from ..contracts.report import FilePatch, FixProposal, PullRequestRef, Report
 
 AUTOFIX_BRANCH_PREFIX: str = "autofix/"
+# Matched case-insensitively against the *normalised* patch path.
+# NOTE: ``.*\.env.*`` deliberately over-blocks (e.g. ``app.environment.ts``). That fails
+# safe; do not narrow it without adding equivalent coverage for real dotenv files.
 FORBIDDEN_PATH_PATTERNS: tuple[str, ...] = (
     r"^\.github/.*",
     r".*\.env.*",
@@ -15,7 +19,11 @@ FORBIDDEN_PATH_PATTERNS: tuple[str, ...] = (
 )
 MAX_CHANGED_FILES: int = 3
 MAX_LINE_DELTA: int = 50
+# Fix PRs may *target* default branches (that is the point of a PR); what is forbidden is
+# committing to them directly. The writer only ever commits to ``autofix/*`` head branches.
+# Kept for reference/back-compat of the public export.
 FORBIDDEN_TARGET_BRANCHES: tuple[str, ...] = ("main", "master")
+_REFS_HEADS_PREFIX = "refs/heads/"
 
 
 def is_autofix_branch(branch: Optional[str]) -> bool:
@@ -30,10 +38,83 @@ def build_autofix_branch_name(run_id: int | str) -> str:
     return f"{AUTOFIX_BRANCH_PREFIX}run-{run_id}"
 
 
+def normalize_branch_ref(branch: Optional[str]) -> str:
+    """Strip whitespace and a leading ``refs/heads/`` prefix from a branch reference."""
+    clean = (branch or "").strip()
+    if clean.startswith(_REFS_HEADS_PREFIX):
+        clean = clean[len(_REFS_HEADS_PREFIX) :]
+    return clean
+
+
+def normalize_patch_path(path: Optional[str]) -> tuple[Optional[str], str]:
+    """Normalise an untrusted repository-relative path.
+
+    Returns ``(normalised_path, "")`` on success or ``(None, reason)`` when the path is
+    empty, contains NUL bytes or backslashes, is absolute, or escapes via ``..``.
+    """
+    if path is None or not path.strip():
+        return None, "empty path"
+    if "\x00" in path:
+        return None, "path contains NUL byte"
+    if "\\" in path:
+        return None, "path contains backslash"
+    if path.startswith("/"):
+        return None, "absolute path"
+    if ".." in path.split("/"):
+        return None, "path traversal ('..')"
+    normalised = posixpath.normpath(path)
+    if normalised in ("", ".") or normalised.startswith("/") or ".." in normalised.split("/"):
+        return None, "path does not resolve to a repository file"
+    return normalised, ""
+
+
+def _count_diff_lines(diff: str) -> int:
+    """Count added/removed lines in a unified diff, skipping only per-file headers.
+
+    ``---``/``+++`` lines are treated as headers only when they appear outside a hunk
+    (i.e. before the first ``@@`` of a file section), so removed SQL/Lua comment lines
+    such as ``--- note`` are still counted.
+    """
+    count = 0
+    in_hunk = False
+    for line in diff.splitlines():
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if line.startswith("diff --git"):
+            in_hunk = False
+            continue
+        if not in_hunk and (line.startswith("---") or line.startswith("+++")):
+            continue
+        # Hunk-less fragments are tolerated: other +/- lines count wherever they appear.
+        if line.startswith("+") or line.startswith("-"):
+            count += 1
+    return count
+
+
+def _patch_line_delta(patch: FilePatch) -> int:
+    """Measure the number of lines a patch writes."""
+    if patch.action == "create":
+        return len((patch.content or "").splitlines())
+    # modify
+    if patch.diff:
+        return _count_diff_lines(patch.diff)
+    if patch.content is not None:
+        return len(patch.content.splitlines())
+    return 0
+
+
 def validate_fix_guardrails(proposal: FixProposal) -> tuple[bool, str]:
     """Validate that a FixProposal satisfies repository safety guardrails."""
-    if not proposal.target_branch_base or proposal.target_branch_base in FORBIDDEN_TARGET_BRANCHES:
-        return False, f"Invalid or forbidden target branch base: '{proposal.target_branch_base}'"
+    clean_base = normalize_branch_ref(proposal.target_branch_base)
+    if not clean_base:
+        return False, f"Invalid target branch base: '{proposal.target_branch_base}'"
+    if is_autofix_branch(clean_base):
+        return (
+            False,
+            f"Invalid or forbidden target branch base '{proposal.target_branch_base}': "
+            "fix PRs must not be stacked on autofix branches",
+        )
 
     if len(proposal.patches) > MAX_CHANGED_FILES:
         return (
@@ -41,23 +122,26 @@ def validate_fix_guardrails(proposal: FixProposal) -> tuple[bool, str]:
             f"Patch touches {len(proposal.patches)} files, exceeding limit of {MAX_CHANGED_FILES}",
         )
 
+    normalised_paths: list[str] = []
     total_line_delta = 0
     for patch in proposal.patches:
+        normalised, reason = normalize_patch_path(patch.path)
+        if normalised is None:
+            return False, f"Invalid patch path '{patch.path}': {reason}"
         for pattern in FORBIDDEN_PATH_PATTERNS:
-            if re.search(pattern, patch.path):
+            if re.search(pattern, normalised, re.IGNORECASE):
                 return (
                     False,
                     f"Patch touches forbidden path: '{patch.path}' matching pattern '{pattern}'",
                 )
+        if patch.action == "delete":
+            # The deleted size cannot be measured without the base blob; refuse outright.
+            return False, f"Delete patches are not permitted: '{patch.path}'"
+        normalised_paths.append(normalised)
+        total_line_delta += _patch_line_delta(patch)
 
-        if patch.diff:
-            lines = [
-                line
-                for line in patch.diff.splitlines()
-                if (line.startswith("+") and not line.startswith("+++"))
-                or (line.startswith("-") and not line.startswith("---"))
-            ]
-            total_line_delta += len(lines)
+    if len(set(normalised_paths)) != len(normalised_paths):
+        return False, "Duplicate patch paths in proposal"
 
     if total_line_delta > MAX_LINE_DELTA:
         return (
@@ -75,25 +159,21 @@ class FixPRWriterBase(ABC):
     @abstractmethod
     def create_fix_branch(self, owner: str, repo: str, base_sha: str, run_id: int | str) -> str:
         """Create git branch autofix/run-{run_id} pointing to base_sha."""
-        pass
 
     @abstractmethod
     def commit_patch(
         self, owner: str, repo: str, branch: str, patch: FilePatch, message: str
     ) -> str:
         """Commit a single file patch to the specified branch and return the new commit SHA."""
-        pass
 
     @abstractmethod
     def create_pull_request(
         self, owner: str, repo: str, title: str, body: str, head_branch: str, base_branch: str
     ) -> PullRequestRef:
         """Open a pull request from head_branch to base_branch."""
-        pass
 
     @abstractmethod
     def execute_fix_proposal(
         self, incident: Incident, report: Report, proposal: FixProposal
     ) -> Optional[PullRequestRef]:
         """Execute end-to-end fix proposal workflow if guardrails pass."""
-        pass
