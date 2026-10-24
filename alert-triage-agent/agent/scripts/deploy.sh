@@ -48,7 +48,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --execution-environment=gen2 \
     --add-volume="name=incidents-volume,type=cloud-storage,bucket=${INCIDENTS_BUCKET},mount-options=only-dir=knowledge/incident-manager" \
     --add-volume-mount="volume=incidents-volume,mount-path=/knowledge/incident-manager" \
-    --set-labels="app=alert-triage-agent,component=${NAME_PREFIX}-agent,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}" \
+    --labels="app=alert-triage-agent,component=${NAME_PREFIX}-agent,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}" \
     --set-env-vars="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${INCIDENTS_BUCKET},INCIDENT_STORE_PATH=/knowledge/incident-manager,BRIDGE_URL=${BRIDGE_URL},AGENT_URL=${AGENT_URL}"
 
 # 3. Ensure IAM run.invoker is granted only to bridge-sa and authorized caller SAs

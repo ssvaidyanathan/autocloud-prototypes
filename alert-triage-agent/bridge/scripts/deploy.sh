@@ -58,7 +58,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --service-account="${BRIDGE_SA}" \
     --allow-unauthenticated \
     --max-instances=1 \
-    --set-labels="app=alert-triage-agent,component=${NAME_PREFIX}-bridge,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}" \
+    --labels="app=alert-triage-agent,component=${NAME_PREFIX}-bridge,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}" \
     --set-env-vars="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${PROJECT_ID}-${NAME_PREFIX}-incidents,TASKS_QUEUE=${NAME_PREFIX}-triage-queue,AGENT_URL=${AGENT_URL},SERVICENOW_INSTANCE_URL=${SERVICENOW_INSTANCE_URL}" \
     --set-secrets="WEBHOOK_TOKEN=${NAME_PREFIX}-webhook-token:latest,SERVICENOW_USERNAME=${NAME_PREFIX}-servicenow-username:latest,SERVICENOW_PASSWORD=${NAME_PREFIX}-servicenow-password:latest"
 

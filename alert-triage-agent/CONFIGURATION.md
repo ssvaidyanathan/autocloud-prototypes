@@ -279,7 +279,7 @@ All 8 Cloud Monitoring alert policies defined in `infra/terraform/observability/
 ### 7.3 Resource Labels & Unsupported Resource Types
 
 1. **Labeled Resources:**
-   - **Cloud Run Services:** `ata-orders-api`, `ata-inventory-api`, `ata-agent`, `ata-bridge`, `ata-tools` via Terraform `labels` or `gcloud run deploy --set-labels`.
+   - **Cloud Run Services:** `ata-orders-api`, `ata-inventory-api`, `ata-agent`, `ata-bridge`, `ata-tools` via Terraform `labels` or `gcloud run deploy --labels`.
    - **Cloud SQL Instances:** `ata-inventory-db` via Terraform `user_labels`.
    - **Cloud Storage Buckets:** State bucket `gs://cloud-assist-fde-2-ata-tfstate/` and incidents bucket `gs://cloud-assist-fde-2-ata-incidents/`.
    - **Artifact Registry & Secrets:** `docker_repo` and Secret Manager secrets (`ata-webhook-token`, placeholder secrets).
