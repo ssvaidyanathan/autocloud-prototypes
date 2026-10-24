@@ -101,6 +101,13 @@ def test_scenario_s1_backend_5xx(isolated_env: AgentConfig):
         state="open",
         started_at=now_str,
         condition_name="Cloud Run inventory 5xx error rate",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "5xx",
+            "severity": "p1",
+        },
     )
 
     # Pre-analysis lock & OKF verification
@@ -139,6 +146,13 @@ def test_scenario_s2_backend_latency(isolated_env: AgentConfig):
         state="open",
         started_at=now_str,
         condition_name="Cloud Run orders latency > 2s",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-orders-api",
+            "tier": "service",
+            "signal": "latency",
+            "severity": "p2",
+        },
     )
     report = generate_investigation_report(alert, "grp_s2", "incident-s2.md", isolated_env)
     assert report.origin == "ata-inventory-api"
@@ -170,6 +184,13 @@ async def test_scenario_s2_upstream_origin_with_telemetry_fixture(isolated_env: 
         started_at=t_alert.isoformat(),
         condition_name="Cloud Run orders latency > 2s",
         resource_labels={"service_name": "ata-orders-api"},
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-orders-api",
+            "tier": "service",
+            "signal": "latency",
+            "severity": "p2",
+        },
     )
 
     # 1. Pre-analysis lock creation
@@ -266,6 +287,13 @@ def test_scenario_s3_concurrent_disjoint_splitting(isolated_env: AgentConfig):
         resource_name="ata-inventory-api",
         state="open",
         started_at=now.isoformat(),
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "5xx",
+            "severity": "p1",
+        },
     )
 
     # Alert 2: Orders 429 SpikeArrest
@@ -275,6 +303,13 @@ def test_scenario_s3_concurrent_disjoint_splitting(isolated_env: AgentConfig):
         resource_name="ata-orders-v1",
         state="open",
         started_at=now.isoformat(),
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-orders-v1",
+            "tier": "edge",
+            "signal": "rate-limit",
+            "severity": "p2",
+        },
     )
 
     # Multi-factor score between Alert 2 and Candidate Group from Alert 1
@@ -322,6 +357,13 @@ def test_scenario_s4_db_connection_pool(isolated_env: AgentConfig):
         state="open",
         started_at=now_str,
         condition_name="Cloud SQL connection count critical",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-db",
+            "tier": "data",
+            "signal": "connections",
+            "severity": "p1",
+        },
     )
     report = generate_investigation_report(alert, "grp_s4", "incident-s4.md", isolated_env)
     assert report.origin == "ata-inventory-db"
@@ -341,6 +383,13 @@ def test_scenario_s5_bad_db_config(isolated_env: AgentConfig):
         state="open",
         started_at=now_str,
         condition_name="Cloud Run inventory 5xx error rate",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "5xx",
+            "severity": "p1",
+        },
     )
     report = generate_investigation_report(alert, "grp_s5", "incident-s5.md", isolated_env)
     assert report.origin == "ata-inventory-api"

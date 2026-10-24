@@ -22,6 +22,16 @@ resource "google_cloud_run_v2_service" "inventory_api" {
   project  = var.project_id
   ingress  = "INGRESS_TRAFFIC_ALL"
 
+  labels = {
+    app        = "alert-triage-agent"
+    component  = "${var.name_prefix}-inventory-api"
+    role       = "demo-workload"
+    tier       = "service"
+    env        = var.environment
+    managed-by = "terraform"
+    owner      = var.owner
+  }
+
   template {
     service_account = data.google_service_account.inventory_sa.email
 
@@ -67,6 +77,16 @@ resource "google_cloud_run_v2_service" "orders_api" {
   location = var.region
   project  = var.project_id
   ingress  = "INGRESS_TRAFFIC_ALL"
+
+  labels = {
+    app        = "alert-triage-agent"
+    component  = "${var.name_prefix}-orders-api"
+    role       = "demo-workload"
+    tier       = "service"
+    env        = var.environment
+    managed-by = "terraform"
+    owner      = var.owner
+  }
 
   template {
     service_account = data.google_service_account.orders_sa.email

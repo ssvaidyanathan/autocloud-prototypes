@@ -1,8 +1,11 @@
 locals {
   common_labels = {
-    app         = "alert-triage-agent"
-    environment = var.environment
-    prefix      = var.name_prefix
+    app        = "alert-triage-agent"
+    role       = "triage-system"
+    tier       = "platform"
+    env        = var.environment
+    managed-by = "terraform"
+    owner      = var.owner
   }
 }
 
@@ -17,10 +20,13 @@ resource "google_storage_bucket" "incidents" {
     enabled = true
   }
 
-  labels = local.common_labels
+  labels = merge(local.common_labels, {
+    component = "${var.name_prefix}-agent"
+  })
 }
 
 # 2. Cloud Tasks Queue (Serialized Triage Queue)
+# Note: Cloud Tasks queues do not support GCP resource labels.
 resource "google_cloud_tasks_queue" "triage_queue" {
   name     = "${var.name_prefix}-triage-queue"
   location = var.region
@@ -46,18 +52,22 @@ resource "google_artifact_registry_repository" "docker_repo" {
   location      = var.region
   format        = "DOCKER"
   description   = "Docker repository for alert triage agent services"
-  labels        = local.common_labels
+  labels = merge(local.common_labels, {
+    component = "${var.name_prefix}-tools"
+  })
 }
 
 # 4. Service Accounts
 resource "google_service_account" "bridge_sa" {
   account_id   = "${var.name_prefix}-bridge-sa"
   display_name = "Alert Triage Bridge Service Account"
+  description  = "app=alert-triage-agent,component=${var.name_prefix}-bridge,role=triage-system,tier=platform,env=${var.environment},managed-by=terraform,owner=${var.owner}"
 }
 
 resource "google_service_account" "agent_sa" {
   account_id   = "${var.name_prefix}-agent-sa"
   display_name = "Alert Triage Agent Service Account"
+  description  = "app=alert-triage-agent,component=${var.name_prefix}-agent,role=triage-system,tier=platform,env=${var.environment},managed-by=terraform,owner=${var.owner}"
 }
 
 # Bridge SA IAM Roles
@@ -129,7 +139,9 @@ resource "google_secret_manager_secret" "webhook_token" {
     auto {}
   }
 
-  labels = local.common_labels
+  labels = merge(local.common_labels, {
+    component = "${var.name_prefix}-bridge"
+  })
 }
 
 resource "google_secret_manager_secret_version" "webhook_token_version" {
@@ -153,7 +165,9 @@ resource "google_secret_manager_secret" "servicenow_placeholders" {
     auto {}
   }
 
-  labels = local.common_labels
+  labels = merge(local.common_labels, {
+    component = "${var.name_prefix}-bridge"
+  })
 }
 
 resource "google_secret_manager_secret_version" "servicenow_placeholder_versions" {
@@ -178,5 +192,7 @@ resource "google_monitoring_notification_channel" "bridge_webhook" {
   sensitive_labels {
     password = random_password.webhook_token.result
   }
-  user_labels = local.common_labels
+  user_labels = merge(local.common_labels, {
+    component = "${var.name_prefix}-bridge"
+  })
 }

@@ -27,3 +27,15 @@ variable "orders_image" {
   default     = "us-west1-docker.pkg.dev/cloud-assist-fde-2/ata-docker/ata-orders-api:latest"
   description = "Container image for ata-orders-api"
 }
+
+variable "environment" {
+  type        = string
+  default     = "demo"
+  description = "Deployment environment name"
+}
+
+variable "owner" {
+  type        = string
+  default     = "sre-prototypes"
+  description = "Ownership team for resources"
+}

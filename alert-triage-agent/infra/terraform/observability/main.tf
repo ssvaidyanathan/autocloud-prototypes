@@ -35,7 +35,11 @@ resource "google_monitoring_alert_policy" "orders_5xx" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
+    component = "${var.name_prefix}-orders-api"
+    tier      = "service"
+    signal    = "5xx"
+    severity  = "p1"
   }
 }
 
@@ -63,7 +67,11 @@ resource "google_monitoring_alert_policy" "orders_latency" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
+    component = "${var.name_prefix}-orders-api"
+    tier      = "service"
+    signal    = "latency"
+    severity  = "p2"
   }
 }
 
@@ -92,7 +100,11 @@ resource "google_monitoring_alert_policy" "inventory_5xx" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
+    component = "${var.name_prefix}-inventory-api"
+    tier      = "service"
+    signal    = "5xx"
+    severity  = "p1"
   }
 }
 
@@ -120,7 +132,11 @@ resource "google_monitoring_alert_policy" "inventory_latency" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
+    component = "${var.name_prefix}-inventory-api"
+    tier      = "service"
+    signal    = "latency"
+    severity  = "p2"
   }
 }
 
@@ -149,7 +165,11 @@ resource "google_monitoring_alert_policy" "apigee_orders_5xx" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
+    component = "${var.name_prefix}-orders-v1"
+    tier      = "edge"
+    signal    = "5xx"
+    severity  = "p1"
   }
 }
 
@@ -178,7 +198,11 @@ resource "google_monitoring_alert_policy" "apigee_orders_429" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
+    component = "${var.name_prefix}-orders-v1"
+    tier      = "edge"
+    signal    = "rate-limit"
+    severity  = "p2"
   }
 }
 
@@ -206,7 +230,11 @@ resource "google_monitoring_alert_policy" "cloudsql_connections" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
+    component = "${var.name_prefix}-inventory-db"
+    tier      = "data"
+    signal    = "connections"
+    severity  = "p1"
   }
 }
 
@@ -234,6 +262,10 @@ resource "google_monitoring_alert_policy" "cloudsql_cpu" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
+    component = "${var.name_prefix}-inventory-db"
+    tier      = "data"
+    signal    = "cpu"
+    severity  = "p2"
   }
 }

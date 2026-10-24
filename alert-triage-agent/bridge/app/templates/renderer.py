@@ -137,6 +137,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Policy Name</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Resource</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Incident ID</th>
+            <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Labels</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">State</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Triggered (UTC)</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Console Links</th>
@@ -156,6 +157,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </td>
             <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
               <a href="{{ inc_url }}" target="_blank" class="console-link" style="color: #0969da; text-decoration: none;"><code>{{ alt.incident_id or 'N/A' }}</code></a>
+            </td>
+            <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
+              {% set alt_labels = alt.labels or alt.policy_user_labels %}
+              {% if alt_labels %}
+                {% for k, v in alt_labels.items() %}
+                  <code style="font-size: 11px; background: #eef2f8; padding: 2px 4px; border-radius: 3px; display: inline-block; margin: 1px;">{{ k }}={{ v }}</code>
+                {% endfor %}
+              {% else %}
+                <span style="color: #57606a; font-size: 11px;">none</span>
+              {% endif %}
             </td>
             <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
               <span class="badge {% if alt.state == 'closed' %}badge-success{% else %}badge-critical{% endif %}" style="padding: 2px 8px; border-radius: 10px; font-size: 11px;">
@@ -183,6 +194,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </td>
             <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
               <a href="{{ inc_url }}" target="_blank" class="console-link" style="color: #0969da; text-decoration: none;"><code>{{ inc_id or report.group_id }}</code></a>
+            </td>
+            <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
+              {% set alt_labels = report.raw_metadata.get('labels') or report.raw_metadata.get('policy_user_labels') %}
+              {% if alt_labels %}
+                {% for k, v in alt_labels.items() %}
+                  <code style="font-size: 11px; background: #eef2f8; padding: 2px 4px; border-radius: 3px; display: inline-block; margin: 1px;">{{ k }}={{ v }}</code>
+                {% endfor %}
+              {% else %}
+                <span style="color: #57606a; font-size: 11px;">none</span>
+              {% endif %}
             </td>
             <td style="padding: 8px 12px; border: 1px solid #d0d7de;"><span class="badge badge-critical" style="padding: 2px 8px; border-radius: 10px; font-size: 11px;">open</span></td>
             <td style="padding: 8px 12px; border: 1px solid #d0d7de;">{{ report.first_seen or 'N/A' }}</td>

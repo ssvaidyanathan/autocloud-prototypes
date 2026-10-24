@@ -346,7 +346,8 @@ class CorrelationEngine:
             self._emit_decision_log(alert, decision, 0)
             return decision
 
-        alert_cat = classify_anomaly_category(alert.policy_name, alert.metric_type or "")
+        sig_hint = getattr(alert, "policy_user_labels", {}).get("signal", "") if getattr(alert, "policy_user_labels", None) else ""
+        alert_cat = classify_anomaly_category(alert.policy_name, alert.metric_type or "", signal=sig_hint)
         try:
             alert_dt = datetime.fromisoformat(alert.started_at.replace("Z", "+00:00"))
         except Exception:

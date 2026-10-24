@@ -18,6 +18,16 @@ resource "google_sql_database_instance" "inventory_db" {
       require_ssl  = true
       ssl_mode     = "ENCRYPTED_ONLY"
     }
+
+    user_labels = {
+      app        = "alert-triage-agent"
+      component  = "${var.name_prefix}-inventory-db"
+      role       = "demo-workload"
+      tier       = "data"
+      env        = var.environment
+      managed-by = "terraform"
+      owner      = var.owner
+    }
   }
 }
 

@@ -46,6 +46,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --region="${REGION}" \
     --image="${PINNED_IMAGE}" \
     --service-account="${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+    --set-labels="app=alert-triage-agent,component=ata-inventory-api,role=demo-workload,tier=service,env=demo,managed-by=script,owner=sre-prototypes" \
     --set-env-vars="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},ATA_INVENTORY_INSTANCE_CONNECTION_NAME=${PROJECT_ID}:${REGION}:${NAME_PREFIX}-inventory-db,ATA_INVENTORY_DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,ATA_INVENTORY_DB_NAME=inventory,ATA_INVENTORY_DB_IAM_AUTH=true,ATA_INVENTORY_MOCK_DB=false,DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,MOCK_DB=false" \
     --no-allow-unauthenticated \
     --quiet

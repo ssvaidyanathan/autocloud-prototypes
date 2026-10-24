@@ -185,6 +185,8 @@ class GroupingManager:
                             "resource_name": alert.resource_name,
                             "state": "closed",
                             "started_at": alert.started_at,
+                            "labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
+                            "policy_user_labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
                         })
                     if d.all_alerts_closed():
                         is_ticketed = d.servicenow_sys_id is not None or str(d.status).lower() == IncidentGroupStatus.TICKETED.value
@@ -306,6 +308,8 @@ class GroupingManager:
                     "state": alert.state,
                     "started_at": alert.started_at,
                     "received_at": now_iso,
+                    "labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
+                    "policy_user_labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
                 })
                 d.updated_at = now_iso
 
@@ -443,6 +447,8 @@ class GroupingManager:
                 "state": alert.state,
                 "started_at": alert.started_at,
                 "received_at": now_iso,
+                "labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
+                "policy_user_labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
             }],
         )
 

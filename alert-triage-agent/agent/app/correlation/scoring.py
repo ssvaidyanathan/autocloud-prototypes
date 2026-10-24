@@ -69,9 +69,21 @@ def calculate_topology_score(hop_distance: Optional[int]) -> tuple[float, float]
     return 0.0, 0.0
 
 
-def classify_anomaly_category(policy_or_condition: str, metric_type: str = "") -> str:
-    """Classify anomaly into architectural failure layer."""
+def classify_anomaly_category(policy_or_condition: str, metric_type: str = "", signal: str = "") -> str:
+    """Classify anomaly into architectural failure layer, using signal hint if provided."""
+    sig = (signal or "").lower().strip()
+    if sig == "rate-limit":
+        return "client_429"
+    if sig in ("connections", "cpu"):
+        return "db_saturation"
+    if sig == "latency":
+        return "latency_504"
+
     text = f"{policy_or_condition} {metric_type}".lower()
+    if sig == "5xx":
+        if any(k in text for k in ["apigee", "gateway", "proxy", "orders-v1", "inventory-v1"]):
+            return "gateway_5xx"
+        return "backend_5xx"
 
     if any(k in text for k in ["connection", "cloudsql", "max_connections", "lock_wait", "db_lock", "row_lock"]):
         return "db_saturation"
