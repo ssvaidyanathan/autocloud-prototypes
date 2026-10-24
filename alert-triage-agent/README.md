@@ -1,86 +1,916 @@
-# Alert Triage Agent (ATA)
+# Alert Triage Agent for Google Cloud Platform
 
-Autonomous SRE diagnostic and incident triage system for Google Cloud Platform environments. ATA ingests Cloud Monitoring alerts, correlates related alerts into unified incident groups, orchestrates deterministic telemetry specialists across GCP services, synthesizes evidence-grounded root cause findings, and creates/updates ServiceNow incident records.
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](../LICENSE)
+[![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/)
+[![Terraform: >=1.5.0](https://img.shields.io/badge/Terraform-%3E%3D1.5.0-623ce4.svg)](https://www.terraform.io/)
 
-## Architecture: Thin Bridge & Agent-Owned Triage
+An autonomous Site Reliability Engineering (SRE) diagnostic and incident triage platform for Google Cloud Platform environments. When Google Cloud Monitoring fires alerts across multi-tier topologies, the Alert Triage Agent (ATA) ingests events via a thin, stateless webhook bridge, correlates related alerts into unified incident groups, orchestrates deterministic telemetry specialists across Cloud Run, Cloud SQL, Apigee X, and recent changes/deployments, synthesizes evidence-grounded root cause findings, and creates and updates ServiceNow incident records with structured executive summaries and standalone responsive HTML dossiers.
 
-The system is organized around a lean, stateless bridge and an autonomous agent core:
+---
+
+## Table of Contents
+
+- [1. System Overview & Problem Statement](#1-system-overview--problem-statement)
+- [2. Quick Start](#2-quick-start)
+- [3. System Architecture & Request Lifecycle](#3-system-architecture--request-lifecycle)
+- [4. Component Breakdown](#4-component-breakdown)
+- [5. Configuration](#5-configuration)
+- [6. Customizing the Agent with Skills](#6-customizing-the-agent-with-skills)
+- [7. Security Model & Production Guardrails](#7-security-model--production-guardrails)
+- [8. Prototype Status & Known Limitations](#8-prototype-status--known-limitations)
+- [9. Full Step-by-Step GCP Deployment Walkthrough](#9-full-step-by-step-gcp-deployment-walkthrough)
+  - [Prerequisites & IAM Requirements](#prerequisites--iam-requirements)
+  - [Step 0: Bootstrap GCS Remote State](#step-0-bootstrap-gcs-remote-state)
+  - [Step 1: Foundation Module](#step-1-foundation-module)
+  - [Step 2: Database Module](#step-2-database-module)
+  - [Step 3: Applications Module](#step-3-applications-module)
+  - [Step 4: Apigee API Proxies & Products](#step-4-apigee-api-proxies--products)
+  - [Step 5: Observability Module](#step-5-observability-module)
+  - [Step 6: Triage Tier Services Deployment](#step-6-triage-tier-services-deployment)
+  - [Step 7: Secret Manager Configuration](#step-7-secret-manager-configuration)
+  - [Step 8: End-to-End Verification](#step-8-end-to-end-verification)
+- [10. Master Automated Deployment Script](#10-master-automated-deployment-script)
+- [11. Terraform Remote State & GCS Backend](#11-terraform-remote-state--gcs-backend)
+- [12. Enterprise Organization Policy Considerations](#12-enterprise-organization-policy-considerations)
+- [13. Local Development & Quality Gates](#13-local-development--quality-gates)
+- [14. Testing Guide & Post-Deploy Smoke Tests](#14-testing-guide--post-deploy-smoke-tests)
+- [15. Teardown & Clean Up](#15-teardown--clean-up)
+- [16. Repository Layout](#16-repository-layout)
+
+---
+
+## 1. System Overview & Problem Statement
+
+### The Problem
+During production outages in complex cloud environments, on-call engineers face an immediate onslaught of cascading alerts. A single infrastructure root cause—such as a database connection pool exhaustion or a bad configuration rollout—frequently triggers dozens of downstream failure symptoms across API gateways (Apigee), container services (Cloud Run), and backend datastores (Cloud SQL).
+
+This causes severe operational bottlenecks:
+- **Alert Fatigue & Ticket Storms**: Disconnected monitoring policies open duplicate, fragmented incident tickets across ticketing platforms like ServiceNow, obscuring the primary incident.
+- **Manual Telemetry Correlation**: Engineers spend critical early triage minutes manually querying Cloud Logging streams, inspecting Cloud Monitoring latency metrics, cross-referencing recent Cloud Run revisions, and piecing together failure sequences under pressure.
+- **Flapping & Premature Triage**: Transient anomalies or cascading failures trigger half-baked investigations before dependent services have settled, leading to erroneous diagnoses and responder confusion.
+
+### The Solution
+The **Alert Triage Agent (ATA)** automates early-stage alert ingestion, intelligent incident grouping, and telemetry investigation through an asynchronous, decoupled **thin-bridge architecture**:
+1. **Stateless Webhook Ingestion**: Ingests Cloud Monitoring alert webhooks via HTTP Basic Auth at `ata-bridge` and immediately enqueues raw alert payloads to a Cloud Tasks queue (`ata-triage-queue`) with HTTP 202 `accepted`. The bridge is completely stateless with zero in-memory windowing, background loops, or alert suppression.
+2. **Agent-Owned Grouping & Suppression**: The agent core (`ata-agent`) owns all incident grouping logic. It evaluates multi-factor correlation (topology DAG distance, causal failure chains, temporal proximity, and change alignment) against active Open Knowledge Files (OKF) stored in Google Cloud Storage with atomic generation preconditions (`if_generation_match`).
+3. **Self-Scheduled Settle & Cool-Down Timers (Stale-Wake Pattern)**: The agent schedules delayed timer tasks on a dedicated queue (`ata-timer-queue`). When an alert arrives, the agent schedules a 120s settle timer. If subsequent related alerts arrive, the settle deadline extends. Upon waking at `/timer/wake`, the agent compares current time against the OKF `settle_deadline`; stale wakes are discarded without ticket creation.
+4. **Parallel Read-Only Telemetry Specialists**: Upon settle deadline or max-wait expiry (300s), the agent fans out four deterministic specialists concurrently (`CloudRunSpecialist`, `ApigeeSpecialist`, `CloudSQLSpecialist`, `ChangeSpecialist`) querying live GCP APIs and FastMCP tool endpoints.
+5. **Evidence-Grounded Root Cause Attribution**: Vertex AI Gemini reasoning (`gemini-3.8-flash`) is invoked strictly for gray-zone correlation scoring (35–65 points). The Synthesizer isolates the probable origin component, calculates blast radius, and computes an evidence-derived formulaic confidence score without hallucinations or fabricated data.
+6. **Rich ServiceNow Delivery**: The agent instructs the bridge via authenticated endpoints (`POST /instructions/ticket/*`) to create or update ServiceNow incident records with structured 4-bullet summaries (Problem, Systems, Observations, Recommended Actions) and attach self-contained, responsive HTML diagnostic dossiers.
+
+---
+
+## 2. Quick Start
+
+### Prerequisites
+- **Google Cloud SDK (`gcloud >= 480.0.0`)** installed and authenticated:
+  ```bash
+  gcloud auth login
+  gcloud auth application-default login
+  ```
+- **Terraform** (`>= 1.5.0`): `terraform version`
+- **Docker** daemon active locally OR Google Cloud Build enabled in the target project.
+- **Python 3.12+** with `pip` and virtual environment support (`uv` or `python3 -m venv`).
+- **Target GCP Project with Billing Enabled**:
+  ```bash
+  export PROJECT_ID="your-target-project-id"
+  export REGION="us-west1"
+  export NAME_PREFIX="ata"
+  export ENVIRONMENT="prod"
+  gcloud config set project "${PROJECT_ID}"
+  ```
+- **Apigee X Organization & Environment**: Pre-existing Apigee organization with environment `prod` bound to an environment group hostname (e.g. `8.233.247.52.nip.io`).
+
+### Fast Deployment Overview
+
+Deployment is sequenced into automated vertical slices and tier automation (see [Section 9](#9-full-step-by-step-gcp-deployment-walkthrough) for the complete step-by-step walkthrough):
+
+```bash
+# 1. Clone repository and enter directory
+git clone https://github.com/ssvaidyanathan/autocloud-prototypes.git
+cd autocloud-prototypes/alert-triage-agent
+
+# 2. Deploy Stage 1 core triage vertical slice
+# (Bootstraps GCS remote state, applies foundation Terraform, deploys inventory API, ata-agent, and ata-bridge)
+./scripts/deploy-stage1.sh
+
+# 3. Deploy demo microservices, database, observability, and Apigee proxies
+./scripts/deploy-demo-infra.sh
+
+# 4. Deploy FastMCP tools server
+(cd tools && ./scripts/deploy.sh)
+
+# 5. Populate ServiceNow credentials in Secret Manager
+./scripts/set-secrets.sh
+```
+
+### ServiceNow Integration Guide Pointer
+The system integrates with ServiceNow via the Table and Attachment APIs:
+- **ServiceNow Configuration**: Detailed configuration settings, field mappings, and assignment groups are documented in the [Configuration Guide (`CONFIGURATION.md`)](CONFIGURATION.md) and [Deployment Guide (`DEPLOY.md`)](DEPLOY.md).
+- **Credentials & Instance URL**:
+  - The ServiceNow instance URL is **configuration**, not a secret. It is configured via the Terraform variable `servicenow_instance_url` in `terraform.tfvars` or the environment variable `SERVICENOW_INSTANCE_URL`.
+  - ServiceNow API user credentials (`ata-servicenow-username` and `ata-servicenow-password`) reside securely in Google Secret Manager, populated via `./scripts/set-secrets.sh`.
+
+---
+
+## 3. System Architecture & Request Lifecycle
 
 ```
 [Cloud Monitoring Alerts]
             │ Webhook (HTTP Basic Auth)
             ▼
-+───────────────────────────+             +───────────────────────────+
+┌───────────────────────────┐             ┌───────────────────────────┐
 │   Cloud Run: ata-bridge   │ ──────────> │     Cloud Tasks Queue     │
-+─────────────┬─────────────+             │     ata-triage-queue      │
-              ▲       │                   +─────────────┬─────────────+
+└─────────────┬─────────────┘             │     ata-triage-queue      │
+              ▲       │                   └─────────────┬─────────────┘
               │       │ Instructions                    │
               │       │ (POST /instructions/ticket/*)   ▼
-              │       │                   +───────────────────────────+
-              │       +────────────────── │   Cloud Run: ata-agent    │ <───+
+              │       │                   ┌───────────────────────────┐
+              │       +────────────────── │   Cloud Run: ata-agent    │ <───┐
               │                           │   - Grouping & OKF Store  │     │
               │                           │   - Telemetry Specialists │     │
-              │                           +─────────────┬─────────────+     │
+              │                           └─────────────┬─────────────┘     │
               ▼                                         │                   │
-+───────────────────────────+                           │ Timers            │ Wake
+┌───────────────────────────┐                           │ Timers            │ Wake
 │   External ServiceNow     │                           ▼                   │
-│   Table & Attachment API  │             +───────────────────────────+     │
-+───────────────────────────+             │     Cloud Tasks Queue     │ ────+
+│   Table & Attachment API  │             ┌───────────────────────────┐     │
+└───────────────────────────┘             │     Cloud Tasks Queue     │ ────┘
                                           │     ata-timer-queue       │
                                           │     (delayed settle/cool) │
-                                          +───────────────────────────+
+                                          └───────────────────────────┘
 ```
 
-1. **`ata-bridge`**: Lean ingestion and adapter service. Performs HTTP Basic Auth validation, validates alert scope, enqueues raw alerts directly to Cloud Tasks (HTTP 202 `accepted`), and exposes authenticated ServiceNow instruction endpoints (`POST /instructions/ticket/*`). Completely stateless with zero in-memory windowing or alert suppression.
-2. **`ata-agent`**: Owns all incident domain logic. Correlates alerts, manages Open Knowledge Files (OKF) in GCS with `if_generation_match` atomic preconditions, schedules delayed timers on `ata-timer-queue`, evaluates stale-wake deadlines at `/timer/wake`, fans out read-only telemetry specialists, synthesizes evidence-based root cause reports, and calls Bridge Instruction API.
-3. **`ata-tools`**: FastMCP read-only telemetry and topology service providing safe, structured inspection of GCP Cloud Run, Cloud SQL, Apigee X, and Cloud Logging.
+### Sequence Flow (Mermaid)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Monitoring as Cloud Monitoring
+    participant Bridge as ata-bridge
+    participant TriageQueue as Cloud Tasks (ata-triage-queue)
+    participant TimerQueue as Cloud Tasks (ata-timer-queue)
+    participant Agent as ata-agent
+    participant GCS as GCS Incident Store (OKF)
+    participant GCP as GCP APIs & ata-tools
+    participant Gemini as Vertex AI Gemini
+    participant ServiceNow as ServiceNow Table API
+
+    Monitoring->>Bridge: POST /webhook/monitoring (HTTP Basic Auth)
+    activate Bridge
+    Bridge->>Bridge: Authenticate & Validate Alert Scope
+    Bridge->>TriageQueue: Enqueue Raw Alert Payload
+    TriageQueue-->>Bridge: 202 Accepted
+    Bridge-->>Monitoring: 202 Accepted
+    deactivate Bridge
+
+    TriageQueue->>Agent: POST /triage (OIDC ID Token)
+    activate Agent
+    Agent->>Agent: Check In-Group Duplicate Suppression
+    Agent->>GCS: Read OKF with generation precondition
+    Agent->>Agent: Evaluate Correlation Scoring Matrix
+    alt Ambiguous Gray Zone (35 <= Score < 65)
+        Agent->>Gemini: Reason on Incident Attachment (gemini-3.8-flash)
+        Gemini-->>Agent: Attachment Decision & Rationale
+    end
+    Agent->>GCS: Update OKF (if_generation_match)
+    Agent->>TimerQueue: Schedule Settle Timer (now + 120s)
+    deactivate Agent
+
+    TimerQueue->>Agent: POST /timer/wake (OIDC ID Token)
+    activate Agent
+    Agent->>Agent: Stale-Wake Check (now vs okf.settle_deadline)
+    alt Settle Deadline Extended (Stale Wake)
+        Agent-->>TimerQueue: 200 OK (Stale wake ignored, no-op)
+    else Settle Expired (Valid Wake)
+        Agent->>GCS: Transition OKF to INVESTIGATING
+        par Concurrent Telemetry Inspection
+            Agent->>GCP: CloudRunSpecialist (restarts, CPU, latency, error logs)
+        and
+            Agent->>GCP: ApigeeSpecialist (access logs, SpikeArrest 429, timeouts)
+        and
+            Agent->>GCP: CloudSQLSpecialist (connections, CPU, lock timeouts)
+        and
+            Agent->>GCP: ChangeSpecialist (recent revisions, deploy timeline)
+        end
+        Agent->>Agent: Synthesize Findings, Blast Radius & Formulaic Confidence
+        Agent->>Bridge: POST /instructions/ticket/create (OIDC Token)
+        activate Bridge
+        Bridge->>ServiceNow: POST /api/now/table/incident (Create Ticket)
+        ServiceNow-->>Bridge: 201 Created (INC0010482)
+        Bridge-->>Agent: 200 OK (sys_id, ticket_number)
+        deactivate Bridge
+        Agent->>Bridge: POST /instructions/ticket/update-report (HTML Dossier)
+        activate Bridge
+        Bridge->>ServiceNow: POST /api/now/attachment/file (Attach Dossier)
+        ServiceNow-->>Bridge: 201 Created
+        Bridge-->>Agent: 200 OK
+        deactivate Bridge
+        Agent->>GCS: Update OKF with Ticket ID & Final Dossier
+    end
+    deactivate Agent
+```
 
 ---
 
-## 5 Evaluation Scenarios (S1–S5)
+## 4. Component Breakdown
 
-The system is evaluated against 5 realistic failure scenarios:
+### 1. `ata-bridge` (`bridge/`)
+- **Role**: Public-facing, lean ingestion and integration layer.
+- **Technology**: Python 3.12+, FastAPI, Pydantic v2, Google Cloud Tasks client, Google Secret Manager client, HTTPX.
+- **Responsibilities**:
+  - Webhook authentication for Cloud Monitoring via HTTP Basic Auth (`webhook_basicauth` channel).
+  - Scope validation: verifies project scoping and filters out foreign or non-`ata` alert notifications.
+  - Asynchronous task enqueue: enqueues normalized `AlertEvent` payloads directly to Cloud Tasks (`ata-triage-queue`) returning HTTP 202 `accepted`.
+  - ServiceNow instruction endpoints (`POST /instructions/ticket/*`): exposes authenticated routes (`create`, `work-note`, `update-report`, `resolve`) invoked by `ata-agent`.
+  - **Thin-Bridge Guarantee**: Completely stateless with zero in-memory windowing, background polling loops, or alert suppression.
 
-| Scenario | Title | Target Infrastructure | Expected Incident Groups & Tickets | Root Cause Origin |
-| :---: | :--- | :--- | :---: | :--- |
-| **S1** | **Backend 5xx Cascade** | Cloud Run (`ata-inventory-api`) | 1 Group, 1 Ticket | `ata-inventory-api` |
-| **S2** | **Backend Latency** | Cloud Run (`ata-inventory-api`) | 1 Group, 1 Ticket | `ata-inventory-api` (Upstream origin via DAG) |
-| **S3** | **Concurrent Disjoint Incidents** | Apigee X & Cloud Run | 2 Groups, 2 Tickets | `ata-orders-v1` and `ata-inventory-api` (Disjoint groups) |
-| **S4** | **DB Connection Exhaustion** | Cloud SQL (`ata-inventory-db`) | 1 Group, 1 Ticket | `ata-inventory-db` |
-| **S5** | **Bad Deploy / Config Failure** | Cloud Run (`ata-inventory-api`) | 1 Group, 1 Ticket | Specific Cloud Run revision (e.g. `ata-inventory-api-00062-6pj`) |
+### 2. `ata-agent` (`agent/`)
+- **Role**: Private, autonomous SRE diagnostic and incident triage engine.
+- **Technology**: Python 3.12+, FastAPI, Google Cloud Storage client, Google Cloud Tasks client, Google GenAI / Vertex AI (`gemini-3.8-flash`), Google Cloud Logging, Google Cloud Monitoring.
+- **Responsibilities**:
+  - **Grouping & Suppression (`agent/app/grouping/`)**: Evaluates incoming alerts against open incidents, enforces in-group duplicate suppression, and updates Open Knowledge Files (OKF) in GCS using atomic generation preconditions (`if_generation_match`).
+  - **Delayed Timer Management (`agent/app/timers/`)**: Self-schedules delayed settle (120s), max-wait (300s), and cool-down (180s) wakeups on a dedicated Cloud Tasks queue (`ata-timer-queue`).
+  - **Stale-Wake Handler**: On wakeup at `POST /timer/wake`, compares current timestamp against `okf.settle_deadline` (with a 2.0s tolerance). Stale wakes caused by subsequent alert extensions are ignored as no-ops without minting duplicate tickets.
+  - **Multi-Factor Correlation (`agent/app/correlation/`)**: Evaluates candidate alerts using a 4-factor scoring matrix (Topology Distance, Causal Failure Chains, Temporal Proximity, Change Alignment). Calls Gemini strictly for gray-zone alerts (scores 35–65).
+  - **Deterministic Specialists (`agent/app/specialists/`)**: Concurrently executes live read-only queries:
+    - `CloudRunSpecialist`: Queries container restarts, CPU/memory saturation, request latency percentiles, and application error logs (filtering `/admin/*`). Recursively traces upstream DAG dependencies.
+    - `ApigeeSpecialist`: Queries proxy access logs (`ata-apigee-access`), extracts status codes and client IPs, and analyzes SpikeArrest policy limits.
+    - `CloudSQLSpecialist`: Queries backend database connection counts (warning threshold 20 / max 25 on `db-f1-micro`), CPU utilization, and PostgreSQL deadlock/lock wait logs.
+    - `ChangeSpecialist`: Inspects Cloud Run revisions and Apigee deployment history within a 2-hour window prior to alert onset.
+  - **Evidence-Based Synthesizer**: Formulates structured 4-bullet executive summaries, calculates blast radius and formulaic confidence, and generates standalone HTML dossiers.
+
+### 3. `ata-tools` (`tools/`)
+- **Role**: FastMCP read-only telemetry and topology service.
+- **Technology**: FastMCP, Starlette/Uvicorn, Google Cloud SDKs.
+- **Responsibilities**:
+  - Exposes structured MCP tools: `list_open_alerts`, `list_time_series`, `list_log_entries`, `get_service`, `get_topology_graph`, `get_blast_radius`.
+  - Strictly read-only IAM viewer boundary.
+  - Optional OIDC ID token validation on tool endpoints.
+
+### 4. `demo/` Microservices Stack
+- **Role**: Realistic multi-tier e-commerce architecture for incident simulation and fault injection.
+- **Components**:
+  - `demo/ata-inventory-api`: Cloud Run service backed by Cloud SQL PostgreSQL with IAM database authentication (`pg8000`) and mock fallback. Houses `/admin/fault/*` endpoints.
+  - `demo/ata-orders-api`: Cloud Run service calling `ata-inventory-api` using ambient Google ID tokens.
+  - `demo/apigee/`: Apigee X API proxies (`ata-orders-v1`, `ata-inventory-v1`) with API key verification, SpikeArrest rate limiting, and Cloud Logging.
+  - `demo/db/`: Cloud SQL PostgreSQL schema (`schema.sql`) and catalog seed data.
+  - **Fault Exclusion Guardrail**: Fault injection endpoints (`/admin/fault/*`) are decoupled from operational telemetry and excluded from Cloud Logging analysis. The agent diagnoses failures strictly from authentic operational symptoms.
 
 ---
 
-## Key Design Guarantees
+## 5. Configuration
 
-- **Agent-Owned Suppression & Grouping**: Grouping state lives exclusively in GCS OKFs (`gs://{incidents_bucket}/knowledge/incident-manager/incident-{group_id}.md`).
-- **Distributed Concurrency**: All OKF updates use GCS generation preconditions (`if_generation_match`). Concurrent writes retry with exponential backoff and jitter, preventing lock clobbering.
-- **Stale-Wake Pattern**: Delayed timers are scheduled on `ata-timer-queue`. When waking at `/timer/wake`, the agent compares current time against the OKF `settle_deadline`. Stale wakes (due to subsequent alert extension) are ignored without ticket creation.
-- **Evidence-Bound Synthesis**: Root causes cite observed metrics, logs, and deployment revisions. Zero fabricated literals; zero "N+1" phrasing.
-- **Security**: All inter-service calls use Google-signed OIDC ID tokens validated by `verify_agent_caller`. Webhook endpoints require HTTP Basic Auth verification. Service accounts operate under strict least-privilege boundaries.
+Configuration is managed strictly through typed Pydantic models (`config.py`) loaded from environment variables and Terraform variables (`terraform.tfvars`), with **zero hardcoding** in application code:
+
+### Key System Settings
+
+| Setting | Environment Variable | Default Value | Description & Rationale |
+| :--- | :--- | :--- | :--- |
+| **GCP Project** | `PROJECT_ID` | `cloud-assist-fde-2` | Target Google Cloud project identifier. |
+| **Resource Prefix** | `NAME_PREFIX` | `ata` | Namespace prefix for isolating resources (`${NAME_PREFIX}-${base_name}`). |
+| **Compute Region** | `REGION` | `us-west1` | Target GCP region hosting Cloud Run, Cloud Tasks, and Cloud SQL. |
+| **Environment** | `ENVIRONMENT` | `prod` | Deployment environment name (`prod`, `staging`, `dev`). |
+| **Incidents Bucket** | `INCIDENTS_BUCKET` | `${PROJECT_ID}-${NAME_PREFIX}-incidents` | GCS bucket for persistent Open Knowledge File (OKF) storage. |
+| **Incident Store Path** | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` | Local or mounted directory path for active OKF incident files. |
+| **Fallback Store Path**| `FALLBACK_STORE_PATH` | `/tmp/knowledge/incident-manager` | Fallback path when primary mount is unavailable. |
+| **Bridge Service URL** | `BRIDGE_URL` | `http://localhost:8080` | URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`). |
+| **Agent Service URL**  | `AGENT_URL` | `http://localhost:8080` | URL of `ata-agent` called by Cloud Tasks at `POST /triage`. |
+| **Triage Queue Name**  | `TASKS_QUEUE` | `ata-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |
+| **Timer Queue Name**   | `TIMER_QUEUE` | `ata-timer-queue` | Dedicated Cloud Tasks queue for delayed settle/cool-down timers. |
+| **Gemini Reasoning**   | `MODEL_NAME` | `gemini-3.8-flash` | Gemini model used strictly for gray-zone correlation (scores 35–65). |
+| **ServiceNow URL**     | `SERVICENOW_INSTANCE_URL` | *None* | **Configuration (NOT a secret)**: Base URL of ServiceNow instance (e.g. `https://<instance>.service-now.com`). |
+| **ServiceNow Caller**  | `SERVICENOW_CALLER` | `ATA Integration` | Caller ID populated on created ServiceNow incident records. |
+| **Assignment Group**   | `SERVICENOW_ASSIGNMENT_GROUP` | `Cloud SRE Tier-2` | Assignment group for triage routing in ServiceNow. |
+| **IAM Database User**  | `DB_USER` | `${NAME_PREFIX}-inventory-sa@...` | IAM database user for Cloud SQL IAM authentication. |
+| **Database Name**      | `DB_NAME` | `inventory` | PostgreSQL database name on Cloud SQL. |
+| **DB Connection Name** | `INSTANCE_CONNECTION_NAME` | `${PROJECT_ID}:${REGION}:${NAME_PREFIX}-inventory-db` | Cloud SQL instance connection string. |
+| **IAM DB Auth Flag**   | `DB_IAM_AUTH` | `true` | Enables IAM database authentication via pg8000 connector. |
+| **Mock Database Flag** | `MOCK_DB` | `false` | Enables in-memory catalog fallback when Cloud SQL is unreachable. |
+| **Local Mode Flag**    | `IS_LOCAL` | `false` | Enables mock storage and local adapters for offline testing. |
+
+### Secret Manager Secret Names
+Sensitive credentials reside exclusively in Google Secret Manager:
+- `ata-webhook-token`: HTTP Basic Auth password for Cloud Monitoring alert webhook channel.
+- `ata-servicenow-username`: API integration username for ServiceNow Table & Attachment APIs.
+- `ata-servicenow-password`: Password for ServiceNow integration user.
+
+> [!NOTE]
+> **ServiceNow Instance URL is CONFIG, not a secret.** It is managed as the Terraform variable `servicenow_instance_url` in `terraform.tfvars` and passed as the environment variable `SERVICENOW_INSTANCE_URL` to `ata-bridge`. It is not stored in Secret Manager.
+
+For complete variable lists and schema details, see the [Configuration Guide (`CONFIGURATION.md`)](CONFIGURATION.md).
 
 ---
 
-## Testing & Verification
+## 6. Customizing the Agent with Skills
 
-Run the full automated test suite:
+The repository includes domain knowledge and diagnostic runbooks located in [`skills/`](skills/):
+
+```
+skills/
+├── alert-triage/                   # Settle window, stale-wake handling, and correlation scoring
+│   └── SKILL.md
+├── apigee-troubleshooting/         # Apigee X access log queries, SpikeArrest 429, and target timeouts
+│   └── SKILL.md
+├── change-correlation/             # Cloud Run revision and Apigee deployment correlation rules
+│   └── SKILL.md
+├── cloud-run-troubleshooting/      # Container lifecycle, CPU/memory saturation, and latency percentiles
+│   └── SKILL.md
+├── cloud-sql-troubleshooting/      # PostgreSQL connection pool exhaustion (max 25, warn 20) and locks
+│   └── SKILL.md
+└── report-style/                   # SRE 4-bullet executive summaries, confidence formulas, HTML dossiers
+    └── SKILL.md
+```
+
+### Skills Directory Overview
+- **`skills/alert-triage/SKILL.md`**: Defines incident grouping mechanics, settle deadline extension rules, stale-wake evaluation, and multi-factor scoring thresholds.
+- **`skills/apigee-troubleshooting/SKILL.md`**: Documents Apigee access log parsing (`ata-apigee-access`), SpikeArrest policy limits, and gateway timeout patterns.
+- **`skills/change-correlation/SKILL.md`**: Outlines revision-to-error timeline alignment rules within the 2-hour window prior to alert onset.
+- **`skills/cloud-run-troubleshooting/SKILL.md`**: Details container restart diagnostic queries, memory limits, and upstream DAG inspection.
+- **`skills/cloud-sql-troubleshooting/SKILL.md`**: Specifies Cloud SQL connection saturation thresholds (warning at 20 connections on `db-f1-micro`) and deadlock queries.
+- **`skills/report-style/SKILL.md`**: Prescribes the structured 4-bullet SRE summary format (Problem, Systems, Observations, Recommended Actions) and evidence-grounded confidence rules.
+
+### Operational Reality & Runtime Architecture
+In the current prototype, the agent's diagnostic pipeline is executed via **deterministic Python specialist modules** (`agent/app/specialists/`) calling live GCP APIs, rather than dynamic LLM prompt/tool injection or an ADK `SkillToolset` at runtime:
+- The Markdown skill files serve as **human and AI assistant architectural runbooks and design specifications** that establish the diagnostic queries, thresholds, and report formatting implemented in code.
+- Gemini is invoked strictly for gray-zone correlation scoring (scores between 35 and 65).
+- The active domain skill areas (`cloud-run-diagnostics`, `apigee-telemetry`, `cloud-sql-triage`, `report-style`) are recorded in the `InvestigationReport` metadata contract (`skills_loaded`).
+
+---
+
+## 7. Security Model & Production Guardrails
+
+The Alert Triage Agent enforces zero-trust security and defense-in-depth across all tiers:
+
+- **Strictly Read-Only IAM Boundaries**:
+  - `ata-agent-sa` and `ata-tools-sa` possess strictly read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer`, `roles/apphub.viewer`).
+  - Neither service account possesses any mutating privileges on production cloud infrastructure. Write permissions are strictly confined to the incident GCS bucket (`roles/storage.objectUser` on `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents`).
+- **Zero Secrets in Repository or Code**: All passwords and tokens reside in Google Secret Manager; the ServiceNow instance URL is configuration.
+- **Mutual Authentication & OIDC Verification**:
+  - Inbound alert webhooks require HTTP Basic Auth validation against Secret Manager credentials.
+  - Cloud Tasks invokes `ata-agent` (`POST /triage`, `POST /timer/wake`) using Google-signed OIDC ID tokens validated by `verify_agent_caller`.
+  - `ata-agent` calls `ata-bridge` (`POST /instructions/ticket/*`) using Google ID tokens verified against `ata-agent-sa`.
+  - Apigee proxies invoke Cloud Run demo services using Google ID tokens.
+- **IAM Database Authentication**: `ata-inventory-api` connects to Cloud SQL PostgreSQL using IAM database authentication via `pg8000` (zero static database passwords).
+- **Atomic Concurrency Protection**: Open Knowledge File updates in GCS use atomic generation preconditions (`if_generation_match`) with exponential backoff and jitter, preventing race conditions and lock clobbering.
+- **Evidence-Bound Synthesis**: Root cause findings cite concrete observed metrics, logs, and deployment revisions. Hardcoded confidence floats and fabricated candidate names are strictly prohibited.
+- **Fault Injection Telemetry Exclusion**: All administrative fault endpoints (`/admin/fault/*`) are decoupled from operational telemetry and excluded from Cloud Logging analysis.
+
+---
+
+## 8. Prototype Status & Known Limitations
+
+The Alert Triage Agent has been evaluated against live GCP infrastructure across 5 realistic failure scenarios (**S1 through S5**), as detailed in the [Demonstration Guide (`DEMO.md`)](DEMO.md):
+
+### Scenario Evaluation Scorecard
+
+| Scenario | Title | Target Infrastructure | Expected Incident Groups & Tickets | Root Cause Origin | Result |
+| :---: | :--- | :--- | :---: | :--- | :---: |
+| **S1** | **Backend 5xx Cascade** | Cloud Run (`ata-inventory-api`) | 1 Group, 1 Ticket | `ata-inventory-api` | **PASS** |
+| **S2** | **Backend Latency** | Cloud Run (`ata-inventory-api`) | 1 Group, 1 Ticket | `ata-inventory-api` (Upstream origin via DAG) | **PASS** |
+| **S3** | **Concurrent Disjoint Incidents** | Apigee X & Cloud Run | 2 Groups, 2 Tickets | `ata-orders-v1` and `ata-inventory-api` (Disjoint groups, multi-factor score < 35) | **PASS** |
+| **S4** | **DB Connection Exhaustion** | Cloud SQL (`ata-inventory-db`) | 1 Group, 1 Ticket | `ata-inventory-db` (earliest onset, connection count > 20) | **PASS** |
+| **S5** | **Bad Deploy / Config Failure** | Cloud Run (`ata-inventory-api`) | 1 Group, 1 Ticket | Specific Cloud Run revision (e.g. `ata-inventory-api-00062-6pj`) | **PASS** |
+
+### Known Limitations
+1. **Cloud SQL `db-f1-micro` Connection Limits**: The test tier uses `db-f1-micro` with `max_connections = 25`. The alert threshold is calibrated at 20 connections (~80% capacity). Under heavy production traffic, production instances (`db-custom-*`) require recalibration.
+2. **Pre-Existing Apigee X Dependency**: Requires an existing Apigee X organization and environment group hostname (`8.233.247.52.nip.io`).
+3. **Local Mock Mode vs Live GCP**: While `IS_LOCAL=true` provides in-memory mock adapters for offline unit tests, full end-to-end evaluation requires live GCP credentials and APIs.
+4. **Queue Concurrency Calibration**: The triage queue `ata-triage-queue` is calibrated with `max_concurrent_dispatches = 10` to serialize burst processing and prevent database lock contention.
+
+---
+
+## 9. Full Step-by-Step GCP Deployment Walkthrough
+
+The following walkthrough follows the staged deployment sequence documented in [DEPLOY.md](DEPLOY.md).
+
+### Prerequisites & IAM Requirements
+
+Before deploying, ensure you have:
+1. **Google Cloud SDK (`gcloud`)** authenticated:
+   ```bash
+   gcloud auth login
+   gcloud auth application-default login
+   ```
+2. **Terraform CLI** (`>= 1.5.0`): `terraform version`
+3. **Target Project Configuration**:
+   ```bash
+   export PROJECT_ID="your-target-project-id"
+   export REGION="us-west1"
+   export NAME_PREFIX="ata"
+   export ENVIRONMENT="prod"
+   gcloud config set project "${PROJECT_ID}"
+   ```
+4. **Deployer Permissions**: Your deploying account requires `roles/owner` or `roles/editor` plus `roles/resourcemanager.projectIamAdmin`.
+
+---
+
+### Step 0: Bootstrap GCS Remote State
+
+Bootstrap the Google Cloud Storage backend for Terraform state storage with uniform bucket-level access and versioning:
 
 ```bash
-# In virtual environment
-/workspace/venv/bin/pytest
+cd /workspace/alert-triage-agent
+./scripts/bootstrap-tfstate.sh \
+  --project-id "${PROJECT_ID}" \
+  --region "${REGION}" \
+  --name-prefix "${NAME_PREFIX}" \
+  --env "${ENVIRONMENT}"
 ```
 
-Run the authentic scenario replay harness:
+This ensures `gs://${PROJECT_ID}-${NAME_PREFIX}-tfstate` exists with encryption and object versioning enabled.
+
+---
+
+### Step 1: Foundation Module
+
+The foundation module provisions the GCS incidents bucket, creates 6 dedicated service accounts, configures Secret Manager placeholders, and provisions Cloud Tasks queues:
 
 ```bash
-/workspace/venv/bin/pytest tests/test_scenario_grouping_replay.py -v
+cd /workspace/alert-triage-agent/infra/terraform/foundation
+terraform init -reconfigure -backend-config=backend.hcl
+
+terraform plan \
+  -var="project_id=${PROJECT_ID}" \
+  -var="region=${REGION}" \
+  -var="name_prefix=${NAME_PREFIX}" \
+  -var="environment=${ENVIRONMENT}" \
+  -out=tfplan-foundation
+
+terraform apply tfplan-foundation
+cd ../../..
+```
+
+**Resources Created**:
+- GCS Bucket: `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents` (versioning enabled).
+- Cloud Tasks Queues: `ata-triage-queue` (max concurrent: 10) and `ata-timer-queue` (max concurrent: 50).
+- Service Accounts: `ata-orders-sa`, `ata-inventory-sa`, `ata-apigee-sa`, `ata-bridge-sa`, `ata-agent-sa`, `ata-tools-sa`.
+- Secret Placeholders: `ata-webhook-token`, `ata-servicenow-username`, `ata-servicenow-password`.
+
+---
+
+### Step 2: Database Module
+
+Provisions a Cloud SQL PostgreSQL 15 instance with IAM database authentication enabled:
+
+```bash
+cd /workspace/alert-triage-agent/infra/terraform/database
+terraform init -reconfigure -backend-config=backend.hcl
+
+terraform plan \
+  -var="project_id=${PROJECT_ID}" \
+  -var="region=${REGION}" \
+  -var="name_prefix=${NAME_PREFIX}" \
+  -out=tfplan-database
+
+terraform apply tfplan-database
+cd ../../..
+```
+
+**Database Initialization**:
+Apply the schema and seed mock inventory catalog items:
+```bash
+gcloud sql connect "${NAME_PREFIX}-inventory-db" --user=postgres --database=inventory < demo/db/schema.sql
 ```
 
 ---
 
-## Documentation
+### Step 3: Applications Module
 
-- [DEMO.md](file:///workspace/alert-triage-agent/DEMO.md): Operator guide for executing and verifying failure scenarios S1 through S5.
-- [DEPLOY.md](file:///workspace/alert-triage-agent/DEPLOY.md): Complete deployment procedures for Terraform, Cloud Run, Cloud Tasks, and Apigee.
-- [AGENTS.md](file:///workspace/alert-triage-agent/AGENTS.md): Architecture reference, telemetry specialists, and synthesis pipeline.
-- [CONFIGURATION.md](file:///workspace/alert-triage-agent/CONFIGURATION.md): Environment variables, secrets, and Cloud Tasks queue specs.
+Deploys internal demo microservices on Cloud Run with IAM service account identities:
+
+```bash
+cd /workspace/alert-triage-agent/infra/terraform/applications
+terraform init -reconfigure -backend-config=backend.hcl
+
+terraform plan \
+  -var="project_id=${PROJECT_ID}" \
+  -var="region=${REGION}" \
+  -var="name_prefix=${NAME_PREFIX}" \
+  -out=tfplan-apps
+
+terraform apply tfplan-apps
+cd ../../..
+```
+
+**Services Deployed**:
+- `ata-inventory-api`: Backed by Cloud SQL IAM authentication and mock fallback.
+- `ata-orders-api`: Securely invokes `ata-inventory-api` using ambient Google ID tokens.
+- Apigee TargetServers: `ata-orders-target` and `ata-inventory-target`.
+
+---
+
+### Step 4: Apigee API Proxies & Products
+
+Package and deploy the Apigee API proxies to environment `prod`, configure developer credentials, and obtain an API consumer key:
+
+```bash
+cd /workspace/alert-triage-agent
+./scripts/deploy-apigee-proxies.sh
+```
+
+**Outputs**:
+- Proxies deployed: `ata-orders-v1` (`/ata/orders/v1`) and `ata-inventory-v1` (`/ata/inventory/v1`).
+- Enforces API key verification, SpikeArrest rate limiting, and structured Cloud Logging.
+- Consumer API key saved to `.ata-api-key`.
+
+---
+
+### Step 5: Observability Module
+
+Deploys Cloud Monitoring alert policies and links them to the `ata-bridge` notification channel:
+
+```bash
+cd /workspace/alert-triage-agent/infra/terraform/observability
+terraform init -reconfigure -backend-config=backend.hcl
+
+terraform plan \
+  -var="project_id=${PROJECT_ID}" \
+  -var="region=${REGION}" \
+  -var="name_prefix=${NAME_PREFIX}" \
+  -out=tfplan-observability
+
+terraform apply tfplan-observability
+cd ../../..
+```
+
+**Alert Policies Configured**:
+1. `ata-orders-5xx`: Cloud Run `ata-orders-api` 5xx rate > 5% over 60s.
+2. `ata-orders-latency`: Cloud Run `ata-orders-api` latency > 2000ms over 60s.
+3. `ata-inventory-5xx`: Cloud Run `ata-inventory-api` 5xx rate > 5% over 60s.
+4. `ata-inventory-latency`: Cloud Run `ata-inventory-api` latency > 2000ms over 60s.
+5. `ata-apigee-orders-5xx`: Apigee proxy `ata-orders-v1` HTTP 500 error count > 1.
+6. `ata-apigee-orders-429`: Apigee proxy `ata-orders-v1` HTTP 429 SpikeArrest rate count > 1.
+7. `ata-cloudsql-connections-critical`: Cloud SQL `ata-inventory-db` connection count > 20 backends.
+8. `ata-cloudsql-cpu-high`: Cloud SQL `ata-inventory-db` CPU utilization > 85%.
+
+---
+
+### Step 6: Triage Tier Services Deployment
+
+Deploy the custom FastMCP tools server, the multi-agent ADK runtime, and the bridge webhook service:
+
+```bash
+# 1. Deploy FastMCP tools server
+cd /workspace/alert-triage-agent/tools
+./scripts/deploy.sh
+cd ../..
+
+# 2. Deploy multi-agent ADK runtime
+cd /workspace/alert-triage-agent/agent
+./scripts/deploy.sh
+cd ../..
+
+# 3. Deploy bridge webhook service
+cd /workspace/alert-triage-agent/bridge
+./scripts/deploy.sh
+cd ../..
+```
+
+---
+
+### Step 7: Secret Manager Configuration
+
+Store ServiceNow credentials safely in Google Secret Manager without echoing passwords:
+
+```bash
+cd /workspace/alert-triage-agent
+./scripts/set-secrets.sh
+```
+
+When prompted:
+- **ServiceNow Username**: API integration user (`ata-servicenow-username`).
+- **ServiceNow Password**: Password for ServiceNow integration user (`ata-servicenow-password`).
+
+---
+
+### Step 8: End-to-End Verification
+
+Verify the deployed infrastructure and services using automated verification scripts:
+
+```bash
+# 1. Verify demo microservices and Apigee routing
+./scripts/verify-demo-infra.sh
+
+# 2. Verify bridge webhook ingestion and GCS OKF generation
+./scripts/verify-stage1.sh
+
+# 3. Run full end-to-end scenario verification harness
+./scripts/verify-scenarios.sh
+```
+
+---
+
+## 10. Master Automated Deployment Script
+
+Unlike monolithic prototypes that rely on a single script, deployment in the Alert Triage Agent is organized into **tier automation scripts** matching the system architecture:
+
+### 1. Core Triage Vertical Slice (`deploy-stage1.sh`)
+Automates the bootstrapping and deployment of the core triage engine:
+```bash
+./scripts/deploy-stage1.sh
+```
+This script sequentially:
+1. Bootstraps the GCS Terraform remote state bucket (`scripts/bootstrap-tfstate.sh`).
+2. Applies the foundation Terraform module (`infra/terraform/foundation`).
+3. Builds and deploys the demo inventory API (`demo/ata-inventory-api/scripts/deploy.sh`).
+4. Builds and deploys the agent service (`agent/scripts/deploy.sh`).
+5. Builds and deploys the bridge service (`bridge/scripts/deploy.sh`).
+
+### 2. Demo Infrastructure & Observability (`deploy-demo-infra.sh`)
+Automates the deployment of the remaining microservices, database, and telemetry:
+```bash
+./scripts/deploy-demo-infra.sh
+```
+This script sequentially:
+1. Applies the database Terraform module (`infra/terraform/database`).
+2. Applies the applications Terraform module (`infra/terraform/applications`).
+3. Applies the observability Terraform module (`infra/terraform/observability`).
+4. Packages and deploys Apigee proxies (`scripts/deploy-apigee-proxies.sh`).
+
+### 3. Full Deployment Execution Sequence
+To deploy the entire stack from clean repository state:
+```bash
+# Set configuration
+export PROJECT_ID="your-target-project-id"
+export REGION="us-west1"
+export NAME_PREFIX="ata"
+export ENVIRONMENT="prod"
+
+# Execute staged deployment sequence
+./scripts/deploy-stage1.sh
+./scripts/deploy-demo-infra.sh
+(cd tools && ./scripts/deploy.sh)
+./scripts/set-secrets.sh
+./scripts/verify-stage1.sh
+```
+
+---
+
+## 11. Terraform Remote State & GCS Backend
+
+All four Terraform stacks in `infra/terraform/` define a partial Google Cloud Storage backend:
+
+```hcl
+terraform {
+  backend "gcs" {}
+}
+```
+
+- **Bootstrapping**: Initialized via `scripts/bootstrap-tfstate.sh` which provisions `gs://${PROJECT_ID}-${NAME_PREFIX}-tfstate` with uniform bucket-level access, public access prevention, and object versioning.
+- **Prefix Isolation**: Each stack isolates its state using distinct GCS prefixes specified via `backend.hcl`:
+  - Foundation: `prefix = "${NAME_PREFIX}/foundation"`
+  - Database: `prefix = "${NAME_PREFIX}/database"`
+  - Applications: `prefix = "${NAME_PREFIX}/applications"`
+  - Observability: `prefix = "${NAME_PREFIX}/observability"`
+- **CI & Pre-deployment Validation**: Quality gates and local linters use `terraform init -backend=false && terraform validate`, validating syntax and structure without requiring cloud credentials or remote backend access.
+
+---
+
+## 12. Enterprise Organization Policy Considerations
+
+In enterprise Google Cloud organizations, standard Organization Policies may require specific configuration adjustments:
+
+1. **Domain Restricted Sharing (`constraints/iam.allowedPolicyMemberDomains`)**:
+   - May prevent binding `allUsers` on public ingress services such as `ata-bridge`.
+   - *Remediation*: Deploy an external Google Cloud Load Balancer with Cloud Armor in front of `ata-bridge` and set Cloud Run ingress to `internal-and-cloud-load-balancing`, or request a project-level policy exemption.
+2. **Cloud Run Ingress Controls (`constraints/run.allowedIngress`)**:
+   - `ata-bridge`: Requires `all` (or `internal-and-cloud-load-balancing`) to receive Cloud Monitoring webhook notifications.
+   - `ata-agent`: Requires `internal` (`INGRESS_TRAFFIC_INTERNAL_ONLY`), accessible exclusively by Cloud Tasks and authorized internal service accounts within the project.
+   - `ata-tools`: Requires `internal` (`INGRESS_TRAFFIC_INTERNAL_ONLY`), accessible exclusively by `ata-agent`.
+3. **Public IP Restriction on Cloud SQL (`constraints/sql.restrictPublicIp`)**:
+   - Enterprise policies frequently block public IP assignments on Cloud SQL.
+   - The database module supports Private IP with Google Private Service Connect (PSC) or VPC peering, connecting securely via the Cloud SQL Auth Proxy with IAM database authentication.
+
+---
+
+## 13. Local Development & Quality Gates
+
+### Local Environment Setup
+Set up a Python virtual environment and install development dependencies:
+
+```bash
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install component packages in editable mode with development dependencies
+pip install -e "./bridge[dev]" -e "./agent[dev]" -e "./tools[dev]" pytest ruff mypy
+```
+
+### Offline & Mock Development Mode
+Set `IS_LOCAL=true` to enable offline mock mode:
+- `ata-bridge` uses mock webhook verification and records ticket operations locally.
+- `ata-agent` reads and writes incident Open Knowledge Files (OKF) to local temporary storage (`/tmp/knowledge/incident-manager`) without requiring GCS bucket credentials.
+- `ata-inventory-api` falls back to in-memory catalog data without requiring a live Cloud SQL connection (`MOCK_DB=true`).
+
+### Quality Gates & Presubmit Verification
+All pull requests must pass the following checks cleanly:
+
+```bash
+# 1. Run full test suite using project virtualenv
+/workspace/venv/bin/pytest tests/ -v
+
+# 2. Run core correlation and scenario test suites
+/workspace/venv/bin/pytest tests/test_scenarios_e2e.py
+/workspace/venv/bin/pytest tests/test_correlation_scoring.py
+/workspace/venv/bin/pytest tests/test_agent_grouping_and_timers.py
+/workspace/venv/bin/pytest tests/test_no_fabricated_data.py
+/workspace/venv/bin/pytest tests/test_container_import_layout.py
+
+# 3. Linting and formatting checks
+ruff check bridge agent tools
+ruff format --check bridge agent tools
+
+# 4. Terraform validation across all modules
+for dir in foundation database applications observability; do
+  (cd "infra/terraform/$dir" && terraform init -backend=false && terraform validate)
+done
+```
+
+---
+
+## 14. Testing Guide & Post-Deploy Smoke Tests
+
+The repository provides comprehensive automated testing tools across multiple layers:
+
+### 1. Preflight Health Verification
+Before triggering scenarios, run `scripts/scenarios/preflight.sh` to validate microservice health, admin endpoints, Apigee ingress, and alert policies:
+```bash
+./scripts/scenarios/preflight.sh
+```
+
+### 2. Failure Scenarios (S1–S5)
+The system is evaluated against 5 realistic production failure scenarios:
+- **Scenario S1: Backend 5xx Cascade**
+  ```bash
+  ./scripts/scenarios/s1_backend_5xx.sh
+  ```
+  Injects 85% HTTP 500 error rate into `ata-inventory-api`. Verifies 1 incident group and 1 ServiceNow ticket with origin `ata-inventory-api`.
+- **Scenario S2: Backend Latency Degradation**
+  ```bash
+  ./scripts/scenarios/s2_backend_latency.sh
+  ```
+  Injects 6500ms latency delay into `ata-inventory-api`. Verifies 1 incident group and 1 ServiceNow ticket tracing root cause to inventory delay.
+- **Scenario S3: Concurrent Disjoint Incidents**
+  ```bash
+  ./scripts/scenarios/s3_concurrent_disjoint.sh
+  ```
+  Simultaneously triggers Scenario S1 on `ata-inventory-api` and strict SpikeArrest rate limiting on `ata-orders-v1`. Evaluates multi-factor correlation score (<35 pts) and verifies **exactly 2 distinct incident groups and 2 distinct ServiceNow tickets**.
+- **Scenario S4: Database Connection Pool Exhaustion**
+  ```bash
+  ./scripts/scenarios/s4_db_connection_pool.sh
+  ```
+  Simulates PostgreSQL connection leak exhausting backends (`>20` connections). Verifies 1 incident group and 1 ServiceNow ticket with origin `ata-inventory-db`.
+- **Scenario S5: Bad Deploy / Config Failure**
+  ```bash
+  ./scripts/scenarios/s5_bad_deploy.sh
+  ```
+  Deploys a Cloud Run revision with invalid IAM database credentials. Verifies 1 incident group and 1 ServiceNow ticket citing the explicit failing revision ID.
+
+### 3. Master Scenario Runner
+Execute scenarios with logging and automated assertions:
+```bash
+# Run prioritized scenarios (S4, S1, S3, S5)
+./scripts/run-all-scenarios.sh --priority
+
+# Run full scenario suite (S1 through S5)
+./scripts/run-all-scenarios.sh --all
+
+# Run a single scenario
+./scripts/run-all-scenarios.sh --scenario s3
+
+# Dry-run validation mode (no network modification)
+./scripts/run-all-scenarios.sh --dry-run
+```
+
+### 4. Resetting Between Scenarios
+Reset injected faults, clear database sleep connections, restore Apigee proxies, and move active incidents to `archive/`:
+```bash
+./scripts/reset-scenarios.sh
+```
+
+---
+
+## 15. Teardown & Clean Up
+
+To avoid ongoing GCP charges, destroy infrastructure in reverse order:
+
+```bash
+# 1. Reset all active scenario faults and clean storage
+./scripts/reset-scenarios.sh
+
+# 2. Teardown Observability alert policies
+cd infra/terraform/observability
+terraform destroy -auto-approve -var="project_id=${PROJECT_ID}" -var="region=${REGION}" -var="name_prefix=${NAME_PREFIX}"
+cd ../../..
+
+# 3. Teardown Applications stack
+cd infra/terraform/applications
+terraform destroy -auto-approve -var="project_id=${PROJECT_ID}" -var="region=${REGION}" -var="name_prefix=${NAME_PREFIX}"
+cd ../../..
+
+# 4. Teardown Database stack
+cd infra/terraform/database
+terraform destroy -auto-approve -var="project_id=${PROJECT_ID}" -var="region=${REGION}" -var="name_prefix=${NAME_PREFIX}"
+cd ../../..
+
+# 5. Delete Cloud Run triage services
+gcloud run services delete "${NAME_PREFIX}-bridge" --region="${REGION}" --project="${PROJECT_ID}" --quiet || true
+gcloud run services delete "${NAME_PREFIX}-agent" --region="${REGION}" --project="${PROJECT_ID}" --quiet || true
+gcloud run services delete "${NAME_PREFIX}-tools" --region="${REGION}" --project="${PROJECT_ID}" --quiet || true
+
+# 6. Teardown Foundation stack (Cloud Tasks queues, Service Accounts, Secrets)
+cd infra/terraform/foundation
+terraform destroy -auto-approve -var="project_id=${PROJECT_ID}" -var="region=${REGION}" -var="name_prefix=${NAME_PREFIX}" -var="environment=${ENVIRONMENT}"
+cd ../../..
+
+# 7. Remove Cloud Storage Buckets
+gcloud storage rm --recursive "gs://${PROJECT_ID}-${NAME_PREFIX}-incidents/**" || true
+gcloud storage rm "gs://${PROJECT_ID}-${NAME_PREFIX}-incidents" || true
+gcloud storage rm --recursive "gs://${PROJECT_ID}-${NAME_PREFIX}-tfstate/**" || true
+gcloud storage rm "gs://${PROJECT_ID}-${NAME_PREFIX}-tfstate" || true
+```
+
+---
+
+## 16. Repository Layout
+
+```
+alert-triage-agent/
+├── agent/                         # Autonomous SRE diagnostic and triage engine
+│   ├── app/                       # Grouping, timers, correlation, specialists, synthesizer
+│   │   ├── contracts/             # Pydantic data contracts (alert, incident, report)
+│   │   ├── correlation/           # Multi-factor correlation scoring engine & DAG traversal
+│   │   ├── grouping/              # GroupingManager, OKF store, and duplicate suppression
+│   │   ├── specialists/           # Deterministic specialists (Cloud Run, Apigee, Cloud SQL, Change)
+│   │   ├── timers/                # Cloud Tasks delayed timer scheduler (settle, max-wait, cool)
+│   │   ├── bridge_client.py       # Client for Bridge Instruction API (/instructions/ticket/*)
+│   │   ├── config.py              # Agent typed configuration (AgentConfig)
+│   │   └── main.py                # FastAPI endpoints (/health, /triage, /timer/wake)
+│   ├── Dockerfile                 # Container build specification for ata-agent
+│   └── scripts/deploy.sh          # Cloud Run deployment script for ata-agent
+├── bridge/                        # Stateless webhook ingestion & ServiceNow adapter
+│   ├── app/                       # FastAPI application, auth, dispatcher, adapters
+│   │   ├── adapters/              # ServiceNow Table & Attachment API adapter
+│   │   ├── contracts/             # AlertEvent and instruction request contracts
+│   │   ├── core/                  # TaskDispatcher for Cloud Tasks enqueue
+│   │   ├── templates/             # HTML report rendering templates
+│   │   ├── auth.py                # HTTP Basic Auth & Google OIDC verification
+│   │   ├── config.py              # Bridge typed configuration (BridgeConfig)
+│   │   └── main.py                # Webhook (/webhook/monitoring) & Instruction endpoints
+│   ├── Dockerfile                 # Container build specification for ata-bridge
+│   └── scripts/deploy.sh          # Cloud Run deployment script for ata-bridge
+├── demo/                          # Realistic e-commerce microservices & fault injection
+│   ├── apigee/                    # Apigee X API proxies (ata-orders-v1, ata-inventory-v1)
+│   ├── ata-inventory-api/         # Cloud Run inventory service (Cloud SQL IAM DB auth)
+│   ├── ata-orders-api/            # Cloud Run orders service (calls inventory via Google ID token)
+│   └── db/schema.sql              # Cloud SQL PostgreSQL schema & catalog seed data
+├── infra/terraform/               # Infrastructure as Code (Terraform)
+│   ├── applications/              # Cloud Run demo microservices & Apigee TargetServers
+│   ├── database/                  # Cloud SQL PostgreSQL 15 instance with IAM DB auth
+│   ├── foundation/                # GCS incidents bucket, Cloud Tasks queues, IAM, Secrets
+│   └── observability/             # Cloud Monitoring alert policies & notification channels
+├── scripts/                       # Deployment, verification, and scenario scripts
+│   ├── scenarios/                 # Realistic failure scenario scripts (S1 through S5)
+│   │   ├── common.sh              # Shared logging, token resolution, and utility functions
+│   │   ├── preflight.sh           # Pre-scenario health & endpoint verification
+│   │   ├── s1_backend_5xx.sh      # Scenario 1: Backend 500 error spike
+│   │   ├── s2_backend_latency.sh  # Scenario 2: Backend latency degradation
+│   │   ├── s3_concurrent_disjoint.sh # Scenario 3: Concurrent disjoint incidents
+│   │   ├── s4_db_connection_pool.sh  # Scenario 4: Database connection pool exhaustion
+│   │   └── s5_bad_deploy.sh       # Scenario 5: Bad deploy / config failure
+│   ├── bootstrap-tfstate.sh       # Bootstraps GCS remote state bucket
+│   ├── deploy-apigee-proxies.sh   # Deploys Apigee X proxies, products, and developer app
+│   ├── deploy-demo-infra.sh       # Staged deployer for database, apps, observability, Apigee
+│   ├── deploy-stage1.sh           # Core vertical slice deployment (tfstate, foundation, apps)
+│   ├── reset-scenarios.sh         # Clears faults, resets baselines, archives incident files
+│   ├── run-all-scenarios.sh       # Master scenario driver (--all, --priority, --scenario)
+│   ├── set-secrets.sh             # Interactive Secret Manager configuration for ServiceNow
+│   ├── verify-demo-infra.sh       # Verifies demo microservices and Apigee routing
+│   ├── verify-scenarios.sh        # Automated scenario verification test harness
+│   └── verify-stage1.sh           # Verifies webhook ingestion, agent triage, and OKF generation
+├── skills/                        # SRE diagnostic runbooks and architectural specifications
+│   ├── alert-triage/              # Incident grouping, settle deadlines, and stale-wake rules
+│   ├── apigee-troubleshooting/    # Apigee X proxy diagnostics and SpikeArrest patterns
+│   ├── change-correlation/        # Cloud Run revision and deployment correlation rules
+│   ├── cloud-run-troubleshooting/ # Container lifecycle, CPU/memory saturation, latency metrics
+│   ├── cloud-sql-troubleshooting/ # Database connection exhaustion and lock contention
+│   └── report-style/              # SRE 4-bullet executive summaries and HTML dossier styling
+├── tests/                         # Automated pytest test suites (30+ test modules)
+├── tools/                         # FastMCP read-only telemetry and topology server
+│   ├── app/                       # MCP server, tool definitions, bundle parser
+│   ├── Dockerfile                 # Container build specification for ata-tools
+│   └── scripts/deploy.sh          # Cloud Run deployment script for ata-tools
+├── topology/                      # Topology DAG definitions and dependency relationships
+├── AGENTS.md                      # Developer and AI assistant architecture reference
+├── CONFIGURATION.md               # Complete configuration, environment variables, secrets reference
+├── DEMO.md                        # Operator demonstration guide for scenarios S1 through S5
+├── DEPLOY.md                      # Step-by-step production deployment guide
+└── README.md                      # Primary project documentation
+```
+
+### In-Depth Documentation Links
+- [Production Deployment Guide (`DEPLOY.md`)](DEPLOY.md)
+- [Operator & Scenario Demonstration Guide (`DEMO.md`)](DEMO.md)
+- [Configuration & Environment Reference (`CONFIGURATION.md`)](CONFIGURATION.md)
+- [Developer & AI Assistant Guide (`AGENTS.md`)](AGENTS.md)
