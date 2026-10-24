@@ -17,13 +17,15 @@ Verifies:
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import logging
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-import requests
 
 # Dynamically import jira-cleanup.py (hyphenated script name)
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "jira-cleanup.py"
@@ -32,6 +34,27 @@ if spec is None or spec.loader is None:
     raise ImportError(f"Cannot load spec from {SCRIPT_PATH}")
 jira = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(jira)
+
+
+def make_mock_response(
+    status: int = 200,
+    json_data: Any = None,
+    text: str = "",
+    headers: Optional[dict] = None,
+) -> MagicMock:
+    """Helper to mock urllib.request.urlopen response."""
+    resp = MagicMock()
+    resp.status = status
+    resp.code = status
+    if json_data is not None:
+        body = json.dumps(json_data).encode("utf-8")
+    else:
+        body = text.encode("utf-8")
+    resp.read.return_value = body
+    resp.headers = headers or {}
+    resp.__enter__.return_value = resp
+    resp.__exit__.return_value = None
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +397,7 @@ class TestSensitiveDataLogging:
 class TestSearchAndPagination:
     def test_single_page_search(self):
         """Searches POST /rest/api/3/search/jql and returns issue list."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -412,7 +435,7 @@ class TestSearchAndPagination:
 
     def test_multi_page_pagination_via_next_page_token(self):
         """Follows nextPageToken across multiple pages until isLast=True."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
 
         resp1 = MagicMock()
         resp1.status_code = 200
@@ -449,7 +472,7 @@ class TestSearchAndPagination:
 
     def test_pagination_stops_at_limit(self):
         """Paging stops as soon as limit is reached even if more pages exist."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
         resp1 = MagicMock()
         resp1.status_code = 200
         resp1.json.return_value = {
@@ -471,7 +494,7 @@ class TestSearchAndPagination:
 
     def test_client_side_summary_regex(self):
         """Filters issues client-side matching summary regex pattern."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -501,7 +524,7 @@ class TestSearchAndPagination:
 class TestDeleteAndRetry:
     def test_successful_deletion(self):
         """DELETE request sends deleteSubtasks=true and succeeds on HTTP 204."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
         mock_resp = MagicMock()
         mock_resp.status_code = 204
         mock_session.delete.return_value = mock_resp
@@ -521,7 +544,7 @@ class TestDeleteAndRetry:
 
     def test_http_404_treated_as_already_deleted(self):
         """HTTP 404 is treated as successfully removed."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
         mock_resp = MagicMock()
         mock_resp.status_code = 404
         mock_session.delete.return_value = mock_resp
@@ -537,7 +560,7 @@ class TestDeleteAndRetry:
 
     def test_rate_limiting_429_honors_retry_after(self):
         """HTTP 429 parses Retry-After header and sleeps for specified seconds plus jitter."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
         resp_429 = MagicMock()
         resp_429.status_code = 429
         resp_429.text = "Rate limit exceeded"
@@ -564,7 +587,7 @@ class TestDeleteAndRetry:
 
     def test_transient_500_retries_with_exponential_backoff_and_jitter(self):
         """HTTP 500 triggers exponential backoff retry with jitter."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
         resp_500 = MagicMock()
         resp_500.status_code = 500
         resp_500.text = "Internal Server Error"
@@ -592,7 +615,7 @@ class TestDeleteAndRetry:
 
     def test_retry_without_jitter_deterministic(self):
         """When jitter is disabled, sleep time matches backoff exactly."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
         resp_500 = MagicMock()
         resp_500.status_code = 500
         resp_500.text = "Internal Server Error"
@@ -618,7 +641,7 @@ class TestDeleteAndRetry:
 
     def test_missing_or_blank_key_skipped_without_delete(self):
         """Records with missing or empty key are recorded as failure without calling DELETE."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
 
         issues = [
             {"key": ""},
@@ -637,7 +660,7 @@ class TestDeleteAndRetry:
 
     def test_max_retries_exceeded_recorded_in_failures(self):
         """Exhausting max retries records failure with last error message."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
         resp_503 = MagicMock()
         resp_503.status_code = 503
         resp_503.text = "Service Unavailable"
@@ -707,17 +730,15 @@ class TestDryRunAndApply:
         parsed = json.loads(json_out)
         assert parsed[0]["key"] == "PROJ-1"
 
-    @patch("requests.Session")
-    def test_dry_run_executes_zero_deletes(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_dry_run_executes_zero_deletes(self, mock_urlopen, capsys, monkeypatch):
         """Dry-run queries issues and executes zero DELETE requests."""
         monkeypatch.setenv("JIRA_API_TOKEN", "mock-token")
-        mock_session = mock_session_cls.return_value
-        search_resp = MagicMock()
-        search_resp.status_code = 200
-        search_resp.json.return_value = {
-            "issues": [{"key": "PROJ-10", "fields": {"summary": "Alert"}}]
-        }
-        mock_session.post.return_value = search_resp
+        search_resp = make_mock_response(
+            status=200,
+            json_data={"issues": [{"key": "PROJ-10", "fields": {"summary": "Alert"}}]},
+        )
+        mock_urlopen.return_value = search_resp
 
         exit_code = jira.main([
             "--site-url", "https://test.atlassian.net",
@@ -726,23 +747,21 @@ class TestDryRunAndApply:
         ])
 
         assert exit_code == 0
-        mock_session.delete.assert_not_called()
+        assert not any(c[0][0].method == "DELETE" for c in mock_urlopen.call_args_list)
         captured = capsys.readouterr()
         assert "[DRY-RUN MODE] Found 1 matching issue(s). Zero deletions executed." in captured.out
 
-    @patch("requests.Session")
+    @patch("urllib.request.urlopen")
     def test_apply_confirmation_mismatch_aborts_without_deleting(
-        self, mock_session_cls, capsys, monkeypatch
+        self, mock_urlopen, capsys, monkeypatch
     ):
         """Apply mode aborts with 0 deletions when interactive count confirmation fails."""
         monkeypatch.setenv("JIRA_API_TOKEN", "mock-token")
-        mock_session = mock_session_cls.return_value
-        search_resp = MagicMock()
-        search_resp.status_code = 200
-        search_resp.json.return_value = {
-            "issues": [{"key": "PROJ-10", "fields": {"summary": "Alert"}}]
-        }
-        mock_session.post.return_value = search_resp
+        search_resp = make_mock_response(
+            status=200,
+            json_data={"issues": [{"key": "PROJ-10", "fields": {"summary": "Alert"}}]},
+        )
+        mock_urlopen.return_value = search_resp
 
         # Operator inputs incorrect count
         with patch("builtins.input", return_value="999"):
@@ -754,27 +773,22 @@ class TestDryRunAndApply:
             ])
 
         assert exit_code == 1
-        mock_session.delete.assert_not_called()
+        assert not any(c[0][0].method == "DELETE" for c in mock_urlopen.call_args_list)
         captured = capsys.readouterr()
         assert "Aborted: Confirmation '999' did not match issue count '1'." in captured.out
 
-    @patch("requests.Session")
+    @patch("urllib.request.urlopen")
     def test_apply_with_exact_count_confirmation_succeeds(
-        self, mock_session_cls, capsys, monkeypatch
+        self, mock_urlopen, capsys, monkeypatch
     ):
         """Apply mode succeeds when operator types matching count."""
         monkeypatch.setenv("JIRA_API_TOKEN", "mock-token")
-        mock_session = mock_session_cls.return_value
-        search_resp = MagicMock()
-        search_resp.status_code = 200
-        search_resp.json.return_value = {
-            "issues": [{"key": "PROJ-10", "fields": {"summary": "Alert"}}]
-        }
-        mock_session.post.return_value = search_resp
-
-        del_resp = MagicMock()
-        del_resp.status_code = 204
-        mock_session.delete.return_value = del_resp
+        search_resp = make_mock_response(
+            status=200,
+            json_data={"issues": [{"key": "PROJ-10", "fields": {"summary": "Alert"}}]},
+        )
+        del_resp = make_mock_response(status=204)
+        mock_urlopen.side_effect = [search_resp, del_resp]
 
         with patch("builtins.input", return_value="1"):
             exit_code = jira.main([
@@ -785,30 +799,30 @@ class TestDryRunAndApply:
             ])
 
         assert exit_code == 0
-        mock_session.delete.assert_called_once()
+        del_calls = [c for c in mock_urlopen.call_args_list if c[0][0].method == "DELETE"]
+        assert len(del_calls) == 1
+        assert "deleteSubtasks=true" in del_calls[0][0][0].full_url
         captured = capsys.readouterr()
         assert "Successfully deleted: 1" in captured.out
 
-    @patch("requests.Session")
+    @patch("urllib.request.urlopen")
     def test_apply_with_yes_flag_skips_prompt(
-        self, mock_session_cls, capsys, monkeypatch
+        self, mock_urlopen, capsys, monkeypatch
     ):
         """Apply mode with --yes echoes count and executes deletions without prompting."""
         monkeypatch.setenv("JIRA_API_TOKEN", "mock-token")
-        mock_session = mock_session_cls.return_value
-        search_resp = MagicMock()
-        search_resp.status_code = 200
-        search_resp.json.return_value = {
-            "issues": [
-                {"key": "PROJ-1", "fields": {"summary": "Issue 1"}},
-                {"key": "PROJ-2", "fields": {"summary": "Issue 2"}},
-            ]
-        }
-        mock_session.post.return_value = search_resp
-
-        del_resp = MagicMock()
-        del_resp.status_code = 204
-        mock_session.delete.return_value = del_resp
+        search_resp = make_mock_response(
+            status=200,
+            json_data={
+                "issues": [
+                    {"key": "PROJ-1", "fields": {"summary": "Issue 1"}},
+                    {"key": "PROJ-2", "fields": {"summary": "Issue 2"}},
+                ]
+            },
+        )
+        del_resp1 = make_mock_response(status=204)
+        del_resp2 = make_mock_response(status=204)
+        mock_urlopen.side_effect = [search_resp, del_resp1, del_resp2]
 
         with patch("builtins.input") as mock_input:
             exit_code = jira.main([
@@ -821,20 +835,18 @@ class TestDryRunAndApply:
 
         mock_input.assert_not_called()
         assert exit_code == 0
-        assert mock_session.delete.call_count == 2
+        del_calls = [c for c in mock_urlopen.call_args_list if c[0][0].method == "DELETE"]
+        assert len(del_calls) == 2
         captured = capsys.readouterr()
         assert "Confirming deletion of 2 issues (--yes specified)." in captured.out
         assert "Successfully deleted: 2" in captured.out
 
-    @patch("requests.Session")
-    def test_warning_when_project_omitted(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_warning_when_project_omitted(self, mock_urlopen, capsys, monkeypatch):
         """When --project is omitted, a loud warning is emitted to stderr."""
         monkeypatch.setenv("JIRA_API_TOKEN", "mock-token")
-        mock_session = mock_session_cls.return_value
-        search_resp = MagicMock()
-        search_resp.status_code = 200
-        search_resp.json.return_value = {"issues": []}
-        mock_session.post.return_value = search_resp
+        search_resp = make_mock_response(status=200, json_data={"issues": []})
+        mock_urlopen.return_value = search_resp
 
         exit_code = jira.main([
             "--site-url", "https://test.atlassian.net",
@@ -847,15 +859,12 @@ class TestDryRunAndApply:
         assert "WARNING: No --project filter specified!" in captured.err
         assert "Zero deletions executed." in captured.out
 
-    @patch("requests.Session")
-    def test_zero_matching_issues_in_apply_mode(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_zero_matching_issues_in_apply_mode(self, mock_urlopen, capsys, monkeypatch):
         """When apply mode finds 0 matching issues, exits cleanly without error."""
         monkeypatch.setenv("JIRA_API_TOKEN", "mock-token")
-        mock_session = mock_session_cls.return_value
-        search_resp = MagicMock()
-        search_resp.status_code = 200
-        search_resp.json.return_value = {"issues": []}
-        mock_session.post.return_value = search_resp
+        search_resp = make_mock_response(status=200, json_data={"issues": []})
+        mock_urlopen.return_value = search_resp
 
         exit_code = jira.main([
             "--site-url", "https://test.atlassian.net",
@@ -865,14 +874,14 @@ class TestDryRunAndApply:
         ])
 
         assert exit_code == 0
-        mock_session.delete.assert_not_called()
+        assert not any(c[0][0].method == "DELETE" for c in mock_urlopen.call_args_list)
         captured = capsys.readouterr()
         assert "No matching issues found. Nothing to delete." in captured.out
 
     def test_network_exception_retry_and_recovery(self):
         """Network RequestException triggers retry and eventual success."""
-        mock_session = MagicMock(spec=requests.Session)
-        req_exc = requests.RequestException("Connection reset by peer")
+        mock_session = MagicMock(spec=jira.HttpSession)
+        req_exc = jira.RequestError("Connection reset by peer")
         success_resp = MagicMock()
         success_resp.status_code = 204
 
@@ -892,7 +901,7 @@ class TestDryRunAndApply:
 
     def test_retry_after_invalid_header_falls_back(self):
         """Non-numeric Retry-After header falls back to default backoff."""
-        mock_session = MagicMock(spec=requests.Session)
+        mock_session = MagicMock(spec=jira.HttpSession)
         resp_429 = MagicMock()
         resp_429.status_code = 429
         resp_429.text = "Too many requests"
@@ -917,4 +926,81 @@ class TestDryRunAndApply:
         assert mock_sleep.call_count == 1
         slept = mock_sleep.call_args[0][0]
         assert 1.2 <= slept <= 1.2 * 1.25
+
+
+# ---------------------------------------------------------------------------
+# HTTP Client Helper Tests
+# ---------------------------------------------------------------------------
+class TestHttpSession:
+    def test_basic_auth_header_encoding(self):
+        """Basic auth header is correctly base64-encoded."""
+        session = jira.HttpSession()
+        session.set_basic_auth("user@example.com", "api_token_123")
+        assert session.headers["Authorization"] == "Basic dXNlckBleGFtcGxlLmNvbTphcGlfdG9rZW5fMTIz"
+
+    @patch("urllib.request.urlopen")
+    def test_post_with_json_and_tls_context(self, mock_urlopen):
+        """POST request serializes JSON payload and enforces TLS default context for https."""
+        mock_urlopen.return_value = make_mock_response(status=200, json_data={"issues": []})
+        session = jira.HttpSession()
+        session.set_basic_auth("user@example.com", "token")
+        resp = session.post("https://test.atlassian.net/rest/api/3/search/jql", json={"jql": "project = PROJ"})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"issues": []}
+        assert mock_urlopen.call_count == 1
+        req = mock_urlopen.call_args[0][0]
+        context = mock_urlopen.call_args[1].get("context")
+        assert context is not None
+        assert req.method == "POST"
+        assert json.loads(req.data.decode("utf-8")) == {"jql": "project = PROJ"}
+        assert req.headers["Content-type"] == "application/json"
+        assert req.headers["Authorization"] == "Basic dXNlckBleGFtcGxlLmNvbTp0b2tlbg=="
+
+    @patch("urllib.request.urlopen")
+    def test_http_error_preserves_status_code_and_retry_after(self, mock_urlopen):
+        """urllib.error.HTTPError preserves HTTP status code, headers, and body."""
+        http_err = urllib.error.HTTPError(
+            "https://test.atlassian.net/rest/api/3/issue/PROJ-1",
+            429,
+            "Too Many Requests",
+            {"Retry-After": "3", "Content-Type": "application/json"},
+            io.BytesIO(b'{"error": "rate limited"}'),
+        )
+        mock_urlopen.side_effect = http_err
+
+        session = jira.HttpSession()
+        resp = session.delete("https://test.atlassian.net/rest/api/3/issue/PROJ-1")
+        assert resp.status_code == 429
+        assert resp.headers.get("Retry-After") == "3"
+        assert resp.text == '{"error": "rate limited"}'
+
+        with pytest.raises(jira.HTTPStatusError, match="HTTP 429"):
+            resp.raise_for_status()
+
+    @patch("urllib.request.urlopen")
+    def test_network_error_raises_request_error(self, mock_urlopen):
+        """urllib.error.URLError raises RequestError."""
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+        session = jira.HttpSession()
+        with pytest.raises(jira.RequestError, match="Network error: Connection refused"):
+            session.post("https://test.atlassian.net/rest/api/3/search/jql", json={})
+
+    @patch("urllib.request.urlopen")
+    def test_https_scheme_case_insensitive(self, mock_urlopen):
+        """TLS verification context is created for HTTPS scheme regardless of casing."""
+        mock_urlopen.return_value = make_mock_response(status=200, json_data={"issues": []})
+        session = jira.HttpSession()
+
+        session.get("HTTPS://test.atlassian.net/rest/api/3/search/jql")
+        context_upper = mock_urlopen.call_args[1].get("context")
+        assert context_upper is not None
+
+        session.get("Https://test.atlassian.net/rest/api/3/search/jql")
+        context_mixed = mock_urlopen.call_args[1].get("context")
+        assert context_mixed is not None
+
+        session.get("http://test.atlassian.net/rest/api/3/search/jql")
+        context_http = mock_urlopen.call_args[1].get("context")
+        assert context_http is None
 

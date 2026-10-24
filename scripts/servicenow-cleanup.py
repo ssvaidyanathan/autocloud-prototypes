@@ -10,7 +10,7 @@ Security & Operational Rules:
 - Credentials must never appear in logs, CLI arguments, or error output.
 - Password is read via SNOW_PASSWORD env var or interactive getpass.getpass() prompt.
   No --password flag is accepted to prevent credential leakage into shell history.
-- Standalone: stdlib + requests only. No Secret Manager or runtime agent dependencies.
+- Standalone: stdlib only (Python 3.9+). No Secret Manager or runtime agent dependencies.
 - Touches ONLY the 'incident' table.
 - Dry-run by default. Applying deletions requires exact count confirmation or --yes.
 - Child attachments (sys_attachment) and journal records are removed via ServiceNow
@@ -20,6 +20,7 @@ Security & Operational Rules:
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import getpass
 import io
@@ -27,14 +28,16 @@ import json
 import logging
 import os
 import re
+import socket
+import ssl
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
-
-import requests
-from requests.auth import HTTPBasicAuth
 
 # Standard ServiceNow Incident State Mapping
 STATE_MAP: Dict[str, str] = {
@@ -234,8 +237,160 @@ def build_encoded_query(
     return "^".join(clauses)
 
 
+class CaseInsensitiveDict(dict):
+    """Case-insensitive dictionary for HTTP headers."""
+
+    def __init__(self, data: Optional[Any] = None) -> None:
+        super().__init__()
+        if data:
+            if hasattr(data, "items"):
+                for k, v in data.items():
+                    self[k] = v
+            else:
+                for k, v in data:
+                    self[k] = v
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        super().__setitem__(key.lower() if isinstance(key, str) else key, value)
+
+    def __getitem__(self, key: Any) -> Any:
+        return super().__getitem__(key.lower() if isinstance(key, str) else key)
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(key.lower() if isinstance(key, str) else key)
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        return super().get(key.lower() if isinstance(key, str) else key, default)
+
+
+class HTTPResponse:
+    """Lightweight HTTP response container mimicking requests.Response."""
+
+    def __init__(self, status_code: int, headers: CaseInsensitiveDict, body: bytes) -> None:
+        self.status_code = status_code
+        self.headers = headers
+        self._body = body
+
+    @property
+    def text(self) -> str:
+        return self._body.decode("utf-8", errors="replace")
+
+    def json(self) -> Any:
+        return json.loads(self.text)
+
+    def raise_for_status(self) -> None:
+        if 400 <= self.status_code < 600:
+            raise HTTPStatusError(f"HTTP {self.status_code}: {self.text[:120]}", response=self)
+
+
+class HTTPStatusError(Exception):
+    """Exception raised by raise_for_status() on 4xx or 5xx responses."""
+
+    def __init__(self, message: str, response: Optional[HTTPResponse] = None) -> None:
+        super().__init__(message)
+        self.response = response
+
+
+class RequestError(Exception):
+    """Exception raised for network or connection failures."""
+    pass
+
+
+# Backward compatibility alias
+RequestException = RequestError
+
+
+class HttpSession:
+    """Lightweight HTTP client built on urllib.request."""
+
+    def __init__(self) -> None:
+        self.headers: Dict[str, str] = {}
+        self._auth: Optional[Tuple[str, str]] = None
+
+    def set_basic_auth(self, username: str, password: str) -> None:
+        self._auth = (username, password)
+        auth_bytes = f"{username}:{password}".encode("utf-8")
+        self.headers["Authorization"] = f"Basic {base64.b64encode(auth_bytes).decode('ascii')}"
+
+    @property
+    def auth(self) -> Optional[Tuple[str, str]]:
+        return self._auth
+
+    @auth.setter
+    def auth(self, value: Any) -> None:
+        if isinstance(value, tuple) and len(value) == 2:
+            self.set_basic_auth(value[0], value[1])
+        elif hasattr(value, "username") and hasattr(value, "password"):
+            self.set_basic_auth(value.username, value.password)
+        elif value is None:
+            self._auth = None
+            self.headers.pop("Authorization", None)
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, str]] = None,
+        json_data: Optional[Any] = None,
+        data: Optional[bytes] = None,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: float = 30.0,
+    ) -> HTTPResponse:
+        req_url = url
+        if params:
+            query_str = urllib.parse.urlencode(params)
+            parsed = urllib.parse.urlsplit(req_url)
+            if parsed.query:
+                query_str = f"{parsed.query}&{query_str}"
+            req_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query_str, parsed.fragment))
+
+        req_headers = dict(self.headers)
+        if headers:
+            req_headers.update(headers)
+
+        req_body = None
+        if json_data is not None:
+            req_body = json.dumps(json_data).encode("utf-8")
+            req_headers.setdefault("Content-Type", "application/json")
+        elif data is not None:
+            req_body = data
+
+        req = urllib.request.Request(req_url, data=req_body, headers=req_headers, method=method)
+
+        # TLS verification on by default with standard CA certificates
+        context = ssl.create_default_context() if urlparse(req_url).scheme.lower() == "https" else None
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=context) as response:
+                status_code = getattr(response, "status", getattr(response, "code", 200))
+                resp_headers = CaseInsensitiveDict(dict(response.headers))
+                body = response.read()
+                return HTTPResponse(status_code=status_code, headers=resp_headers, body=body)
+        except urllib.error.HTTPError as exc:
+            # Preserve status codes for 4xx and 5xx responses
+            status_code = exc.code
+            resp_headers = CaseInsensitiveDict(dict(exc.headers))
+            body = exc.read()
+            return HTTPResponse(status_code=status_code, headers=resp_headers, body=body)
+        except urllib.error.URLError as exc:
+            raise RequestError(f"Network error: {exc.reason}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise RequestError(f"Request timed out: {exc}") from exc
+        except Exception as exc:
+            raise RequestError(f"Request failed: {exc}") from exc
+
+    def get(self, url: str, params: Optional[Dict[str, str]] = None, timeout: float = 30.0) -> HTTPResponse:
+        return self.request("GET", url, params=params, timeout=timeout)
+
+    def post(self, url: str, json: Optional[Any] = None, timeout: float = 30.0) -> HTTPResponse:
+        return self.request("POST", url, json_data=json, timeout=timeout)
+
+    def delete(self, url: str, timeout: float = 30.0) -> HTTPResponse:
+        return self.request("DELETE", url, timeout=timeout)
+
+
 def fetch_incidents(
-    session: requests.Session,
+    session: HttpSession,
     instance_url: str,
     query: str,
     limit: int = 500,
@@ -298,7 +453,7 @@ def fetch_incidents(
 
 
 def delete_incidents(
-    session: requests.Session,
+    session: HttpSession,
     instance_url: str,
     incidents: List[Dict[str, Any]],
     max_retries: int = 3,
@@ -356,13 +511,20 @@ def delete_incidents(
 
                 # Retry on rate limiting (429) or server errors (5xx)
                 if resp.status_code in (429, 500, 502, 503, 504):
+                    retry_after_hdr = getattr(resp, "headers", {}).get("Retry-After") if resp.status_code == 429 else None
+                    sleep_time = backoff
+                    if retry_after_hdr:
+                        try:
+                            sleep_time = max(0.0, float(retry_after_hdr))
+                        except (ValueError, TypeError):
+                            sleep_time = backoff
                     last_error = f"HTTP {resp.status_code}: {resp.text[:120]}"
                     if attempt < max_retries:
                         if logger:
                             logger.warning(
-                                "Transient error deleting %s: %s. Retrying in %.2fs...", number, last_error, backoff
+                                "Transient error deleting %s: %s. Retrying in %.2fs...", number, last_error, sleep_time
                             )
-                        time.sleep(backoff)
+                        time.sleep(sleep_time)
                         backoff *= backoff_factor
                         attempt += 1
                         continue
@@ -370,7 +532,7 @@ def delete_incidents(
                 last_error = f"HTTP {resp.status_code}: {resp.text[:120]}"
                 break
 
-            except requests.RequestException as exc:
+            except (RequestError, urllib.error.URLError, TimeoutError, OSError) as exc:
                 last_error = str(exc)
                 if attempt < max_retries:
                     if logger:
@@ -799,9 +961,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     logger.debug("Constructed ServiceNow encoded query: %s", encoded_query)
 
-    # Initialize authenticated requests session
-    session = requests.Session()
-    session.auth = HTTPBasicAuth(username, password)
+    # Initialize authenticated HTTP session
+    session = HttpSession()
+    session.set_basic_auth(username, password)
     session.headers.update(
         {
             "Accept": "application/json",

@@ -17,13 +17,15 @@ Verifies:
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import logging
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-import requests
 
 # Dynamically import servicenow-cleanup.py (hyphenated script name)
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "servicenow-cleanup.py"
@@ -32,6 +34,27 @@ if spec is None or spec.loader is None:
     raise ImportError(f"Cannot load spec from {SCRIPT_PATH}")
 snow = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(snow)
+
+
+def make_mock_response(
+    status: int = 200,
+    json_data: Any = None,
+    text: str = "",
+    headers: Optional[dict] = None,
+) -> MagicMock:
+    """Helper to mock urllib.request.urlopen response."""
+    resp = MagicMock()
+    resp.status = status
+    resp.code = status
+    if json_data is not None:
+        body = json.dumps(json_data).encode("utf-8")
+    else:
+        body = text.encode("utf-8")
+    resp.read.return_value = body
+    resp.headers = headers or {}
+    resp.__enter__.return_value = resp
+    resp.__exit__.return_value = None
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -239,15 +262,12 @@ class TestSecurityAndCredentials:
 # Dry-Run Mode Tests
 # ---------------------------------------------------------------------------
 class TestDryRunMode:
-    @patch("requests.Session")
-    def test_dry_run_makes_zero_delete_calls(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_dry_run_makes_zero_delete_calls(self, mock_urlopen, capsys, monkeypatch):
         """Dry-run queries Table API, prints output, and issues zero DELETE calls."""
         monkeypatch.setenv("SNOW_INSTANCE_URL", "https://test.service-now.com")
         monkeypatch.setenv("SNOW_USERNAME", "admin")
         monkeypatch.setenv("SNOW_PASSWORD", "secret")
-
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
 
         sample_records = [
             {
@@ -270,16 +290,14 @@ class TestDryRunMode:
             },
         ]
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"result": sample_records}
-        mock_session.get.return_value = mock_resp
+        mock_resp = make_mock_response(status=200, json_data={"result": sample_records})
+        mock_urlopen.return_value = mock_resp
 
         exit_code = snow.main(["--older-than", "7"])
         assert exit_code == 0
 
         # Assert ZERO delete requests were executed
-        assert mock_session.delete.call_count == 0
+        assert not any(c[0][0].method == "DELETE" for c in mock_urlopen.call_args_list)
 
         captured = capsys.readouterr().out
         assert "[DRY-RUN MODE] Found 2 matching incident(s). Zero deletions executed." in captured
@@ -287,65 +305,53 @@ class TestDryRunMode:
         assert "INC0010002" in captured
         assert "Database lock timeout" in captured
 
-    @patch("requests.Session")
-    def test_dry_run_json_output(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_dry_run_json_output(self, mock_urlopen, capsys, monkeypatch):
         monkeypatch.setenv("SNOW_INSTANCE_URL", "https://test.service-now.com")
         monkeypatch.setenv("SNOW_USERNAME", "admin")
         monkeypatch.setenv("SNOW_PASSWORD", "secret")
 
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
         sample_records = [{"sys_id": "sys001", "number": "INC0010001", "short_description": "Test"}]
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"result": sample_records}
-        mock_session.get.return_value = mock_resp
+        mock_resp = make_mock_response(status=200, json_data={"result": sample_records})
+        mock_urlopen.return_value = mock_resp
 
         exit_code = snow.main(["--output", "json"])
         assert exit_code == 0
-        assert mock_session.delete.call_count == 0
+        assert not any(c[0][0].method == "DELETE" for c in mock_urlopen.call_args_list)
 
         out = capsys.readouterr().out
         assert '"INC0010001"' in out
 
-    @patch("requests.Session")
-    def test_dry_run_csv_output(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_dry_run_csv_output(self, mock_urlopen, capsys, monkeypatch):
         monkeypatch.setenv("SNOW_INSTANCE_URL", "https://test.service-now.com")
         monkeypatch.setenv("SNOW_USERNAME", "admin")
         monkeypatch.setenv("SNOW_PASSWORD", "secret")
 
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
         sample_records = [{"sys_id": "sys001", "number": "INC0010001", "short_description": "Test"}]
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"result": sample_records}
-        mock_session.get.return_value = mock_resp
+        mock_resp = make_mock_response(status=200, json_data={"result": sample_records})
+        mock_urlopen.return_value = mock_resp
 
         exit_code = snow.main(["--output", "csv"])
         assert exit_code == 0
-        assert mock_session.delete.call_count == 0
+        assert not any(c[0][0].method == "DELETE" for c in mock_urlopen.call_args_list)
 
         out = capsys.readouterr().out
         assert "sys_id,number,short_description" in out
         assert "sys001,INC0010001,Test" in out
 
-    @patch("requests.Session")
-    def test_dry_run_zero_matches(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_dry_run_zero_matches(self, mock_urlopen, capsys, monkeypatch):
         monkeypatch.setenv("SNOW_INSTANCE_URL", "https://test.service-now.com")
         monkeypatch.setenv("SNOW_USERNAME", "admin")
         monkeypatch.setenv("SNOW_PASSWORD", "secret")
 
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"result": []}
-        mock_session.get.return_value = mock_resp
+        mock_resp = make_mock_response(status=200, json_data={"result": []})
+        mock_urlopen.return_value = mock_resp
 
         exit_code = snow.main([])
         assert exit_code == 0
-        assert mock_session.delete.call_count == 0
+        assert not any(c[0][0].method == "DELETE" for c in mock_urlopen.call_args_list)
 
         out = capsys.readouterr().out
         assert "No matching incidents found." in out
@@ -355,67 +361,54 @@ class TestDryRunMode:
 # Apply Mode & Confirmation Tests
 # ---------------------------------------------------------------------------
 class TestApplyMode:
-    @patch("requests.Session")
-    def test_apply_mismatch_confirmation_aborts_without_deleting(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_apply_mismatch_confirmation_aborts_without_deleting(self, mock_urlopen, capsys, monkeypatch):
         """When confirmation does not match the exact count, abort without deleting."""
         monkeypatch.setenv("SNOW_INSTANCE_URL", "https://test.service-now.com")
         monkeypatch.setenv("SNOW_USERNAME", "admin")
         monkeypatch.setenv("SNOW_PASSWORD", "secret")
 
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
         sample_records = [
             {"sys_id": "sys001", "number": "INC0010001", "short_description": "Alert 1"},
             {"sys_id": "sys002", "number": "INC0010002", "short_description": "Alert 2"},
         ]
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"result": sample_records}
-        mock_session.get.return_value = mock_resp
+        mock_resp = make_mock_response(status=200, json_data={"result": sample_records})
+        mock_urlopen.return_value = mock_resp
 
         # Operator inputs '1' instead of exact count '2'
         with patch("builtins.input", return_value="1"):
             exit_code = snow.main(["--apply"])
 
         assert exit_code == 1
-        assert mock_session.delete.call_count == 0
+        assert not any(c[0][0].method == "DELETE" for c in mock_urlopen.call_args_list)
 
         out = capsys.readouterr().out
         assert "Aborted: Confirmation '1' did not match incident count '2'." in out
         assert "Zero incidents were deleted." in out
 
-    @patch("requests.Session")
-    def test_apply_exact_confirmation_deletes_records(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_apply_exact_confirmation_deletes_records(self, mock_urlopen, capsys, monkeypatch):
         """Matching confirmation executes DELETE for each sys_id."""
         monkeypatch.setenv("SNOW_INSTANCE_URL", "https://test.service-now.com")
         monkeypatch.setenv("SNOW_USERNAME", "admin")
         monkeypatch.setenv("SNOW_PASSWORD", "secret")
 
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
         sample_records = [
             {"sys_id": "sys001", "number": "INC0010001", "short_description": "Alert 1"},
             {"sys_id": "sys002", "number": "INC0010002", "short_description": "Alert 2"},
         ]
-        mock_get_resp = MagicMock()
-        mock_get_resp.status_code = 200
-        mock_get_resp.json.return_value = {"result": sample_records}
-        mock_session.get.return_value = mock_get_resp
-
-        # Mock successful DELETE calls (204 No Content)
-        mock_del_resp = MagicMock()
-        mock_del_resp.status_code = 204
-        mock_session.delete.return_value = mock_del_resp
+        mock_get_resp = make_mock_response(status=200, json_data={"result": sample_records})
+        mock_del_resp = make_mock_response(status=204)
+        mock_urlopen.side_effect = [mock_get_resp, mock_del_resp, mock_del_resp]
 
         with patch("builtins.input", return_value="2"):
             exit_code = snow.main(["--apply"])
 
         assert exit_code == 0
-        assert mock_session.delete.call_count == 2
-        mock_session.delete.assert_has_calls([
-            call("https://test.service-now.com/api/now/table/incident/sys001", timeout=30),
-            call("https://test.service-now.com/api/now/table/incident/sys002", timeout=30),
-        ])
+        del_calls = [c for c in mock_urlopen.call_args_list if c[0][0].method == "DELETE"]
+        assert len(del_calls) == 2
+        assert del_calls[0][0][0].full_url == "https://test.service-now.com/api/now/table/incident/sys001"
+        assert del_calls[1][0][0].full_url == "https://test.service-now.com/api/now/table/incident/sys002"
 
         out = capsys.readouterr().out
         assert "Total targeted:       2" in out
@@ -423,52 +416,43 @@ class TestApplyMode:
         assert "Failed deletions:     0" in out
         assert "Child attachments were removed by ServiceNow database cascade." in out
 
-    @patch("requests.Session")
-    def test_apply_with_yes_flag_non_interactive(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_apply_with_yes_flag_non_interactive(self, mock_urlopen, capsys, monkeypatch):
         """--yes skips input prompt and executes deletions with count echoed."""
         monkeypatch.setenv("SNOW_INSTANCE_URL", "https://test.service-now.com")
         monkeypatch.setenv("SNOW_USERNAME", "admin")
         monkeypatch.setenv("SNOW_PASSWORD", "secret")
 
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
         sample_records = [{"sys_id": "sys001", "number": "INC0010001", "short_description": "Alert"}]
-        mock_get_resp = MagicMock()
-        mock_get_resp.status_code = 200
-        mock_get_resp.json.return_value = {"result": sample_records}
-        mock_session.get.return_value = mock_get_resp
-
-        mock_del_resp = MagicMock()
-        mock_del_resp.status_code = 204
-        mock_session.delete.return_value = mock_del_resp
+        mock_get_resp = make_mock_response(status=200, json_data={"result": sample_records})
+        mock_del_resp = make_mock_response(status=204)
+        mock_urlopen.side_effect = [mock_get_resp, mock_del_resp]
 
         with patch("builtins.input") as mock_input:
             exit_code = snow.main(["--apply", "--yes"])
 
         mock_input.assert_not_called()
         assert exit_code == 0
-        assert mock_session.delete.call_count == 1
+        del_calls = [c for c in mock_urlopen.call_args_list if c[0][0].method == "DELETE"]
+        assert len(del_calls) == 1
+        assert del_calls[0][0][0].full_url == "https://test.service-now.com/api/now/table/incident/sys001"
 
         out = capsys.readouterr().out
         assert "Confirming deletion of 1 incidents (--yes specified)." in out
         assert "Successfully deleted: 1" in out
 
-    @patch("requests.Session")
-    def test_apply_zero_records_found(self, mock_session_cls, capsys, monkeypatch):
+    @patch("urllib.request.urlopen")
+    def test_apply_zero_records_found(self, mock_urlopen, capsys, monkeypatch):
         monkeypatch.setenv("SNOW_INSTANCE_URL", "https://test.service-now.com")
         monkeypatch.setenv("SNOW_USERNAME", "admin")
         monkeypatch.setenv("SNOW_PASSWORD", "secret")
 
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"result": []}
-        mock_session.get.return_value = mock_resp
+        mock_resp = make_mock_response(status=200, json_data={"result": []})
+        mock_urlopen.return_value = mock_resp
 
         exit_code = snow.main(["--apply"])
         assert exit_code == 0
-        assert mock_session.delete.call_count == 0
+        assert not any(c[0][0].method == "DELETE" for c in mock_urlopen.call_args_list)
         assert "Nothing to delete." in capsys.readouterr().out
 
 
@@ -659,3 +643,79 @@ class TestDeleteRetriesAndBackoff:
         for fail in failures:
             assert "missing or empty sys_id" in fail["error"]
         assert [f["number"] for f in failures] == ["INC_NO_SYSID", "INC_BLANK_SYSID", "INC_NONE_SYSID"]
+
+
+# ---------------------------------------------------------------------------
+# HTTP Client Helper Tests
+# ---------------------------------------------------------------------------
+class TestHttpSession:
+    def test_basic_auth_header_encoding(self):
+        """Basic auth header is correctly base64-encoded."""
+        session = snow.HttpSession()
+        session.set_basic_auth("myuser", "mypassword")
+        assert session.headers["Authorization"] == "Basic bXl1c2VyOm15cGFzc3dvcmQ="
+
+    @patch("urllib.request.urlopen")
+    def test_get_with_params_and_tls_context(self, mock_urlopen):
+        """GET request formats query params and enforces TLS default context for https."""
+        mock_urlopen.return_value = make_mock_response(status=200, json_data={"result": []})
+        session = snow.HttpSession()
+        session.set_basic_auth("admin", "secret")
+        resp = session.get("https://test.service-now.com/api/test", params={"limit": "10", "offset": "0"})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"result": []}
+        assert mock_urlopen.call_count == 1
+        req = mock_urlopen.call_args[0][0]
+        context = mock_urlopen.call_args[1].get("context")
+        assert context is not None
+        assert "limit=10" in req.full_url
+        assert "offset=0" in req.full_url
+        assert req.headers["Authorization"] == "Basic YWRtaW46c2VjcmV0"
+
+    @patch("urllib.request.urlopen")
+    def test_http_error_preserves_status_code_and_headers(self, mock_urlopen):
+        """urllib.error.HTTPError preserves HTTP status code, headers, and body."""
+        http_err = urllib.error.HTTPError(
+            "https://test.service-now.com/api/test",
+            429,
+            "Too Many Requests",
+            {"Retry-After": "5", "Content-Type": "application/json"},
+            io.BytesIO(b'{"error": "rate limited"}'),
+        )
+        mock_urlopen.side_effect = http_err
+
+        session = snow.HttpSession()
+        resp = session.delete("https://test.service-now.com/api/test")
+        assert resp.status_code == 429
+        assert resp.headers.get("Retry-After") == "5"
+        assert resp.text == '{"error": "rate limited"}'
+
+        with pytest.raises(snow.HTTPStatusError, match="HTTP 429"):
+            resp.raise_for_status()
+
+    @patch("urllib.request.urlopen")
+    def test_network_error_raises_request_error(self, mock_urlopen):
+        """urllib.error.URLError raises RequestError."""
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+        session = snow.HttpSession()
+        with pytest.raises(snow.RequestError, match="Network error: Connection refused"):
+            session.get("https://test.service-now.com/api/test")
+
+    @patch("urllib.request.urlopen")
+    def test_https_scheme_case_insensitive(self, mock_urlopen):
+        """TLS verification context is created for HTTPS scheme regardless of casing."""
+        mock_urlopen.return_value = make_mock_response(status=200, json_data={"result": []})
+        session = snow.HttpSession()
+
+        session.get("HTTPS://test.service-now.com/api/test")
+        context_upper = mock_urlopen.call_args[1].get("context")
+        assert context_upper is not None
+
+        session.get("Https://test.service-now.com/api/test")
+        context_mixed = mock_urlopen.call_args[1].get("context")
+        assert context_mixed is not None
+
+        session.get("http://test.service-now.com/api/test")
+        context_http = mock_urlopen.call_args[1].get("context")
+        assert context_http is None
