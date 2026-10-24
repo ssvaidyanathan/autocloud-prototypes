@@ -93,7 +93,12 @@ def _count_diff_lines(diff: str) -> int:
 
 
 def _patch_line_delta(patch: FilePatch) -> int:
-    """Measure the number of lines a patch writes."""
+    """Estimate the number of lines a patch writes from the proposal alone.
+
+    This is a stateless pre-check. The writer re-measures the bytes it actually commits
+    against the base blob (and rejects ``content`` that disagrees with ``diff``) before
+    any branch is created, so a small ``diff`` cannot smuggle in a large ``content``.
+    """
     if patch.action == "create":
         return len((patch.content or "").splitlines())
     # modify
@@ -171,6 +176,10 @@ class FixPRWriterBase(ABC):
         self, owner: str, repo: str, title: str, body: str, head_branch: str, base_branch: str
     ) -> PullRequestRef:
         """Open a pull request from head_branch to base_branch."""
+
+    def fetch_file_content(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
+        """Return the file content at ``ref``, or None if unavailable (read-only helper)."""
+        return None
 
     @abstractmethod
     def execute_fix_proposal(

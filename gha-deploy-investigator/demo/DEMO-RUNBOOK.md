@@ -320,6 +320,15 @@ git pull origin main
   - Remove or reduce `CACHE_PREWARM_BUFFER_MB` buffer allocation.
 - **Unrelated Observations**: Any auxiliary deployment warnings placed in separate section.
 
+#### Expected Auto-Fix PR (`config_tuning`)
+Unless the agent proposes its own patch, the bridge's deterministic memory-config fixer opens a
+PR from `autofix/run-<run_id>` that **tunes the container memory limit allocation** in
+`scripts/deploy.sh`. It doubles the declared default, capped at 2048Mi. Here that is
+`MEMORY="${MEMORY:-256Mi}"` → `MEMORY="${MEMORY:-512Mi}"`. The fixer only changes the numeric
+memory value. It does **not** remove `CACHE_PREWARM_BUFFER_MB=2048` from `EXTRA_ENV_VARS`.
+Because the failure log reports more than 512 MiB in use, the fix PR's CI may still fail on OOM.
+In that case use the revert fallback below.
+
 #### Step 6: Reset
 1. **Primary — merge the auto-fix PR.** Wait for the `autofix/run-<run_id>` PR's CI to go green
    (ServiceNow gets an `[Auto-Fix Verification] ... PASSED` work note), then merge it:
@@ -329,6 +338,9 @@ git pull origin main
    gh pr merge <pr_number> --squash --delete-branch
    git pull origin main
    ```
+   Merging restores a 512Mi memory limit but leaves `CACHE_PREWARM_BUFFER_MB=2048` configured.
+   For a byte-exact baseline before the next scenario, also run the local clean-slate script
+   ([Section 4C](#c-local-clean-slate)).
 2. **Fallback — revert.** If no fix PR was opened, or its CI failed:
    ```bash
    cd gdi-sample-pipeline-app
@@ -336,7 +348,7 @@ git pull origin main
    ```
 
 #### Note on Declarative Deployment Invariant
-`scripts/deploy.sh` enforces `--clear-env-vars` when `EXTRA_ENV_VARS` is empty. Merging the fix PR (or reverting the commit) automatically clears `CACHE_PREWARM_BUFFER_MB=2048` from the Cloud Run service, guaranteeing a clean return to baseline.
+`scripts/deploy.sh` enforces `--clear-env-vars` when `EXTRA_ENV_VARS` is empty. Reverting the scenario commit (or running the clean-slate reset) empties `EXTRA_ENV_VARS`, which clears `CACHE_PREWARM_BUFFER_MB=2048` from the Cloud Run service and returns it to baseline. The auto-fix PR alone only raises the memory limit, so it does not clear that variable.
 
 ---
 

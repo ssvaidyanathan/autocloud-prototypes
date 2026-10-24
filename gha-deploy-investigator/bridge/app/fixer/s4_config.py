@@ -10,7 +10,7 @@ Safety model:
 * Only two line shapes are ever edited, and only the numeric memory value in
   them changes:
     - shell/env variable assignments whose name contains ``MEM``
-      (``NAME=<n>Mi``, ``export NAME="<n>Gi"``)
+      (``NAME=<n>Mi``, ``export NAME="<n>Gi"``, ``NAME="${NAME:-<n>Mi}"``)
     - YAML/config key-value pairs whose key contains ``memory``
       (``memory: <n>Mi``)
 * Lines carrying shell control or command syntax (command substitution, pipes,
@@ -64,6 +64,11 @@ _VALUE = r"(?P<q>[\"']?)(?P<num>\d+)(?P<unit>Mi|Gi)(?P=q)"
 _TRAILER = r"(?P<trail>\s*(?:#.*)?)$"
 _ENV_ASSIGN_RE = re.compile(
     r"^(?P<lead>\s*(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)=)" + _VALUE + _TRAILER
+)
+# Self-defaulting shell assignment: NAME="${NAME:-<n>Mi}" (only the default value changes).
+_ENV_DEFAULT_RE = re.compile(
+    r"^(?P<lead>\s*(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<q>[\"']?)"
+    r"\$\{(?P=name):?-)(?P<num>\d+)(?P<unit>Mi|Gi)\}(?P=q)" + _TRAILER
 )
 _YAML_KV_RE = re.compile(
     r"^(?P<lead>\s*(?:-\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\s*:\s*)" + _VALUE + _TRAILER
@@ -120,7 +125,7 @@ def is_editable_path(path: str) -> bool:
 
 def _tune_line(line: str, max_mib: int) -> Optional[tuple[str, int, int]]:
     """Return (new_line, old_mib, new_mib) for a safe memory line, else None."""
-    match = _ENV_ASSIGN_RE.match(line)
+    match = _ENV_ASSIGN_RE.match(line) or _ENV_DEFAULT_RE.match(line)
     if match and "MEM" not in match.group("name").upper():
         match = None
     if match is None:
@@ -138,9 +143,8 @@ def _tune_line(line: str, max_mib: int) -> Optional[tuple[str, int, int]]:
     if old_mib < MIN_MEMORY_MIB or old_mib >= max_mib:
         return None
     new_mib = min(old_mib * 2, max_mib)
-    q = match.group("q")
-    head, tail = line[: match.start("q")], line[match.start("trail") :]
-    new_line = f"{head}{q}{_format(new_mib, unit)}{q}{tail}"
+    head, tail = line[: match.start("num")], line[match.end("unit") :]
+    new_line = f"{head}{_format(new_mib, unit)}{tail}"
     return new_line, old_mib, new_mib
 
 

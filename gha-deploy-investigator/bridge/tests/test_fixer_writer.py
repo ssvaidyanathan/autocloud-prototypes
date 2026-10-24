@@ -25,6 +25,8 @@ class FakeGitHub:
     def __init__(self, files: Optional[dict[str, str]] = None) -> None:
         self.refs: dict[str, str] = {}
         self.files: dict[str, str] = dict(files or {})
+        # Commit SHAs are immutable: non-branch refs keep serving the initial snapshot.
+        self.base_files: dict[str, str] = dict(files or {})
         self.pulls: list[dict[str, Any]] = []
         self.calls: list[tuple[str, str]] = []
         self.fail_put = False
@@ -52,9 +54,20 @@ class FakeGitHub:
         if path.startswith(f"{PREFIX}/contents/"):
             file_path = path.split("/contents/", 1)[1]
             if method == "GET":
-                if file_path not in self.files:
+                ref = request.url.params.get("ref", "")
+                source = self.files if f"refs/heads/{ref}" in self.refs else self.base_files
+                if file_path not in source:
                     return httpx.Response(404, json={"message": "Not Found"})
-                return httpx.Response(200, json={"sha": f"blob-{file_path}", "path": file_path})
+                encoded = base64.b64encode(source[file_path].encode()).decode()
+                return httpx.Response(
+                    200,
+                    json={
+                        "sha": f"blob-{file_path}",
+                        "path": file_path,
+                        "encoding": "base64",
+                        "content": encoded,
+                    },
+                )
             if method == "PUT":
                 if self.fail_put:
                     return httpx.Response(409, json={"message": "conflict"})
@@ -180,10 +193,59 @@ class TestFixPRWriterPrimitives:
         assert base64.b64decode(captured[0]["content"]).decode() == "x = 1\n"
         assert fake_gh.files["app/main.py"] == "x = 1\n"
 
-    def test_commit_patch_requires_content(self, fake_gh: FakeGitHub) -> None:
+    def test_commit_patch_requires_content_or_diff(self, fake_gh: FakeGitHub) -> None:
+        patch = FilePatch(path="app/main.py", action="modify")
+        with pytest.raises(ValueError, match="neither content nor diff"):
+            _writer(fake_gh).commit_patch(OWNER, REPO, "b", patch, "m")
+
+    def test_commit_patch_rejects_malformed_diff(self, fake_gh: FakeGitHub) -> None:
         patch = FilePatch(path="app/main.py", action="modify", diff="-a\n+b\n")
         with pytest.raises(ValueError):
             _writer(fake_gh).commit_patch(OWNER, REPO, "b", patch, "m")
+        assert not any(m == "PUT" for m, _ in fake_gh.calls)
+
+    def test_commit_patch_applies_diff_only_patch(self, fake_gh: FakeGitHub) -> None:
+        diff = "--- a/app/main.py\n+++ b/app/main.py\n@@ -1,2 +1,2 @@\n import os\n-x = 1\n+x = 2\n"
+        patch = FilePatch(path="app/main.py", action="modify", diff=diff)
+        _writer(fake_gh).commit_patch(OWNER, REPO, "autofix/run-1", patch, "m")
+        assert fake_gh.files["app/main.py"] == "import os\nx = 2\n"
+
+    def test_commit_patch_rejects_content_disagreeing_with_diff(self, fake_gh: FakeGitHub) -> None:
+        patch = _proposal().patches[0].model_copy(update={"content": "something else\n"})
+        with pytest.raises(ValueError, match="does not match its diff"):
+            _writer(fake_gh).commit_patch(OWNER, REPO, "b", patch, "m")
+        assert fake_gh.files["app/main.py"] == "import os\nx = 1\n"
+
+    def test_commit_patch_rejects_oversized_committed_content(self, fake_gh: FakeGitHub) -> None:
+        big = "".join(f"y{i} = {i}\n" for i in range(200))
+        patch = FilePatch(path="app/main.py", action="modify", content=big)
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            _writer(fake_gh).commit_patch(OWNER, REPO, "b", patch, "m")
+
+    def test_commit_patch_normalises_and_encodes_path(self) -> None:
+        fake = FakeGitHub(files={"app/my file.py": "a = 1\n"})
+        raw_paths: list[str] = []
+        original = fake.handler
+
+        def spy(request: httpx.Request) -> httpx.Response:
+            raw_paths.append(request.url.raw_path.decode())
+            return original(request)
+
+        writer = FixPRWriter(
+            config=_config(), http_client=httpx.Client(transport=httpx.MockTransport(spy))
+        )
+        patch = FilePatch(path="./app//my file.py", action="modify", content="a = 2\n")
+        writer.commit_patch(OWNER, REPO, "autofix/run-1", patch, "m")
+        assert fake.files["app/my file.py"] == "a = 2\n"
+        assert all("/contents/app/my%20file.py" in p for p in raw_paths)
+
+    def test_fetch_file_content_decodes_base64(self, fake_gh: FakeGitHub) -> None:
+        writer = _writer(fake_gh)
+        assert writer.fetch_file_content(OWNER, REPO, "app/main.py", "abc123") == (
+            "import os\nx = 1\n"
+        )
+        assert writer.fetch_file_content(OWNER, REPO, "missing.py", "abc123") is None
+        assert writer.fetch_file_content(OWNER, REPO, "../etc/passwd", "abc123") is None
 
     def test_create_pull_request_returns_ref(self, fake_gh: FakeGitHub) -> None:
         pr = _writer(fake_gh).create_pull_request(
@@ -207,6 +269,27 @@ class TestExecuteFixProposal:
         assert created["base"]["ref"] == "feature/login"
         assert created["title"] == "fix: automated remediation for run 555"
         assert f"{OWNER}/{REPO}#555" in created["body"]
+
+    def test_large_content_with_small_diff_is_rejected_before_branch(
+        self, fake_gh: FakeGitHub
+    ) -> None:
+        big = "".join(f"y{i} = {i}\n" for i in range(500))
+        proposal = _proposal()
+        proposal.patches[0] = proposal.patches[0].model_copy(update={"content": big})
+        assert _writer(fake_gh).execute_fix_proposal(_incident(), _report(), proposal) is None
+        assert fake_gh.refs == {}
+        assert fake_gh.files["app/main.py"] == "import os\nx = 1\n"
+
+    def test_content_only_whole_file_rewrite_is_rejected_before_branch(
+        self, fake_gh: FakeGitHub
+    ) -> None:
+        fake = FakeGitHub(files={"app/main.py": "".join(f"a{i}\n" for i in range(40))})
+        rewrite = "".join(f"b{i}\n" for i in range(40))
+        proposal = _proposal(
+            patches=[FilePatch(path="app/main.py", action="modify", content=rewrite)]
+        )
+        assert _writer(fake).execute_fix_proposal(_incident(), _report(), proposal) is None
+        assert fake.refs == {}
 
     def test_kill_switch_disabled_makes_no_calls(self, fake_gh: FakeGitHub) -> None:
         result = _writer(fake_gh, enabled=False).execute_fix_proposal(

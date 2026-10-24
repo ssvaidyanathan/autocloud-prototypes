@@ -261,6 +261,25 @@ def test_ci_feedback_incident_not_found_does_not_raise() -> None:
     assert recorder.patches() == []
 
 
+@pytest.mark.parametrize("correlation_id", ["", None, f"gdi:{REPO}:1234:1", "unrelated"])
+def test_ci_feedback_rejects_records_without_matching_correlation_id(
+    correlation_id: Optional[str],
+) -> None:
+    # Simulates an instance that ignores the STARTSWITH filter and returns other incidents.
+    settings = _settings()
+    record = {"sys_id": "sn-other", "number": "INC0099999", "correlation_id": correlation_id}
+    recorder = _Recorder(incidents=[record])
+    listener = _listener(settings, recorder)
+
+    outcome = listener.handle_autofix_workflow_run(
+        _workflow_run_payload("autofix/run-123", "success"), settings
+    )
+
+    assert outcome.work_note_posted is False
+    assert outcome.detail == "incident not found"
+    assert recorder.patches() == []
+
+
 def test_ci_feedback_github_writeback_comments_on_pr() -> None:
     settings = _settings(enable_github_writeback=True)
     recorder = _Recorder(incidents=[ORIGINAL_INCIDENT])

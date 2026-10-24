@@ -308,3 +308,15 @@ class TestFixPRWriterBase:
     def test_cannot_instantiate_abstract_base(self) -> None:
         with pytest.raises(TypeError):
             FixPRWriterBase()  # type: ignore[abstract]
+
+
+class TestGuardrailParity:
+    """The agent pre-flight and bridge guardrail are deployed separately; keep them in sync."""
+
+    def test_guardrail_constants_match_agent_patch_extractor(self) -> None:
+        from agent.app import patch_extractor
+        from bridge.app.fixer import interface
+
+        assert interface.MAX_CHANGED_FILES == patch_extractor.MAX_CHANGED_FILES
+        assert interface.MAX_LINE_DELTA == patch_extractor.MAX_LINE_DELTA
+        assert interface.FORBIDDEN_PATH_PATTERNS == patch_extractor.FORBIDDEN_PATH_PATTERNS

@@ -10,10 +10,12 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from agent.app.patch_extractor import extract_fix_proposal
 from bridge.app.adapters.github import GitHubAdapter
 from bridge.app.adapters.servicenow import ServiceNowAdapter
 from bridge.app.config import BridgeConfig, get_settings
-from bridge.app.contracts.report import FilePatch, FixProposal, Report
+from bridge.app.contracts.findings import EvidenceItem
+from bridge.app.contracts.report import FilePatch, FixProposal, ProbableRootCause, Report
 from bridge.app.contracts.result import InvestigationResult
 from bridge.app.core.dedup import get_dedup_registry
 from bridge.app.core.tasks import DispatchResult
@@ -265,3 +267,147 @@ class TestAutofixEndToEnd:
         listener.handle_autofix_workflow_run.assert_called_once()
         harness["dispatcher"].dispatch.assert_not_called()
         writer.execute_fix_proposal.assert_not_called()
+
+
+def _writer_for(settings: BridgeConfig, fake_gh: FakeGitHub) -> FixPRWriter:
+    writer = FixPRWriter(
+        config=settings,
+        http_client=httpx.Client(transport=httpx.MockTransport(fake_gh.handler)),
+    )
+    set_fix_pr_writer(writer)
+    return writer
+
+
+def _agent_llm_proposal(raw: dict[str, Any], base: str = "main") -> FixProposal:
+    """Run the agent's real extractor and carry its output across the wire contract."""
+    agent_proposal = extract_fix_proposal(raw, base)
+    return FixProposal.model_validate(agent_proposal.model_dump(mode="json"))
+
+
+class TestAutofixRealProducers:
+    """Drive proposals shaped exactly as each production producer emits them."""
+
+    def test_agent_diff_only_proposal_is_applied_and_opens_pr(
+        self, harness: dict[str, Any]
+    ) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"app/main.py": SOURCE})
+        _writer_for(settings, fake_gh)
+        proposal = _agent_llm_proposal(
+            {
+                "status": "proposed",
+                "confidence": 0.93,
+                "rationale": "Remove the unused import flagged by the linter.",
+                "diff": "--- a/app/main.py\n+++ b/app/main.py\n@@ -1,2 +1 @@\n-import os\n x = 1\n",
+            }
+        )
+        assert proposal.status == "proposed"
+        assert proposal.patches[0].content is None and proposal.patches[0].diff
+
+        cb = _post_callback(client, harness, "main", Report(summary="s", fix_proposal=proposal))
+
+        assert cb.status_code == 200
+        assert cb.json()["fix_pr_url"] == f"https://github.com/{OWNER}/{REPO}/pull/7"
+        assert fake_gh.files["app/main.py"] == FIXED
+        assert fake_gh.refs == {f"refs/heads/autofix/run-{RUN_ID}": HEAD_SHA}
+
+    def test_agent_diff_that_does_not_apply_opens_no_branch(
+        self, harness: dict[str, Any]
+    ) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"app/main.py": "import sys\nx = 1\n"})
+        _writer_for(settings, fake_gh)
+        proposal = _agent_llm_proposal(
+            {
+                "status": "proposed",
+                "confidence": 0.93,
+                "rationale": "r",
+                "diff": "--- a/app/main.py\n+++ b/app/main.py\n@@ -1,2 +1 @@\n-import os\n x = 1\n",
+            }
+        )
+
+        cb = _post_callback(client, harness, "main", Report(summary="s", fix_proposal=proposal))
+
+        assert cb.status_code == 200
+        assert "fix_pr_url" not in cb.json()
+        assert fake_gh.refs == {} and fake_gh.pulls == []
+        assert len(ticket_state.servicenow_incidents) == 1
+
+    def test_small_diff_with_large_content_is_rejected(self, harness: dict[str, Any]) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"app/main.py": SOURCE})
+        _writer_for(settings, fake_gh)
+        big = "".join(f"y{i} = {i}\n" for i in range(500))
+        proposal = _proposal("main")
+        proposal.patches[0] = proposal.patches[0].model_copy(update={"content": big})
+
+        cb = _post_callback(client, harness, "main", Report(summary="s", fix_proposal=proposal))
+
+        assert cb.status_code == 200
+        assert "fix_pr_url" not in cb.json()
+        assert fake_gh.refs == {} and fake_gh.pulls == []
+        assert fake_gh.files["app/main.py"] == SOURCE
+
+    def test_deterministic_lint_fixer_opens_pr_without_agent_proposal(
+        self, harness: dict[str, Any]
+    ) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"app/main.py": SOURCE})
+        _writer_for(settings, fake_gh)
+        lint_output = "app/main.py:1:8: F401 [*] `os` imported but unused"
+        report = Report(
+            summary="Lint step failed",
+            evidence_by_area={"pipeline": [EvidenceItem(kind="log", excerpt=lint_output)]},
+            fix_proposal=FixProposal(
+                status="no_safe_fix",
+                strategy="llm_patch",
+                rationale="low",
+                target_branch_base="main",
+            ),
+        )
+
+        cb = _post_callback(client, harness, "main", report)
+
+        assert cb.status_code == 200
+        assert "fix_pr_url" in cb.json()
+        assert fake_gh.files["app/main.py"] == FIXED
+        assert "deterministic_linter" in fake_gh.pulls[0]["body"]
+
+    def test_deterministic_memory_fixer_opens_pr_for_deploy_oom(
+        self, harness: dict[str, Any]
+    ) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        script = "#!/usr/bin/env bash\nSERVICE_MEMORY=384Mi\ngcloud run deploy svc\n"
+        fake_gh = FakeGitHub(files={"deploy/run.sh": script})
+        _writer_for(settings, fake_gh)
+        report = Report(
+            summary="Deploy failed: container terminated with exit code 137",
+            probable_root_cause=ProbableRootCause(
+                text="Memory limit in deploy/run.sh is too low (OOMKilled)", confidence=0.9
+            ),
+            metadata={"failing_stage": "deploy"},
+        )
+
+        cb = _post_callback(client, harness, "main", report)
+
+        assert cb.status_code == 200
+        assert "fix_pr_url" in cb.json()
+        assert fake_gh.files["deploy/run.sh"] == script.replace("384Mi", "768Mi")
+        assert "config_tuning" in fake_gh.pulls[0]["body"]
+
+    def test_no_producer_applies_creates_no_pr(self, harness: dict[str, Any]) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"app/main.py": SOURCE})
+        _writer_for(settings, fake_gh)
+
+        cb = _post_callback(client, harness, "main", Report(summary="Unit tests failed"))
+
+        assert cb.status_code == 200
+        assert "fix_pr_url" not in cb.json()
+        assert fake_gh.refs == {}

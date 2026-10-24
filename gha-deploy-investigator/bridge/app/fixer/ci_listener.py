@@ -184,14 +184,17 @@ class CIFeedbackListener:
                 )
                 resp.raise_for_status()
                 records = resp.json().get("result", [])
+                if isinstance(records, dict):
+                    records = [records]
                 if isinstance(records, list):
                     for record in records:
+                        if not isinstance(record, dict):
+                            continue
                         corr = str(record.get("correlation_id") or "")
-                        # Guard against instances that ignore STARTSWITH filters.
-                        if not corr or corr.startswith(prefix):
+                        # Guard against instances that ignore STARTSWITH filters; an empty
+                        # correlation id never identifies the original incident.
+                        if corr and corr.startswith(prefix):
                             return dict(record)
-                elif isinstance(records, dict) and records.get("sys_id"):
-                    return dict(records)
                 return None
 
         result: Optional[dict[str, Any]] = adapter._execute_with_retry(_do_lookup)

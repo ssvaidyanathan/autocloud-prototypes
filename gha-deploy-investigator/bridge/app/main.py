@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Any, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 
@@ -13,6 +13,7 @@ from .core.dedup import CallbackDedupRegistry, get_dedup_registry
 from .core.tasks import TaskDispatcher
 from .fixer.ci_listener import CIFeedbackListener
 from .fixer.interface import FixPRWriterBase, is_autofix_branch
+from .fixer.selection import select_fix_proposal
 from .fixer.writer import FixPRWriter
 
 logger = logging.getLogger(__name__)
@@ -76,22 +77,45 @@ def set_fix_pr_writer(writer: Optional[FixPRWriterBase]) -> None:
     _fix_pr_writer = writer
 
 
+def _bind_fetch_file(
+    writer: FixPRWriterBase, result: InvestigationResult
+) -> Callable[[str], Optional[str]]:
+    """Bind a read-only file fetcher to the failing commit of the investigated run."""
+    incident = result.incident
+    repo_full = (incident.github_repo if incident else None) or ""
+    owner, _, repo = repo_full.partition("/")
+    ref = incident.github_head_sha if incident else None
+
+    def fetch_file(path: str) -> Optional[str]:
+        if not owner or not repo or not ref:
+            return None
+        return writer.fetch_file_content(owner, repo, path, ref)
+
+    return fetch_file
+
+
 def _maybe_open_fix_pr(
     result: InvestigationResult, settings: BridgeConfig
 ) -> Optional[PullRequestRef]:
     """Open an auto-fix PR for a completed GitHub investigation, if enabled and proposed.
 
-    Never raises: auto-fix is best-effort and must not block ticket creation.
+    The agent's proposal is preferred; otherwise the deterministic lint (S1) and memory
+    config (S4) fixers are tried. Never raises: auto-fix is best-effort and must not block
+    ticket creation.
     """
     if settings.autofix_enabled is not True:
         return None
     if result.report is None or result.incident is None:
         return None
-    proposal = result.report.fix_proposal
-    if proposal is None or proposal.status != "proposed":
-        return None
     try:
         writer = get_fix_pr_writer(settings)
+        proposal = select_fix_proposal(
+            result.incident, result.report, _bind_fetch_file(writer, result)
+        )
+        if proposal is None:
+            return None
+        if result.report.fix_proposal is not proposal:
+            result.report.fix_proposal = proposal
         return writer.execute_fix_proposal(result.incident, result.report, proposal)
     except Exception as exc:
         logger.error("Auto-fix PR execution failed for %s: %s", result.incident_id, exc)

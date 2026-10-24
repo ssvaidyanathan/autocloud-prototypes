@@ -5,8 +5,10 @@ Investigator specialists remain strictly read-only.
 """
 
 import base64
+import difflib
 import logging
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -14,10 +16,13 @@ from ..config import BridgeConfig, get_settings
 from ..contracts.incident import Incident
 from ..contracts.report import FilePatch, FixProposal, PullRequestRef, Report
 from ..github.auth import GitHubAppAuth
+from .diff_apply import apply_unified_diff
 from .interface import (
+    MAX_LINE_DELTA,
     FixPRWriterBase,
     build_autofix_branch_name,
     is_autofix_branch,
+    normalize_patch_path,
     validate_fix_guardrails,
 )
 
@@ -26,6 +31,37 @@ logger = logging.getLogger(__name__)
 
 class FixBranchExistsError(RuntimeError):
     """Raised when the autofix branch for an incident already exists (one attempt per run)."""
+
+
+def committed_line_delta(before: str, after: str) -> int:
+    """Count lines added plus removed between two file versions."""
+    matcher = difflib.SequenceMatcher(
+        None, before.splitlines(), after.splitlines(), autojunk=False
+    )
+    return sum(
+        (i2 - i1) + (j2 - j1)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag != "equal"
+    )
+
+
+def resolve_patch_content(patch: FilePatch, base_content: Optional[str]) -> str:
+    """Return the exact file content a patch writes, given the current base content.
+
+    The ``diff`` is authoritative whenever present: a ``content`` that disagrees with
+    ``apply(base, diff)`` is rejected so the guardrail-measured diff is what gets written.
+    """
+    base = base_content or ""
+    if patch.diff:
+        applied = apply_unified_diff(base, patch.diff)
+        if patch.content is not None and patch.content != applied:
+            raise ValueError(
+                f"Patch for '{patch.path}' carries content that does not match its diff"
+            )
+        return applied
+    if patch.content is not None:
+        return patch.content
+    raise ValueError(f"Patch for '{patch.path}' has neither content nor diff")
 
 
 def _split_repo(repo_full: Optional[str]) -> Optional[tuple[str, str]]:
@@ -85,15 +121,77 @@ class FixPRWriter(FixPRWriterBase):
         url = f"{self._api_url}/repos/{owner}/{repo}{path}"
         return self._client().request(method, url, headers=self._headers(owner, repo), **kwargs)
 
-    def _get_file_sha(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
-        resp = self._request("GET", owner, repo, f"/contents/{path}", params={"ref": ref})
+    def _get_file(
+        self, owner: str, repo: str, encoded_path: str, ref: str
+    ) -> Optional[dict[str, Any]]:
+        resp = self._request("GET", owner, repo, f"/contents/{encoded_path}", params={"ref": ref})
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
         data = resp.json()
-        if isinstance(data, dict) and data.get("sha"):
-            return str(data["sha"])
-        return None
+        if not isinstance(data, dict):
+            raise ValueError(f"Path '{encoded_path}' is not a file")
+        return data
+
+    @staticmethod
+    def _decode_content(data: dict[str, Any], path: str) -> str:
+        if data.get("encoding") != "base64" or not isinstance(data.get("content"), str):
+            raise ValueError(f"Contents API did not return base64 content for '{path}'")
+        return base64.b64decode(data["content"]).decode("utf-8")
+
+    def fetch_file_content(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
+        clean_path, _ = normalize_patch_path(path)
+        if clean_path is None:
+            return None
+        data = self._get_file(owner, repo, quote(clean_path, safe="/"), ref)
+        if data is None:
+            return None
+        return self._decode_content(data, clean_path)
+
+    def _resolve_patch(
+        self, owner: str, repo: str, ref: str, patch: FilePatch
+    ) -> tuple[str, str, Optional[str], str, int]:
+        """Resolve a patch against ``ref``.
+
+        Returns ``(clean_path, encoded_path, existing_sha, final_content, line_delta)``.
+        """
+        clean_path, reason = normalize_patch_path(patch.path)
+        if clean_path is None:
+            raise ValueError(f"Invalid patch path '{patch.path}': {reason}")
+        encoded_path = quote(clean_path, safe="/")
+        existing = self._get_file(owner, repo, encoded_path, ref)
+        if patch.action == "modify" and existing is None:
+            raise ValueError(f"Cannot modify missing file '{patch.path}'")
+        if patch.action == "create" and existing is not None:
+            raise ValueError(f"Cannot create existing file '{patch.path}'")
+        base_content = self._decode_content(existing, clean_path) if existing else ""
+        final_content = resolve_patch_content(patch, base_content)
+        existing_sha = str(existing["sha"]) if existing and existing.get("sha") else None
+        delta = committed_line_delta(base_content, final_content)
+        return clean_path, encoded_path, existing_sha, final_content, delta
+
+    def resolve_proposal(
+        self, owner: str, repo: str, ref: str, proposal: FixProposal
+    ) -> list[FilePatch]:
+        """Resolve every patch to full content at ``ref`` and enforce the committed delta.
+
+        Raises ``ValueError`` if any patch does not apply or the total number of lines
+        actually written exceeds ``MAX_LINE_DELTA``.
+        """
+        resolved: list[FilePatch] = []
+        total_delta = 0
+        for patch in proposal.patches:
+            if patch.action == "delete":
+                raise ValueError(f"Delete patches are not permitted: '{patch.path}'")
+            clean_path, _, _, final_content, delta = self._resolve_patch(owner, repo, ref, patch)
+            total_delta += delta
+            resolved.append(FilePatch(path=clean_path, action=patch.action, content=final_content))
+        if total_delta > MAX_LINE_DELTA:
+            raise ValueError(
+                f"Committed change ({total_delta} lines) exceeds maximum allowed "
+                f"({MAX_LINE_DELTA})"
+            )
+        return resolved
 
     def _delete_branch(self, owner: str, repo: str, branch: str) -> None:
         try:
@@ -154,33 +252,38 @@ class FixPRWriter(FixPRWriterBase):
     def commit_patch(
         self, owner: str, repo: str, branch: str, patch: FilePatch, message: str
     ) -> str:
-        existing_sha = self._get_file_sha(owner, repo, patch.path, branch)
-
         if patch.action == "delete":
-            if existing_sha is None:
+            clean_path, reason = normalize_patch_path(patch.path)
+            if clean_path is None:
+                raise ValueError(f"Invalid patch path '{patch.path}': {reason}")
+            encoded_path = quote(clean_path, safe="/")
+            existing = self._get_file(owner, repo, encoded_path, branch)
+            if existing is None or not existing.get("sha"):
                 raise ValueError(f"Cannot delete missing file '{patch.path}'")
             resp = self._request(
                 "DELETE",
                 owner,
                 repo,
-                f"/contents/{patch.path}",
-                json={"message": message, "sha": existing_sha, "branch": branch},
+                f"/contents/{encoded_path}",
+                json={"message": message, "sha": str(existing["sha"]), "branch": branch},
             )
         else:
-            if patch.content is None:
-                raise ValueError(f"Patch for '{patch.path}' has no full file content")
-            if patch.action == "modify" and existing_sha is None:
-                raise ValueError(f"Cannot modify missing file '{patch.path}'")
-            if patch.action == "create" and existing_sha is not None:
-                raise ValueError(f"Cannot create existing file '{patch.path}'")
+            _, encoded_path, existing_sha, final_content, delta = self._resolve_patch(
+                owner, repo, branch, patch
+            )
+            if delta > MAX_LINE_DELTA:
+                raise ValueError(
+                    f"Committed change to '{patch.path}' ({delta} lines) exceeds maximum "
+                    f"allowed ({MAX_LINE_DELTA})"
+                )
             body: dict[str, Any] = {
                 "message": message,
-                "content": base64.b64encode(patch.content.encode("utf-8")).decode("ascii"),
+                "content": base64.b64encode(final_content.encode("utf-8")).decode("ascii"),
                 "branch": branch,
             }
             if existing_sha:
                 body["sha"] = existing_sha
-            resp = self._request("PUT", owner, repo, f"/contents/{patch.path}", json=body)
+            resp = self._request("PUT", owner, repo, f"/contents/{encoded_path}", json=body)
 
         resp.raise_for_status()
         commit = resp.json().get("commit") or {}
@@ -237,6 +340,15 @@ class FixPRWriter(FixPRWriterBase):
         owner, repo = repo_parts
         run_id = incident.github_run_id
 
+        # Measure what will actually be written (R-2) before any branch exists.
+        try:
+            resolved_patches = self.resolve_proposal(
+                owner, repo, incident.github_head_sha, proposal
+            )
+        except Exception as exc:
+            logger.warning("Fix proposal for incident %s rejected: %s", incident.id, exc)
+            return None
+
         try:
             branch = self.create_fix_branch(owner, repo, incident.github_head_sha, run_id)
         except FixBranchExistsError:
@@ -253,7 +365,7 @@ class FixPRWriter(FixPRWriterBase):
             return None
 
         try:
-            for patch in proposal.patches:
+            for patch in resolved_patches:
                 self.commit_patch(
                     owner,
                     repo,
@@ -305,4 +417,9 @@ class FixPRWriter(FixPRWriterBase):
         return "\n".join(lines)
 
 
-__all__ = ["FixBranchExistsError", "FixPRWriter"]
+__all__ = [
+    "FixBranchExistsError",
+    "FixPRWriter",
+    "committed_line_delta",
+    "resolve_patch_content",
+]

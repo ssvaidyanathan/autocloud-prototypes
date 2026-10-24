@@ -114,6 +114,8 @@ class TestMemoryTuning:
             ("export APP_MEM='512Mi'", "export APP_MEM='1024Mi'"),
             ("MEM_LIMIT=1Gi  # tuned", "MEM_LIMIT=2Gi  # tuned"),
             ("MEMORY=1536Mi", "MEMORY=2048Mi"),  # capped
+            ('MEMORY="${MEMORY:-256Mi}"', 'MEMORY="${MEMORY:-512Mi}"'),
+            ("export SVC_MEM=${SVC_MEM-1Gi}  # d", "export SVC_MEM=${SVC_MEM-2Gi}  # d"),
         ],
     )
     def test_env_assignment_variants(self, line: str, expected: str) -> None:
@@ -222,6 +224,8 @@ class TestRejectsUnsafeScriptModifications:
             "MEMORY=256MB",  # unsupported unit
             "MEMORY=64Mi",  # below minimum sane value
             "# MEMORY=256Mi",  # comment
+            'MEMORY="${OTHER_MEM:-256Mi}"',  # default taken from a different variable
+            'MEMORY="${MEMORY:-$(probe)256Mi}"',  # command substitution in default
         ],
     )
     def test_non_memory_or_ambiguous_lines_are_not_edited(self, line: str) -> None:
