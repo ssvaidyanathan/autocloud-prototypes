@@ -21,7 +21,10 @@ from .fixer.writer import FixPRWriter
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-logging.getLogger("bridge.app.fixer").setLevel(logging.INFO)
+# The package is `app` under uvicorn (`uvicorn app.main:app`) and `bridge.app` under pytest.
+for _pkg in ("bridge.app", "app"):
+    logging.getLogger(_pkg).setLevel(logging.INFO)
+    logging.getLogger(f"{_pkg}.fixer").setLevel(logging.INFO)
 
 app = FastAPI(
     title="GitHub Actions Deployment Investigator Bridge",
@@ -136,12 +139,11 @@ def _maybe_open_fix_pr(
             result.incident, result.report, _bind_fetch_file(writer, result)
         )
         if proposal is None:
-            logger.info(
-                "autofix.selection incident=%s source=none; autofix.skipped reason=no_proposal",
-                incident_id,
-            )
+            logger.info("autofix.selection incident=%s source=none", incident_id)
+            logger.info("autofix.skipped incident=%s reason=no_proposal", incident_id)
             return None
-        if result.report.fix_proposal is proposal:
+        is_agent_proposal = result.report.fix_proposal is proposal
+        if is_agent_proposal:
             source = "agent"
         else:
             source = _DETERMINISTIC_SOURCES.get(proposal.strategy, "deterministic")
@@ -153,7 +155,7 @@ def _maybe_open_fix_pr(
             len(proposal.patches),
             ",".join(p.path for p in proposal.patches),
         )
-        if result.report.fix_proposal is not proposal:
+        if not is_agent_proposal:
             result.report.fix_proposal = proposal
         pr_ref = writer.execute_fix_proposal(result.incident, result.report, proposal)
         if pr_ref is None:
@@ -172,7 +174,7 @@ def _maybe_open_fix_pr(
             )
         return pr_ref
     except Exception as exc:
-        logger.error("autofix.writer incident=%s outcome=error error=%s", incident_id, exc)
+        logger.error("autofix.writer incident=%s outcome=error error=%r", incident_id, exc)
         return None
 
 

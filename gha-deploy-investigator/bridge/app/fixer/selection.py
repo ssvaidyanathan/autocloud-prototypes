@@ -96,7 +96,7 @@ def select_fix_proposal(
         return agent_proposal
     else:
         logger.info(
-            "autofix.candidate incident=%s candidate=agent result=rejected status=%s rationale=%s",
+            "autofix.candidate incident=%s candidate=agent result=rejected status=%s rationale=%r",
             incident.id,
             agent_proposal.status,
             agent_proposal.rationale,
@@ -111,7 +111,7 @@ def select_fix_proposal(
             proposal = build()
         except Exception as exc:
             logger.warning(
-                "autofix.candidate incident=%s candidate=%s result=error error=%s",
+                "autofix.candidate incident=%s candidate=%s result=error error=%r",
                 incident.id,
                 name,
                 exc,
@@ -134,7 +134,7 @@ def select_fix_proposal(
             )
             return proposal
         logger.info(
-            "autofix.candidate incident=%s candidate=%s result=rejected status=%s rationale=%s",
+            "autofix.candidate incident=%s candidate=%s result=rejected status=%s rationale=%r",
             incident.id,
             name,
             proposal.status,

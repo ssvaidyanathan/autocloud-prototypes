@@ -317,7 +317,7 @@ class FixPRWriter(FixPRWriterBase):
         valid, reason = validate_fix_guardrails(proposal)
         if not valid:
             logger.warning(
-                "autofix.guardrail incident=%s result=rejected reason=%s", incident.id, reason
+                "autofix.guardrail incident=%s result=rejected reason=%r", incident.id, reason
             )
             return None
         logger.info("autofix.guardrail incident=%s result=passed", incident.id)
@@ -348,7 +348,7 @@ class FixPRWriter(FixPRWriterBase):
             )
         except Exception as exc:
             logger.warning(
-                "autofix.guardrail incident=%s result=rejected stage=resolve reason=%s",
+                "autofix.guardrail incident=%s result=rejected stage=resolve reason=%r",
                 incident.id,
                 exc,
             )
@@ -374,7 +374,7 @@ class FixPRWriter(FixPRWriterBase):
             return existing
         except Exception as exc:
             logger.error(
-                "autofix.branch incident=%s run=%s outcome=error error=%s", incident.id, run_id, exc
+                "autofix.branch incident=%s run=%s outcome=error error=%r", incident.id, run_id, exc
             )
             return None
         logger.info(
@@ -410,8 +410,8 @@ class FixPRWriter(FixPRWriterBase):
             )
         except Exception as exc:
             logger.error(
-                "autofix.pr incident=%s run=%s outcome=error branch=%s error=%s; "
-                "removing partial branch",
+                "autofix.pr incident=%s run=%s outcome=error branch=%s error=%r "
+                "action=delete_partial_branch",
                 incident.id,
                 run_id,
                 branch,

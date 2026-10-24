@@ -384,8 +384,17 @@ class TestAstFallback:
         assert fix_source(LIVE_SOURCE, [diag]) == LIVE_EXPECTED
 
     def test_single_binding_used_when_message_name_mismatches(self) -> None:
+        # A message name that contradicts the statement must not be replaced by a guess.
         diag = LintDiagnostic("app/main.py", 1, "F401", "`something.else` imported but unused")
-        assert fix_source(LIVE_SOURCE, [diag]) == LIVE_EXPECTED
+        with pytest.raises(UnsafeFixError, match="Cannot locate unused import at line 1"):
+            fix_source(LIVE_SOURCE, [diag])
+
+    def test_contradicting_name_does_not_remove_other_import(self) -> None:
+        # Regression (R-1): `os` named at the line of `import sys` must not remove the used `sys`.
+        src = "import os\nimport sys\n\nprint(sys.argv)\n"
+        diag = LintDiagnostic("m.py", 2, "F401", "`os` imported but unused")
+        with pytest.raises(UnsafeFixError, match="Cannot locate unused import at line 2"):
+            fix_source(src, [diag])
 
     def test_single_from_import_binding(self) -> None:
         src = "from pathlib import Path\nimport sys\n\nprint(sys)\n"

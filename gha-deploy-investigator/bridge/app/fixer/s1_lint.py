@@ -174,13 +174,15 @@ def _resolve_unused_name(node: ast.Import | ast.ImportFrom, message: str) -> Opt
     """Pick the import binding a diagnostic refers to.
 
     A name from the message is used when it matches an alias of the import statement.
-    Otherwise, if the statement binds exactly one (non-star) name, the diagnostic can only
-    refer to that binding, so it is taken from the AST.
+    Only when the message names no import at all, and the statement binds exactly one
+    (non-star) name, is that binding taken from the AST. A message name that contradicts
+    the statement is never overridden by a guess; the caller treats it as unsafe.
     """
-    for name in extract_import_names(message):
+    names = extract_import_names(message)
+    for name in names:
         if any(_alias_matches(node, alias, name) for alias in node.names):
             return name
-    if len(node.names) == 1 and node.names[0].name != "*":
+    if not names and len(node.names) == 1 and node.names[0].name != "*":
         return node.names[0].name
     return None
 
