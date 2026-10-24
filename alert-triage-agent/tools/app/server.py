@@ -27,6 +27,7 @@ try:
     from tools.app.bundle_parser import parse_proxy_bundle_bytes
     from tools.app.topology_graph import (
         get_topology_graph as topology_get_graph,
+        get_topology as topology_get_topology,
         get_blast_radius as topology_get_blast_radius,
         calculate_hop_distance,
     )
@@ -36,6 +37,7 @@ except ImportError:
     from app.bundle_parser import parse_proxy_bundle_bytes
     from app.topology_graph import (
         get_topology_graph as topology_get_graph,
+        get_topology as topology_get_topology,
         get_blast_radius as topology_get_blast_radius,
         calculate_hop_distance,
     )
@@ -127,6 +129,12 @@ def list_open_alerts(
 def get_topology_graph() -> Dict[str, Any]:
     """Returns the full directed DAG nodes and caller -> callee edges."""
     return topology_get_graph()
+
+
+@mcp.tool()
+def get_topology(resource: Optional[str] = None) -> Dict[str, Any]:
+    """Returns components, edges, and the resource's upstream and downstream dependencies from TOPOLOGY.md."""
+    return topology_get_topology(resource)
 
 
 @mcp.tool()

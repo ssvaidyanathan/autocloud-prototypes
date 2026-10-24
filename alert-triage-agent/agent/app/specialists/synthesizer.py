@@ -33,10 +33,20 @@ from .cloud_sql import CloudSQLSpecialist
 from .change import ChangeSpecialist
 
 try:
-    from topology.topology_graph import get_blast_radius, get_upstream_dependencies, _canonicalize_node
+    from topology.topology_graph import (
+        get_blast_radius,
+        get_upstream_dependencies,
+        _canonicalize_node,
+        get_loader,
+    )
 except ImportError:
     try:
-        from agent.topology.topology_graph import get_blast_radius, get_upstream_dependencies, _canonicalize_node
+        from agent.topology.topology_graph import (
+            get_blast_radius,
+            get_upstream_dependencies,
+            _canonicalize_node,
+            get_loader,
+        )
     except ImportError as err:
         logging.getLogger(__name__).error("Failed to import topology_graph: %s", err)
         raise
@@ -77,7 +87,7 @@ class SynthesizerAgent:
             "CloudSQLSpecialist": self.cloud_sql_specialist.investigate(alert, config),
             "ChangeSpecialist": self.change_specialist.investigate(alert, config),
         }
-        # Run CloudRunSpecialist on upstream Cloud Run dependencies (e.g. ata-inventory-api)
+        # Run CloudRunSpecialist on upstream Cloud Run dependencies
         dep_tasks = {}
         for dep in upstream_deps:
             if "db" not in dep and "apigee" not in dep and dep != canonical_res:
@@ -144,7 +154,7 @@ class SynthesizerAgent:
         agent_run_metadata = self._build_agent_metadata(config, duration_seconds=execution_duration)
         tools_used = [
             "list_open_alerts", "list_time_series", "list_log_entries",
-            "get_service", "get_topology_graph", "get_blast_radius"
+            "get_service", "get_topology_graph", "get_topology", "get_blast_radius"
         ]
         skills_loaded = [
             "cloud-run-diagnostics", "apigee-telemetry", "cloud-sql-triage", "report-style"
@@ -202,7 +212,7 @@ class SynthesizerAgent:
 
         Rules:
         1. SpikeArrest 429 is enforced at the Apigee ingress proxy gateway; origin stays at gateway.
-        2. Change-induced deployments on a service (e.g. ata-inventory-api in S5) attribute directly
+        2. Change-induced deployments on a service attribute directly
            to the deployed service, never to downstream database dependencies.
         3. Cloud SQL origin is attributed only when Cloud SQL alert fired or DB telemetry shows verified
            saturation/locks at alert onset without caller configuration/credential error.
@@ -215,7 +225,7 @@ class SynthesizerAgent:
             return alert.resource_name
 
         # 2. Change-induced fault detection:
-        # A change deployment on a service (e.g. ata-inventory-api in S5) is attributed
+        # A change deployment on a service is attributed
         # directly to that service where the revision was deployed, NEVER to downstream database.
         chg_dossier = dossiers.get("ChangeSpecialist")
         if chg_dossier and chg_dossier.anomaly_detected:
@@ -225,7 +235,7 @@ class SynthesizerAgent:
                 return chg_svc
 
         # 3. Cloud SQL check: database is the deepest backend layer in the topology DAG
-        # Origin must ONLY attribute to ata-inventory-db when database telemetry is actually anomalous in the window
+        # Origin must ONLY attribute to database when database telemetry is actually anomalous in the window
         sql_dossier = dossiers.get("CloudSQLSpecialist")
         if sql_dossier and sql_dossier.anomaly_detected:
             db_conns = sql_dossier.metrics.get("active_connections")
@@ -1558,6 +1568,22 @@ class SynthesizerAgent:
             "alerts": alerts_list,
         }
 
+        # Build Topology used section
+        try:
+            topo_loader = get_loader()
+            source_file = topo_loader.source_path.name
+            rel_edges = topo_loader.get_relevant_edges(origin, alert.resource_name)
+            if not rel_edges:
+                rel_edges = [{"from": e.from_node, "to": e.to_node, "relation": e.relation} for e in topo_loader.edges]
+            edges_lines = "\n".join(
+                f"- `{e['from']}` -> `{e['to']}`" + (f" ({e['relation']})" if e.get("relation") else "")
+                for e in rel_edges
+            )
+        except Exception as topo_err:
+            logger.warning("Failed to extract topology edges for report: %s", topo_err)
+            source_file = "TOPOLOGY.md"
+            edges_lines = "- Topology information unavailable"
+
         exec_bullets = "\n".join(report.build_executive_summary_bullets())
         file_content = f"""---
 {yaml.dump(frontmatter, sort_keys=False).strip()}
@@ -1574,6 +1600,11 @@ class SynthesizerAgent:
 ## Blast Radius
 - Origin: `{origin}`
 - Impacted Downstream Components: {', '.join(f'`{b}`' for b in merged_blast)}
+
+## Topology used
+- Source: `{source_file}`
+- Relevant edges:
+{edges_lines}
 """
         try:
             file_path.write_text(file_content, encoding="utf-8")

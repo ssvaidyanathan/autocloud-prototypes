@@ -6,6 +6,7 @@ READ_ONLY_TOOL_ALLOWLIST: Set[str] = {
     # Custom ata-tools FastMCP server tools
     "list_open_alerts",
     "get_topology_graph",
+    "get_topology",
     "get_blast_radius",
     "get_apigee_metrics",
     "get_apigee_logs",
