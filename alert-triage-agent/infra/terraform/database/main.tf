@@ -15,8 +15,8 @@ resource "google_sql_database_instance" "inventory_db" {
 
     ip_configuration {
       ipv4_enabled = true
-      require_ssl  = true
-      ssl_mode     = "ENCRYPTED_ONLY"
+      require_ssl  = false
+      ssl_mode     = "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
     }
 
     user_labels = {
