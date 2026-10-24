@@ -17,8 +17,14 @@ variable "name_prefix" {
 
 variable "environment" {
   type        = string
-  default     = "prod"
+  default     = "demo"
   description = "Deployment environment name"
+}
+
+variable "owner" {
+  type        = string
+  default     = "sre-prototypes"
+  description = "Ownership team for resources"
 }
 
 variable "servicenow_instance_url" {

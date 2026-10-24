@@ -105,8 +105,87 @@ def normalize_resource_name(
     return str(raw_name or "unknown-resource").strip()
 
 
+import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+import re
+from typing import Any, Optional, Set
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_PARTS: Set[str] = {"ata-agent", "ata-bridge", "ata-tools"}
+KNOWN_COMPONENTS: Set[str] = {
+    "ata-orders-api",
+    "ata-inventory-api",
+    "ata-inventory-db",
+    "ata-orders-v1",
+    "ata-inventory-v1",
+    "ata-agent",
+    "ata-bridge",
+    "ata-tools",
+    "ata-apigee-orders-v1",
+    "ata-apigee-inventory-v1",
+}
+
+
+def load_topology_components() -> Set[str]:
+    """Load valid component IDs from TOPOLOGY.md if available, supplemented with system parts."""
+    components = set(KNOWN_COMPONENTS)
+    candidates = []
+    if "TOPOLOGY_FILE" in os.environ:
+        candidates.append(Path(os.environ["TOPOLOGY_FILE"]))
+
+    current_file = Path(__file__).resolve()
+    for parent in current_file.parents:
+        candidates.append(parent / "topology" / "TOPOLOGY.md")
+        candidates.append(parent / "TOPOLOGY.md")
+
+    candidates.append(Path("/workspace/alert-triage-agent/topology/TOPOLOGY.md"))
+    candidates.append(Path("/workspace/pr-ata-labels/alert-triage-agent/topology/TOPOLOGY.md"))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                content = candidate.read_text(encoding="utf-8")
+                in_components = False
+                for line in content.splitlines():
+                    line_str = line.strip()
+                    if line_str.startswith("## Components"):
+                        in_components = True
+                        continue
+                    if in_components:
+                        if line_str.startswith("## "):
+                            break
+                        if line_str.startswith("|") and not line_str.startswith("|---") and "Component" not in line_str:
+                            parts = [p.strip() for p in line_str.split("|")]
+                            if len(parts) >= 2 and parts[1]:
+                                comp_id = parts[1].strip("` ")
+                                if comp_id:
+                                    components.add(comp_id)
+                            if len(parts) >= 4 and parts[3]:
+                                for alias in parts[3].split(","):
+                                    alias_clean = alias.strip("` ")
+                                    if alias_clean:
+                                        components.add(alias_clean)
+                break
+            except Exception:
+                pass
+    return components
+
+
+def is_valid_component(component: str) -> bool:
+    """Validate if a component identifier matches TOPOLOGY.md or system parts."""
+    if not component or not isinstance(component, str):
+        return False
+    return component.strip() in load_topology_components()
+
+
 class AlertEvent(BaseModel):
     """Normalized Cloud Monitoring Alert Event."""
+    model_config = ConfigDict(extra="allow")
+
     incident_id: str
     policy_name: str
     policy_id: Optional[str] = None
@@ -114,10 +193,46 @@ class AlertEvent(BaseModel):
     resource_name: str
     resource_type: Optional[str] = None
     resource_labels: dict[str, str] = Field(default_factory=dict)
+    policy_user_labels: dict[str, str] = Field(default_factory=dict)
     state: str = "open"
     started_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     ended_at: Optional[str] = None
     summary: Optional[str] = None
+
+    @property
+    def labels(self) -> dict[str, str]:
+        return self.policy_user_labels
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_and_map_component(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        # Allow passing 'labels' alias for 'policy_user_labels'
+        p_labels = data.get("policy_user_labels")
+        if p_labels is None and "labels" in data:
+            p_labels = data.get("labels")
+            data["policy_user_labels"] = p_labels
+
+        if isinstance(p_labels, dict) and p_labels:
+            data["policy_user_labels"] = {str(k): str(v) for k, v in p_labels.items()}
+            comp = data["policy_user_labels"].get("component")
+            if comp:
+                comp_clean = str(comp).strip()
+                if not is_valid_component(comp_clean):
+                    raise ValueError(
+                        f"Unknown component '{comp_clean}' in policy_user_labels (not defined in TOPOLOGY.md)"
+                    )
+                # Component label takes precedence over resource_name
+                inc_id = data.get("incident_id", "unknown")
+                data["resource_name"] = comp_clean
+                logger.info(
+                    "Mapped alert %s to component '%s' from policy_user_labels['component']",
+                    inc_id,
+                    comp_clean,
+                )
+        return data
 
     @field_validator("started_at", mode="before")
     @classmethod
@@ -188,11 +303,49 @@ class AlertEvent(BaseModel):
             or ""
         )
 
-        res_name = normalize_resource_name(
-            raw_name=raw_res_name,
-            res_type=res_type,
-            res_labels=res_labels,
+        # Extract policy user labels
+        pol_user_labels: dict[str, str] = {}
+        raw_labels = (
+            inc.get("policy_user_labels")
+            or inc.get("policyUserLabels")
+            or inc.get("user_labels")
+            or inc.get("userLabels")
+            or (pol_val.get("user_labels") if isinstance(pol_val, dict) else None)
+            or (pol_val.get("userLabels") if isinstance(pol_val, dict) else None)
+            or payload.get("policy_user_labels")
+            or payload.get("policyUserLabels")
+            or payload.get("user_labels")
+            or payload.get("userLabels")
+            or {}
         )
+        if isinstance(raw_labels, dict):
+            pol_user_labels = {str(k): str(v) for k, v in raw_labels.items()}
+
+        # Map alert -> component FIRST from policy user label 'component'
+        component_label = pol_user_labels.get("component")
+        if component_label:
+            comp_clean = str(component_label).strip()
+            if not is_valid_component(comp_clean):
+                raise ValueError(
+                    f"Unknown component '{comp_clean}' in policy_user_labels for incident {inc_id} (not defined in TOPOLOGY.md)"
+                )
+            res_name = comp_clean
+            logger.info(
+                "Mapped alert %s to component '%s' from policy user label 'component'",
+                inc_id,
+                res_name,
+            )
+        else:
+            res_name = normalize_resource_name(
+                raw_name=raw_res_name,
+                res_type=res_type,
+                res_labels=res_labels,
+            )
+            logger.info(
+                "Mapped alert %s to component '%s' from resource-label canonicalization",
+                inc_id,
+                res_name,
+            )
 
         condition_dict = inc.get("condition")
         cond_name = None
@@ -237,6 +390,7 @@ class AlertEvent(BaseModel):
             resource_name=res_name,
             resource_type=res_type,
             resource_labels=res_labels,
+            policy_user_labels=pol_user_labels,
             state=str(inc.get("state", "open")).lower(),
             started_at=started_at,
             ended_at=ended_at,
@@ -305,8 +459,12 @@ def is_ata_alert_payload(payload: dict[str, Any]) -> bool:
 
     # 4. user_labels containing 'app': 'alert-triage-agent' or 'managed_by': 'alert-triage-agent'
     user_labels = (
-        inc.get("user_labels")
+        inc.get("policy_user_labels")
+        or inc.get("policyUserLabels")
+        or inc.get("user_labels")
         or inc.get("userLabels")
+        or payload.get("policy_user_labels")
+        or payload.get("policyUserLabels")
         or payload.get("user_labels")
         or payload.get("userLabels")
         or (pol_val.get("user_labels") if isinstance(pol_val, dict) else None)
@@ -324,6 +482,10 @@ def is_ata_alert_event(alert: AlertEvent) -> bool:
     """Check if an AlertEvent instance belongs to ata."""
     if alert.raw_payload and is_ata_alert_payload(alert.raw_payload):
         return True
+
+    if getattr(alert, "policy_user_labels", None):
+        if alert.policy_user_labels.get("app") == "alert-triage-agent" or alert.policy_user_labels.get("managed_by") == "alert-triage-agent":
+            return True
 
     p_name = (alert.policy_name or "").lower().strip()
     if p_name.startswith("ata-") or "ata-" in p_name or "alert-triage-agent" in p_name:

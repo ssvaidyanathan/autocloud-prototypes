@@ -121,7 +121,7 @@ gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" --unifor
 gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" --public-access-prevention
 gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" --versioning
 gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" \
-    --update-labels="app=alert-triage-agent,component=tfstate,env=${ENVIRONMENT},prefix=${NAME_PREFIX}"
+    --update-labels="app=alert-triage-agent,component=ata-tools,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=sre-prototypes"
 
 # Generate backend.hcl for foundation stack
 STACKS=("foundation")

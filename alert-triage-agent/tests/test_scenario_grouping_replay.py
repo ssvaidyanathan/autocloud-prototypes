@@ -422,18 +422,39 @@ def test_replay_scenario_s1_backend_5xx(replay_env):
         policy_name="ata-inventory-5xx",
         resource_name="ata-inventory-api",
         started_at="2026-10-23T07:52:06Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "5xx",
+            "severity": "p1",
+        },
     )
     alert2 = AlertEvent(
         incident_id="0.oe5l7g8jv5kd",
         policy_name="ata-inventory-latency",
         resource_name="ata-inventory-api",
         started_at="2026-10-23T07:52:06Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "latency",
+            "severity": "p2",
+        },
     )
     alert3 = AlertEvent(
         incident_id="0.oe5guunhsdi3",
         policy_name="ata-apigee-orders-5xx",
         resource_name="ata-orders-v1",
         started_at="2026-10-23T07:54:37Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-orders-v1",
+            "tier": "edge",
+            "signal": "5xx",
+            "severity": "p1",
+        },
     )
 
     alerts = [
@@ -486,18 +507,39 @@ def test_replay_scenario_s2_backend_latency(replay_env):
         policy_name="ata-orders-latency",
         resource_name="ata-orders-api",
         started_at="2026-10-23T19:52:57Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-orders-api",
+            "tier": "service",
+            "signal": "latency",
+            "severity": "p2",
+        },
     )
     alert2 = AlertEvent(
         incident_id="0.oe61pyb0j2oa",
         policy_name="ata-apigee-orders-5xx",
         resource_name="ata-orders-v1",
         started_at="2026-10-23T19:55:14Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-orders-v1",
+            "tier": "edge",
+            "signal": "5xx",
+            "severity": "p1",
+        },
     )
     alert3 = AlertEvent(
         incident_id="0.oe61pyb0j2of",
         policy_name="ata-inventory-latency",
         resource_name="ata-inventory-api",
         started_at="2026-10-23T19:55:14Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "latency",
+            "severity": "p2",
+        },
     )
     alert2_resolved = AlertEvent(
         incident_id="0.oe61pyb0j2oa",
@@ -505,12 +547,26 @@ def test_replay_scenario_s2_backend_latency(replay_env):
         resource_name="ata-orders-v1",
         started_at="2026-10-23T19:55:14Z",
         state="closed",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-orders-v1",
+            "tier": "edge",
+            "signal": "5xx",
+            "severity": "p1",
+        },
     )
     alert4 = AlertEvent(
         incident_id="0.oe61tbneyg5z",
         policy_name="ata-inventory-latency",
         resource_name="ata-inventory-api",
         started_at="2026-10-23T19:59:20Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "latency",
+            "severity": "p2",
+        },
     )
 
     alerts = [
@@ -557,18 +613,39 @@ def test_replay_scenario_s3_concurrent_disjoint(replay_env):
         policy_name="ata-inventory-5xx",
         resource_name="ata-inventory-api",
         started_at="2026-10-23T05:24:50Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "5xx",
+            "severity": "p1",
+        },
     )
     alert_ord_429 = AlertEvent(
         incident_id="0.oe5hwcqe3x3w",
         policy_name="ata-apigee-orders-429",
         resource_name="ata-orders-v1",
         started_at="2026-10-23T05:27:14Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-orders-v1",
+            "tier": "edge",
+            "signal": "rate-limit",
+            "severity": "p2",
+        },
     )
     alert_inv_lat = AlertEvent(
         incident_id="0.oe5l7g8jv5kd",
         policy_name="ata-inventory-latency",
         resource_name="ata-inventory-api",
         started_at="2026-10-23T05:27:20Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "latency",
+            "severity": "p2",
+        },
     )
 
     alerts = [
@@ -615,12 +692,26 @@ def test_replay_scenario_s4_db_connection_pool(replay_env):
         policy_name="ata-cloudsql-connections-critical",
         resource_name="ata-inventory-db",
         started_at="2026-10-23T13:22:13Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-db",
+            "tier": "data",
+            "signal": "connections",
+            "severity": "p1",
+        },
     )
     alert2 = AlertEvent(
         incident_id="0.oe5t7vkp3wi8",
         policy_name="ata-inventory-latency",
         resource_name="ata-inventory-api",
         started_at="2026-10-23T13:23:40Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "latency",
+            "severity": "p2",
+        },
     )
 
     alerts = [
@@ -655,12 +746,26 @@ def test_replay_scenario_s5_bad_deploy(replay_env):
         policy_name="ata-inventory-latency",
         resource_name="ata-inventory-api",
         started_at="2026-10-23T13:42:56Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "latency",
+            "severity": "p2",
+        },
     )
     alert2 = AlertEvent(
         incident_id="0.oe5tdjamzkgy",
         policy_name="ata-inventory-5xx",
         resource_name="ata-inventory-api",
         started_at="2026-10-23T13:49:49Z",
+        policy_user_labels={
+            "app": "alert-triage-agent",
+            "component": "ata-inventory-api",
+            "tier": "service",
+            "signal": "5xx",
+            "severity": "p1",
+        },
     )
 
     alerts = [

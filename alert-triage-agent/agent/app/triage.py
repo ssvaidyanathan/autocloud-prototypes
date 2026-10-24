@@ -400,6 +400,8 @@ def generate_investigation_report(
                 "started_at": valid_ts,
                 "url": alert.url or ConsoleLinkBuilder(project_id=config.project_id).build_incident_url(alert.incident_id),
                 "console_url": alert.url or ConsoleLinkBuilder(project_id=config.project_id).build_incident_url(alert.incident_id),
+                "labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
+                "policy_user_labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
             }
         ],
         triage_decision={

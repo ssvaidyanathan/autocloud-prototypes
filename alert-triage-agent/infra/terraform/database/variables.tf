@@ -15,3 +15,15 @@ variable "name_prefix" {
   default     = "ata"
   description = "Resource name prefix for all alert triage agent components"
 }
+
+variable "environment" {
+  type        = string
+  default     = "demo"
+  description = "Deployment environment name"
+}
+
+variable "owner" {
+  type        = string
+  default     = "sre-prototypes"
+  description = "Ownership team for resources"
+}

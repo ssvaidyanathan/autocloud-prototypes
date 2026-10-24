@@ -1066,6 +1066,8 @@ class SynthesizerAgent:
                 "started_at": sa,
                 "url": inc_url,
                 "console_url": inc_url,
+                "labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
+                "policy_user_labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
             }
         ]
 
@@ -1331,6 +1333,12 @@ class SynthesizerAgent:
             f"Telemetric breach on '{origin}' coincides with alert trigger timestamp.",
             f"Multi-service correlation confirms causal failure propagation across {len(dossiers)} specialist domains.",
         ]
+        sig_label = getattr(alert, "policy_user_labels", {}).get("signal") if getattr(alert, "policy_user_labels", None) else None
+        if sig_label:
+            if sig_label == "rate-limit":
+                supporting.append(f"Supporting hint: Alert policy user label signal '{sig_label}' indicates ingress rate-limiting; rate-limit at the edge stays at the edge based on corroborating telemetry.")
+            else:
+                supporting.append(f"Supporting hint: Alert policy user label signal '{sig_label}' provides supporting evidence for observed {sig_label} telemetry.")
         contradicting: list[str] = [
             "Zero host-level compute/hypervisor hyperthreading faults reported in us-west1.",
             "No upstream Google Cloud infrastructure service outages affecting project cloud-assist-fde-2.",

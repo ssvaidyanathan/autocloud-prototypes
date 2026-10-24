@@ -39,6 +39,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --image="${IMAGE_TAG}" \
     --service-account="${TOOLS_SA}" \
     --no-allow-unauthenticated \
+    --set-labels="app=alert-triage-agent,component=ata-tools,role=triage-system,tier=platform,env=demo,managed-by=script,owner=sre-prototypes" \
     --set-env-vars="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},APIGEE_ORG=${PROJECT_ID}"
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)")"
