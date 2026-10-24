@@ -761,6 +761,25 @@ class TestTLSCertificateHandling:
         resolved = snow.resolve_ca_bundle(ca_bundle=None)
         assert resolved == "/env/requests_ca.pem"
 
+    def test_cafile_precedence_env_empty_or_whitespace_falls_through(self, monkeypatch):
+        """Empty or whitespace-only environment variables are ignored and stripped, falling through."""
+        # 1. Whitespace in SSL_CERT_FILE falls through to valid REQUESTS_CA_BUNDLE (and strips whitespace)
+        monkeypatch.setenv("SSL_CERT_FILE", "   ")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "  /env/requests_ca.pem  ")
+        assert snow.resolve_ca_bundle(ca_bundle=None) == "/env/requests_ca.pem"
+
+        # 2. Both empty/whitespace falls through to certifi
+        monkeypatch.setenv("SSL_CERT_FILE", "")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "   \t\n  ")
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+        assert snow.resolve_ca_bundle(ca_bundle=None) == "/certifi/where.pem"
+
+        # 3. SSL_CERT_FILE with padding whitespace is stripped
+        monkeypatch.setenv("SSL_CERT_FILE", "  /env/ssl_cert.pem  ")
+        assert snow.resolve_ca_bundle(ca_bundle=None) == "/env/ssl_cert.pem"
+
     def test_cafile_precedence_certifi_over_default(self, monkeypatch):
         """certifi.where() is used when no flag or environment variables are provided."""
         monkeypatch.delenv("SSL_CERT_FILE", raising=False)

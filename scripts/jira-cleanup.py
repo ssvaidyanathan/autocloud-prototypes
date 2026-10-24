@@ -400,9 +400,10 @@ def resolve_ca_bundle(ca_bundle: Optional[str] = None) -> Optional[str]:
     if ca_bundle and ca_bundle.strip():
         return ca_bundle.strip()
 
-    env_bundle = os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE")
-    if env_bundle and env_bundle.strip():
-        return env_bundle.strip()
+    for env_var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        val = os.environ.get(env_var)
+        if val and val.strip():
+            return val.strip()
 
     try:
         import certifi  # type: ignore[import-untyped]
