@@ -144,6 +144,67 @@ def is_valid_component(component: str) -> bool:
     return component.strip() in load_topology_components()
 
 
+def extract_numeric_policy_id(payload: dict[str, Any], inc: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """Extract numeric policy id from payload if present (e.g. incident.policy_name resource path,
+    condition_name, policy object, or explicit policy_id field).
+    """
+    incident = inc if isinstance(inc, dict) else (payload.get("incident") if isinstance(payload, dict) and isinstance(payload.get("incident"), dict) else {})
+    candidates: list[str] = []
+
+    # 1. Explicit fields in incident or payload
+    for k in ("policy_id", "policyId"):
+        if incident.get(k) is not None:
+            candidates.append(str(incident[k]))
+        if isinstance(payload, dict) and payload.get(k) is not None:
+            candidates.append(str(payload[k]))
+
+    # 2. Policy object in incident or payload
+    for pol_source in (incident.get("policy"), (payload.get("policy") if isinstance(payload, dict) else None)):
+        if isinstance(pol_source, dict):
+            for k in ("name", "id", "policy_id", "policyId"):
+                if pol_source.get(k) is not None:
+                    candidates.append(str(pol_source[k]))
+        elif isinstance(pol_source, str):
+            candidates.append(pol_source)
+
+    # 3. Policy name string
+    for pol_name in (incident.get("policy_name"), (payload.get("policy_name") if isinstance(payload, dict) else None)):
+        if isinstance(pol_name, str):
+            candidates.append(pol_name)
+
+    # 4. Condition name or condition object
+    for cond_source in (incident.get("condition"), (payload.get("condition") if isinstance(payload, dict) else None)):
+        if isinstance(cond_source, dict):
+            for k in ("name", "id"):
+                if cond_source.get(k) is not None:
+                    candidates.append(str(cond_source[k]))
+        elif isinstance(cond_source, str):
+            candidates.append(cond_source)
+
+    for cond_name in (incident.get("condition_name"), (payload.get("condition_name") if isinstance(payload, dict) else None)):
+        if isinstance(cond_name, str):
+            candidates.append(cond_name)
+
+    # 5. Search candidates for numeric policy id
+    for item in candidates:
+        item = item.strip()
+        if not item:
+            continue
+        # Direct numeric check
+        if item.isdigit():
+            return item
+        # Resource path matching alertPolicies/<digits>
+        m = re.search(r"alertPolicies/(\d+)", item)
+        if m:
+            return m.group(1)
+        # Path matching policies/<digits>
+        m2 = re.search(r"policies/(\d+)", item)
+        if m2:
+            return m2.group(1)
+
+    return None
+
+
 class AlertEvent(BaseModel):
     """Normalized Cloud Monitoring Alert Event."""
     model_config = ConfigDict(extra="allow")
@@ -156,14 +217,19 @@ class AlertEvent(BaseModel):
     resource_type: Optional[str] = None
     resource_labels: dict[str, str] = Field(default_factory=dict)
     policy_user_labels: dict[str, str] = Field(default_factory=dict)
+    labels: dict[str, str] = Field(default_factory=dict)
     state: str = "open"
     started_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     ended_at: Optional[str] = None
     summary: Optional[str] = None
 
     @property
-    def labels(self) -> dict[str, str]:
-        return self.policy_user_labels
+    def component(self) -> str:
+        return self.policy_user_labels.get("component") or self.resource_name
+
+    @property
+    def signal(self) -> Optional[str]:
+        return self.policy_user_labels.get("signal")
 
     @model_validator(mode="before")
     @classmethod
@@ -171,21 +237,32 @@ class AlertEvent(BaseModel):
         if not isinstance(data, dict):
             return data
 
+        # Extract numeric policy_id if not already set or numeric
+        if not data.get("policy_id") or not str(data.get("policy_id")).strip().isdigit():
+            extracted_pid = extract_numeric_policy_id(data)
+            if extracted_pid:
+                data["policy_id"] = extracted_pid
+
         # Allow passing 'labels' alias for 'policy_user_labels'
         p_labels = data.get("policy_user_labels")
         if p_labels is None and "labels" in data:
             p_labels = data.get("labels")
             data["policy_user_labels"] = p_labels
 
+        inc_id = data.get("incident_id", "unknown")
+        used_label = False
+
         if isinstance(p_labels, dict) and p_labels:
-            data["policy_user_labels"] = {str(k): str(v) for k, v in p_labels.items()}
-            comp = data["policy_user_labels"].get("component")
+            clean_labels = {str(k): str(v) for k, v in p_labels.items()}
+            data["policy_user_labels"] = clean_labels
+            data["labels"] = clean_labels
+            comp = clean_labels.get("component")
             if comp:
                 comp_clean = str(comp).strip()
-                inc_id = data.get("incident_id", "unknown")
                 if is_valid_component(comp_clean):
                     # Valid component label takes precedence over resource_name
                     data["resource_name"] = comp_clean
+                    used_label = True
                     logger.info(
                         "Mapped alert %s to component '%s' from policy_user_labels['component']",
                         inc_id,
@@ -197,16 +274,22 @@ class AlertEvent(BaseModel):
                         comp_clean,
                         inc_id,
                     )
-                    # Never reject: keep and canonicalize existing resource_name
-                    raw_res = str(data.get("resource_name") or "")
-                    if raw_res:
-                        data["resource_name"] = normalize_resource_name(raw_name=raw_res)
-                    else:
-                        data["resource_name"] = normalize_resource_name(
-                            raw_name="",
-                            res_type=str(data.get("resource_type") or ""),
-                            res_labels=data.get("resource_labels") if isinstance(data.get("resource_labels"), dict) else None,
-                        )
+        elif "labels" not in data or not data["labels"]:
+            data["labels"] = {}
+
+        if not used_label:
+            # Resource-label canonicalization
+            raw_res = str(data.get("resource_name") or "")
+            res_type = str(data.get("resource_type") or "")
+            res_labels = data.get("resource_labels") if isinstance(data.get("resource_labels"), dict) else None
+            canon_res = normalize_resource_name(raw_name=raw_res, res_type=res_type, res_labels=res_labels)
+            data["resource_name"] = canon_res
+            logger.info(
+                "Mapped alert %s to component '%s' from resource-label canonicalization",
+                inc_id,
+                canon_res,
+            )
+
         return data
 
     @field_validator("started_at", mode="before")
@@ -296,45 +379,6 @@ class AlertEvent(BaseModel):
         if isinstance(raw_labels, dict):
             pol_user_labels = {str(k): str(v) for k, v in raw_labels.items()}
 
-        # Map alert -> component FIRST from policy user label 'component'
-        component_label = pol_user_labels.get("component")
-        if component_label:
-            comp_clean = str(component_label).strip()
-            if is_valid_component(comp_clean):
-                res_name = comp_clean
-                logger.info(
-                    "Mapped alert %s to component '%s' from policy user label 'component'",
-                    inc_id,
-                    res_name,
-                )
-            else:
-                logger.warning(
-                    "Unknown component '%s' in policy_user_labels for incident %s (not defined in TOPOLOGY.md); falling back to resource canonicalization",
-                    comp_clean,
-                    inc_id,
-                )
-                res_name = normalize_resource_name(
-                    raw_name=raw_res_name,
-                    res_type=res_type,
-                    res_labels=res_labels,
-                )
-                logger.info(
-                    "Mapped alert %s to component '%s' from resource-label canonicalization fallback",
-                    inc_id,
-                    res_name,
-                )
-        else:
-            res_name = normalize_resource_name(
-                raw_name=raw_res_name,
-                res_type=res_type,
-                res_labels=res_labels,
-            )
-            logger.info(
-                "Mapped alert %s to component '%s' from resource-label canonicalization",
-                inc_id,
-                res_name,
-            )
-
         condition_dict = inc.get("condition")
         cond_name = None
         if isinstance(condition_dict, dict):
@@ -356,29 +400,18 @@ class AlertEvent(BaseModel):
             summary = inc.get("policy", {}).get("displayName")
 
         # Extract real policy numeric id if present
-        pol_id = None
-        if isinstance(inc.get("policy"), dict):
-            p_name = str(inc.get("policy", {}).get("name") or "")
-            if "alertPolicies/" in p_name:
-                pol_id = p_name.split("alertPolicies/")[-1].split("?")[0].strip()
-        if not pol_id and isinstance(inc.get("policy_name"), str):
-            p_name = inc.get("policy_name", "")
-            if "alertPolicies/" in p_name:
-                pol_id = p_name.split("alertPolicies/")[-1].split("?")[0].strip()
-        if not pol_id:
-            raw_pid = inc.get("policy_id") or inc.get("policyId")
-            if raw_pid:
-                pol_id = str(raw_pid).strip()
+        pol_id = extract_numeric_policy_id(payload, inc)
 
         return cls(
             incident_id=inc_id,
             policy_name=policy,
             policy_id=pol_id,
             condition_name=cond_name,
-            resource_name=res_name,
+            resource_name=raw_res_name or "unknown-resource",
             resource_type=res_type,
             resource_labels=res_labels,
             policy_user_labels=pol_user_labels,
+            labels=pol_user_labels,
             state=str(inc.get("state", "open")).lower(),
             started_at=started_at,
             ended_at=ended_at,

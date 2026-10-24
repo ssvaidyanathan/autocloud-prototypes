@@ -31,7 +31,7 @@ from ..correlation.engine import (
     candidate_from_okf,
 )
 from ..timers.scheduler import TimerScheduleError, schedule_delayed_timer
-from .models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument
+from .models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument, format_okf_alert_entry
 from .store import OKFStore
 from .suppression import (
     check_duplicate_alert,
@@ -101,6 +101,8 @@ class GroupingManager:
             "incident_id": alert.incident_id,
             "policy_name": alert.policy_name,
             "resource_name": alert.resource_name,
+            "component": getattr(alert, "component", None) or (alert.policy_user_labels.get("component") if getattr(alert, "policy_user_labels", None) else None) or alert.resource_name,
+            "component_source": "label" if (getattr(alert, "policy_user_labels", None) and alert.policy_user_labels.get("component")) else "canonicalization",
             "state": alert.state.lower() if alert.state else "unknown",
             "action": action,
             "group_id": group_id,
@@ -448,18 +450,7 @@ class GroupingManager:
             timestamp=now_iso,
             settle_deadline=settle_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
             max_wait_deadline=max_wait_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            alerts=[{
-                "incident_id": alert.incident_id,
-                "policy_name": alert.policy_name,
-                "policy_id": getattr(alert, "policy_id", None),
-                "resource_name": alert.resource_name,
-                "state": alert.state,
-                "started_at": alert.started_at,
-                "received_at": now_iso,
-                "url": alert.url,
-                "labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
-                "policy_user_labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
-            }],
+            alerts=[format_okf_alert_entry(alert, valid_ts=alert.started_at, received_at=now_iso)],
         )
 
         saved_doc = self.store.write(group_id, new_doc)

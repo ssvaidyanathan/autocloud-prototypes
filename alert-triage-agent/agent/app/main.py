@@ -495,12 +495,17 @@ def _extract_primary_alert(doc: OKFDocument) -> AlertEvent:
     """Extract primary alert from OKFDocument for investigation synthesizers."""
     if doc.alerts:
         first_a = doc.alerts[0]
+        a_labels = first_a.get("labels") or first_a.get("policy_user_labels") or {}
         return AlertEvent(
             incident_id=first_a.get("incident_id", "0.unknown"),
-            policy_name=first_a.get("policy_name", doc.policy_name or "unknown"),
-            resource_name=first_a.get("resource_name", doc.resource_name or "unknown"),
+            policy_name=first_a.get("policy_name") or first_a.get("policy", doc.policy_name or "unknown"),
+            policy_id=first_a.get("policy_id"),
+            resource_name=first_a.get("resource_name") or first_a.get("resource", doc.resource_name or "unknown"),
             state=first_a.get("state", "open"),
             started_at=first_a.get("started_at", doc.created_at),
+            url=first_a.get("url"),
+            policy_user_labels=a_labels,
+            labels=a_labels,
         )
     return AlertEvent(
         incident_id="0.unknown",

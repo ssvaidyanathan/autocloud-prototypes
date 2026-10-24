@@ -19,6 +19,7 @@ import re
 from typing import Any, Optional
 import yaml
 
+from .grouping.models import format_okf_alert_entry
 from .tools.shell import DEFAULT_INCIDENT_STORE, execute_incident_command
 
 logger = logging.getLogger(__name__)
@@ -96,32 +97,37 @@ def append_duplicate_alert_to_incident(
 
     # 3. Append or update alert in alerts list
     alerts_list = list(meta.get("alerts", [])) if isinstance(meta.get("alerts"), list) else []
-    new_alert_entry = {
-        "incident_id": getattr(alert, "incident_id", "unknown"),
-        "policy": getattr(alert, "policy_name", meta.get("policy_name", "")),
-        "resource": getattr(alert, "resource_name", meta.get("resource_name", "")),
-        "state": getattr(alert, "state", "open"),
-        "started_at": new_ts,
-    }
+    new_alert_entry = format_okf_alert_entry(alert, valid_ts=new_ts)
 
     found = False
     for i, a in enumerate(alerts_list):
         if isinstance(a, dict) and a.get("incident_id") == new_alert_entry["incident_id"]:
+            if not new_alert_entry.get("labels") and a.get("labels"):
+                new_alert_entry["labels"] = a["labels"]
+                new_alert_entry["policy_user_labels"] = a.get("policy_user_labels") or a["labels"]
+            if not new_alert_entry.get("component") and a.get("component"):
+                new_alert_entry["component"] = a["component"]
+            if not new_alert_entry.get("signal") and a.get("signal"):
+                new_alert_entry["signal"] = a["signal"]
             alerts_list[i] = new_alert_entry
             found = True
             break
     if not found:
         alerts_list.append(new_alert_entry)
-    meta["alerts"] = alerts_list
+    meta["alerts"] = [format_okf_alert_entry(a, valid_ts=new_ts) for a in alerts_list]
 
     # Reconstruct file
     yaml_header = yaml.dump(meta, sort_keys=False, default_flow_style=False).strip()
     body = parts[2]
+    comp_line = f"- Component: `{new_alert_entry.get('component')}`\n" if new_alert_entry.get("component") else ""
+    sig_line = f"- Signal: `{new_alert_entry.get('signal')}`\n" if new_alert_entry.get("signal") else ""
     dup_note = (
         f"\n\n**Duplicate Alert Appended**\n"
         f"- Incident ID: `{new_alert_entry['incident_id']}`\n"
         f"- Policy: `{new_alert_entry['policy']}`\n"
         f"- Resource: `{new_alert_entry['resource']}`\n"
+        f"{comp_line}"
+        f"{sig_line}"
         f"- State: `{new_alert_entry['state']}`\n"
         f"- Timestamp: `{new_ts}`\n"
     )

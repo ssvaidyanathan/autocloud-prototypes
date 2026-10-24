@@ -20,6 +20,7 @@ from .contracts.report import (
     TimelineItem,
 )
 from .contracts.links import ConsoleLinkBuilder
+from .grouping.models import format_okf_alert_entry
 from .specialists.synthesizer import SynthesizerAgent
 
 try:
@@ -57,11 +58,14 @@ def write_preanalysis_lock(
         )
 
     # Normalize resource before dedup, topology, and filenames
-    canonical_res = normalize_resource_name(
-        raw_name=alert.resource_name,
-        res_type=alert.resource_type or "",
-        res_labels=alert.resource_labels,
-    )
+    if alert.policy_user_labels and alert.policy_user_labels.get("component"):
+        canonical_res = alert.policy_user_labels["component"]
+    else:
+        canonical_res = normalize_resource_name(
+            raw_name=alert.resource_name,
+            res_type=alert.resource_type or "",
+            res_labels=alert.resource_labels,
+        )
     alert.resource_name = canonical_res
 
     store_dir = config.get_effective_store_path()
@@ -110,38 +114,9 @@ def write_preanalysis_lock(
     alerts_list: list[dict[str, Any]] = []
     if member_alerts:
         for a in member_alerts:
-            if hasattr(a, "incident_id"):
-                alerts_list.append({
-                    "incident_id": a.incident_id,
-                    "policy": getattr(a, "policy_name", ""),
-                    "policy_id": getattr(a, "policy_id", None),
-                    "resource": getattr(a, "resource_name", ""),
-                    "state": getattr(a, "state", "open"),
-                    "started_at": getattr(a, "started_at", valid_ts),
-                    "url": getattr(a, "url", None),
-                })
-            elif isinstance(a, dict):
-                alerts_list.append({
-                    "incident_id": a.get("incident_id", ""),
-                    "policy": a.get("policy_name", a.get("policy", "")),
-                    "policy_id": a.get("policy_id"),
-                    "resource": a.get("resource_name", a.get("resource", "")),
-                    "state": a.get("state", "open"),
-                    "started_at": a.get("started_at", valid_ts),
-                    "url": a.get("url"),
-                })
+            alerts_list.append(format_okf_alert_entry(a, valid_ts=valid_ts))
     if not alerts_list:
-        alerts_list = [
-            {
-                "incident_id": alert.incident_id,
-                "policy": alert.policy_name,
-                "policy_id": getattr(alert, "policy_id", None),
-                "resource": alert.resource_name,
-                "state": alert.state,
-                "started_at": valid_ts,
-                "url": alert.url,
-            }
-        ]
+        alerts_list = [format_okf_alert_entry(alert, valid_ts=valid_ts)]
 
     frontmatter: dict[str, Any] = {
         "type": "incident",
@@ -177,7 +152,7 @@ def write_preanalysis_lock(
                         existing_ids = {a.get("incident_id") for a in alerts_list}
                         for oa in old_alerts:
                             if isinstance(oa, dict) and oa.get("incident_id") not in existing_ids:
-                                alerts_list.append(oa)
+                                alerts_list.append(format_okf_alert_entry(oa, valid_ts=valid_ts))
                         frontmatter["alerts"] = alerts_list
         except Exception as exc:
             logger.debug("Failed reading existing OKF file %s: %s", file_path, exc)
@@ -242,11 +217,14 @@ def generate_investigation_report(
     """Generate 4-bullet executive summary and diagnostic report (synchronous baseline)."""
     t0 = time.monotonic()
 
-    canonical_res = normalize_resource_name(
-        raw_name=alert.resource_name,
-        res_type=alert.resource_type or "",
-        res_labels=alert.resource_labels,
-    )
+    if alert.policy_user_labels and alert.policy_user_labels.get("component"):
+        canonical_res = alert.policy_user_labels["component"]
+    else:
+        canonical_res = normalize_resource_name(
+            raw_name=alert.resource_name,
+            res_type=alert.resource_type or "",
+            res_labels=alert.resource_labels,
+        )
     alert.resource_name = canonical_res
     origin = canonical_res
 
@@ -367,6 +345,16 @@ def generate_investigation_report(
     else:
         root_cause_text = f"Primary anomaly isolated to {origin} under policy {alert.policy_name}."
 
+    link_builder = ConsoleLinkBuilder(project_id=config.project_id)
+    primary_alert_entry = format_okf_alert_entry(alert, valid_ts=valid_ts)
+    pol_id = primary_alert_entry.get("policy_id")
+    primary_alert_entry["policy_url"] = link_builder.build_policy_url(pol_id or alert.policy_name)
+    primary_alert_entry["resource_type"] = alert.resource_type
+    primary_alert_entry["resource_url"] = link_builder.build_resource_url(alert.resource_name, alert.resource_type)
+    inc_url = primary_alert_entry.get("url") or link_builder.build_incident_url(alert.incident_id)
+    primary_alert_entry["url"] = inc_url
+    primary_alert_entry["console_url"] = inc_url
+
     report = InvestigationReport(
         group_id=group_id,
         filename=filename,
@@ -385,25 +373,7 @@ def generate_investigation_report(
         last_alert=valid_ts,
         report_generated_at=now_ts,
         project_id=config.project_id,
-        alerts=[
-            {
-                "policy": alert.policy_name,
-                "policy_name": alert.policy_name,
-                "policy_id": getattr(alert, "policy_id", None),
-                "policy_url": ConsoleLinkBuilder(project_id=config.project_id).build_policy_url(getattr(alert, "policy_id", None) or alert.policy_name),
-                "resource": alert.resource_name,
-                "resource_name": alert.resource_name,
-                "resource_type": alert.resource_type,
-                "resource_url": ConsoleLinkBuilder(project_id=config.project_id).build_resource_url(alert.resource_name, alert.resource_type),
-                "incident_id": alert.incident_id,
-                "state": alert.state,
-                "started_at": valid_ts,
-                "url": alert.url or ConsoleLinkBuilder(project_id=config.project_id).build_incident_url(alert.incident_id),
-                "console_url": alert.url or ConsoleLinkBuilder(project_id=config.project_id).build_incident_url(alert.incident_id),
-                "labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
-                "policy_user_labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
-            }
-        ],
+        alerts=[primary_alert_entry],
         triage_decision={
             "correlation_score": 0.91,
             "grouping_rationale": f"Alert policy '{alert.policy_name}' isolated to '{origin}' within active triage evaluation window.",
