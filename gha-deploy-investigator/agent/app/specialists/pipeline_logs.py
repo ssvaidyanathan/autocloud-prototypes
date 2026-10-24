@@ -401,10 +401,72 @@ class PipelineLogsSpecialist(BaseSpecialist):
             )
         else:
             res = self._diagnose_generic(
-                incident, failing_job, failing_step, log_text, diff_data=diff_data
+                incident,
+                failing_job,
+                failing_step,
+                log_text,
+                client,
+                config,
+                diff_data=diff_data,
             )
 
         return self.skill_tracker.populate_diagnostic_result(res)
+
+    def _resolve_diff_data(
+        self,
+        incident: Incident,
+        diff_data: Optional[dict[str, Any]],
+        client: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Return diff_data, fetching the incident's commit diff when not already provided."""
+        if diff_data is not None or not (incident.github_repo and incident.github_head_sha):
+            return diff_data
+        try:
+            return self.tracked_tool_call(
+                "get_commit_diff",
+                {"repo": incident.github_repo, "head_sha": incident.github_head_sha},
+                lambda: get_commit_diff(
+                    repo=incident.github_repo,
+                    head_sha=incident.github_head_sha,
+                    client=client,
+                    config=config,
+                ),
+            )
+        except Exception as exc:
+            logger.debug("Could not fetch commit diff: %s", exc)
+            return None
+
+    @staticmethod
+    def _append_git_diff_evidence(
+        evidence_items: list[EvidenceItem],
+        diff_data: Optional[dict[str, Any]],
+        incident: Incident,
+        now: datetime,
+    ) -> list[str]:
+        """Append a git_diff evidence item carrying unified diff hunks.
+
+        Returns the normalized list of changed file paths (empty if no diff).
+        """
+        if not (isinstance(diff_data, dict) and "files" in diff_data):
+            return []
+        changed_files = [
+            re.sub(r"^\.?/", "", f.get("filename", ""))
+            for f in diff_data["files"]
+            if isinstance(f, dict) and f.get("filename")
+        ]
+        if changed_files:
+            diff_excerpt = format_git_diff_excerpt(diff_data)
+            if diff_excerpt:
+                evidence_items.append(
+                    EvidenceItem(
+                        kind="git_diff",
+                        excerpt=diff_excerpt,
+                        timestamp=now,
+                        console_url=incident.external_url,
+                    )
+                )
+        return changed_files
 
     def _diagnose_lint(
         self,
@@ -424,7 +486,15 @@ class PipelineLogsSpecialist(BaseSpecialist):
 
         total_errors = len(parsed_items)
         if total_errors == 0:
-            return self._diagnose_generic(incident, failing_job, failing_step, log_text)
+            return self._diagnose_generic(
+                incident,
+                failing_job,
+                failing_step,
+                log_text,
+                client,
+                config,
+                diff_data=diff_data,
+            )
 
         # Group by file
         files_map: dict[str, list[dict[str, Any]]] = {}
@@ -464,38 +534,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
 
         # Correlate with commit diff if available
         diff_info = ""
-        changed_files: list[str] = []
-        if diff_data is None and incident.github_repo and incident.github_head_sha:
-            try:
-                diff_data = self.tracked_tool_call(
-                    "get_commit_diff",
-                    {"repo": incident.github_repo, "head_sha": incident.github_head_sha},
-                    lambda: get_commit_diff(
-                        repo=incident.github_repo,
-                        head_sha=incident.github_head_sha,
-                        client=client,
-                        config=config,
-                    ),
-                )
-            except Exception as exc:
-                logger.debug("Could not fetch commit diff: %s", exc)
-
-        if diff_data and "files" in diff_data:
-            changed_files = [
-                re.sub(r"^\.?/", "", f.get("filename", ""))
-                for f in diff_data["files"]
-                if f.get("filename")
-            ]
-            if changed_files:
-                diff_excerpt = format_git_diff_excerpt(diff_data)
-                evidence_items.append(
-                    EvidenceItem(
-                        kind="git_diff",
-                        excerpt=diff_excerpt,
-                        timestamp=now,
-                        console_url=incident.external_url,
-                    )
-                )
+        diff_data = self._resolve_diff_data(incident, diff_data, client, config)
+        changed_files = self._append_git_diff_evidence(evidence_items, diff_data, incident, now)
 
         violating_files = list(files_map.keys())
         confirmed_files = [f for f in violating_files if f in changed_files]
@@ -629,24 +669,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
             )
         )
 
-        if diff_data and "files" in diff_data:
-            changed_files = [
-                re.sub(r"^\.?/", "", f.get("filename", ""))
-                for f in diff_data["files"]
-                if f.get("filename")
-            ]
-            if changed_files:
-                evidence_items.append(
-                    EvidenceItem(
-                        kind="git_diff",
-                        excerpt=(
-                            f"Commit diff touched {len(changed_files)} file(s): "
-                            f"{', '.join(changed_files)}"
-                        ),
-                        timestamp=now,
-                        console_url=incident.external_url,
-                    )
-                )
+        diff_data = self._resolve_diff_data(incident, diff_data, client, config)
+        self._append_git_diff_evidence(evidence_items, diff_data, incident, now)
 
         summary = (
             f"Unit/Integration test failure in step '{step_name}': "
@@ -731,24 +755,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
             )
         )
 
-        if diff_data and "files" in diff_data:
-            changed_files = [
-                re.sub(r"^\.?/", "", f.get("filename", ""))
-                for f in diff_data["files"]
-                if f.get("filename")
-            ]
-            if changed_files:
-                evidence_items.append(
-                    EvidenceItem(
-                        kind="git_diff",
-                        excerpt=(
-                            f"Commit diff touched {len(changed_files)} file(s): "
-                            f"{', '.join(changed_files)}"
-                        ),
-                        timestamp=now,
-                        console_url=incident.external_url,
-                    )
-                )
+        diff_data = self._resolve_diff_data(incident, diff_data, client, config)
+        self._append_git_diff_evidence(evidence_items, diff_data, incident, now)
 
         return DiagnosticResult(
             stage="build",
@@ -767,6 +775,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
         failing_job: dict[str, Any],
         failing_step: dict[str, Any],
         log_text: str,
+        client: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
         diff_data: Optional[dict[str, Any]] = None,
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Unknown Step")
@@ -792,24 +802,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
             )
         ]
 
-        if diff_data and "files" in diff_data:
-            changed_files = [
-                re.sub(r"^\.?/", "", f.get("filename", ""))
-                for f in diff_data["files"]
-                if f.get("filename")
-            ]
-            if changed_files:
-                evidence_items.append(
-                    EvidenceItem(
-                        kind="git_diff",
-                        excerpt=(
-                            f"Commit diff touched {len(changed_files)} file(s): "
-                            f"{', '.join(changed_files)}"
-                        ),
-                        timestamp=now,
-                        console_url=incident.external_url,
-                    )
-                )
+        diff_data = self._resolve_diff_data(incident, diff_data, client, config)
+        self._append_git_diff_evidence(evidence_items, diff_data, incident, now)
 
         return DiagnosticResult(
             stage="pipeline_logs",
