@@ -1,0 +1,5 @@
+project_id  = "cloud-assist-fde-2"
+region      = "us-west1"
+name_prefix = "ata"
+bridge_url                     = "https://ata-bridge-185099261133.us-west1.run.app"
+cloudsql_connections_threshold = 20

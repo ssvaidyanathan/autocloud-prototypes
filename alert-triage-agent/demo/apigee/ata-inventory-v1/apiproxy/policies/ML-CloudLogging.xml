@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<MessageLogging continueOnError="true" enabled="true" name="ML-CloudLogging">
+    <DisplayName>Message Logging to Cloud Logging</DisplayName>
+    <CloudLogging>
+        <LogName>projects/{organization.name}/logs/ata-apigee-access</LogName>
+        <Message contentType="application/json">{
+            "timestamp": "{system.timestamp}",
+            "proxy": "{apiproxy.name}",
+            "revision": "{apiproxy.revision}",
+            "environment": "{environment.name}",
+            "client_ip": "{proxy.client.ip}",
+            "request_verb": "{request.verb}",
+            "request_path": "{proxy.pathsuffix}",
+            "status_code": "{response.status.code}",
+            "target_status_code": "{target.response.status.code}",
+            "target_host": "{target.host}",
+            "target_latency_ms": "{target.response.time}",
+            "total_latency_ms": "{client.response.time}",
+            "fault_source": "{fault.name}"
+        }</Message>
+        <Labels>
+            <Label>
+                <Key>proxy_name</Key>
+                <Value>{apiproxy.name}</Value>
+            </Label>
+            <Label>
+                <Key>environment</Key>
+                <Value>{environment.name}</Value>
+            </Label>
+        </Labels>
+        <ResourceType>api</ResourceType>
+    </CloudLogging>
+</MessageLogging>

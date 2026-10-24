@@ -47,6 +47,17 @@ A repo of Autocloud prototypes
 | **State & Persistence** | Stateless event processing; Cloud Tasks asynchronous queue; in-memory query cache |
 | **Docs & Quick-Start** | [Documentation](gha-deploy-investigator/) • [Deployment Walkthrough](gha-deploy-investigator/#9-full-step-by-step-gcp-deployment-walkthrough) |
 
+### [Alert Triage Agent](alert-triage-agent/) (@ssvaidyanathan)
+
+| Specification | Details |
+| :--- | :--- |
+| **Core Architecture** | Cloud Monitoring alert triage: agent-owned grouping (topology, causal chain, time, shared deploy; Gemini for gray-zone cases), suppression, evidence-based origin/root cause, one ServiceNow incident per group |
+| **Runtime & Protocols** | Lean bridge (Basic-auth webhook + ServiceNow instruction endpoints) + Cloud Tasks (triage and delayed settle/cool-down timers) + ADK agent on Cloud Run |
+| **Integrations** | Cloud Monitoring, Cloud Run, Apigee X, Cloud SQL, Cloud Logging, ServiceNow (Table & Attachment API), Vertex AI |
+| **Cloud Run Services (default prefix)** | `ata-bridge`, `ata-agent`, `ata-tools` |
+| **State & Persistence** | Incident group state as markdown (OKF) files on GCS with generation-match preconditions |
+| **Docs & Quick-Start** | [Documentation](alert-triage-agent/) • [Deployment](alert-triage-agent/DEPLOY.md) • [Demo Scenarios](alert-triage-agent/DEMO.md) |
+
 ## Shared Utilities
 
 Repo-wide scripts live in [`scripts/`](scripts/). See [`scripts/README.md`](scripts/README.md) for the list and usage of each.

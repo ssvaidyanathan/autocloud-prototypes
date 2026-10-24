@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<APIProxy revision="1" name="ata-inventory-v1">
+    <ConfigurationVersion majorVersion="4" minorVersion="0"/>
+    <CreatedAt>1792708000000</CreatedAt>
+    <CreatedBy>dev-demo-infra</CreatedBy>
+    <Description>ATA Inventory Proxy v1</Description>
+    <DisplayName>ata-inventory-v1</DisplayName>
+    <LastModifiedAt>1792708000000</LastModifiedAt>
+    <LastModifiedBy>dev-demo-infra</LastModifiedBy>
+    <ManifestVersion>SHA-512:123456</ManifestVersion>
+    <Policies>
+        <Policy>RF-BlockAdmin</Policy>
+        <Policy>VA-VerifyKey-Header</Policy>
+        <Policy>VA-VerifyKey-Query</Policy>
+        <Policy>SA-SpikeArrest</Policy>
+        <Policy>ML-CloudLogging</Policy>
+    </Policies>
+    <ProxyEndpoints>
+        <ProxyEndpoint>default</ProxyEndpoint>
+    </ProxyEndpoints>
+    <TargetEndpoints>
+        <TargetEndpoint>default</TargetEndpoint>
+    </TargetEndpoints>
+</APIProxy>
