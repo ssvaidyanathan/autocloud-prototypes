@@ -39,10 +39,7 @@ class ApigeeSpecialist(BaseSpecialist):
         try:
             from topology.topology_graph import get_loader
         except ImportError:
-            try:
-                from agent.topology.topology_graph import get_loader
-            except ImportError:
-                get_loader = None
+            get_loader = None
 
         if get_loader is not None:
             loader = get_loader()

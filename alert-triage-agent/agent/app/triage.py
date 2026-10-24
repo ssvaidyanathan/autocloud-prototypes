@@ -24,12 +24,9 @@ from .specialists.synthesizer import SynthesizerAgent
 
 try:
     from topology.topology_graph import get_blast_radius, get_upstream_dependencies
-except ImportError:
-    try:
-        from agent.topology.topology_graph import get_blast_radius, get_upstream_dependencies
-    except ImportError as err:
-        logging.getLogger(__name__).error("Failed to import topology_graph: %s", err)
-        raise
+except ImportError as err:
+    logging.getLogger(__name__).error("Failed to import topology_graph: %s", err)
+    raise
 
 logger = logging.getLogger(__name__)
 

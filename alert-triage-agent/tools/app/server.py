@@ -25,22 +25,17 @@ try:
     from tools.app.config import get_tools_config
     from tools.app.contracts.alert import AlertEvent, is_ata_alert_payload
     from tools.app.bundle_parser import parse_proxy_bundle_bytes
-    from tools.app.topology_graph import (
-        get_topology_graph as topology_get_graph,
-        get_topology as topology_get_topology,
-        get_blast_radius as topology_get_blast_radius,
-        calculate_hop_distance,
-    )
 except ImportError:
     from app.config import get_tools_config
     from app.contracts.alert import AlertEvent, is_ata_alert_payload
     from app.bundle_parser import parse_proxy_bundle_bytes
-    from app.topology_graph import (
-        get_topology_graph as topology_get_graph,
-        get_topology as topology_get_topology,
-        get_blast_radius as topology_get_blast_radius,
-        calculate_hop_distance,
-    )
+
+from topology.topology_graph import (
+    get_topology_graph as topology_get_graph,
+    get_topology as topology_get_topology,
+    get_blast_radius as topology_get_blast_radius,
+    calculate_hop_distance,
+)
 
 # Initialize FastMCP service
 mcp = FastMCP(

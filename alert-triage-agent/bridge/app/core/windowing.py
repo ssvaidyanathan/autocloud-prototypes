@@ -16,13 +16,10 @@ from .dispatcher import TaskDispatcher
 try:
     from topology.topology_graph import get_blast_radius, calculate_hop_distance, _canonicalize_node, get_upstream_dependencies
 except ImportError:
-    try:
-        from agent.topology.topology_graph import get_blast_radius, calculate_hop_distance, _canonicalize_node, get_upstream_dependencies
-    except ImportError:
-        get_blast_radius = None
-        calculate_hop_distance = None
-        _canonicalize_node = None
-        get_upstream_dependencies = None
+    get_blast_radius = None
+    calculate_hop_distance = None
+    _canonicalize_node = None
+    get_upstream_dependencies = None
 
 logger = logging.getLogger(__name__)
 

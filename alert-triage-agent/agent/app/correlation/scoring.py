@@ -17,13 +17,10 @@ from typing import Any, Optional
 
 try:
     from topology.topology_graph import calculate_hop_distance
-except ImportError:
-    try:
-        from agent.topology.topology_graph import calculate_hop_distance
-    except ImportError as err:
-        import logging
-        logging.getLogger(__name__).error("Failed to import calculate_hop_distance from topology_graph: %s", err)
-        calculate_hop_distance = None
+except ImportError as err:
+    import logging
+    logging.getLogger(__name__).error("Failed to import calculate_hop_distance from topology_graph: %s", err)
+    calculate_hop_distance = None
 
 
 WEIGHT_TOPO = 35.0

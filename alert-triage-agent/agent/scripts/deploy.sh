@@ -22,6 +22,11 @@ echo "  Project: ${PROJECT_ID} | Region: ${REGION}"
 echo "==================================================================="
 
 # 1. Build and push container image using Cloud Build
+echo "Syncing single topology package into agent build context..."
+rm -rf "${AGENT_DIR}/topology"
+cp -r "${AGENT_DIR}/../topology" "${AGENT_DIR}/topology"
+trap 'rm -rf "${AGENT_DIR}/topology"' EXIT
+
 echo "Building container image ${IMAGE_TAG} via Cloud Build..."
 gcloud builds submit "${AGENT_DIR}" \
     --project="${PROJECT_ID}" \

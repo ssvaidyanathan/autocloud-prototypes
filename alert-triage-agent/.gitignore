@@ -36,3 +36,7 @@ backend.hcl
 *.tfvars
 !*.tfvars.example
 .ata-api-key
+
+# Build-time synced topology package (single source of truth lives in topology/)
+agent/topology/
+tools/topology/

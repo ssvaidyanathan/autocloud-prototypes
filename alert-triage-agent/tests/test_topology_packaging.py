@@ -8,14 +8,36 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_topology_md_packaged_in_agent_tree():
-    """Assert TOPOLOGY.md is present in both agent/topology and root topology dirs."""
-    root_topo = REPO_ROOT / "topology" / "TOPOLOGY.md"
-    agent_topo = REPO_ROOT / "agent" / "topology" / "TOPOLOGY.md"
+def test_single_tracked_source_of_truth():
+    """Assert git tracks exactly ONE TOPOLOGY.md, ONE loader.py, and ONE topology_graph.py."""
+    proc = subprocess.run(
+        ["git", "ls-files"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked_files = proc.stdout.splitlines()
 
+    topology_files = [f for f in tracked_files if Path(f).name == "TOPOLOGY.md"]
+    loader_files = [f for f in tracked_files if Path(f).name == "loader.py"]
+    graph_files = [f for f in tracked_files if Path(f).name == "topology_graph.py"]
+
+    assert topology_files == ["topology/TOPOLOGY.md"], (
+        f"Expected exactly ONE tracked TOPOLOGY.md in topology/TOPOLOGY.md, found: {topology_files}"
+    )
+    assert loader_files == ["topology/loader.py"], (
+        f"Expected exactly ONE tracked loader.py in topology/loader.py, found: {loader_files}"
+    )
+    assert graph_files == ["topology/topology_graph.py"], (
+        f"Expected exactly ONE tracked topology_graph.py in topology/topology_graph.py, found: {graph_files}"
+    )
+
+
+def test_topology_md_single_source_of_truth():
+    """Assert root TOPOLOGY.md is present."""
+    root_topo = REPO_ROOT / "topology" / "TOPOLOGY.md"
     assert root_topo.is_file(), f"TOPOLOGY.md missing from {root_topo}"
-    assert agent_topo.is_file(), f"TOPOLOGY.md missing from {agent_topo}"
-    assert root_topo.read_text(encoding="utf-8") == agent_topo.read_text(encoding="utf-8")
 
 
 def test_agent_pyproject_declares_topology_package_data():
@@ -60,7 +82,7 @@ def test_container_layout_loads_packaged_topology():
         "-c",
         f"""
 import sys
-sys.path = ['{agent_dir}'] + [p for p in sys.path if 'site-packages' in p or 'lib/python' in p]
+sys.path = ['{agent_dir}', '{REPO_ROOT}'] + [p for p in sys.path if 'site-packages' in p or 'lib/python' in p]
 
 import topology
 topo = topology.get_topology()
@@ -73,3 +95,4 @@ print('PACKAGED TOPOLOGY LOADED IN CONTAINER LAYOUT')
     proc = subprocess.run(cmd, capture_output=True, text=True)
     assert proc.returncode == 0, f"Failed container layout load: {proc.stderr}\n{proc.stdout}"
     assert "PACKAGED TOPOLOGY LOADED IN CONTAINER LAYOUT" in proc.stdout
+
