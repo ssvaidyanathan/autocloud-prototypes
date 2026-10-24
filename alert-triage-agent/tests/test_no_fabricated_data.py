@@ -33,7 +33,7 @@ PROHIBITED_FABRICATED_STRINGS = [
     "1.65s",
 ]
 
-PRODUCTION_DIRS = ["agent", "bridge", "tools"]
+PRODUCTION_DIRS = ["agent", "bridge", "tools", "topology"]
 
 REVISION_STRING_PATTERN = re.compile(r"\b[a-z0-9-]+-\d{5}-[a-z0-9]+\b")
 REVISION_STRING_PATTERNS = [
@@ -90,6 +90,38 @@ def test_no_prohibited_fabricated_strings_in_production_code():
                                         f"{fpath}:{lineno} contains prohibited string '{prohibited}': {line.strip()}"
                                     )
     assert not violations, "Found prohibited fabricated mock data in production code:\n" + "\n".join(violations)
+
+
+PROHIBITED_DEMO_SERVICE_NAMES = [
+    "ata-orders-api",
+    "ata-inventory-api",
+    "ata-inventory-db",
+    "ata-orders-v1",
+    "ata-inventory-v1",
+    "ata-apigee-orders-v1",
+    "ata-apigee-inventory-v1",
+]
+
+
+def test_no_hardcoded_service_name_literals_in_production_code():
+    """Assert non-test production python code in agent/, bridge/, tools/, topology/ has zero service-name literals."""
+    violations = []
+    for pdir in PRODUCTION_DIRS:
+        for root, _, files in os.walk(pdir):
+            for fname in files:
+                if fname.endswith(".py"):
+                    fpath = os.path.join(root, fname)
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        for lineno, line in enumerate(f, 1):
+                            stripped = line.strip()
+                            if stripped.startswith("#"):
+                                continue
+                            for svc in PROHIBITED_DEMO_SERVICE_NAMES:
+                                if svc in line:
+                                    violations.append(
+                                        f"{fpath}:{lineno} contains service-name literal '{svc}': {line.strip()}"
+                                    )
+    assert not violations, "Found prohibited hardcoded service names in non-test production code:\n" + "\n".join(violations)
 
 
 def test_no_hardcoded_revision_strings_in_production_code():

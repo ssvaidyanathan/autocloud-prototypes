@@ -68,8 +68,9 @@ for mod in modules_to_test:
         sys.exit(1)
 
 # Verify get_blast_radius expands properly inside container
-from topology.topology_graph import get_blast_radius, NODE_ORDERS_V1, _canonicalize_node
-assert _canonicalize_node(NODE_ORDERS_V1) == 'ata-apigee-orders-v1'
+from topology.topology_graph import get_blast_radius, _canonicalize_node
+assert _canonicalize_node('orders-v1') == 'ata-orders-v1'
+assert _canonicalize_node('ata-apigee-orders-v1') == 'ata-orders-v1'
 blast = get_blast_radius('ata-inventory-api')
 assert len(blast) >= 3
 assert 'ata-orders-api' in blast

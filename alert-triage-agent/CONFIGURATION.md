@@ -131,13 +131,11 @@ The system assigns least-privilege IAM roles to 6 dedicated service accounts:
 |                    | roles/monitoring.viewer               | resources. Write access strictly confined to  |
 |                    | roles/run.viewer                      | the GCS incident store.                       |
 |                    | roles/cloudsql.viewer                 |                                               |
-|                    | roles/apphub.viewer                   |                                               |
 |                    | roles/run.invoker (on ata-tools)      |                                               |
 +--------------------+---------------------------------------+-----------------------------------------------+
 | ata-tools-sa       | roles/monitoring.viewer               | STRICTLY READ-ONLY:                           |
 |                    | roles/logging.viewer                  | Read-only access to Apigee bundles, metrics,  |
 |                    | roles/apigee.readOnlyAdmin            | and topology graphs.                          |
-|                    | roles/apphub.viewer                   |                                               |
 +--------------------+---------------------------------------+-----------------------------------------------+
 ```
 

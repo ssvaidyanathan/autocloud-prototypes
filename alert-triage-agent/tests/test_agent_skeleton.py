@@ -211,7 +211,7 @@ async def test_execute_multi_agent_investigation_no_fallback(test_alert, agent_c
     assert not fallback_called
     assert report.origin == "ata-inventory-api"
     assert "ata-orders-api" in report.blast_radius
-    assert "ata-apigee-orders-v1" in report.blast_radius
+    assert "ata-apigee-orders-v1" in report.blast_radius or "ata-orders-v1" in report.blast_radius
     assert not report.summary.startswith("degraded:")
     assert report.agent_run_metadata.get("duration_seconds") != "1.74s"
 

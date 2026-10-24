@@ -507,7 +507,7 @@ def generate_investigation_report(
         },
         tools_used=[
             "list_open_alerts", "list_time_series", "list_log_entries",
-            "get_service", "get_topology_graph", "get_blast_radius"
+            "get_service", "get_topology_graph", "get_topology", "get_blast_radius"
         ],
         skills_loaded=[
             "cloud-run-diagnostics", "apigee-telemetry", "cloud-sql-triage", "report-style"
