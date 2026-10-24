@@ -304,6 +304,7 @@ SSL_VERIFY_HINT = (
     "Hints to resolve CA certificate verification issues:\n"
     "  - On macOS: run 'Install Certificates.command' for your Python version\n"
     "    (e.g., /Applications/Python 3.x/Install Certificates.command)\n"
+    "  - Or use the macOS system certificate bundle: --ca-bundle /etc/ssl/cert.pem\n"
     "  - Or install certifi: pip install certifi\n"
     "  - Or specify custom CA bundle via --ca-bundle PATH or SSL_CERT_FILE / REQUESTS_CA_BUNDLE"
 )
@@ -315,7 +316,8 @@ def resolve_ca_bundle(ca_bundle: Optional[str] = None) -> Optional[str]:
     1. Explicit CLI flag (--ca-bundle)
     2. Environment variables: SSL_CERT_FILE or REQUESTS_CA_BUNDLE
     3. certifi.where() if certifi is installed
-    4. None (system default)
+    4. /etc/ssl/cert.pem on macOS (if present)
+    5. None (system default)
     """
     if ca_bundle and ca_bundle.strip():
         return ca_bundle.strip()
@@ -329,6 +331,9 @@ def resolve_ca_bundle(ca_bundle: Optional[str] = None) -> Optional[str]:
         return certifi.where()
     except ImportError:
         pass
+
+    if sys.platform == "darwin" and os.path.exists("/etc/ssl/cert.pem"):
+        return "/etc/ssl/cert.pem"
 
     return None
 

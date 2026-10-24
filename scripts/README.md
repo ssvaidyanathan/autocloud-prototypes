@@ -217,7 +217,10 @@ urllib.error.URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certifica
    pip install certifi
    ```
 
-3. **Provide a Custom CA Bundle:**
+3. **Use the macOS System Certificate Bundle (`/etc/ssl/cert.pem`):**
+   On macOS, the system certificate bundle is located at `/etc/ssl/cert.pem`. If `certifi` is not installed, both cleanup utilities automatically fall back to `/etc/ssl/cert.pem` if present. You can also supply it explicitly via `--ca-bundle /etc/ssl/cert.pem`.
+
+4. **Provide a Custom CA Bundle:**
    If your organization uses private CAs, self-signed certificates, or corporate inspection proxies, provide the bundle path using any of:
    - CLI flag: `--ca-bundle /path/to/cacert.pem`
    - Environment variable: `export SSL_CERT_FILE="/path/to/cacert.pem"`
@@ -230,7 +233,8 @@ The CA bundle path is resolved following strict precedence:
 2. `SSL_CERT_FILE` environment variable
 3. `REQUESTS_CA_BUNDLE` environment variable
 4. `certifi.where()` (if `certifi` is importable)
-5. System default CA bundle (`ssl.create_default_context()`)
+5. `/etc/ssl/cert.pem` (on macOS if present)
+6. System default CA bundle (`ssl.create_default_context()`)
 
 ### Security Guarantee
 

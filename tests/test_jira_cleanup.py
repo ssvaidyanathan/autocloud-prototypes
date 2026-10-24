@@ -20,6 +20,7 @@ import importlib.util
 import io
 import json
 import logging
+import os
 import ssl
 import sys
 import types
@@ -1056,13 +1057,49 @@ class TestTLSCertificateHandling:
         assert resolved == "/certifi/where.pem"
 
     def test_cafile_precedence_default_when_no_certifi(self, monkeypatch):
-        """Returns None (system default) when no flag, no env, and certifi is not importable."""
+        """Returns None (system default) when no flag, no env, certifi is missing, and not macOS with cert.pem."""
         monkeypatch.delenv("SSL_CERT_FILE", raising=False)
         monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
         monkeypatch.setitem(sys.modules, "certifi", None)
+        monkeypatch.setattr(sys, "platform", "linux")
 
         resolved = jira.resolve_ca_bundle(ca_bundle=None)
         assert resolved is None
+
+    def test_cafile_precedence_macos_etc_ssl_cert_pem_over_default(self, monkeypatch):
+        """On macOS, falls back to /etc/ssl/cert.pem if certifi is not importable."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.setitem(sys.modules, "certifi", None)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(os.path, "exists", lambda p: p == "/etc/ssl/cert.pem")
+
+        resolved = jira.resolve_ca_bundle(ca_bundle=None)
+        assert resolved == "/etc/ssl/cert.pem"
+
+    def test_cafile_precedence_macos_etc_ssl_cert_pem_ignored_on_non_darwin(self, monkeypatch):
+        """On non-Darwin platforms, /etc/ssl/cert.pem is not used as an automatic fallback."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.setitem(sys.modules, "certifi", None)
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(os.path, "exists", lambda p: p == "/etc/ssl/cert.pem")
+
+        resolved = jira.resolve_ca_bundle(ca_bundle=None)
+        assert resolved is None
+
+    def test_cafile_precedence_certifi_over_macos_etc_ssl_cert_pem(self, monkeypatch):
+        """certifi takes precedence over macOS /etc/ssl/cert.pem fallback."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(os.path, "exists", lambda p: p == "/etc/ssl/cert.pem")
+
+        resolved = jira.resolve_ca_bundle(ca_bundle=None)
+        assert resolved == "/certifi/where.pem"
 
     @patch("ssl.create_default_context")
     def test_create_ssl_context_calls_create_default_context_with_cafile(self, mock_create_ctx):
@@ -1126,6 +1163,7 @@ class TestTLSCertificateHandling:
 
         # Check required hint contents
         assert "Install Certificates.command" in err_out
+        assert "/etc/ssl/cert.pem" in err_out
         assert "pip install certifi" in err_out
         assert "--ca-bundle" in err_out
         assert "SSL_CERT_FILE" in err_out
