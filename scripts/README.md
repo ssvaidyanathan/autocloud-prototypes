@@ -40,6 +40,7 @@ A cross-prototype standalone administration tool to inspect and safely purge inc
 |---|---|---|---|
 | `--instance-url` | string | `SNOW_INSTANCE_URL` | ServiceNow instance base URL (e.g. `https://dev12345.service-now.com`). |
 | `--username` | string | `SNOW_USERNAME` | ServiceNow username or service account. |
+| `--ca-bundle` | string (path) | None | Path to custom CA certificate bundle file (or set `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`). |
 | `--table` | string | `incident` | Target table (strictly locked to `incident`). |
 | `--older-than` | integer | 7 (if no other filter) | Incidents created more than N days ago (`sys_created_on<javascript:gs.daysAgoStart(N)`). |
 | `--created-before` | ISO string | None | Incidents created before date/datetime (UTC, e.g. `2026-10-01` or `2026-10-01T12:00:00Z`). |
@@ -127,6 +128,7 @@ A standalone administration utility to inspect (dry-run) and safely purge incide
 |---|---|---|---|
 | `--site-url` | string | `JIRA_SITE_URL` | Jira Cloud site URL (e.g. `https://myteam.atlassian.net`). |
 | `--email` | string | `JIRA_EMAIL` | Jira user email address associated with the API token. |
+| `--ca-bundle` | string (path) | None | Path to custom CA certificate bundle file (or set `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`). |
 | `--project` | string (repeatable) | None | Project key (e.g. `PROJ`). Repeatable or comma-separated. Strongly recommended. |
 | `--older-than` | integer | None | Filter issues created more than N days ago (`created <= "-Nd"`). |
 | `--created-before` | ISO string | None | Filter issues created before UTC date/datetime (e.g. `2026-10-01` or `2026-10-01T12:00:00Z`). |
@@ -191,3 +193,46 @@ python scripts/jira-cleanup.py \
   --apply \
   --yes
 ```
+
+## TLS Certificates (macOS)
+
+When using Python on macOS (especially the official python.org installers), Python does not use the macOS system keychain by default and does not bundle root certificates. Running either cleanup utility against an HTTPS endpoint may result in:
+
+```text
+urllib.error.URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1029)>
+```
+
+### Remediation Options
+
+1. **Run the Python macOS Certificate Installer (Recommended):**
+   Execute the `Install Certificates.command` script bundled with your Python installation:
+   ```bash
+   /Applications/Python\ 3.x/Install\ Certificates.command
+   ```
+   (Replace `3.x` with your Python version, e.g. `3.11`, `3.12`, or `3.13`). This installs `certifi` and configures OpenSSL's default certificate path.
+
+2. **Install `certifi`:**
+   Both cleanup utilities automatically detect and use `certifi.where()` if `certifi` is installed:
+   ```bash
+   pip install certifi
+   ```
+
+3. **Provide a Custom CA Bundle:**
+   If your organization uses private CAs, self-signed certificates, or corporate inspection proxies, provide the bundle path using any of:
+   - CLI flag: `--ca-bundle /path/to/cacert.pem`
+   - Environment variable: `export SSL_CERT_FILE="/path/to/cacert.pem"`
+   - Environment variable: `export REQUESTS_CA_BUNDLE="/path/to/cacert.pem"`
+
+### CA Bundle Resolution Precedence
+
+The CA bundle path is resolved following strict precedence:
+1. `--ca-bundle PATH` CLI flag
+2. `SSL_CERT_FILE` environment variable
+3. `REQUESTS_CA_BUNDLE` environment variable
+4. `certifi.where()` (if `certifi` is importable)
+5. System default CA bundle (`ssl.create_default_context()`)
+
+### Security Guarantee
+
+TLS certificate and hostname verification remain strictly enforced at all times (`ssl.CERT_REQUIRED`, `check_hostname=True`). Neither script provides an `--insecure` or `--no-verify` bypass option.
+

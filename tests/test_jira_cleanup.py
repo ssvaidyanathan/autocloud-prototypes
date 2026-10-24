@@ -20,6 +20,9 @@ import importlib.util
 import io
 import json
 import logging
+import ssl
+import sys
+import types
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -1003,4 +1006,193 @@ class TestHttpSession:
         session.get("http://test.atlassian.net/rest/api/3/search/jql")
         context_http = mock_urlopen.call_args[1].get("context")
         assert context_http is None
+
+
+class TestTLSCertificateHandling:
+    """Tests for CA bundle resolution, TLS verification enforcement, and cert verification error hints in Jira cleanup."""
+
+    def test_cafile_precedence_flag_over_env_and_certifi(self, monkeypatch):
+        """CLI flag takes precedence over environment variables and certifi."""
+        monkeypatch.setenv("SSL_CERT_FILE", "/env/ssl_cert.pem")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/env/requests_ca.pem")
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+
+        resolved = jira.resolve_ca_bundle(ca_bundle="/flag/custom_ca.pem")
+        assert resolved == "/flag/custom_ca.pem"
+
+    def test_cafile_precedence_env_ssl_cert_file_over_requests_ca_bundle_and_certifi(self, monkeypatch):
+        """SSL_CERT_FILE takes precedence over REQUESTS_CA_BUNDLE and certifi when no flag is given."""
+        monkeypatch.setenv("SSL_CERT_FILE", "/env/ssl_cert.pem")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/env/requests_ca.pem")
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+
+        resolved = jira.resolve_ca_bundle(ca_bundle=None)
+        assert resolved == "/env/ssl_cert.pem"
+
+    def test_cafile_precedence_env_requests_ca_bundle_over_certifi(self, monkeypatch):
+        """REQUESTS_CA_BUNDLE takes precedence over certifi when SSL_CERT_FILE is unset."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/env/requests_ca.pem")
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+
+        resolved = jira.resolve_ca_bundle(ca_bundle=None)
+        assert resolved == "/env/requests_ca.pem"
+
+    def test_cafile_precedence_certifi_over_default(self, monkeypatch):
+        """certifi.where() is used when no flag or environment variables are provided."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        mock_certifi = types.ModuleType("certifi")
+        mock_certifi.where = lambda: "/certifi/where.pem"
+        monkeypatch.setitem(sys.modules, "certifi", mock_certifi)
+
+        resolved = jira.resolve_ca_bundle(ca_bundle=None)
+        assert resolved == "/certifi/where.pem"
+
+    def test_cafile_precedence_default_when_no_certifi(self, monkeypatch):
+        """Returns None (system default) when no flag, no env, and certifi is not importable."""
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.setitem(sys.modules, "certifi", None)
+
+        resolved = jira.resolve_ca_bundle(ca_bundle=None)
+        assert resolved is None
+
+    @patch("ssl.create_default_context")
+    def test_create_ssl_context_calls_create_default_context_with_cafile(self, mock_create_ctx):
+        """create_ssl_context resolves bundle and passes cafile to ssl.create_default_context."""
+        mock_ctx = MagicMock()
+        mock_create_ctx.return_value = mock_ctx
+
+        ctx = jira.create_ssl_context(ca_bundle="/path/to/my_bundle.pem")
+        mock_create_ctx.assert_called_once_with(cafile="/path/to/my_bundle.pem")
+        assert ctx == mock_ctx
+
+    def test_tls_verification_never_disabled(self):
+        """TLS certificate verification and hostname checking are never disabled."""
+        ctx_default = jira.create_ssl_context(ca_bundle=None)
+        assert ctx_default.verify_mode == ssl.CERT_REQUIRED
+        assert ctx_default.check_hostname is True
+
+        # Insecure bypass flags must NOT exist
+        parser = jira.build_arg_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--insecure"])
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--no-verify"])
+        with pytest.raises(SystemExit):
+            parser.parse_args(["-k"])
+
+    def test_is_cert_verification_error_detection(self):
+        """is_cert_verification_error correctly identifies SSL verification errors across structures."""
+        cert_err = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        url_err = urllib.error.URLError(cert_err)
+        req_err = jira.RequestError(f"Network error: {url_err.reason}")
+        req_err.__cause__ = url_err
+
+        assert jira.is_cert_verification_error(cert_err) is True
+        assert jira.is_cert_verification_error(url_err) is True
+        assert jira.is_cert_verification_error(req_err) is True
+        assert jira.is_cert_verification_error(jira.RequestError("Network error: [SSL: CERTIFICATE_VERIFY_FAILED] ...")) is True
+
+        # Non-verification errors should return False
+        assert jira.is_cert_verification_error(jira.RequestError("Network error: Connection refused")) is False
+        assert jira.is_cert_verification_error(urllib.error.URLError("Connection reset")) is False
+        assert jira.is_cert_verification_error(ValueError("Invalid argument")) is False
+
+    @patch("urllib.request.urlopen")
+    def test_cert_verification_failure_in_main_prints_hint_and_no_traceback(self, mock_urlopen, capsys, monkeypatch):
+        """main exits non-zero and prints macOS/certifi/ca-bundle hint with no traceback on CERTIFICATE_VERIFY_FAILED."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "token123")
+        cert_err = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed (_ssl.c:1029)")
+        mock_urlopen.side_effect = urllib.error.URLError(cert_err)
+
+        exit_code = jira.main([
+            "--site-url", "https://test.atlassian.net",
+            "--email", "test@example.com",
+            "--project", "PROJ",
+            "--older-than", "10",
+        ])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        err_out = captured.err
+
+        # Check required hint contents
+        assert "Install Certificates.command" in err_out
+        assert "pip install certifi" in err_out
+        assert "--ca-bundle" in err_out
+        assert "SSL_CERT_FILE" in err_out
+
+        # Verify NO traceback is output
+        assert "Traceback (most recent call last)" not in err_out
+        assert "Traceback (most recent call last)" not in captured.out
+
+    def test_missing_ca_bundle_file_in_main_exits_nonzero(self, capsys):
+        """Specifying a nonexistent CA bundle file exits non-zero with a clear error."""
+        exit_code = jira.main([
+            "--site-url", "https://test.atlassian.net",
+            "--email", "test@example.com",
+            "--project", "PROJ",
+            "--ca-bundle", "/path/to/definitely_nonexistent_bundle.pem",
+        ])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Configuration Error: CA bundle file not found" in captured.err
+
+    @patch("urllib.request.urlopen")
+    def test_cert_verification_failure_in_delete_prints_hint(self, mock_urlopen, capsys):
+        """delete_issues detects cert failure, prints hint, and aborts immediately without retrying."""
+        cert_err = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        mock_urlopen.side_effect = urllib.error.URLError(cert_err)
+
+        session = jira.HttpSession()
+        successful, failures = jira.delete_issues(
+            session=session,
+            site_url="https://test.atlassian.net",
+            issues=[{"key": "PROJ-101"}],
+        )
+
+        assert len(successful) == 0
+        assert len(failures) == 1
+        assert "CERTIFICATE_VERIFY_FAILED" in failures[0]["error"]
+        assert mock_urlopen.call_count == 1  # No wasteful retries on cert failure
+
+        captured = capsys.readouterr()
+        assert "Install Certificates.command" in captured.err
+        assert "pip install certifi" in captured.err
+
+    def test_ca_bundle_arg_passed_to_session(self, tmp_path, monkeypatch):
+        """Valid --ca-bundle file is configured on HttpSession in main."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "token123")
+        fake_ca = tmp_path / "custom_ca.pem"
+        fake_ca.write_text("-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n")
+
+        session_instances = []
+        original_init = jira.HttpSession.__init__
+
+        def mock_session_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            session_instances.append(self)
+
+        monkeypatch.setattr(jira.HttpSession, "__init__", mock_session_init)
+        monkeypatch.setattr(jira, "fetch_issues", lambda *args, **kwargs: [])
+
+        exit_code = jira.main([
+            "--site-url", "https://test.atlassian.net",
+            "--email", "test@example.com",
+            "--project", "PROJ",
+            "--ca-bundle", str(fake_ca),
+        ])
+
+        assert exit_code == 0
+        assert len(session_instances) == 1
+        assert session_instances[0].ca_bundle == str(fake_ca)
+
 
