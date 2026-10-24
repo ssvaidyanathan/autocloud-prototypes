@@ -713,6 +713,25 @@ class TestAbsoluteFirstPartyImports:
         assert "import fastapi\n\nfrom app.config import cfg\n" in fixed
         assert _ruff_lint(fixed, project, "src/app/main.py", tmp_path) == ""
 
+    def test_subpackage_named_like_third_party_stays_third_party(self, tmp_path: Path) -> None:
+        # Review finding R2: only the top-level package is first-party, so ``celery`` stays
+        # third-party even inside ``app/celery/``.
+        (tmp_path / "app" / "celery").mkdir()
+        (tmp_path / "app" / "celery" / "__init__.py").touch()
+        path = "app/celery/tasks.py"
+        original = (
+            "import os\n\nfrom celery import Celery\n\nfrom app.config import cfg\n\n"
+            "print(os, cfg)\nimport json\n\nprint(Celery, json)\n"
+        )
+        assert _ruff_lint(original, SAMPLE_APP, path, tmp_path).count("E402") == 1
+        diag = LintDiagnostic(path, 8, "E402", "Module level import not at top of file")
+        fixed = fix_source(original, [diag])
+        assert fixed == (
+            "import json\nimport os\n\nfrom celery import Celery\n\nfrom app.config import cfg\n\n"
+            "print(os, cfg)\n\nprint(Celery, json)\n"
+        )
+        assert _ruff_lint(fixed, SAMPLE_APP, path, tmp_path) == ""
+
 
 class TestRuffFallback:
     SRC = "import sys\nimport os\n\nprint(os, sys)\n"
@@ -767,6 +786,30 @@ class TestRuffFallback:
         assert cmd[-3:] == ["--stdin-filename", "pkg/m.py", "-"]
         assert "--isolated" in cmd and "--fix" in cmd
         assert cmd[cmd.index("--config") + 1] == 'lint.isort.known-first-party = ["pkg"]'
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("app/celery/tasks.py", '["app"]'),
+            ("app/db/redis/client.py", '["app"]'),
+            ("src/app/celery/tasks.py", '["app", "src"]'),
+            ("src/m.py", '["src"]'),
+        ],
+    )
+    def test_only_top_level_package_is_first_party(
+        self, path: str, expected: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            calls.append(cmd)
+            return _FakeCompleted(0, stdout=self.SRC)
+
+        monkeypatch.setattr(s1_lint, "_ruff_executable", lambda: "/usr/bin/ruff")
+        monkeypatch.setattr(s1_lint.subprocess, "run", fake_run)
+        assert organize_imports(self.SRC, path) == self.SRC
+        cmd = calls[0]
+        assert cmd[cmd.index("--config") + 1] == f"lint.isort.known-first-party = {expected}"
 
     def test_top_level_file_passes_no_first_party_config(
         self, monkeypatch: pytest.MonkeyPatch

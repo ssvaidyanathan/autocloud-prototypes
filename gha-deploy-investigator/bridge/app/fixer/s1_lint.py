@@ -354,6 +354,17 @@ def _package_dirs(path: str) -> list[str]:
     return dirs
 
 
+def _first_party_packages(dirs: list[str]) -> list[str]:
+    """Return the top-level package of ``dirs`` (``src/<pkg>`` layouts include both).
+
+    Only the top-level package is first-party, matching how the target's own ruff run sees
+    it. Intermediate directories are excluded: ``app/celery/tasks.py`` must still treat the
+    third-party ``celery`` library as third-party.
+    """
+    top = dirs[:2] if dirs[:1] == ["src"] else dirs[:1]
+    return sorted(top)
+
+
 def _ruff_import_command(ruff: str, path: str, first_party: list[str]) -> list[str]:
     cmd = [ruff, "check", "--isolated"]
     if first_party:
@@ -368,18 +379,18 @@ def organize_imports(source: str, path: str) -> str:
 
     Ruff runs with ``--isolated`` from a temporary directory so neither the bridge's own ruff
     configuration nor packages next to its working directory influence the result. The
-    file's package directories are mirrored there (with ``__init__.py`` files) and declared
-    as ``known-first-party``, so absolute imports of the target's own packages (e.g. ``app``
-    for ``app/main.py`` or ``src/app/main.py``) land in the first-party section, as the
-    target's own ruff run would place them. The output keeps the line-ending style and
-    trailing-newline state of ``source``.
+    file's package directories are mirrored there (with ``__init__.py`` files) and only the
+    top-level package is declared ``known-first-party``, so absolute imports of the target's
+    own packages (e.g. ``app`` for ``app/main.py`` or ``src/app/main.py``) land in the
+    first-party section, as the target's own ruff run would place them. The output keeps the
+    line-ending style and trailing-newline state of ``source``.
     """
     ruff = _ruff_executable()
     if ruff is None:
         logger.warning("ruff CLI not found; import blocks left unorganized for %s", path)
         return source
     dirs = _package_dirs(path)
-    cmd = _ruff_import_command(ruff, path, sorted(set(dirs)))
+    cmd = _ruff_import_command(ruff, path, _first_party_packages(dirs))
     try:
         with tempfile.TemporaryDirectory() as workdir:
             package = Path(workdir)
@@ -507,6 +518,7 @@ def fix_source(source: str, diagnostics: list[LintDiagnostic], path: Optional[st
         return organized
     # No import was moved. Re-section only when ruff accepts the original layout as-is, so
     # a target whose isort settings ruff cannot see never gets untouched blocks rearranged.
+    # This second ruff run is intentional (bounded by RUFF_TIMEOUT_SECONDS); do not remove it.
     if organize_imports(source, stdin_path) == source:
         return organized
     logger.info("Original import layout differs from ruff defaults for %s; kept as-is", stdin_path)
