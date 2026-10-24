@@ -103,7 +103,6 @@ modules_to_test = [
     'app.adapters.servicenow',
     'app.templates.renderer',
     'app.core.dispatcher',
-    'app.core.windowing',
     'app.main',
 ]
 

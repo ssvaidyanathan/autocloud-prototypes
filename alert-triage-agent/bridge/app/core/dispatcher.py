@@ -99,57 +99,6 @@ class TaskDispatcher:
 
         return self._enqueue_task(task_name, task_id, target_url, body_dict)
 
-    def dispatch_investigation(
-        self,
-        group: Any,
-        current_time: Optional[float] = None,
-        attempt: int = 1,
-    ) -> DispatchResult:
-        """Enqueue investigation task to Cloud Tasks serialized queue with bridge group context."""
-        group_id = getattr(group, "group_id", str(group))
-        filename = getattr(group, "filename", f"incident-{group_id}.md")
-        task_id = self.get_task_id(
-            current_time=current_time,
-            prefix="investigate",
-            group_id=group_id,
-            attempt=attempt,
-        )
-        task_name = self.get_task_name(task_id)
-        target_url = f"{self.config.agent_url.rstrip('/')}/investigate"
-
-        alert = None
-        if hasattr(group, "alerts") and group.alerts:
-            alert = next(iter(group.alerts.values()))
-
-        if alert is not None:
-            alert_dict = alert.model_dump(mode="json")
-        else:
-            alert_dict = {
-                "incident_id": f"grp-{group_id}",
-                "policy_name": getattr(group, "origin", "unknown"),
-                "resource_name": getattr(group, "origin", "unknown"),
-                "state": "open",
-                "started_at": "2026-10-22T00:00:00Z",
-                "summary": f"Investigation trigger for group {group_id}",
-            }
-
-        member_alerts = []
-        if hasattr(group, "alerts") and group.alerts:
-            member_alerts = [
-                a.model_dump(mode="json") if hasattr(a, "model_dump") else a
-                for a in group.alerts.values()
-            ]
-
-        body_dict: dict[str, Any] = {
-            "alert": alert_dict,
-            "group_id": group_id,
-            "filename": filename,
-            "member_alerts": member_alerts,
-            "origin": getattr(group, "origin", "unknown"),
-            "blast_radius": getattr(group, "blast_radius", []),
-        }
-        return self._enqueue_task(task_name, task_id, target_url, body_dict)
-
     def _enqueue_task(
         self,
         task_name: str,

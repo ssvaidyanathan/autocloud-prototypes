@@ -832,3 +832,65 @@ def test_bridge_client_methods_and_retries(agent_cfg: Path):
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
         client.query_ticket("http://testbridge", "non-existent")
     assert exc_info.value.response.status_code == 404
+
+
+def test_post_resolution_alert_initializes_fresh_new_group(agent_cfg: Path):
+    """An alert arriving after an incident group is resolved initializes a fresh new group."""
+    app.dependency_overrides[get_agent_settings] = lambda: agent_cfg
+    client = TestClient(app)
+    store = OKFStore(config=agent_cfg)
+
+    simulated_time = 1000.0
+    set_clock_func(lambda: simulated_time)
+
+    try:
+        # 1. Initial alert creates group
+        alert_initial = AlertEvent(
+            incident_id="inc-init-1",
+            policy_name="projects/cloud-assist-fde-2/alertPolicies/ata-apigee-orders-429",
+            resource_name="ata-orders-v1",
+            resource_type="apigee_proxy",
+            state="open",
+            started_at="2026-10-23T05:16:00Z",
+        )
+        res1 = client.post("/triage", json=alert_initial.model_dump(mode="json"))
+        assert res1.status_code == 200
+        group_id_1 = res1.json()["group_id"]
+        assert group_id_1 is not None
+
+        # Verify group 1 is active
+        doc1 = store.read(group_id_1)
+        assert doc1.status == "open"
+
+        # 2. Mark group 1 as resolved (simulating resolution after cooling expiry)
+        store.update_atomically(
+            group_id_1,
+            lambda d: setattr(d, "status", "resolved") or setattr(d, "servicenow_sys_id", "sys_post_res_1") or d,
+        )
+        doc1_resolved = store.read(group_id_1)
+        assert doc1_resolved.status == "resolved"
+
+        # 3. New alert arrives on the exact same policy and resource after resolution
+        simulated_time = 2000.0
+        alert_new = AlertEvent(
+            incident_id="inc-new-2",
+            policy_name="projects/cloud-assist-fde-2/alertPolicies/ata-apigee-orders-429",
+            resource_name="ata-orders-v1",
+            resource_type="apigee_proxy",
+            state="open",
+            started_at="2026-10-23T05:25:00Z",
+        )
+        res2 = client.post("/triage", json=alert_new.model_dump(mode="json"))
+        assert res2.status_code == 200
+        group_id_2 = res2.json()["group_id"]
+
+        # Must NOT reuse group_id_1
+        assert group_id_2 != group_id_1
+        doc2 = store.read(group_id_2)
+        assert doc2.status == "open"
+        assert doc2.group_id == group_id_2
+        assert any(a.get("incident_id") == "inc-new-2" for a in doc2.alerts)
+        assert not any(a.get("incident_id") == "inc-init-1" for a in doc2.alerts)
+    finally:
+        set_clock_func(time.time)
+

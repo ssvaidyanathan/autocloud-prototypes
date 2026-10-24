@@ -387,10 +387,10 @@ def test_full_downstream_blast_radius_computation(tmp_path):
 
 
 def test_update_gcs_okf_with_servicenow_details(tmp_path):
-    """Assert OKF frontmatter is updated with servicenow_number, servicenow_sys_id, and status: ticketed."""
+    """Assert OKF frontmatter is updated with servicenow_number, servicenow_sys_id, and status: ticketed via agent store."""
     import yaml
     from pathlib import Path
-    from bridge.app.core.windowing import update_gcs_okf_servicenow
+    from agent.app.grouping.store import OKFDocument, update_okf_atomically
 
     # Create dummy local OKF file
     dummy_dir = Path("/tmp/knowledge/incident-manager")
@@ -411,6 +411,10 @@ def test_update_gcs_okf_with_servicenow_details(tmp_path):
             self.name = name
             self._text = text
             self.uploaded_content = ""
+            self.generation = 1
+
+        def reload(self):
+            pass
 
         def exists(self):
             return True
@@ -420,6 +424,8 @@ def test_update_gcs_okf_with_servicenow_details(tmp_path):
 
         def upload_from_string(self, content, **kwargs):
             self.uploaded_content = content
+            self._text = content
+            test_file.write_text(content, encoding="utf-8")
 
     mock_blob = MockBlob("incident-test-sn.md", test_file.read_text(encoding="utf-8"))
 
@@ -434,24 +440,23 @@ def test_update_gcs_okf_with_servicenow_details(tmp_path):
         def bucket(self, name):
             return MockBucket()
 
-    config = BridgeConfig(
-        project_id="cloud-assist-fde-2",
-        name_prefix="ata",
-        region="us-west1",
-        incidents_bucket="cloud-assist-fde-2-ata-incidents",
-        is_local=True,
-    )
+    def update_sn(doc: OKFDocument) -> OKFDocument:
+        doc.servicenow_number = "INC0012345"
+        doc.servicenow_sys_id = "sys_id_999"
+        doc.status = "ticketed"
+        return doc
 
-    success = update_gcs_okf_servicenow(
-        filename="incident-test-sn.md",
-        servicenow_number="INC0012345",
-        servicenow_sys_id="sys_id_999",
-        status="ticketed",
-        config=config,
+    doc = update_okf_atomically(
+        bucket_name="cloud-assist-fde-2-ata-incidents",
+        blob_name="incident-test-sn.md",
+        update_fn=update_sn,
         storage_client=MockStorageClient(),
     )
 
-    assert success is True
+    assert doc.servicenow_number == "INC0012345"
+    assert doc.servicenow_sys_id == "sys_id_999"
+    assert doc.status == "ticketed"
+
     # Verify local file update
     updated_local = yaml.safe_load(test_file.read_text(encoding="utf-8").split("---")[1])
     assert updated_local["servicenow_number"] == "INC0012345"
