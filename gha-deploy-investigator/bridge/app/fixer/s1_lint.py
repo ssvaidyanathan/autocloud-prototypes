@@ -281,6 +281,9 @@ def fix_source(source: str, diagnostics: list[LintDiagnostic]) -> str:
 
     trailing_newline = source.endswith("\n")
     lines = source.splitlines()
+    # Preserve CRLF using the same rule as ``apply_unified_diff`` so content and diff agree.
+    physical = source.split("\n")[:-1] if trailing_newline else source.split("\n")
+    eol = "\r\n" if physical and all(line.endswith("\r") for line in physical) else "\n"
 
     # Resolve position-independent targets against the original tree.
     unused: list[tuple[str, str]] = []
@@ -330,7 +333,7 @@ def fix_source(source: str, diagnostics: list[LintDiagnostic]) -> str:
         lines = _hoist_import(lines, tree, key)
         tree = ast.parse("\n".join(lines))
 
-    fixed = "\n".join(lines) + ("\n" if trailing_newline else "")
+    fixed = eol.join(lines) + (eol if trailing_newline else "")
     try:
         ast.parse(fixed)
     except SyntaxError as exc:  # pragma: no cover - defensive
@@ -339,12 +342,14 @@ def fix_source(source: str, diagnostics: list[LintDiagnostic]) -> str:
 
 
 def _unified_diff(path: str, before: str, after: str) -> str:
-    return "".join(
+    """Generate a unified diff that round-trips through ``apply_unified_diff``."""
+    return "\n".join(
         difflib.unified_diff(
-            before.splitlines(keepends=True),
-            after.splitlines(keepends=True),
+            before.splitlines(),
+            after.splitlines(),
             fromfile=f"a/{path}",
             tofile=f"b/{path}",
+            lineterm="",
         )
     )
 

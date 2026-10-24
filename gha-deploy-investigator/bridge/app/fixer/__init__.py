@@ -2,7 +2,6 @@ from .diff_apply import apply_unified_diff
 from .interface import (
     AUTOFIX_BRANCH_PREFIX,
     FORBIDDEN_PATH_PATTERNS,
-    FORBIDDEN_TARGET_BRANCHES,
     MAX_CHANGED_FILES,
     MAX_LINE_DELTA,
     FixPRWriterBase,
@@ -16,7 +15,6 @@ from .writer import FixBranchExistsError, FixPRWriter
 __all__ = [
     "AUTOFIX_BRANCH_PREFIX",
     "FORBIDDEN_PATH_PATTERNS",
-    "FORBIDDEN_TARGET_BRANCHES",
     "FixBranchExistsError",
     "FixPRWriter",
     "MAX_CHANGED_FILES",

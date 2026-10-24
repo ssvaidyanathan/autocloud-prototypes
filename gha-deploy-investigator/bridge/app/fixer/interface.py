@@ -19,10 +19,6 @@ FORBIDDEN_PATH_PATTERNS: tuple[str, ...] = (
 )
 MAX_CHANGED_FILES: int = 3
 MAX_LINE_DELTA: int = 50
-# Fix PRs may *target* default branches (that is the point of a PR); what is forbidden is
-# committing to them directly. The writer only ever commits to ``autofix/*`` head branches.
-# Kept for reference/back-compat of the public export.
-FORBIDDEN_TARGET_BRANCHES: tuple[str, ...] = ("main", "master")
 _REFS_HEADS_PREFIX = "refs/heads/"
 
 
