@@ -10,6 +10,8 @@ from .contracts.result import InvestigationResult
 from .core.auth import verify_oidc_token
 from .core.dedup import CallbackDedupRegistry, get_dedup_registry
 from .core.tasks import TaskDispatcher
+from .fixer.ci_listener import CIFeedbackListener
+from .fixer.interface import is_autofix_branch
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,23 @@ def set_task_dispatcher(dispatcher: Optional[TaskDispatcher]) -> None:
     """Helper to set or reset the TaskDispatcher instance (e.g. for testing)."""
     global _dispatcher
     _dispatcher = dispatcher
+
+
+# Global CI feedback listener for auto-fix verification runs (overridable in tests)
+_ci_listener: Optional[CIFeedbackListener] = None
+
+
+def get_ci_feedback_listener() -> CIFeedbackListener:
+    global _ci_listener
+    if _ci_listener is None:
+        _ci_listener = CIFeedbackListener()
+    return _ci_listener
+
+
+def set_ci_feedback_listener(listener: Optional[CIFeedbackListener]) -> None:
+    """Helper to set or reset the CIFeedbackListener instance (e.g. for testing)."""
+    global _ci_listener
+    _ci_listener = listener
 
 
 @app.get("/health")
@@ -81,6 +100,29 @@ async def _process_webhook(
         json_payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}") from exc
+
+    # Loop prevention: CI runs on auto-fix branches are verification feedback only.
+    # They must never enqueue a new investigation or trigger another fix attempt.
+    workflow_run = json_payload.get("workflow_run") if isinstance(json_payload, dict) else None
+    if isinstance(workflow_run, dict):
+        head_branch = workflow_run.get("head_branch")
+        if is_autofix_branch(head_branch):
+            conclusion = workflow_run.get("conclusion")
+            try:
+                outcome = get_ci_feedback_listener().handle_autofix_workflow_run(
+                    json_payload, settings
+                )
+                outcome_name = outcome.outcome
+            except Exception as exc:
+                logger.error("Auto-fix CI feedback processing failed for %s: %s", head_branch, exc)
+                outcome_name = "error"
+            response.status_code = status.HTTP_200_OK
+            return {
+                "status": "autofix_verification_processed",
+                "branch": head_branch,
+                "conclusion": conclusion,
+                "outcome": outcome_name,
+            }
 
     try:
         incident = adapter.to_incident(json_payload)
