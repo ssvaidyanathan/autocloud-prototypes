@@ -76,6 +76,9 @@ class BridgeConfig(BaseSettings):
     github_app_id: Optional[str] = None
     github_app_private_key: Optional[str] = None
 
+    # Auto-fix PR Configuration
+    autofix_enabled: bool = False
+
     @property
     def is_local(self) -> bool:
         env_val = self.app_env or self.environment
