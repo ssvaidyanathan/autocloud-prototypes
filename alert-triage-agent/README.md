@@ -13,6 +13,7 @@ An autonomous Site Reliability Engineering (SRE) diagnostic and incident triage 
 - [1. System Overview & Problem Statement](#1-system-overview--problem-statement)
 - [2. Quick Start](#2-quick-start)
 - [3. System Architecture & Request Lifecycle](#3-system-architecture--request-lifecycle)
+  - [Topology as Single Source of Truth (TOPOLOGY.md)](#topology-as-single-source-of-truth-topologymd)
 - [4. Component Breakdown](#4-component-breakdown)
 - [5. Configuration](#5-configuration)
 - [6. Customizing the Agent with Skills](#6-customizing-the-agent-with-skills)
@@ -210,6 +211,24 @@ sequenceDiagram
     deactivate Agent
 ```
 
+### Topology as Single Source of Truth (`TOPOLOGY.md`)
+
+The system topology, service catalog, and dependency relationships are defined in [`alert-triage-agent/topology/TOPOLOGY.md`](topology/TOPOLOGY.md) as the single source of truth. The document is structured into two canonical Markdown tables:
+
+- **Components Table**: Defines all monitored services, gateways, datastores, and aliases:
+  ```markdown
+  | Component | Type | Also known as | Notes |
+  ```
+- **Dependencies Table**: Encodes directional call paths and transport protocols between services:
+  ```markdown
+  | From | To | How |
+  ```
+
+This topology specification is ingested at runtime via the agent's `get_topology` tool and guided by the `topology` skill. The resulting directed acyclic graph (DAG) is leveraged across the incident triage lifecycle to:
+1. **Calculate Topology Hop Distance**: Determines the shortest path between alerting resources in the multi-factor correlation scoring engine (0 hops = 35 pts, 1 hop = 28 pts, 2 hops = 17.5 pts, $\ge$ 3 hops / disjoint = 0 pts).
+2. **Isolate Root Cause Origin**: Traverses upstream dependency edges from symptomatic downstream services back to the true failure origin.
+3. **Compute Blast Radius**: Identifies all directly and transitively impacted downstream dependencies for inclusion in Open Knowledge Files and ServiceNow incident dossiers.
+
 ---
 
 ## 4. Component Breakdown
@@ -233,17 +252,19 @@ sequenceDiagram
   - **Stale-Wake Handler**: On wakeup at `POST /timer/wake`, compares current timestamp against `okf.settle_deadline` (with a 2.0s tolerance). Stale wakes caused by subsequent alert extensions are ignored as no-ops without minting duplicate tickets.
   - **Multi-Factor Correlation (`agent/app/correlation/`)**: Evaluates candidate alerts using a 4-factor scoring matrix (Topology Distance, Causal Failure Chains, Temporal Proximity, Change Alignment). Calls Gemini strictly for gray-zone alerts (scores 35–65).
   - **Deterministic Specialists (`agent/app/specialists/`)**: Concurrently executes live read-only queries:
-    - `CloudRunSpecialist`: Queries container restarts, CPU/memory saturation, request latency percentiles, and application error logs (filtering `/admin/*`). Recursively traces upstream DAG dependencies.
+    - `CloudRunSpecialist`: Queries container restarts, CPU/memory saturation, request latency percentiles, and application error logs (filtering `/admin/*`). Recursively traces upstream DAG dependencies using the topology graph.
     - `ApigeeSpecialist`: Queries proxy access logs (`ata-apigee-access`), extracts status codes and client IPs, and analyzes SpikeArrest policy limits.
     - `CloudSQLSpecialist`: Queries backend database connection counts (warning threshold 20 / max 25 on `db-f1-micro`), CPU utilization, and PostgreSQL deadlock/lock wait logs.
     - `ChangeSpecialist`: Inspects Cloud Run revisions and Apigee deployment history within a 2-hour window prior to alert onset.
+  - **Topology-Guided Analysis**: Ingests system architecture and dependencies from [`topology/TOPOLOGY.md`](topology/TOPOLOGY.md) via the `get_topology` tool guided by the `topology` skill, computing shortest-path DAG distances and downstream blast radius.
   - **Evidence-Based Synthesizer**: Formulates structured 4-bullet executive summaries, calculates blast radius and formulaic confidence, and generates standalone HTML dossiers.
 
 ### 3. `ata-tools` (`tools/`)
 - **Role**: FastMCP read-only telemetry and topology service.
 - **Technology**: FastMCP, Starlette/Uvicorn, Google Cloud SDKs.
 - **Responsibilities**:
-  - Exposes structured MCP tools: `list_open_alerts`, `list_time_series`, `list_log_entries`, `get_service`, `get_topology_graph`, `get_blast_radius`.
+  - Exposes structured MCP tools: `list_open_alerts`, `list_time_series`, `list_log_entries`, `get_service`, `get_topology`, `get_topology_graph`, `get_blast_radius`.
+  - Ingests and parses system architecture from `topology/TOPOLOGY.md` to construct in-memory DAG representations.
   - Strictly read-only IAM viewer boundary.
   - Optional OIDC ID token validation on tool endpoints.
 
@@ -317,7 +338,9 @@ skills/
 │   └── SKILL.md
 ├── cloud-sql-troubleshooting/      # PostgreSQL connection pool exhaustion (max 25, warn 20) and locks
 │   └── SKILL.md
-└── report-style/                   # SRE 4-bullet executive summaries, confidence formulas, HTML dossiers
+├── report-style/                   # SRE 4-bullet executive summaries, confidence formulas, HTML dossiers
+│   └── SKILL.md
+└── topology/                       # Interprets topology/TOPOLOGY.md components and dependency tables
     └── SKILL.md
 ```
 
@@ -328,12 +351,13 @@ skills/
 - **`skills/cloud-run-troubleshooting/SKILL.md`**: Details container restart diagnostic queries, memory limits, and upstream DAG inspection.
 - **`skills/cloud-sql-troubleshooting/SKILL.md`**: Specifies Cloud SQL connection saturation thresholds (warning at 20 connections on `db-f1-micro`) and deadlock queries.
 - **`skills/report-style/SKILL.md`**: Prescribes the structured 4-bullet SRE summary format (Problem, Systems, Observations, Recommended Actions) and evidence-grounded confidence rules.
+- **`skills/topology/SKILL.md`**: Guides the parsing and interpretation of [`topology/TOPOLOGY.md`](topology/TOPOLOGY.md) (the single source of truth for system components and dependencies). Specifies how the agent uses the `get_topology` tool to parse the Components table (`| Component | Type | Also known as | Notes |`) and Dependencies table (`| From | To | How |`) to evaluate topological proximity, trace upstream failure paths, and project downstream blast radius.
 
 ### Operational Reality & Runtime Architecture
 In the current prototype, the agent's diagnostic pipeline is executed via **deterministic Python specialist modules** (`agent/app/specialists/`) calling live GCP APIs, rather than dynamic LLM prompt/tool injection or an ADK `SkillToolset` at runtime:
 - The Markdown skill files serve as **human and AI assistant architectural runbooks and design specifications** that establish the diagnostic queries, thresholds, and report formatting implemented in code.
 - Gemini is invoked strictly for gray-zone correlation scoring (scores between 35 and 65).
-- The active domain skill areas (`cloud-run-diagnostics`, `apigee-telemetry`, `cloud-sql-triage`, `report-style`) are recorded in the `InvestigationReport` metadata contract (`skills_loaded`).
+- The active domain skill areas (`cloud-run-diagnostics`, `apigee-telemetry`, `cloud-sql-triage`, `report-style`, `topology`) are recorded in the `InvestigationReport` metadata contract (`skills_loaded`).
 
 ---
 
@@ -342,7 +366,7 @@ In the current prototype, the agent's diagnostic pipeline is executed via **dete
 The Alert Triage Agent enforces zero-trust security and defense-in-depth across all tiers:
 
 - **Strictly Read-Only IAM Boundaries**:
-  - `ata-agent-sa` and `ata-tools-sa` possess strictly read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer`, `roles/apphub.viewer`).
+  - `ata-agent-sa` and `ata-tools-sa` possess strictly read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer`).
   - Neither service account possesses any mutating privileges on production cloud infrastructure. Write permissions are strictly confined to the incident GCS bucket (`roles/storage.objectUser` on `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents`).
 - **Zero Secrets in Repository or Code**: All passwords and tokens reside in Google Secret Manager; the ServiceNow instance URL is configuration.
 - **Mutual Authentication & OIDC Verification**:
@@ -895,13 +919,16 @@ alert-triage-agent/
 │   ├── change-correlation/        # Cloud Run revision and deployment correlation rules
 │   ├── cloud-run-troubleshooting/ # Container lifecycle, CPU/memory saturation, latency metrics
 │   ├── cloud-sql-troubleshooting/ # Database connection exhaustion and lock contention
-│   └── report-style/              # SRE 4-bullet executive summaries and HTML dossier styling
+│   ├── report-style/              # SRE 4-bullet executive summaries and HTML dossier styling
+│   └── topology/                  # Component catalog and dependency table parser guidance
 ├── tests/                         # Automated pytest test suites (30+ test modules)
 ├── tools/                         # FastMCP read-only telemetry and topology server
 │   ├── app/                       # MCP server, tool definitions, bundle parser
 │   ├── Dockerfile                 # Container build specification for ata-tools
 │   └── scripts/deploy.sh          # Cloud Run deployment script for ata-tools
 ├── topology/                      # Topology DAG definitions and dependency relationships
+│   ├── TOPOLOGY.md                # Single source of truth for components and dependencies
+│   └── topology_graph.py          # In-memory DAG parser and blast radius calculator
 ├── AGENTS.md                      # Developer and AI assistant architecture reference
 ├── CONFIGURATION.md               # Complete configuration, environment variables, secrets reference
 ├── DEMO.md                        # Operator demonstration guide for scenarios S1 through S5
