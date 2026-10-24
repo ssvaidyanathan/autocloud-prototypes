@@ -29,6 +29,93 @@ class ActionItem(BaseModel):
     rollback: Optional[str] = None
 
 
+def balance_brackets(text: str) -> str:
+    """Remove unbalanced parentheses and brackets from text."""
+    # Balance '(' and ')'
+    stack = []
+    remove_indices = set()
+    for i, ch in enumerate(text):
+        if ch == "(":
+            stack.append(i)
+        elif ch == ")":
+            if stack:
+                stack.pop()
+            else:
+                remove_indices.add(i)
+    remove_indices.update(stack)
+
+    # Balance '[' and ']'
+    b_stack = []
+    for i, ch in enumerate(text):
+        if i in remove_indices:
+            continue
+        if ch == "[":
+            b_stack.append(i)
+        elif ch == "]":
+            if b_stack:
+                b_stack.pop()
+            else:
+                remove_indices.add(i)
+    remove_indices.update(b_stack)
+
+    # Balance '{' and '}'
+    c_stack = []
+    for i, ch in enumerate(text):
+        if i in remove_indices:
+            continue
+        if ch == "{":
+            c_stack.append(i)
+        elif ch == "}":
+            if c_stack:
+                c_stack.pop()
+            else:
+                remove_indices.add(i)
+    remove_indices.update(c_stack)
+
+    return "".join(ch for i, ch in enumerate(text) if i not in remove_indices)
+
+
+def clean_problem_text(problem: str) -> str:
+    """Clean problem text by removing monitoring labels, policies, dangling brackets, and trailing punctuation."""
+    if not problem:
+        return ""
+
+    # Strip monitoring labels: labels{...}
+    problem = re.sub(r"labels\s*\{[^}]*\}?", "", problem)
+
+    # Strip GCP alert policy paths (numeric and identifier forms)
+    problem = re.sub(r"projects/[^/]+/alertPolicies/[^\s,)}]+", "", problem)
+    problem = re.sub(r"projects/[^/]+/alertPolicies/?", "", problem)
+
+    # Strip URLs
+    problem = re.sub(r"https?://\S+", "", problem)
+
+    # Repeatedly remove empty bracket pairs like (), [], {}, (  ), etc.
+    while True:
+        new_prob = re.sub(r"\(\s*\)|\[\s*\]|\{\s*\}", "", problem)
+        if new_prob == problem:
+            break
+        problem = new_prob
+
+    # Balance any leftover open/close brackets
+    problem = balance_brackets(problem)
+
+    # Repeatedly remove empty bracket pairs again in case balancing created any
+    while True:
+        new_prob = re.sub(r"\(\s*\)|\[\s*\]|\{\s*\}", "", problem)
+        if new_prob == problem:
+            break
+        problem = new_prob
+
+    # Collapse multiple whitespaces
+    problem = re.sub(r"\s+", " ", problem).strip()
+
+    # Strip trailing punctuation and dangling opening brackets/parentheses
+    problem = re.sub(r"[\s.,:;_\-/([{]+$", "", problem).strip()
+
+    return problem
+
+
 class InvestigationReport(BaseModel):
     """Investigation Report data contract."""
     group_id: str
@@ -202,19 +289,40 @@ class InvestigationReport(BaseModel):
         if n_alerts == 0:
             n_alerts = max(1, len([t for t in self.timeline if "alert" in t.description.lower()]) or 1)
 
-        problem = self.summary or "Anomalous telemetry breach detected"
-        if "{" in problem and "}" in problem:
-            problem = re.sub(r"labels\s*\{[^}]*\}", "", problem).strip()
-        if "projects/" in problem:
-            problem = re.sub(r"projects/[^/]+/alertPolicies/\d+", "", problem).strip()
-        problem = re.sub(r"\s+", " ", problem).strip()
+        raw_problem = self.summary or ""
+        problem = clean_problem_text(raw_problem)
+        if not problem or problem.lower() in ["none", "n/a", "unknown"]:
+            signal = None
+            if self.issue_type:
+                issue_map = {
+                    "runtime_exhaustion": "Resource exhaustion",
+                    "change_induced": "Deployment regression",
+                    "latency_spike": "Elevated latency",
+                    "runtime_anomaly": "Telemetry breach",
+                }
+                signal = issue_map.get(self.issue_type)
+            if not signal and self.probable_root_cause and self.probable_root_cause.text:
+                rc_text = clean_problem_text(self.probable_root_cause.text)
+                if rc_text and rc_text.lower() not in ["under investigation", "unknown"]:
+                    signal = rc_text
+            if not signal:
+                signal = "Anomalous telemetry breach detected"
+            problem = signal
 
         prefix = f"[{self.priority}] {self.origin}: "
         suffix = f" ({n_alerts} alert{'s' if n_alerts != 1 else ''})"
 
         allowed_len = max_length - len(prefix) - len(suffix)
-        if len(problem) > allowed_len:
-            problem = problem[:allowed_len - 3].rstrip() + "..."
+        if allowed_len <= 3:
+            problem = problem[:max(0, allowed_len)]
+        elif len(problem) > allowed_len:
+            truncated = problem[: allowed_len - 3]
+            truncated = clean_problem_text(truncated)
+            problem = truncated + "..."
+            while len(problem) > allowed_len and len(truncated) > 0:
+                truncated = truncated[:-1]
+                truncated = clean_problem_text(truncated)
+                problem = truncated + "..."
 
         return f"{prefix}{problem}{suffix}"
 
@@ -273,11 +381,11 @@ class InvestigationReport(BaseModel):
                     inc_id = a.get("incident_id") or "0.unknown"
                     st = a.get("state") or "open"
                     sa = a.get("started_at") or first_seen
-                    url = builder.build_incident_url(inc_id)
+                    url = a.get("url") or builder.build_incident_url(inc_id)
                     alert_lines.append(f"  - {pol} | {res} | {inc_id} | {st} | {sa} | {url}")
         else:
             inc_id = self.raw_metadata.get("incident_id", "0.unknown")
-            url = builder.build_incident_url(inc_id)
+            url = self.raw_metadata.get("url") or builder.build_incident_url(inc_id)
             alert_lines.append(f"  - {self.summary} | {self.origin} | {inc_id} | open | {first_seen} | {url}")
 
         alert_list_str = "\n".join(alert_lines)

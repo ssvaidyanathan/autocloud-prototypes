@@ -182,9 +182,11 @@ class GroupingManager:
                         d.add_alert({
                             "incident_id": alert.incident_id,
                             "policy_name": alert.policy_name,
+                            "policy_id": getattr(alert, "policy_id", None),
                             "resource_name": alert.resource_name,
                             "state": "closed",
                             "started_at": alert.started_at,
+                            "url": alert.url,
                         })
                     if d.all_alerts_closed():
                         is_ticketed = d.servicenow_sys_id is not None or str(d.status).lower() == IncidentGroupStatus.TICKETED.value
@@ -302,10 +304,12 @@ class GroupingManager:
                 d.add_alert({
                     "incident_id": alert.incident_id,
                     "policy_name": alert.policy_name,
+                    "policy_id": getattr(alert, "policy_id", None),
                     "resource_name": alert.resource_name,
                     "state": alert.state,
                     "started_at": alert.started_at,
                     "received_at": now_iso,
+                    "url": alert.url,
                 })
                 d.updated_at = now_iso
 
@@ -331,7 +335,11 @@ class GroupingManager:
             curr_status = str(updated_doc.status).lower()
             if curr_status == "ticketed" or updated_doc.servicenow_sys_id:
                 if updated_doc.servicenow_sys_id:
-                    note = format_late_alert_work_note(alert, updated_doc.blast_radius)
+                    note = format_late_alert_work_note(
+                        alert,
+                        updated_doc.blast_radius,
+                        project_id=self.config.project_id or updated_doc.project,
+                    )
                     try:
                         self.bridge_client.append_work_note(
                             bridge_url=self.config.bridge_url,
@@ -439,10 +447,12 @@ class GroupingManager:
             alerts=[{
                 "incident_id": alert.incident_id,
                 "policy_name": alert.policy_name,
+                "policy_id": getattr(alert, "policy_id", None),
                 "resource_name": alert.resource_name,
                 "state": alert.state,
                 "started_at": alert.started_at,
                 "received_at": now_iso,
+                "url": alert.url,
             }],
         )
 

@@ -6,12 +6,14 @@ Implements suppression decisions owned entirely by the agent:
 - Safe upstream DAG origin promotion.
 """
 
+import html
 from enum import Enum
 import logging
 from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from ..contracts.alert import AlertEvent
+from ..contracts.links import ConsoleLinkBuilder
 from .models import OKFDocument
 
 logger = logging.getLogger(__name__)
@@ -46,13 +48,73 @@ def check_duplicate_alert(alert: AlertEvent, documents: list[OKFDocument]) -> tu
     return False, None
 
 
-def format_late_alert_work_note(alert: AlertEvent, blast_radius: Optional[list[str]] = None) -> str:
-    """Format work note for a late-arriving or flapping correlated alert."""
-    blast_str = ", ".join(blast_radius) if blast_radius else alert.resource_name
+def format_late_alert_work_note(
+    alert: AlertEvent,
+    blast_radius: Optional[list[str]] = None,
+    project_id: Optional[str] = None,
+    as_html: bool = True,
+) -> str:
+    """Format work note for a late-arriving or flapping correlated alert with clickable links."""
+    proj = project_id or "cloud-assist-fde-2"
+    builder = ConsoleLinkBuilder(project_id=proj)
+
+    policy_name = getattr(alert, "policy_name", None) or "Alert"
+    policy_id = getattr(alert, "policy_id", None)
+    resource_name = getattr(alert, "resource_name", None) or "unknown-resource"
+    raw_incident_id = getattr(alert, "incident_id", None)
+    clean_incident_id = str(raw_incident_id or "").strip()
+    has_real_id = bool(
+        clean_incident_id and clean_incident_id.lower() not in ["none", "n/a", "unknown", "null", ""]
+    )
+
+    policy_url = builder.build_policy_url(policy_id or policy_name)
+
+    alert_url: Optional[str] = None
+    if has_real_id:
+        payload_url = getattr(alert, "url", None)
+        if payload_url and str(payload_url).strip():
+            alert_url = str(payload_url).strip()
+        else:
+            alert_url = builder.build_incident_url(clean_incident_id)
+
+    blast_str = ", ".join(blast_radius) if blast_radius else resource_name
+
+    if not as_html:
+        if has_real_id and alert_url:
+            alert_part_plain = f"(Alert ID: {clean_incident_id} - {alert_url})"
+        else:
+            disp_id = clean_incident_id if clean_incident_id else "N/A"
+            alert_part_plain = f"(Alert ID: {disp_id})"
+        return (
+            f"Correlated Alert Ingested: {policy_name} ({policy_url}) on "
+            f"{resource_name} {alert_part_plain}\n"
+            f"Updated Blast Radius: {blast_str}"
+        )
+
+    policy_html = (
+        f'<a href="{html.escape(policy_url, quote=True)}" target="_blank" '
+        f'class="console-link" style="color: #0969da; text-decoration: none;">'
+        f'{html.escape(policy_name)}</a>'
+    )
+    resource_html = f"<code>{html.escape(resource_name)}</code>"
+
+    if has_real_id and alert_url:
+        id_link = (
+            f'<a href="{html.escape(alert_url, quote=True)}" target="_blank" '
+            f'class="console-link" style="color: #0969da; text-decoration: none;">'
+            f'{html.escape(clean_incident_id)}</a>'
+        )
+        alert_part = f"(Alert ID: {id_link})"
+    else:
+        disp_id = clean_incident_id if clean_incident_id else "N/A"
+        alert_part = f"(Alert ID: {html.escape(disp_id)})"
+
+    blast_html = html.escape(blast_str)
+
     return (
-        f"[code]<b>Correlated Alert Ingested:</b> {alert.policy_name} on "
-        f"<code>{alert.resource_name}</code> (Alert ID: {alert.incident_id})<br/>"
-        f"<b>Updated Blast Radius:</b> {blast_str}[/code]"
+        f"[code]<b>Correlated Alert Ingested:</b> {policy_html} on "
+        f"{resource_html} {alert_part}<br/>"
+        f"<b>Updated Blast Radius:</b> {blast_html}[/code]"
     )
 
 

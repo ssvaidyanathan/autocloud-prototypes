@@ -117,26 +117,32 @@ def write_preanalysis_lock(
                 alerts_list.append({
                     "incident_id": a.incident_id,
                     "policy": getattr(a, "policy_name", ""),
+                    "policy_id": getattr(a, "policy_id", None),
                     "resource": getattr(a, "resource_name", ""),
                     "state": getattr(a, "state", "open"),
                     "started_at": getattr(a, "started_at", valid_ts),
+                    "url": getattr(a, "url", None),
                 })
             elif isinstance(a, dict):
                 alerts_list.append({
                     "incident_id": a.get("incident_id", ""),
                     "policy": a.get("policy_name", a.get("policy", "")),
+                    "policy_id": a.get("policy_id"),
                     "resource": a.get("resource_name", a.get("resource", "")),
                     "state": a.get("state", "open"),
                     "started_at": a.get("started_at", valid_ts),
+                    "url": a.get("url"),
                 })
     if not alerts_list:
         alerts_list = [
             {
                 "incident_id": alert.incident_id,
                 "policy": alert.policy_name,
+                "policy_id": getattr(alert, "policy_id", None),
                 "resource": alert.resource_name,
                 "state": alert.state,
                 "started_at": valid_ts,
+                "url": alert.url,
             }
         ]
 
