@@ -177,6 +177,68 @@ class TestWorkNoteLinks:
         assert payload_url in body
         assert "https://console.cloud.google.com/monitoring/alerting/policies/54321?project=test-proj" in body
 
+    def test_unknown_project_omits_console_links_rather_than_guessing(self):
+        """When project_id is unknown/None and no payload url exists, omit console links entirely."""
+        alert = AlertEvent(
+            incident_id="0.no-proj-1",
+            policy_name="ata-inventory-5xx",
+            resource_name="ata-inventory-api",
+            url=None,
+        )
+        note = format_late_alert_work_note(alert, blast_radius=["ata-inventory-api"], project_id=None)
+
+        assert "console.cloud.google.com" not in note
+        assert "<a " not in note
+        assert "href" not in note
+        assert "<b>Correlated Alert Ingested:</b> ata-inventory-5xx on <code>ata-inventory-api</code> (Alert ID: 0.no-proj-1)" in note
+
+    def test_unknown_project_preserves_payload_url_without_guessing_policy(self):
+        """When project_id is unknown but payload url is provided, use payload url and omit policy link."""
+        payload_url = "https://console.cloud.google.com/monitoring/alerting/incidents/0.sn123?project=actual-proj"
+        alert = AlertEvent(
+            incident_id="0.sn123",
+            policy_name="ata-orders-5xx",
+            resource_name="ata-orders-api",
+            url=payload_url,
+        )
+        note = format_late_alert_work_note(alert, blast_radius=["ata-orders-api"], project_id=None)
+
+        assert payload_url in note
+        assert f'href="{payload_url}"' in note
+        # Policy link should NOT be guessed since project_id is unknown
+        assert "policies" not in note
+
+    def test_servicenow_adapter_unknown_project_omits_console_links(self):
+        """ServiceNowAdapter omits console links when no project is configured or passed."""
+        posted_requests = []
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            posted_requests.append(request)
+            return httpx.Response(200, json={"result": {"sys_id": "sn-test"}})
+
+        mock_client = httpx.Client(transport=httpx.MockTransport(mock_handler))
+        config = BridgeConfig(
+            servicenow_instance_url="https://fake.service-now.com",
+            project_id="",
+            is_local=True,
+        )
+        adapter = ServiceNowAdapter(config=config, http_client=mock_client)
+
+        alert = AlertEvent(
+            incident_id="0.sn999",
+            policy_name="ata-orders-5xx",
+            policy_id="54321",
+            resource_name="ata-orders-api",
+            url=None,
+        )
+        adapter.append_late_alert_work_note("sn-test", alert, blast_radius=["ata-orders-api"], project_id=None)
+
+        assert len(posted_requests) == 1
+        body = posted_requests[0].read().decode()
+        assert "Correlated Alert Ingested" in body
+        assert "console.cloud.google.com" not in body
+        assert "<a " not in body
+
 
 class TestShortDescriptionCleaning:
     """Tests for build_short_description bracket balancing, regex cleaning, and length cap."""
