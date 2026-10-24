@@ -107,6 +107,12 @@ def generate_gemini_synthesis(
         findings_context=findings_context,
         log_excerpt=log_excerpt,
     )
+    try:
+        patch_guidance = get_agent_config().get_patch_instruction("synthesizer")
+    except (KeyError, ValueError):
+        patch_guidance = ""
+    if patch_guidance:
+        prompt = "\n".join((prompt, patch_guidance, ""))
 
     request_body = {
         "contents": [
@@ -171,13 +177,16 @@ def generate_gemini_synthesis(
                     for o in parsed.get("unrelated_observations", [])
                     if str(o).strip()
                 ]
-                return {
+                synthesis: dict[str, Any] = {
                     "root_cause": str(parsed["root_cause"]).strip(),
                     "causal_remediation": causal_list,
                     "unrelated_observations": unrelated_list,
                     "remediation_actions": causal_list,
                     "confidence": float(parsed.get("confidence", 0.95)),
                 }
+                if "fix_proposal" in parsed:
+                    synthesis["fix_proposal"] = parsed["fix_proposal"]
+                return synthesis
         except Exception:
             # Fallback: search for first { and last }
             m = re.search(r"(\{.*\})", clean_text, re.DOTALL)

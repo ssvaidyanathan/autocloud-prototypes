@@ -48,6 +48,7 @@ class SubAgentConfig(BaseModel):
     model: Optional[str] = None
     instruction: Optional[str] = None
     drilldown_instruction: Optional[str] = None
+    patch_instruction: Optional[str] = None
     output_schema: Optional[str] = None
     sub_agents: Optional[List[SubAgentConfig]] = None
 
@@ -152,6 +153,13 @@ class AgentYamlConfig(BaseModel):
                 f"Specialist '{name}' does not define a drilldown_instruction"
             )
         return agent.drilldown_instruction
+
+    def get_patch_instruction(self, name: str) -> str:
+        """Retrieve the optional auto-fix patch proposal instruction for an agent."""
+        agent = self.get_agent(name)
+        if not agent.patch_instruction or not agent.patch_instruction.strip():
+            raise ValueError(f"Agent '{name}' does not define a patch_instruction")
+        return agent.patch_instruction
 
     def get_description(self, name: str) -> str:
         """Retrieve description for an agent (or root dispatcher)."""

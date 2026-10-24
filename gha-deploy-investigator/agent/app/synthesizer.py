@@ -15,6 +15,7 @@ from .contracts.report import (
     TimelineItem,
 )
 from .log_utils import extract_error_lines
+from .patch_extractor import extract_fix_proposal
 from .skills_loader import SkillsLoader, get_skill_toolset_for_target
 from .specialists.base import DiagnosticResult
 
@@ -291,6 +292,12 @@ class SynthesizerAgent:
         if diagnostic_result and diagnostic_result.queries_run:
             queries_appendix["queries_run"] = list(diagnostic_result.queries_run)
 
+        fix_proposal = None
+        if llm_result and "fix_proposal" in llm_result:
+            fix_proposal = extract_fix_proposal(
+                llm_result.get("fix_proposal"), incident.github_branch
+            )
+
         return Report(
             summary=summary,
             impact=f"Pipeline delivery blocked on branch '{incident.github_branch or 'main'}'",
@@ -314,6 +321,7 @@ class SynthesizerAgent:
                 "run_id": incident.github_run_id,
                 "synthesizer_mode": self.synthesizer_mode,
             },
+            fix_proposal=fix_proposal,
         )
 
 
