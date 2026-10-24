@@ -17,6 +17,8 @@ PINNED_TAG="${PINNED_INVENTORY_TAG:-v1.1.0}"
 IMAGE_BASE="us-west1-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${SERVICE_NAME}"
 IMAGE_TAG="${IMAGE_BASE}:${PINNED_TAG}"
 PINNED_IMAGE="${IMAGE_BASE}@${PINNED_DIGEST}"
+ENVIRONMENT="${ENVIRONMENT:-demo}"
+OWNER="${OWNER:-sre-prototypes}"
 
 echo "==================================================================="
 echo "  Deploying ${SERVICE_NAME} to Cloud Run"
@@ -46,7 +48,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --region="${REGION}" \
     --image="${PINNED_IMAGE}" \
     --service-account="${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --set-labels="app=alert-triage-agent,component=ata-inventory-api,role=demo-workload,tier=service,env=demo,managed-by=script,owner=sre-prototypes" \
+    --set-labels="app=alert-triage-agent,component=${NAME_PREFIX}-inventory-api,role=demo-workload,tier=service,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}" \
     --set-env-vars="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},ATA_INVENTORY_INSTANCE_CONNECTION_NAME=${PROJECT_ID}:${REGION}:${NAME_PREFIX}-inventory-db,ATA_INVENTORY_DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,ATA_INVENTORY_DB_NAME=inventory,ATA_INVENTORY_DB_IAM_AUTH=true,ATA_INVENTORY_MOCK_DB=false,DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,MOCK_DB=false" \
     --no-allow-unauthenticated \
     --quiet

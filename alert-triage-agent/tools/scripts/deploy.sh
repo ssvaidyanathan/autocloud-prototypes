@@ -14,6 +14,8 @@ NAME_PREFIX="${NAME_PREFIX:-ata}"
 SERVICE_NAME="${NAME_PREFIX}-tools"
 IMAGE_TAG="us-west1-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${SERVICE_NAME}:latest"
 TOOLS_SA="${NAME_PREFIX}-agent-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+ENVIRONMENT="${ENVIRONMENT:-demo}"
+OWNER="${OWNER:-sre-prototypes}"
 
 echo "==================================================================="
 echo "  Deploying ${SERVICE_NAME} to Cloud Run"
@@ -39,7 +41,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --image="${IMAGE_TAG}" \
     --service-account="${TOOLS_SA}" \
     --no-allow-unauthenticated \
-    --set-labels="app=alert-triage-agent,component=ata-tools,role=triage-system,tier=platform,env=demo,managed-by=script,owner=sre-prototypes" \
+    --set-labels="app=alert-triage-agent,component=${NAME_PREFIX}-tools,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}" \
     --set-env-vars="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},APIGEE_ORG=${PROJECT_ID}"
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)")"

@@ -29,7 +29,8 @@ fi
 PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-cloud-assist-fde-2}}"
 REGION="${REGION:-${GCP_REGION:-us-west1}}"
 NAME_PREFIX="${NAME_PREFIX:-ata}"
-ENVIRONMENT="${ENVIRONMENT:-prod}"
+ENVIRONMENT="${ENVIRONMENT:-demo}"
+OWNER="${OWNER:-sre-prototypes}"
 TFSTATE_BUCKET="${TFSTATE_BUCKET:-}"
 DRY_RUN=false
 
@@ -43,6 +44,7 @@ ${BOLD}Options:${NC}
   -b, --bucket <bucket>     GCS bucket name (default: \${PROJECT_ID}-\${NAME_PREFIX}-tfstate)
   -n, --name-prefix <pfx>   Resource name prefix (default: ${NAME_PREFIX})
   -e, --env <env>           Environment name (default: ${ENVIRONMENT})
+  -o, --owner <owner>       Owner name (default: ${OWNER})
       --dry-run             Print commands without running
   -h, --help                Show this help message
 EOF
@@ -68,6 +70,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -e|--env)
             ENVIRONMENT="$2"
+            shift 2
+            ;;
+        -o|--owner)
+            OWNER="$2"
             shift 2
             ;;
         --dry-run)
@@ -121,7 +127,7 @@ gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" --unifor
 gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" --public-access-prevention
 gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" --versioning
 gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" \
-    --update-labels="app=alert-triage-agent,component=ata-tools,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=sre-prototypes"
+    --update-labels="app=alert-triage-agent,component=${NAME_PREFIX}-tools,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}"
 
 # Generate backend.hcl for foundation stack
 STACKS=("foundation")

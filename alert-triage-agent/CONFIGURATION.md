@@ -274,7 +274,7 @@ All 8 Cloud Monitoring alert policies defined in `infra/terraform/observability/
 | `ata-cloudsql-cpu-high` | `ata-inventory-db` | `data` | `cpu` | `p2` |
 | `ata-cloudsql-connections-critical` | `ata-inventory-db` | `data` | `connections` | `p1` |
 | `ata-apigee-orders-429` | `ata-orders-v1` | `edge` | `rate-limit` | `p2` |
-| `ata-apigee-inventory-5xx` | `ata-inventory-v1` | `edge` | `5xx` | `p1` |
+| `ata-apigee-orders-5xx` | `ata-orders-v1` | `edge` | `5xx` | `p1` |
 
 ### 7.3 Resource Labels & Unsupported Resource Types
 

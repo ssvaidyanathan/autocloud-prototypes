@@ -228,6 +228,15 @@ cd /workspace/alert-triage-agent/bridge
 ./scripts/deploy.sh
 ```
 
+> [!TIP]
+> **Deployment Parameters:**
+> All Cloud Run deployment and bootstrap scripts support configuring target environment and ownership labels via environment variables:
+> - `ENVIRONMENT`: Deployment environment label (`demo`, `staging`, `prod`; default: `demo`).
+> - `OWNER`: Owning engineering team or contact (`sre-prototypes`, `devops`; default: `sre-prototypes`).
+> - `NAME_PREFIX`: Resource name prefix (default: `ata`).
+>
+> Example: `ENVIRONMENT=staging OWNER=infra-team ./scripts/deploy.sh`
+
 ---
 
 ## 9. Step 7: Secret Manager Configuration
