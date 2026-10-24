@@ -9,11 +9,19 @@ from fastapi import Request
 
 from ..config import BridgeConfig, get_settings
 from ..contracts.incident import Incident
-from ..contracts.report import Report
+from ..contracts.report import PullRequestRef, Report
 from ..github.auth import GitHubAppAuth
 from .base import BaseAdapter, IncidentRef, parse_utc_datetime
 
 logger = logging.getLogger(__name__)
+
+
+def format_fix_pr_markdown(pull_request: PullRequestRef) -> str:
+    """Markdown bullet linking to an opened auto-fix pull request."""
+    return (
+        f"* 🛠️ **Automated Fix PR:** [#{pull_request.pr_number}]({pull_request.pr_url}) "
+        "has been opened with proposed remediation."
+    )
 
 
 class _ReusableClientWrapper:
@@ -170,8 +178,14 @@ class GitHubAdapter(BaseAdapter):
             github_commit_author=author,
         )
 
-    def post_report_link(self, incident: Incident, report: Report, ref: IncidentRef) -> None:
-        """Post a Check Run on commit SHA linking to the ServiceNow incident."""
+    def post_report_link(
+        self,
+        incident: Incident,
+        report: Report,
+        ref: IncidentRef,
+        pull_request: Optional[PullRequestRef] = None,
+    ) -> None:
+        """Post a Check Run on commit SHA linking to the ServiceNow incident (and fix PR)."""
         repo_str = incident.github_repo or incident.service_hint or ""
         if not incident.github_head_sha or not repo_str or "/" not in repo_str:
             logger.warning(
@@ -222,6 +236,9 @@ class GitHubAdapter(BaseAdapter):
             "summary": summary,
             "text": report.summary,
         }
+        fix_pr_md = format_fix_pr_markdown(pull_request) if pull_request else None
+        if fix_pr_md:
+            output_data["text"] = f"{report.summary}\n\n{fix_pr_md}"
         if report.annotations:
             output_data["annotations"] = [
                 {
@@ -306,6 +323,8 @@ class GitHubAdapter(BaseAdapter):
                             "</details>\n",
                         ]
                     )
+                if fix_pr_md:
+                    comment_lines.extend([fix_pr_md, ""])
                 comment_lines.extend(
                     [
                         "---",

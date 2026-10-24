@@ -7,7 +7,7 @@ from typing import Any, Optional
 from jinja2 import Environment, FileSystemLoader
 
 from ..contracts.incident import Incident
-from ..contracts.report import Report
+from ..contracts.report import PullRequestRef, Report
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent
 
@@ -178,6 +178,7 @@ def render_standalone_html(
     incident: Optional[Incident] = None,
     config: Optional[Any] = None,
     generated_at: Optional[datetime] = None,
+    pull_request: Optional[PullRequestRef] = None,
 ) -> str:
     """Render standalone elaborate diagnostic dossier HTML report for ticket attachments."""
     if incident is None and isinstance(incident_ref, Incident):
@@ -259,6 +260,8 @@ def render_standalone_html(
         servicenow_url=servicenow_url,
         model_name=model_name,
         generated_at=gen_time,
+        fix_proposal=report.fix_proposal,
+        pull_request=pull_request,
     )
 
 

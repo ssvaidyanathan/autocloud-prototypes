@@ -8,7 +8,7 @@ from fastapi import Request
 
 from ..config import BridgeConfig, get_settings
 from ..contracts.incident import Incident
-from ..contracts.report import Report
+from ..contracts.report import PullRequestRef, Report
 from ..templates.renderer import (
     chunk_servicenow_work_note,
     render_servicenow_html,
@@ -67,6 +67,14 @@ def build_servicenow_description(
         lines.append(f"Workflow Run URL: {incident.external_url}")
 
     return "\n".join(lines)
+
+
+def format_fix_pr_work_note(pull_request: PullRequestRef) -> str:
+    """Work note announcing an opened auto-fix pull request."""
+    return (
+        f"[Auto-Fix Initiated] Pull Request #{pull_request.pr_number} created on branch "
+        f"{pull_request.branch_name} to remediate failure: {pull_request.pr_url}"
+    )
 
 
 class ServiceNowAdapter(BaseAdapter):
@@ -226,7 +234,12 @@ class ServiceNowAdapter(BaseAdapter):
             reporter=data.get("caller_id"),
         )
 
-    def create_incident_with_report(self, incident: Incident, report: Report) -> IncidentRef:
+    def create_incident_with_report(
+        self,
+        incident: Incident,
+        report: Report,
+        pull_request: Optional[PullRequestRef] = None,
+    ) -> IncidentRef:
         """Create a ServiceNow ticket or update an existing one using correlation_id."""
         base_url = (
             self.config.servicenow_instance_url or "https://example.service-now.com"
@@ -328,7 +341,11 @@ class ServiceNowAdapter(BaseAdapter):
                         f"&file_name=ci_cd_investigation_report_{number}.html"
                     )
                     standalone_html = render_standalone_html(
-                        report, incident_ref=ref, incident=incident, config=self.config
+                        report,
+                        incident_ref=ref,
+                        incident=incident,
+                        config=self.config,
+                        pull_request=pull_request,
                     )
                     att_resp = client.post(
                         attachment_endpoint,
@@ -401,7 +418,11 @@ class ServiceNowAdapter(BaseAdapter):
                     f"&file_name=ci_cd_investigation_report_{number}.html"
                 )
                 standalone_html = render_standalone_html(
-                    report, incident_ref=ref, incident=incident, config=self.config
+                    report,
+                    incident_ref=ref,
+                    incident=incident,
+                    config=self.config,
+                    pull_request=pull_request,
                 )
                 att_resp = client.post(
                     attachment_endpoint,
@@ -458,6 +479,21 @@ class ServiceNowAdapter(BaseAdapter):
                 resp.raise_for_status()
 
         self._execute_with_retry(_do_report)
+
+    def post_fix_pr_note(self, ref: IncidentRef, pull_request: PullRequestRef) -> None:
+        """Post a work note linking the auto-fix pull request; incident stays In Progress."""
+        base_url = (self.config.servicenow_instance_url or "").rstrip("/")
+        if not base_url:
+            return
+        endpoint = f"{base_url}/api/now/table/incident/{ref.external_id}"
+        note = format_fix_pr_work_note(pull_request)
+
+        def _do_note() -> None:
+            with self._get_client() as client:
+                resp = client.patch(endpoint, json={"work_notes": note})
+                resp.raise_for_status()
+
+        self._execute_with_retry(_do_note)
 
     def post_failure(self, ref: IncidentRef, error: str) -> None:
         """Post failure note to ServiceNow."""
