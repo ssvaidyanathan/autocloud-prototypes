@@ -82,6 +82,10 @@ Ensure the following tools and permissions are configured on your operator works
 4. **Active IAM Role**: `roles/owner` or `roles/editor` with `roles/resourcemanager.projectIamAdmin` on `cloud-assist-fde-2`.
 5. **Apigee X Setup**: Existing Apigee organization `cloud-assist-fde-2` with environment `prod` bound to envgroup hostname `8.233.247.52.nip.io`.
 
+> [!IMPORTANT]
+> **Resource Labels & Metadata Policy:**
+> All newly provisioned or deployed resources in `cloud-assist-fde-2` must carry standard labels (`app=alert-triage-agent`, `component`, `role`, `tier`, `env`, `managed-by`, `owner`). For resources that do not natively support GCP labels (such as Apigee API proxies and Cloud Tasks queues), metadata must be recorded in proxy bundle `<Description>` tags. Refer to [`CONFIGURATION.md`](file:///workspace/pr-ata-labels/alert-triage-agent/CONFIGURATION.md#7-labels--metadata) for the complete label specification, allowed values, and agent ingestion rules.
+
 ---
 
 ## 2. Step 0: Terraform State Bootstrap

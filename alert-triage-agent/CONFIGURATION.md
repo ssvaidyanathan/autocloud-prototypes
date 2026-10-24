@@ -242,3 +242,59 @@ Client traffic reaching the demo microservices routes through Apigee X environme
 | **Credential Key File** | `/workspace/alert-triage-agent/.ata-api-key` | Stores consumer API key. |
 | **Authentication Header** | `x-api-key: <KEY>` | Header enforced on protected proxy endpoints. |
 | **Query Parameter Auth** | `?apikey=<KEY>` | Query parameter fallback for API key validation. |
+
+---
+
+## 7. Labels & Metadata
+
+To ensure operational clarity, multi-tenant safety, and deterministic triage routing across Google Cloud Platform and ServiceNow, all Alert Triage Agent (ATA) resources conform to a unified label and metadata scheme.
+
+### 7.1 Label Scheme & Value Requirements
+
+All GCP resource labels adhere to Google Cloud's labeling rules: lowercase alphanumeric characters, underscores (`_`), and dashes (`-`), with a maximum length of 63 characters (`^[a-z0-9_-]{1,63}$`).
+
+| Label Key | Allowed Values / Pattern | Purpose |
+| :--- | :--- | :--- |
+| `app` | `alert-triage-agent` | Namespace identifier identifying all ATA project resources. |
+| `component` | Component ID matching `TOPOLOGY.md` (`ata-orders-api`, `ata-inventory-api`, `ata-inventory-db`, `ata-orders-v1`, `ata-inventory-v1`) or system parts (`ata-agent`, `ata-bridge`, `ata-tools`). | Topology mapping identifier. |
+| `role` | `demo-workload` \| `triage-system` | Distinguishes monitored workloads from triage control-plane components. |
+| `tier` | `edge` \| `service` \| `data` \| `platform` | Architectural tier in the topology hierarchy. |
+| `env` | `demo` \| `staging` \| `prod` | Deployment environment (default: `demo`). |
+| `managed-by` | `terraform` \| `script` | Identifies provisioning authority. |
+| `owner` | Configurable variable (default: `sre-prototypes`) | Owning engineering team or proto lead. |
+
+### 7.2 Alert Policy User Labels
+
+All 8 Cloud Monitoring alert policies defined in `infra/terraform/observability/main.tf` attach `user_labels`:
+
+| Policy Name | Component | Tier | Signal | Severity |
+| :--- | :--- | :--- | :--- | :--- |
+| `ata-orders-5xx` | `ata-orders-api` | `service` | `5xx` | `p1` |
+| `ata-orders-latency` | `ata-orders-api` | `service` | `latency` | `p2` |
+| `ata-inventory-5xx` | `ata-inventory-api` | `service` | `5xx` | `p1` |
+| `ata-inventory-latency` | `ata-inventory-api` | `service` | `latency` | `p2` |
+| `ata-cloudsql-cpu-high` | `ata-inventory-db` | `data` | `cpu` | `p2` |
+| `ata-cloudsql-connections-critical` | `ata-inventory-db` | `data` | `connections` | `p1` |
+| `ata-apigee-orders-429` | `ata-orders-v1` | `edge` | `rate-limit` | `p2` |
+| `ata-apigee-inventory-5xx` | `ata-inventory-v1` | `edge` | `5xx` | `p1` |
+
+### 7.3 Resource Labels & Unsupported Resource Types
+
+1. **Labeled Resources:**
+   - **Cloud Run Services:** `ata-orders-api`, `ata-inventory-api`, `ata-agent`, `ata-bridge`, `ata-tools` via Terraform `labels` or `gcloud run deploy --set-labels`.
+   - **Cloud SQL Instances:** `ata-inventory-db` via Terraform `user_labels`.
+   - **Cloud Storage Buckets:** State bucket `gs://cloud-assist-fde-2-ata-tfstate/` and incidents bucket `gs://cloud-assist-fde-2-ata-incidents/`.
+   - **Artifact Registry & Secrets:** `docker_repo` and Secret Manager secrets (`ata-webhook-token`, placeholder secrets).
+2. **Unsupported Resource Types:**
+   - **Apigee X Proxies:** Apigee API proxies do not support GCP resource labels. Instead, metadata is recorded in the `<Description>` tag of the proxy XML definition (`apiproxy/<proxy-name>.xml`), formatted as `[app=alert-triage-agent component=... tier=edge role=demo-workload env=demo managed-by=script owner=sre-prototypes]`.
+   - **Cloud Tasks Queues:** Cloud Tasks queues do not support GCP resource labels.
+
+### 7.4 Agent Ingestion & Investigation Usage
+
+- **`component` Precedence & Validation:**
+  When Cloud Monitoring triggers an incident webhook, the incident payload carries `incident.policy_user_labels['component']`. `AlertEvent.from_monitoring_payload` uses this field as the primary source of truth for component identification, validating it against `TOPOLOGY.md` or raising `ValueError` if unrecognized. If `policy_user_labels` does not define `component`, the agent falls back to canonicalizing `resource.labels` with an audit log.
+- **`signal` Hint for Correlation & Root Cause:**
+  The `signal` label (`5xx`, `latency`, `rate-limit`, `connections`, `cpu`) serves as a directional hypothesis for correlation scoring and root cause analysis. For instance, a `rate-limit` signal at the edge (`ata-orders-v1`) indicates client throttling at the edge and prevents false causal linking to backend database connection pool exhaustion. Crucially, the `signal` label is treated as supporting evidence only—it never supersedes empirical telemetry inspection.
+- **Incident Storage & Reporting:**
+  Labels are persisted in the Open Knowledge File (OKF) incident record and rendered in both the triage summary report and the bridge HTML notification table (`Labels` column with badges).
+
