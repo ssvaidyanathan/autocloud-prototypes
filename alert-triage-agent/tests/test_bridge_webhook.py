@@ -78,6 +78,81 @@ def test_webhook_valid_token_parses_payload(client, test_config):
     assert dup_data["incident_id"] == "0.12345678"
 
 
+def test_real_webhook_payload_with_policy_user_labels_passes_bridge_and_reaches_agent(client, test_config, tmp_path):
+    """Verify real webhook payload with policy_user_labels component=ata-inventory-api passes bridge (202) and reaches agent."""
+    from agent.app.main import app as agent_app
+    from agent.app.config import AgentConfig, get_agent_settings
+    from bridge.app.main import get_dispatcher
+    from fastapi.testclient import TestClient
+
+    agent_cfg = AgentConfig(
+        project_id="cloud-assist-fde-2",
+        incident_store_path=str(tmp_path),
+        fallback_store_path=str(tmp_path),
+        is_local=True,
+    )
+    agent_app.dependency_overrides[get_agent_settings] = lambda: agent_cfg
+
+    real_payload = {
+        "version": "1.2",
+        "incident": {
+            "incident_id": "0.oe7hh3n6tkr3",
+            "resource_id": "projects/cloud-assist-fde-2/locations/us-west1/services/ata-inventory-api",
+            "resource_name": "ata-inventory-api",
+            "resource_type": "cloud_run_revision",
+            "state": "open",
+            "started_at": 1729631700,
+            "policy_name": "projects/cloud-assist-fde-2/alertPolicies/ata-inventory-5xx",
+            "condition_name": "Cloud Run 5xx rate high",
+            "summary": "ata-inventory-api 5xx rate high",
+            "policy_user_labels": {
+                "app": "alert-triage-agent",
+                "component": "ata-inventory-api",
+                "tier": "service",
+                "signal": "5xx",
+                "severity": "p1",
+            },
+            "resource": {
+                "type": "cloud_run_revision",
+                "labels": {
+                    "service_name": "ata-inventory-api",
+                    "location": "us-west1",
+                    "project_id": "cloud-assist-fde-2",
+                },
+            },
+        },
+    }
+
+    # 1. Post to bridge webhook -> 202 Accepted
+    resp = client.post("/webhook/monitoring?token=secret-webhook-token", json=real_payload)
+    assert resp.status_code == 202
+    data = resp.json()
+    assert data["status"] == "accepted"
+    assert data["incident_id"] == "0.oe7hh3n6tkr3"
+    assert "task_id" in data
+
+    # 2. Extract enqueued task payload from dispatcher
+    dispatcher = get_dispatcher(test_config)
+    task_name = dispatcher.get_task_name(data["task_id"])
+    enqueued_body = dispatcher.local_payloads[task_name]
+    assert enqueued_body["alert"]["resource_name"] == "ata-inventory-api"
+    assert enqueued_body["alert"]["policy_user_labels"]["component"] == "ata-inventory-api"
+
+    # 3. Deliver to agent /triage endpoint -> 200 Triaged
+    from agent.app.timers.scheduler import set_timer_scheduler_hook
+    set_timer_scheduler_hook(lambda **kwargs: "mock-timer-task")
+    try:
+        with TestClient(agent_app) as agent_client:
+            agent_resp = agent_client.post("/triage", json=enqueued_body)
+            assert agent_resp.status_code == 200
+            agent_data = agent_resp.json()
+            assert agent_data["status"] == "triaged"
+            assert "group_id" in agent_data
+    finally:
+        set_timer_scheduler_hook(None)
+        agent_app.dependency_overrides.clear()
+
+
 def test_webhook_drops_non_ata_alert(client):
     """Assert non-ata alert policies are ignored with HTTP 200 and not dispatched."""
     non_ata_payload = {

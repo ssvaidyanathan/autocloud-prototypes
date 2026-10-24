@@ -13,13 +13,11 @@ from ..contracts.alert import AlertEvent, slugify
 from ..contracts.report import InvestigationReport
 from .dispatcher import TaskDispatcher
 
-try:
-    from topology.topology_graph import get_blast_radius, calculate_hop_distance, _canonicalize_node, get_upstream_dependencies
-except ImportError:
-    get_blast_radius = None
-    calculate_hop_distance = None
-    _canonicalize_node = None
-    get_upstream_dependencies = None
+# Lean bridge does not validate components or read topology; topology is agent-owned.
+get_blast_radius = None
+calculate_hop_distance = None
+_canonicalize_node = None
+get_upstream_dependencies = None
 
 logger = logging.getLogger(__name__)
 

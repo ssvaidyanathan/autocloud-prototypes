@@ -17,6 +17,15 @@ from .base import BaseSpecialist, EvidenceDossier
 
 logger = logging.getLogger(__name__)
 
+try:
+    from topology.topology_graph import get_loader
+except ImportError:
+    try:
+        from alert_triage_agent.topology.topology_graph import get_loader
+    except ImportError as err:
+        logger.error("Failed to import topology_graph: %s", err)
+        raise
+
 
 class ApigeeSpecialist(BaseSpecialist):
     """Specialist agent diagnosing Apigee ingress proxy faults via real read-only telemetry."""
@@ -36,29 +45,23 @@ class ApigeeSpecialist(BaseSpecialist):
             or alert.resource_name
         )
         target_proxy = str(raw_proxy)
-        try:
-            from topology.topology_graph import get_loader
-        except ImportError:
-            get_loader = None
-
-        if get_loader is not None:
-            loader = get_loader()
-            canon = loader.canonicalize(target_proxy)
-            comp = loader.components.get(canon) if canon else None
-            if comp and "apigee" in comp.type.lower():
+        loader = get_loader()
+        canon = loader.canonicalize(target_proxy)
+        comp = loader.components.get(canon) if canon else None
+        if comp and "apigee" in comp.type.lower():
+            target_proxy = canon
+        else:
+            callers = loader.downstream(canon) if canon else []
+            proxy_caller = next(
+                (c for c in callers if loader.components.get(c) and "apigee" in loader.components[c].type.lower()),
+                None,
+            )
+            if proxy_caller:
+                target_proxy = proxy_caller
+            elif canon:
                 target_proxy = canon
-            else:
-                callers = loader.downstream(canon) if canon else []
-                proxy_caller = next(
-                    (c for c in callers if loader.components.get(c) and "apigee" in loader.components[c].type.lower()),
-                    None,
-                )
-                if proxy_caller:
-                    target_proxy = proxy_caller
-                elif canon:
-                    target_proxy = canon
-        elif target_proxy.startswith("ata-apigee-"):
-            target_proxy = "ata-" + target_proxy[len("ata-apigee-"):]
+            elif target_proxy.startswith("ata-apigee-"):
+                target_proxy = "ata-" + target_proxy[len("ata-apigee-"):]
 
         findings: list[str] = []
         evidence_items: list[EvidenceItem] = []

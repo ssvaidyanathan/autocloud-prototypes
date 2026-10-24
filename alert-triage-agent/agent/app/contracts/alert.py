@@ -118,24 +118,22 @@ logger = logging.getLogger(__name__)
 SYSTEM_PARTS: Set[str] = {"ata-agent", "ata-bridge", "ata-tools"}
 
 
+try:
+    from topology.loader import get_loader
+except ImportError:
+    try:
+        from alert_triage_agent.topology.loader import get_loader
+    except ImportError as exc:
+        logger.error("Failed to import topology loader: %s", exc)
+        raise
+
+
 def load_topology_components() -> Set[str]:
     """Load valid component IDs and aliases from TOPOLOGY.md via topology.loader, supplemented with system parts."""
     components = set(SYSTEM_PARTS)
-    try:
-        from topology.loader import get_loader
-    except ImportError:
-        try:
-            from alert_triage_agent.topology.loader import get_loader
-        except ImportError:
-            get_loader = None
-
-    if get_loader is not None:
-        try:
-            loader = get_loader()
-            components.update(loader.components.keys())
-            components.update(loader.alias_map.keys())
-        except Exception as exc:
-            logger.debug("Failed to load components from topology.loader: %s", exc)
+    loader = get_loader()
+    components.update(loader.components.keys())
+    components.update(loader.alias_map.keys())
     return components
 
 
@@ -184,18 +182,31 @@ class AlertEvent(BaseModel):
             comp = data["policy_user_labels"].get("component")
             if comp:
                 comp_clean = str(comp).strip()
-                if not is_valid_component(comp_clean):
-                    raise ValueError(
-                        f"Unknown component '{comp_clean}' in policy_user_labels (not defined in TOPOLOGY.md)"
-                    )
-                # Component label takes precedence over resource_name
                 inc_id = data.get("incident_id", "unknown")
-                data["resource_name"] = comp_clean
-                logger.info(
-                    "Mapped alert %s to component '%s' from policy_user_labels['component']",
-                    inc_id,
-                    comp_clean,
-                )
+                if is_valid_component(comp_clean):
+                    # Valid component label takes precedence over resource_name
+                    data["resource_name"] = comp_clean
+                    logger.info(
+                        "Mapped alert %s to component '%s' from policy_user_labels['component']",
+                        inc_id,
+                        comp_clean,
+                    )
+                else:
+                    logger.warning(
+                        "Unknown component '%s' in policy_user_labels for incident %s (not defined in TOPOLOGY.md); falling back to resource canonicalization",
+                        comp_clean,
+                        inc_id,
+                    )
+                    # Never reject: keep and canonicalize existing resource_name
+                    raw_res = str(data.get("resource_name") or "")
+                    if raw_res:
+                        data["resource_name"] = normalize_resource_name(raw_name=raw_res)
+                    else:
+                        data["resource_name"] = normalize_resource_name(
+                            raw_name="",
+                            res_type=str(data.get("resource_type") or ""),
+                            res_labels=data.get("resource_labels") if isinstance(data.get("resource_labels"), dict) else None,
+                        )
         return data
 
     @field_validator("started_at", mode="before")
@@ -289,16 +300,29 @@ class AlertEvent(BaseModel):
         component_label = pol_user_labels.get("component")
         if component_label:
             comp_clean = str(component_label).strip()
-            if not is_valid_component(comp_clean):
-                raise ValueError(
-                    f"Unknown component '{comp_clean}' in policy_user_labels for incident {inc_id} (not defined in TOPOLOGY.md)"
+            if is_valid_component(comp_clean):
+                res_name = comp_clean
+                logger.info(
+                    "Mapped alert %s to component '%s' from policy user label 'component'",
+                    inc_id,
+                    res_name,
                 )
-            res_name = comp_clean
-            logger.info(
-                "Mapped alert %s to component '%s' from policy user label 'component'",
-                inc_id,
-                res_name,
-            )
+            else:
+                logger.warning(
+                    "Unknown component '%s' in policy_user_labels for incident %s (not defined in TOPOLOGY.md); falling back to resource canonicalization",
+                    comp_clean,
+                    inc_id,
+                )
+                res_name = normalize_resource_name(
+                    raw_name=raw_res_name,
+                    res_type=res_type,
+                    res_labels=res_labels,
+                )
+                logger.info(
+                    "Mapped alert %s to component '%s' from resource-label canonicalization fallback",
+                    inc_id,
+                    res_name,
+                )
         else:
             res_name = normalize_resource_name(
                 raw_name=raw_res_name,

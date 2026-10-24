@@ -96,8 +96,9 @@ def test_alert_event_falls_back_to_resource_canonicalization_without_component()
     assert "component" not in event.policy_user_labels
 
 
-def test_alert_event_rejects_unrecognized_component_with_value_error():
-    """Verify that an unrecognized component name raises ValueError."""
+def test_alert_event_warns_and_falls_back_on_unrecognized_component(caplog):
+    """Verify that an unrecognized component name logs a WARNING and falls back to resource canonicalization (never rejects)."""
+    import logging
     payload = {
         "incident": {
             "incident_id": "inc-004",
@@ -116,19 +117,28 @@ def test_alert_event_rejects_unrecognized_component_with_value_error():
         }
     }
 
-    with pytest.raises(ValueError, match="Unknown component"):
-        AlertEvent.from_monitoring_payload(payload)
+    with caplog.at_level(logging.WARNING):
+        event = AlertEvent.from_monitoring_payload(payload)
+
+    assert event.resource_name == "ata-inventory-api"
+    assert event.policy_user_labels["component"] == "completely-invalid-nonexistent-component"
+    assert any("Unknown component 'completely-invalid-nonexistent-component'" in r.message for r in caplog.records)
 
 
-def test_direct_alert_event_instantiation_rejects_unknown_component():
-    """Verify direct AlertEvent model instantiation also validates component."""
-    with pytest.raises(ValueError, match="Unknown component"):
-        AlertEvent(
+def test_direct_alert_event_instantiation_warns_and_falls_back_on_unrecognized_component(caplog):
+    """Verify direct AlertEvent model instantiation also warns and falls back without rejecting."""
+    import logging
+    with caplog.at_level(logging.WARNING):
+        event = AlertEvent(
             incident_id="inc-005",
             policy_name="ata-test",
             resource_name="ata-orders-api",
             policy_user_labels={"component": "bogus-component"},
         )
+
+    assert event.resource_name == "ata-orders-api"
+    assert event.policy_user_labels["component"] == "bogus-component"
+    assert any("Unknown component 'bogus-component'" in r.message for r in caplog.records)
 
 
 # ==============================================================================

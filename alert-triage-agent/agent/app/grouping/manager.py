@@ -41,6 +41,15 @@ from .suppression import (
 
 logger = logging.getLogger(__name__)
 
+try:
+    from topology.topology_graph import get_blast_radius
+except ImportError:
+    try:
+        from alert_triage_agent.topology.topology_graph import get_blast_radius
+    except ImportError as exc:
+        logger.error("Failed to import get_blast_radius from topology_graph: %s", exc)
+        raise
+
 
 _global_ingest_lock = threading.RLock()
 
@@ -419,17 +428,11 @@ class GroupingManager:
         # Compute initial blast radius
         initial_blast = [alert.resource_name]
         try:
-            from topology.topology_graph import get_blast_radius
-        except ImportError:
-            get_blast_radius = None
-
-        if get_blast_radius is not None:
-            try:
-                for b in get_blast_radius(alert.resource_name):
-                    if b not in initial_blast:
-                        initial_blast.append(b)
-            except Exception as b_exc:
-                logger.debug("Failed computing blast radius: %s", b_exc)
+            for b in get_blast_radius(alert.resource_name):
+                if b not in initial_blast:
+                    initial_blast.append(b)
+        except Exception as b_exc:
+            logger.debug("Failed computing blast radius: %s", b_exc)
 
         new_doc = OKFDocument(
             group_id=group_id,

@@ -114,12 +114,96 @@ for mod in modules_to_test:
         print(f"FAILED TO IMPORT {mod}: {exc}", file=sys.stderr)
         sys.exit(1)
 
+# Verify topology package is NOT present or needed in bridge container
+try:
+    importlib.import_module('topology')
+    print("FAILED: topology package should not be importable in bridge container", file=sys.stderr)
+    sys.exit(1)
+except ImportError:
+    pass
+
+# Verify parsing a real alert with component=ata-inventory-api succeeds in bridge without topology
+alert_mod = importlib.import_module('app.contracts.alert')
+real_payload = {
+    'incident': {
+        'incident_id': '0.bridge_lean_check_001',
+        'policy_name': 'projects/cloud-assist-fde-2/alertPolicies/ata-inventory-5xx',
+        'resource_name': 'ata-inventory-api',
+        'state': 'open',
+        'started_at': 1729631700,
+        'policy_user_labels': {
+            'app': 'alert-triage-agent',
+            'component': 'ata-inventory-api',
+            'tier': 'service',
+            'signal': '5xx',
+            'severity': 'p1',
+        },
+        'resource': {
+            'type': 'cloud_run_revision',
+            'labels': {'service_name': 'ata-inventory-api'},
+        },
+    }
+}
+event = alert_mod.AlertEvent.from_monitoring_payload(real_payload)
+assert event.resource_name == 'ata-inventory-api', f"Expected ata-inventory-api, got {event.resource_name}"
+assert event.policy_user_labels.get('component') == 'ata-inventory-api'
+
 print("ALL BRIDGE CONTAINER MODULES IMPORTED CLEANLY")
         """,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     assert proc.returncode == 0, f"Bridge container import check failed: {proc.stderr}\n{proc.stdout}"
     assert "ALL BRIDGE CONTAINER MODULES IMPORTED CLEANLY" in proc.stdout
+
+
+def test_agent_fails_loudly_without_topology():
+    """Assert that agent alert contracts fail loudly with ImportError at startup when topology is missing."""
+    agent_dir = str(REPO_ROOT / "agent")
+    cmd = [
+        sys.executable,
+        "-c",
+        """
+import sys
+# Exclude REPO_ROOT so topology package cannot be resolved
+sys.path = ['""" + agent_dir + """'] + [p for p in sys.path if 'site-packages' in p or 'lib/python' in p]
+
+try:
+    import app.contracts.alert
+    print("UNEXPECTED: agent contracts should have failed loudly without topology loader", file=sys.stderr)
+    sys.exit(1)
+except ImportError:
+    print("AGENT FAILED LOUDLY WITHOUT TOPOLOGY LOADER AS EXPECTED")
+    sys.exit(0)
+        """,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode == 0, f"Agent did not fail loudly without topology: {proc.stderr}\n{proc.stdout}"
+    assert "AGENT FAILED LOUDLY WITHOUT TOPOLOGY LOADER AS EXPECTED" in proc.stdout
+
+
+def test_tools_fails_loudly_without_topology():
+    """Assert that tools alert contracts fail loudly with ImportError at startup when topology is missing."""
+    tools_dir = str(REPO_ROOT / "tools")
+    cmd = [
+        sys.executable,
+        "-c",
+        """
+import sys
+# Exclude REPO_ROOT so topology package cannot be resolved
+sys.path = ['""" + tools_dir + """'] + [p for p in sys.path if 'site-packages' in p or 'lib/python' in p]
+
+try:
+    import app.contracts.alert
+    print("UNEXPECTED: tools contracts should have failed loudly without topology loader", file=sys.stderr)
+    sys.exit(1)
+except ImportError:
+    print("TOOLS FAILED LOUDLY WITHOUT TOPOLOGY LOADER AS EXPECTED")
+    sys.exit(0)
+        """,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode == 0, f"Tools did not fail loudly without topology: {proc.stderr}\n{proc.stdout}"
+    assert "TOOLS FAILED LOUDLY WITHOUT TOPOLOGY LOADER AS EXPECTED" in proc.stdout
 
 
 def test_tools_container_import_layout():

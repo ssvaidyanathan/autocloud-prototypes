@@ -115,35 +115,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PARTS: Set[str] = {"ata-agent", "ata-bridge", "ata-tools"}
-
-
-def load_topology_components() -> Set[str]:
-    """Load valid component IDs and aliases from TOPOLOGY.md via topology.loader, supplemented with system parts."""
-    components = set(SYSTEM_PARTS)
-    try:
-        from topology.loader import get_loader
-    except ImportError:
-        try:
-            from alert_triage_agent.topology.loader import get_loader
-        except ImportError:
-            get_loader = None
-
-    if get_loader is not None:
-        try:
-            loader = get_loader()
-            components.update(loader.components.keys())
-            components.update(loader.alias_map.keys())
-        except Exception as exc:
-            logger.debug("Failed to load components from topology.loader: %s", exc)
-    return components
+# NOTE (Architectural Principle): This copy deliberately diverges from the agent and tools
+# contracts. Per the LEAN BRIDGE user principle, the bridge does NOT validate components
+# or read topology. In the bridge, policy_user_labels are parsed and passed through to
+# the agent unchanged, and no topology modules are packaged or imported in the bridge container.
+# Component validation is strictly agent-owned.
 
 
 def is_valid_component(component: str) -> bool:
-    """Validate if a component identifier matches TOPOLOGY.md or system parts."""
-    if not component or not isinstance(component, str):
-        return False
-    return component.strip() in load_topology_components()
+    """In lean bridge, component validation is skipped (topology is agent-owned)."""
+    return bool(component and isinstance(component, str) and component.strip())
 
 
 class AlertEvent(BaseModel):
@@ -184,15 +165,12 @@ class AlertEvent(BaseModel):
             comp = data["policy_user_labels"].get("component")
             if comp:
                 comp_clean = str(comp).strip()
-                if not is_valid_component(comp_clean):
-                    raise ValueError(
-                        f"Unknown component '{comp_clean}' in policy_user_labels (not defined in TOPOLOGY.md)"
-                    )
-                # Component label takes precedence over resource_name
+                # Lean bridge does not validate components against topology.
+                # Component label maps directly to resource_name and passes through to agent unchanged.
                 inc_id = data.get("incident_id", "unknown")
                 data["resource_name"] = comp_clean
                 logger.info(
-                    "Mapped alert %s to component '%s' from policy_user_labels['component']",
+                    "Mapped alert %s to component '%s' from policy_user_labels['component'] (bridge pass-through)",
                     inc_id,
                     comp_clean,
                 )
@@ -285,17 +263,13 @@ class AlertEvent(BaseModel):
         if isinstance(raw_labels, dict):
             pol_user_labels = {str(k): str(v) for k, v in raw_labels.items()}
 
-        # Map alert -> component FIRST from policy user label 'component'
+        # Map alert -> component FIRST from policy user label 'component' (bridge pass-through, no topology check)
         component_label = pol_user_labels.get("component")
         if component_label:
             comp_clean = str(component_label).strip()
-            if not is_valid_component(comp_clean):
-                raise ValueError(
-                    f"Unknown component '{comp_clean}' in policy_user_labels for incident {inc_id} (not defined in TOPOLOGY.md)"
-                )
             res_name = comp_clean
             logger.info(
-                "Mapped alert %s to component '%s' from policy user label 'component'",
+                "Mapped alert %s to component '%s' from policy user label 'component' (bridge pass-through)",
                 inc_id,
                 res_name,
             )

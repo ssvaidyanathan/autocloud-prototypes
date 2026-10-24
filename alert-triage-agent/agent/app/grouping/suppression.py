@@ -18,6 +18,15 @@ from .models import OKFDocument
 
 logger = logging.getLogger(__name__)
 
+try:
+    from topology.topology_graph import get_blast_radius, get_upstream_dependencies
+except ImportError:
+    try:
+        from alert_triage_agent.topology.topology_graph import get_blast_radius, get_upstream_dependencies
+    except ImportError as exc:
+        logger.error("Failed to import topology_graph: %s", exc)
+        raise
+
 
 class SuppressionType(str, Enum):
     """Reason for alert suppression or attachment action."""
@@ -142,28 +151,20 @@ def safe_promote_upstream_origin(doc: OKFDocument, alert: AlertEvent) -> bool:
         return False
 
     try:
-        from topology.topology_graph import get_blast_radius, get_upstream_dependencies
-    except ImportError:
-        get_upstream_dependencies = None
-        get_blast_radius = None
-
-    if get_upstream_dependencies is not None:
-        try:
-            upstreams = get_upstream_dependencies(curr_origin)
-            if alert.resource_name in upstreams:
-                logger.info(
-                    "Promoting group %s origin from %s to upstream %s",
-                    doc.group_id,
-                    curr_origin,
-                    alert.resource_name,
-                )
-                doc.origin = alert.resource_name
-                if get_blast_radius is not None:
-                    for b in get_blast_radius(doc.origin):
-                        if b not in doc.blast_radius:
-                            doc.blast_radius.append(b)
-                return True
-        except Exception as exc:
+        upstreams = get_upstream_dependencies(curr_origin)
+        if alert.resource_name in upstreams:
+            logger.info(
+                "Promoting group %s origin from %s to upstream %s",
+                doc.group_id,
+                curr_origin,
+                alert.resource_name,
+            )
+            doc.origin = alert.resource_name
+            for b in get_blast_radius(doc.origin):
+                if b not in doc.blast_radius:
+                    doc.blast_radius.append(b)
+            return True
+    except Exception as exc:
             logger.debug("Failed checking upstream dependencies during safe origin update: %s", exc)
 
     if alert.resource_name not in doc.blast_radius:
