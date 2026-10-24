@@ -409,10 +409,7 @@ class GroupingManager:
         try:
             from topology.topology_graph import get_blast_radius
         except ImportError:
-            try:
-                from agent.topology.topology_graph import get_blast_radius
-            except ImportError:
-                get_blast_radius = None
+            get_blast_radius = None
 
         if get_blast_radius is not None:
             try:

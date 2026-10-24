@@ -21,6 +21,11 @@ echo "  Project: ${PROJECT_ID} | Region: ${REGION}"
 echo "==================================================================="
 
 # 1. Build and push container image using Cloud Build
+echo "Syncing single topology package into tools build context..."
+rm -rf "${TOOLS_DIR}/topology"
+cp -r "${TOOLS_DIR}/../topology" "${TOOLS_DIR}/topology"
+trap 'rm -rf "${TOOLS_DIR}/topology"' EXIT
+
 echo "Building container image ${IMAGE_TAG} via Cloud Build..."
 gcloud builds submit "${TOOLS_DIR}" \
     --project="${PROJECT_ID}" \

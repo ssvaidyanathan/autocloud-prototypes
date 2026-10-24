@@ -27,7 +27,7 @@ import pkgutil
 import sys
 
 # Simulate Cloud Run container environment: PYTHONPATH=/app
-sys.path = ['""" + agent_dir + """'] + [p for p in sys.path if 'site-packages' in p or 'lib/python' in p]
+sys.path = ['""" + agent_dir + """', '""" + str(REPO_ROOT) + """'] + [p for p in sys.path if 'site-packages' in p or 'lib/python' in p]
 
 # Modules to verify in agent container layout
 modules_to_test = [
@@ -132,13 +132,13 @@ def test_tools_container_import_layout():
 import importlib
 import sys
 
-sys.path = ['""" + tools_dir + """'] + [p for p in sys.path if 'site-packages' in p or 'lib/python' in p]
+sys.path = ['""" + tools_dir + """', '""" + str(REPO_ROOT) + """'] + [p for p in sys.path if 'site-packages' in p or 'lib/python' in p]
 
 modules_to_test = [
     'app.config',
     'app.contracts.alert',
     'app.bundle_parser',
-    'app.topology_graph',
+    'topology.topology_graph',
     'app.server',
     'app.main',
 ]

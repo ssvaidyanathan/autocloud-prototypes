@@ -78,11 +78,8 @@ def safe_promote_upstream_origin(doc: OKFDocument, alert: AlertEvent) -> bool:
     try:
         from topology.topology_graph import get_blast_radius, get_upstream_dependencies
     except ImportError:
-        try:
-            from agent.topology.topology_graph import get_blast_radius, get_upstream_dependencies
-        except ImportError:
-            get_upstream_dependencies = None
-            get_blast_radius = None
+        get_upstream_dependencies = None
+        get_blast_radius = None
 
     if get_upstream_dependencies is not None:
         try:
