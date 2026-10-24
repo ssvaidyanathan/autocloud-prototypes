@@ -136,6 +136,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <tr style="background: #f6f8fa;">
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Policy Name</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Resource</th>
+            <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Component</th>
+            <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Signal</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Incident ID</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Labels</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">State</th>
@@ -154,6 +156,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </td>
             <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
               <a href="{{ res_url }}" target="_blank" class="console-link" style="color: #0969da; text-decoration: none;"><code>{{ alt.resource or alt.resource_name or report.origin }}</code></a>
+            </td>
+            <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
+              <code>{{ alt.component or (alt.labels and alt.labels.component) or (alt.policy_user_labels and alt.policy_user_labels.component) or alt.resource or alt.resource_name or report.origin }}</code>
+            </td>
+            <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
+              <code>{{ alt.signal or (alt.labels and alt.labels.signal) or (alt.policy_user_labels and alt.policy_user_labels.signal) or 'N/A' }}</code>
             </td>
             <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
               <a href="{{ inc_url }}" target="_blank" class="console-link" style="color: #0969da; text-decoration: none;"><code>{{ alt.incident_id or 'N/A' }}</code></a>
@@ -191,6 +199,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </td>
             <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
               <a href="{{ res_url }}" target="_blank" class="console-link" style="color: #0969da; text-decoration: none;"><code>{{ report.origin }}</code></a>
+            </td>
+            <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
+              <code>{{ report.raw_metadata.get('component') or report.origin }}</code>
+            </td>
+            <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
+              <code>{{ report.raw_metadata.get('signal') or 'N/A' }}</code>
             </td>
             <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
               <a href="{{ inc_url }}" target="_blank" class="console-link" style="color: #0969da; text-decoration: none;"><code>{{ inc_id or report.group_id }}</code></a>

@@ -26,6 +26,7 @@ from ..contracts.report import (
     TimelineItem,
 )
 from ..contracts.links import ConsoleLinkBuilder
+from ..grouping.models import format_okf_alert_entry
 from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist
 from .apigee import ApigeeSpecialist
@@ -1045,31 +1046,16 @@ class SynthesizerAgent:
 
     def _build_alerts(self, alert: AlertEvent, config: AgentConfig) -> list[dict[str, Any]]:
         sa = alert.started_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        inc_id = alert.incident_id or "0.unknown"
         builder = ConsoleLinkBuilder(project_id=config.project_id)
-        inc_url = alert.url or builder.build_incident_url(inc_id)
-        pol_id = getattr(alert, "policy_id", None)
-        pol_url = builder.build_policy_url(pol_id or alert.policy_name)
-        res_url = builder.build_resource_url(alert.resource_name, alert.resource_type)
-        return [
-            {
-                "policy": alert.policy_name,
-                "policy_name": alert.policy_name,
-                "policy_id": pol_id,
-                "policy_url": pol_url,
-                "resource": alert.resource_name,
-                "resource_name": alert.resource_name,
-                "resource_type": alert.resource_type,
-                "resource_url": res_url,
-                "incident_id": inc_id,
-                "state": alert.state or "open",
-                "started_at": sa,
-                "url": inc_url,
-                "console_url": inc_url,
-                "labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
-                "policy_user_labels": getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}),
-            }
-        ]
+        entry = format_okf_alert_entry(alert, valid_ts=sa)
+        pol_id = entry.get("policy_id")
+        entry["policy_url"] = builder.build_policy_url(pol_id or alert.policy_name)
+        entry["resource_type"] = alert.resource_type
+        entry["resource_url"] = builder.build_resource_url(alert.resource_name, alert.resource_type)
+        inc_url = entry.get("url") or builder.build_incident_url(alert.incident_id)
+        entry["url"] = inc_url
+        entry["console_url"] = inc_url
+        return [entry]
 
     def _build_triage_decision(
         self,
@@ -1529,27 +1515,31 @@ class SynthesizerAgent:
         builder = ConsoleLinkBuilder(project_id=config.project_id)
         inc_url = alert.url or builder.build_incident_url(alert.incident_id)
         pol_id = getattr(alert, "policy_id", None)
-        new_alert_entry = {
-            "incident_id": alert.incident_id,
-            "policy": alert.policy_name,
-            "policy_id": pol_id,
-            "policy_url": builder.build_policy_url(pol_id or alert.policy_name),
-            "resource": alert.resource_name,
-            "resource_type": alert.resource_type,
-            "resource_url": builder.build_resource_url(alert.resource_name, alert.resource_type),
-            "state": alert.state,
-            "started_at": alert_started_at,
-            "url": inc_url,
-            "console_url": inc_url,
-        }
+        new_alert_entry = format_okf_alert_entry(alert, valid_ts=alert_started_at)
+        new_alert_entry["policy_url"] = builder.build_policy_url(pol_id or alert.policy_name)
+        new_alert_entry["resource_type"] = alert.resource_type
+        new_alert_entry["resource_url"] = builder.build_resource_url(alert.resource_name, alert.resource_type)
+        if not new_alert_entry.get("url"):
+            new_alert_entry["url"] = inc_url
+        new_alert_entry["console_url"] = inc_url
+
         alert_updated = False
         for i, a in enumerate(alerts_list):
             if isinstance(a, dict) and a.get("incident_id") == alert.incident_id:
+                if not new_alert_entry.get("labels") and a.get("labels"):
+                    new_alert_entry["labels"] = a["labels"]
+                    new_alert_entry["policy_user_labels"] = a.get("policy_user_labels") or a["labels"]
+                if not new_alert_entry.get("component") and a.get("component"):
+                    new_alert_entry["component"] = a["component"]
+                if not new_alert_entry.get("signal") and a.get("signal"):
+                    new_alert_entry["signal"] = a["signal"]
                 alerts_list[i] = new_alert_entry
                 alert_updated = True
                 break
         if not alert_updated:
             alerts_list.append(new_alert_entry)
+
+        formatted_alerts = [format_okf_alert_entry(a, valid_ts=timestamp) for a in alerts_list]
 
         frontmatter: dict[str, Any] = {
             "type": "incident",
@@ -1565,7 +1555,7 @@ class SynthesizerAgent:
             "confidence": report.probable_root_cause.confidence,
             "servicenow_sys_id": servicenow_sys_id,
             "servicenow_number": servicenow_number,
-            "alerts": alerts_list,
+            "alerts": formatted_alerts,
         }
 
         # Build Topology used section

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import re
 from typing import Any, Optional, Union
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
 
@@ -50,6 +50,72 @@ def parse_iso_timestamp(ts_val: Optional[Union[str, int, float, datetime]]) -> O
     return None
 
 
+def format_okf_alert_entry(
+    alert: Any,
+    valid_ts: Optional[str] = None,
+    received_at: Optional[str] = None,
+) -> dict[str, Any]:
+    """Format an alert object or dict into a standard OKF alert entry dictionary.
+    Guarantees presence of:
+    - incident_id
+    - policy / policy_name
+    - policy_id (numeric string or None)
+    - resource / resource_name
+    - component
+    - signal
+    - state
+    - started_at
+    - url
+    - labels: {component, signal, severity, tier, ...}
+    - policy_user_labels
+    """
+    if isinstance(alert, dict):
+        inc_id = str(alert.get("incident_id") or "0.unknown")
+        pol_name = str(alert.get("policy_name") or alert.get("policy") or "unknown-policy")
+        pol_id = alert.get("policy_id")
+        res_name = str(alert.get("resource_name") or alert.get("resource") or "unknown-resource")
+        state = str(alert.get("state") or "open")
+        st_at = alert.get("started_at") or valid_ts or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = alert.get("url")
+        raw_labels = alert.get("labels") or alert.get("policy_user_labels") or {}
+        labels = {str(k): str(v) for k, v in raw_labels.items()} if isinstance(raw_labels, dict) else {}
+        comp = alert.get("component") or labels.get("component") or res_name
+        sig = alert.get("signal") or labels.get("signal")
+        rec_at = alert.get("received_at") or received_at
+    else:
+        inc_id = getattr(alert, "incident_id", "0.unknown")
+        pol_name = getattr(alert, "policy_name", "unknown-policy")
+        pol_id = getattr(alert, "policy_id", None)
+        res_name = getattr(alert, "resource_name", "unknown-resource")
+        state = getattr(alert, "state", "open")
+        st_at = getattr(alert, "started_at", None) or valid_ts or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = getattr(alert, "url", None)
+        raw_labels = getattr(alert, "policy_user_labels", {}) or getattr(alert, "labels", {}) or {}
+        labels = {str(k): str(v) for k, v in raw_labels.items()} if isinstance(raw_labels, dict) else {}
+        comp = getattr(alert, "component", None) or labels.get("component") or res_name
+        sig = getattr(alert, "signal", None) or labels.get("signal")
+        rec_at = received_at
+
+    entry: dict[str, Any] = {
+        "incident_id": inc_id,
+        "policy": pol_name,
+        "policy_name": pol_name,
+        "policy_id": pol_id,
+        "resource": res_name,
+        "resource_name": res_name,
+        "component": comp,
+        "signal": sig,
+        "state": state,
+        "started_at": st_at,
+        "url": url,
+        "labels": labels,
+        "policy_user_labels": labels,
+    }
+    if rec_at:
+        entry["received_at"] = rec_at
+    return entry
+
+
 class OKFDocument(BaseModel):
     """Model representing an Open Knowledge File (OKF) with YAML frontmatter and markdown body."""
     model_config = ConfigDict(extra="allow")
@@ -87,6 +153,13 @@ class OKFDocument(BaseModel):
 
     # Correlated Member Alerts
     alerts: list[dict[str, Any]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_alerts(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "alerts" in data and isinstance(data["alerts"], list):
+            data["alerts"] = [format_okf_alert_entry(a) for a in data["alerts"]]
+        return data
 
     # Markdown body
     body: str = ""
@@ -134,7 +207,8 @@ class OKFDocument(BaseModel):
         inc_id = alert_data.get("incident_id")
         if inc_id and self.has_alert(inc_id):
             return False
-        self.alerts.append(alert_data)
+        entry = format_okf_alert_entry(alert_data)
+        self.alerts.append(entry)
         now_dt = datetime.now(timezone.utc)
         self.updated_at = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         return True

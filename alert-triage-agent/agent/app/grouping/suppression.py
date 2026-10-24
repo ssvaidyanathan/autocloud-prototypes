@@ -88,6 +88,20 @@ def format_late_alert_work_note(
 
     blast_str = ", ".join(blast_radius) if blast_radius else resource_name
 
+    comp = getattr(alert, "component", None)
+    if not comp and hasattr(alert, "policy_user_labels") and alert.policy_user_labels:
+        comp = alert.policy_user_labels.get("component")
+    if not comp and isinstance(alert, dict):
+        comp = alert.get("component") or (alert.get("policy_user_labels") or {}).get("component")
+    if not comp:
+        comp = resource_name
+
+    sig = getattr(alert, "signal", None)
+    if not sig and hasattr(alert, "policy_user_labels") and alert.policy_user_labels:
+        sig = alert.policy_user_labels.get("signal")
+    if not sig and isinstance(alert, dict):
+        sig = alert.get("signal") or (alert.get("policy_user_labels") or {}).get("signal")
+
     if not as_html:
         pol_str = f"{policy_name} ({policy_url})" if policy_url else policy_name
         if has_real_id and alert_url:
@@ -95,9 +109,15 @@ def format_late_alert_work_note(
         else:
             disp_id = clean_incident_id if clean_incident_id else "N/A"
             alert_part_plain = f"(Alert ID: {disp_id})"
+        meta_parts = []
+        if comp:
+            meta_parts.append(f"Component: {comp}")
+        if sig:
+            meta_parts.append(f"Signal: {sig}")
+        meta_str = f" | {' | '.join(meta_parts)}" if meta_parts else ""
         return (
             f"Correlated Alert Ingested: {pol_str} on "
-            f"{resource_name} {alert_part_plain}\n"
+            f"{resource_name} {alert_part_plain}{meta_str}\n"
             f"Updated Blast Radius: {blast_str}"
         )
 
@@ -122,11 +142,18 @@ def format_late_alert_work_note(
         disp_id = clean_incident_id if clean_incident_id else "N/A"
         alert_part = f"(Alert ID: {html.escape(disp_id)})"
 
+    meta_html_parts = []
+    if comp:
+        meta_html_parts.append(f"Component: <code>{html.escape(comp)}</code>")
+    if sig:
+        meta_html_parts.append(f"Signal: <code>{html.escape(sig)}</code>")
+    meta_html = f" | {' | '.join(meta_html_parts)}" if meta_html_parts else ""
+
     blast_html = html.escape(blast_str)
 
     return (
         f"[code]<b>Correlated Alert Ingested:</b> {policy_html} on "
-        f"{resource_html} {alert_part}<br/>"
+        f"{resource_html} {alert_part}{meta_html}<br/>"
         f"<b>Updated Blast Radius:</b> {blast_html}[/code]"
     )
 

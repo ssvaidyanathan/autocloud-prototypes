@@ -232,7 +232,30 @@ class InvestigationReport(BaseModel):
         blast_str = ", ".join(self.blast_radius) if self.blast_radius else "None detected"
 
         prob_text = f"{self.summary} (Severity: {self.priority})"
-        sys_text = f"Origin: <code>{self.origin}</code> ({conf_pct}% confidence) | Blast Radius: {blast_str}"
+
+        primary_alert = self.alerts[0] if self.alerts else {}
+        comp = None
+        sig = None
+        if isinstance(primary_alert, dict):
+            comp = primary_alert.get("component")
+            sig = primary_alert.get("signal")
+        elif hasattr(primary_alert, "component"):
+            comp = getattr(primary_alert, "component", None)
+            sig = getattr(primary_alert, "signal", None)
+
+        if not comp:
+            comp = self.raw_metadata.get("component") or (self.raw_metadata.get("labels") or {}).get("component") or (self.raw_metadata.get("policy_user_labels") or {}).get("component")
+        if not sig:
+            sig = self.raw_metadata.get("signal") or (self.raw_metadata.get("labels") or {}).get("signal") or (self.raw_metadata.get("policy_user_labels") or {}).get("signal")
+
+        comp_sig_parts = []
+        if comp:
+            comp_sig_parts.append(f"Component: <code>{comp}</code>")
+        if sig:
+            comp_sig_parts.append(f"Signal: <code>{sig}</code>")
+        comp_sig_str = f" | {' | '.join(comp_sig_parts)}" if comp_sig_parts else ""
+
+        sys_text = f"Origin: <code>{self.origin}</code> ({conf_pct}% confidence){comp_sig_str} | Blast Radius: {blast_str}"
         obs_text = self.observations
 
         # Clean any raw asterisks or markdown formatting
