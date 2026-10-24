@@ -414,6 +414,21 @@ class TestReconcileHunkHeaders:
             validate_unified_diff(diff)
         assert validate_unified_diff(reconcile_hunk_headers(diff))[2] == 3
 
+    def test_both_counts_over_by_one_with_trailing_newline_are_reconciled(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n a\n+x\n b\n"
+
+        result = reconcile_hunk_headers(diff)
+
+        assert result == "--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n a\n+x\n b\n"
+        assert validate_unified_diff(result)[2] == 1
+
+    def test_zero_context_insertion_with_declared_old_count_is_not_rewritten(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -2 +2 @@\n+x\n"
+
+        assert reconcile_hunk_headers(diff) == diff
+        with pytest.raises(PatchValidationError, match="counts"):
+            validate_unified_diff(reconcile_hunk_headers(diff))
+
     def test_rewrite_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
         diff = "--- a/f\n+++ b/f\n@@ -1,10 +1,10 @@\n-a\n+b"
 

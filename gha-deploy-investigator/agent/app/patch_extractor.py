@@ -163,6 +163,11 @@ def reconcile_hunk_headers(diff: str) -> str:
     invalid line, are left unchanged so strict validation can still reject them.
     """
     lines = diff.split("\n")
+    # A diff ending in "\n" splits into a trailing "" that is not a hunk line; left in
+    # place it would be counted as blank context and mask a surplus of one.
+    trailing_nl = bool(lines) and lines[-1] == ""
+    if trailing_nl:
+        lines.pop()
     idx = 0
     while idx < len(lines):
         match = _HUNK_HEADER_RE.match(lines[idx])
@@ -183,13 +188,17 @@ def reconcile_hunk_headers(diff: str) -> str:
         counts = _count_hunk_body(lines[idx:end])
         if counts is None:
             continue
+        if declared_old > 0 and counts[0] == 0:
+            # Old count 0 means "insert after line N" while > 0 means "start at line N";
+            # rewriting the count alone would shift the insertion point by one line.
+            continue
         old_header = lines[header_idx]
         heading = old_header[match.end() :]
         new_header = f"@@ -{match.group(1)},{counts[0]} +{match.group(3)},{counts[1]} @@{heading}"
         if new_header != old_header:
             lines[header_idx] = new_header
             logger.info("Normalised hunk header from %s to %s", old_header, new_header)
-    return "\n".join(lines)
+    return "\n".join(lines) + ("\n" if trailing_nl else "")
 
 
 def validate_unified_diff(diff: str) -> tuple[Optional[str], Optional[str], int]:

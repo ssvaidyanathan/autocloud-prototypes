@@ -142,6 +142,17 @@ class TestReconcileHunkHeaders:
         diff = "--- a/f\n+++ b/f\n@@ -2 +2 @@\n a\n-b\n+B\n"
         assert "@@ -2,2 +2,2 @@\n" in reconcile_hunk_headers(diff)
 
+    def test_both_counts_over_by_one_with_trailing_newline_apply(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n a\n+x\n b\n"
+        assert reconcile_hunk_headers(diff) == "--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n a\n+x\n b\n"
+        assert apply_unified_diff("a\nb\n", diff) == "a\nx\nb\n"
+
+    def test_zero_context_insertion_with_declared_old_count_is_rejected(self) -> None:
+        diff = "--- a/f\n+++ b/f\n@@ -2 +2 @@\n+x\n"
+        assert reconcile_hunk_headers(diff) == diff
+        with pytest.raises(ValueError, match="counts"):
+            apply_unified_diff("a\nb\nc\n", diff)
+
     def test_valid_difflib_diff_is_unchanged(self) -> None:
         after = ORIGINAL.replace("line 2\n", "line two\n").replace("line 18\n", "")
         diff = _difflib(ORIGINAL, after)
