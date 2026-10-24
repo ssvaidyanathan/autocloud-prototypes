@@ -116,62 +116,26 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 logger = logging.getLogger(__name__)
 
 SYSTEM_PARTS: Set[str] = {"ata-agent", "ata-bridge", "ata-tools"}
-KNOWN_COMPONENTS: Set[str] = {
-    "ata-orders-api",
-    "ata-inventory-api",
-    "ata-inventory-db",
-    "ata-orders-v1",
-    "ata-inventory-v1",
-    "ata-agent",
-    "ata-bridge",
-    "ata-tools",
-    "ata-apigee-orders-v1",
-    "ata-apigee-inventory-v1",
-}
 
 
 def load_topology_components() -> Set[str]:
-    """Load valid component IDs from TOPOLOGY.md if available, supplemented with system parts."""
-    components = set(KNOWN_COMPONENTS)
-    candidates = []
-    if "TOPOLOGY_FILE" in os.environ:
-        candidates.append(Path(os.environ["TOPOLOGY_FILE"]))
+    """Load valid component IDs and aliases from TOPOLOGY.md via topology.loader, supplemented with system parts."""
+    components = set(SYSTEM_PARTS)
+    try:
+        from topology.loader import get_loader
+    except ImportError:
+        try:
+            from alert_triage_agent.topology.loader import get_loader
+        except ImportError:
+            get_loader = None
 
-    current_file = Path(__file__).resolve()
-    for parent in current_file.parents:
-        candidates.append(parent / "topology" / "TOPOLOGY.md")
-        candidates.append(parent / "TOPOLOGY.md")
-
-    candidates.append(Path("/workspace/alert-triage-agent/topology/TOPOLOGY.md"))
-    candidates.append(Path("/workspace/pr-ata-labels/alert-triage-agent/topology/TOPOLOGY.md"))
-
-    for candidate in candidates:
-        if candidate.is_file():
-            try:
-                content = candidate.read_text(encoding="utf-8")
-                in_components = False
-                for line in content.splitlines():
-                    line_str = line.strip()
-                    if line_str.startswith("## Components"):
-                        in_components = True
-                        continue
-                    if in_components:
-                        if line_str.startswith("## "):
-                            break
-                        if line_str.startswith("|") and not line_str.startswith("|---") and "Component" not in line_str:
-                            parts = [p.strip() for p in line_str.split("|")]
-                            if len(parts) >= 2 and parts[1]:
-                                comp_id = parts[1].strip("` ")
-                                if comp_id:
-                                    components.add(comp_id)
-                            if len(parts) >= 4 and parts[3]:
-                                for alias in parts[3].split(","):
-                                    alias_clean = alias.strip("` ")
-                                    if alias_clean:
-                                        components.add(alias_clean)
-                break
-            except Exception:
-                pass
+    if get_loader is not None:
+        try:
+            loader = get_loader()
+            components.update(loader.components.keys())
+            components.update(loader.alias_map.keys())
+        except Exception as exc:
+            logger.debug("Failed to load components from topology.loader: %s", exc)
     return components
 
 
