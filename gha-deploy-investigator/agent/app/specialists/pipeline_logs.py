@@ -138,6 +138,165 @@ DOCKER_RUN_FAILED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Decisive log excerpt selection
+# ---------------------------------------------------------------------------
+
+# Lines emitted by the GitHub Actions runner after the step body finished
+# (post-step cleanup, credential removal, orphan-process teardown).
+RUNNER_CLEANUP_LINE_PATTERN = re.compile(
+    r"^(?:"
+    r"(?:##\[(?:group|endgroup)\])?\s*post[- ]job clean ?up"
+    r"|##\[endgroup\]\s*$"
+    r"|cleaning up orphan process"
+    r"|terminate orphan process"
+    r"|removing credentials? config"
+    r"|(?:removing|cleaning up|revoking)\b.*\bcredentials?\b"
+    r"|.*\bgit\b.*\bconfig\b.*--unset"
+    r"|finishing:"
+    r"|\[command\]\S*git(?:\s|$)"
+    r"|git version \d"
+    r"|temporarily overriding home="
+    r"|adding repository directory to the temporary git global config"
+    r"|http\.https://\S+\.extraheader\s*$"
+    r")",
+    re.IGNORECASE,
+)
+# Section header that opens the runner post-job cleanup block.
+RUNNER_CLEANUP_ANCHOR_PATTERN = re.compile(
+    r"^(?:##\[group\])?\s*post[- ]job clean ?up", re.IGNORECASE
+)
+# Generic error indicators across build tools, test runners, and shells.
+ERROR_MARKER_PATTERN = re.compile(
+    r"error:|failed:|fatal:|failure:|error \[|\[error\]|\berr:|\berr!|exception:"
+    r"|traceback \(most recent call last\)",
+    re.IGNORECASE,
+)
+# Runner summary lines that only restate the exit status, not the cause.
+GENERIC_EXIT_LINE_PATTERN = re.compile(
+    r"process completed with exit code \d+|exited with (?:exit )?code \d+",
+    re.IGNORECASE,
+)
+# Lines that announce which command a step is running.
+COMMAND_HEADER_PATTERN = re.compile(r"^(?:##\[group\])?Run\s|^\[command\]")
+
+EXCERPT_CONTEXT_BEFORE = 6
+EXCERPT_CONTEXT_AFTER = 10
+EXCERPT_GAP_MARKER = "..."
+
+
+def strip_runner_cleanup(log_text: str) -> list[str]:
+    """Return log lines (timestamps removed) with trailing runner cleanup stripped.
+
+    Everything from the first post-job cleanup header that follows the last error
+    marker is dropped, then remaining trailing cleanup/blank lines are removed from
+    the bottom up until real step output is reached.
+    """
+    lines = [TIMESTAMP_PREFIX.sub("", raw).rstrip() for raw in log_text.splitlines()]
+
+    last_marker = -1
+    for idx, line in enumerate(lines):
+        if ERROR_MARKER_PATTERN.search(line):
+            last_marker = idx
+    for idx in range(last_marker + 1, len(lines)):
+        if RUNNER_CLEANUP_ANCHOR_PATTERN.match(lines[idx].strip()):
+            lines = lines[:idx]
+            break
+
+    while lines and (
+        not lines[-1].strip() or RUNNER_CLEANUP_LINE_PATTERN.match(lines[-1].strip())
+    ):
+        lines.pop()
+    return lines
+
+
+def _render_excerpt(lines: list[str], selected: set[int]) -> str:
+    rendered: list[str] = []
+    previous: Optional[int] = None
+    for idx in sorted(selected):
+        if previous is not None and idx != previous + 1:
+            rendered.append(EXCERPT_GAP_MARKER)
+        rendered.append(lines[idx])
+        previous = idx
+    return "\n".join(rendered)
+
+
+def _tail_excerpt(lines: list[str], max_chars: int) -> str:
+    kept: list[str] = []
+    size = 0
+    for line in reversed(lines):
+        cost = len(line) + (1 if kept else 0)
+        if size + cost > max_chars:
+            break
+        kept.append(line)
+        size += cost
+    if not kept and lines:
+        return lines[-1][-max_chars:]
+    return "\n".join(reversed(kept))
+
+
+def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
+    """Select the error-bearing portion of a step log within ``max_chars``.
+
+    1. Strips trailing runner post-step cleanup output.
+    2. If error markers exist, keeps the decisive error lines plus the command
+       header and surrounding context, prioritising the error lines themselves.
+    3. Otherwise falls back to the cleaned tail of the log.
+    """
+    if not log_text:
+        return ""
+    lines = strip_runner_cleanup(log_text)
+    if not lines:
+        return log_text[-max_chars:]
+
+    clip = max(max_chars - len(EXCERPT_GAP_MARKER), 1)
+    lines = [
+        line if len(line) <= max_chars else line[:clip] + EXCERPT_GAP_MARKER for line in lines
+    ]
+
+    markers = [idx for idx, line in enumerate(lines) if ERROR_MARKER_PATTERN.search(line)]
+    if not markers:
+        return _tail_excerpt(lines, max_chars)
+
+    decisive = [idx for idx in markers if not GENERIC_EXIT_LINE_PATTERN.search(lines[idx])]
+    if not decisive:
+        decisive = markers
+    generic = [idx for idx in markers if idx not in decisive]
+
+    # Each entry is (line index, expansion key). Context expansion around a marker
+    # stops in a direction once a line no longer fits, keeping context contiguous.
+    priority: list[tuple[int, Optional[tuple[int, int]]]] = [
+        (idx, None) for idx in [decisive[-1], decisive[0], *reversed(decisive), *generic]
+    ]
+    for idx in range(decisive[0] - 1, -1, -1):
+        if COMMAND_HEADER_PATTERN.match(lines[idx].strip()):
+            priority.append((idx, None))
+            break
+    for distance in range(1, max(EXCERPT_CONTEXT_BEFORE, EXCERPT_CONTEXT_AFTER) + 1):
+        for idx in reversed(decisive):
+            if distance <= EXCERPT_CONTEXT_BEFORE:
+                priority.append((idx - distance, (idx, -1)))
+            if distance <= EXCERPT_CONTEXT_AFTER:
+                priority.append((idx + distance, (idx, 1)))
+    priority.extend((idx, None) for idx in range(decisive[0], decisive[-1] + 1))
+
+    selected: set[int] = set()
+    blocked: set[tuple[int, int]] = set()
+    for idx, key in priority:
+        if idx < 0 or idx >= len(lines) or idx in selected:
+            continue
+        if key is not None and key in blocked:
+            continue
+        candidate = selected | {idx}
+        if len(_render_excerpt(lines, candidate)) <= max_chars:
+            selected = candidate
+        elif key is not None:
+            blocked.add(key)
+    if not selected:
+        return lines[decisive[-1]][:max_chars]
+    return _render_excerpt(lines, selected)
+
+
 class PipelineLogsSpecialist(BaseSpecialist):
     """Diagnoses lint, test, and container packaging failures from CI logs and git diffs."""
 
@@ -658,7 +817,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
         elif assert_matches:
             assertion_msg = assert_matches[0].group("msg").strip()
 
-        tail_log = log_text[-1500:] if len(log_text) > 1500 else log_text
+        tail_log = extract_decisive_log_excerpt(log_text, max_chars=1500)
         evidence_items: list[EvidenceItem] = []
         evidence_items.append(
             EvidenceItem(
@@ -745,7 +904,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
                 "Verify base image and network connectivity to package registries",
             ]
 
-        build_log_tail = log_text[-1500:] if len(log_text) > 1500 else log_text
+        build_log_tail = extract_decisive_log_excerpt(log_text, max_chars=1500)
         evidence_items.append(
             EvidenceItem(
                 kind="github_runner_log",
@@ -780,7 +939,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
         diff_data: Optional[dict[str, Any]] = None,
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Unknown Step")
-        lines = [line.strip() for line in log_text.splitlines() if line.strip()]
+        lines = [line.strip() for line in strip_runner_cleanup(log_text) if line.strip()]
         error_lines = [
             line_item
             for line_item in lines
@@ -796,7 +955,10 @@ class PipelineLogsSpecialist(BaseSpecialist):
         evidence_items = [
             EvidenceItem(
                 kind="github_runner_log",
-                excerpt=f"Step '{step_name}' failed: {culprit}",
+                excerpt=(
+                    f"Step '{step_name}' failed: {culprit}\n"
+                    f"{extract_decisive_log_excerpt(log_text, max_chars=1500)}"
+                ),
                 timestamp=now,
                 console_url=incident.external_url,
             )
