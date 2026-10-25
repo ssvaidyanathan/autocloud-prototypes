@@ -35,11 +35,13 @@ class AgentConfig(BaseSettings):
     # thinkingConfig outright, and gemini-2.5-pro rejects budgets below 128
     # (so 0 is invalid there). None or a negative value (e.g.
     # SYNTHESIS_THINKING_BUDGET=-1) omits thinkingConfig from the request; this
-    # is intended for models that reject it (non-thinking models). On 2.5
-    # thinking models omission means the model-default *dynamic* (unbounded)
-    # thinking, NOT disabled thinking (-1 is also Gemini's own "dynamic"
-    # value). To disable thinking on gemini-2.5-flash, use 0. The omitted case
-    # is not covered by the budget < max-output-tokens validator below.
+    # is intended for models that reject it (non-thinking models). On
+    # gemini-2.5-flash / 2.5-pro, omission means the model-default *dynamic*
+    # thinking (not bounded by synthesis_max_output_tokens), NOT disabled
+    # thinking (-1 is also Gemini's own "dynamic" value); gemini-2.5-flash-lite
+    # has thinking off by default, so omission there means no thinking. To
+    # disable thinking on gemini-2.5-flash, use 0. The omitted case is not
+    # covered by the budget < max-output-tokens validator below.
     synthesis_thinking_budget: Optional[int] = Field(default=1024)
 
     # GitHub API configuration
@@ -56,10 +58,7 @@ class AgentConfig(BaseSettings):
     @model_validator(mode="after")
     def validate_synthesis_budget(self) -> "AgentConfig":
         budget = self.synthesis_thinking_budget
-        if (
-            synthesis_thinking_enabled(budget)
-            and budget >= self.synthesis_max_output_tokens
-        ):
+        if synthesis_thinking_enabled(budget) and budget >= self.synthesis_max_output_tokens:
             raise ValueError(
                 "synthesis_thinking_budget must be less than synthesis_max_output_tokens "
                 "when thinking is enabled (thinking tokens count against the output "
