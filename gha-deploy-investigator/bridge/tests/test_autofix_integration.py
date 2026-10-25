@@ -202,6 +202,7 @@ class TestAutofixEndToEnd:
         notes = _work_notes()
         assert "[Auto-Fix Initiated]" in notes
         assert pr_url in notes
+        assert "[Auto-Fix Hand-off]" not in notes
 
         # 5. Check Run links both the ticket and the fix PR.
         assert len(github_state.check_runs) == 1
@@ -223,6 +224,7 @@ class TestAutofixEndToEnd:
         assert len(ticket_state.servicenow_incidents) == 1
         assert "[Auto-Fix Initiated]" not in _work_notes()
         assert "/pull/" not in json.dumps(github_state.check_runs)
+        assert "[Auto-Fix Hand-off]" not in _work_notes()
 
     @pytest.mark.parametrize("status", ["no_safe_fix", "unsupported"])
     def test_non_proposed_status_creates_no_pr(self, harness: dict[str, Any], status: str) -> None:
@@ -235,6 +237,9 @@ class TestAutofixEndToEnd:
 
         assert cb.status_code == 200
         writer.execute_fix_proposal.assert_not_called()
+        assert "[Auto-Fix Hand-off] No automated fix PR opened: Remove unused import (F401)" in (
+            _work_notes()
+        )
 
     def test_writer_error_does_not_block_ticket(self, harness: dict[str, Any]) -> None:
         client = harness["configure"](_settings(autofix_enabled=True))
@@ -248,6 +253,47 @@ class TestAutofixEndToEnd:
         assert cb.json()["status"] == "ok"
         assert "fix_pr_url" not in cb.json()
         assert len(ticket_state.servicenow_incidents) == 1
+        assert len(github_state.check_runs) == 1
+        assert "[Auto-Fix Hand-off] No automated fix PR opened" in _work_notes()
+
+    def test_no_proposal_posts_default_handoff_note(self, harness: dict[str, Any]) -> None:
+        client = harness["configure"](_settings(autofix_enabled=True))
+        set_fix_pr_writer(MagicMock(spec=FixPRWriterBase))
+
+        cb = _post_callback(client, harness, "main", Report(summary="Unit tests failed"))
+
+        assert cb.status_code == 200
+        assert "fix_pr_url" not in cb.json()
+        notes = _work_notes()
+        assert "[Auto-Fix Hand-off] No automated fix could be safely proposed." in notes
+        assert "Requires human attention." in notes
+
+    def test_kill_switch_disabled_posts_no_handoff_note_without_proposal(
+        self, harness: dict[str, Any]
+    ) -> None:
+        client = harness["configure"](_settings(autofix_enabled=False))
+
+        cb = _post_callback(client, harness, "main", Report(summary="Unit tests failed"))
+
+        assert cb.status_code == 200
+        assert len(ticket_state.servicenow_incidents) == 1
+        assert "[Auto-Fix Hand-off]" not in _work_notes()
+
+    def test_handoff_note_failure_does_not_block_response(
+        self, harness: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = harness["configure"](_settings(autofix_enabled=True))
+        set_fix_pr_writer(MagicMock(spec=FixPRWriterBase))
+        monkeypatch.setattr(
+            harness["adapters"]["servicenow"],
+            "post_fix_pr_handoff_note",
+            MagicMock(side_effect=RuntimeError("servicenow down")),
+        )
+
+        cb = _post_callback(client, harness, "main", Report(summary="s"))
+
+        assert cb.status_code == 200
+        assert cb.json()["status"] == "ok"
         assert len(github_state.check_runs) == 1
 
     def test_autofix_branch_webhook_routes_to_listener_never_investigates(

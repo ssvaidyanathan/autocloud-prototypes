@@ -77,6 +77,17 @@ def format_fix_pr_work_note(pull_request: PullRequestRef) -> str:
     )
 
 
+def format_fix_pr_handoff_work_note(rationale: Optional[str] = None) -> str:
+    """Work note handing the incident to a human when auto-fix opened no pull request."""
+    reason = (rationale or "").strip().rstrip(".").strip()
+    if not reason:
+        return (
+            "[Auto-Fix Hand-off] No automated fix could be safely proposed. "
+            "Requires human attention."
+        )
+    return f"[Auto-Fix Hand-off] No automated fix PR opened: {reason}. Requires human attention."
+
+
 class ServiceNowAdapter(BaseAdapter):
     """Adapter for ServiceNow Table and Attachment APIs."""
 
@@ -487,6 +498,21 @@ class ServiceNowAdapter(BaseAdapter):
             return
         endpoint = f"{base_url}/api/now/table/incident/{ref.external_id}"
         note = format_fix_pr_work_note(pull_request)
+
+        def _do_note() -> None:
+            with self._get_client() as client:
+                resp = client.patch(endpoint, json={"work_notes": note})
+                resp.raise_for_status()
+
+        self._execute_with_retry(_do_note)
+
+    def post_fix_pr_handoff_note(self, ref: IncidentRef, rationale: Optional[str] = None) -> None:
+        """Post a work note stating no auto-fix PR was opened and a human must take over."""
+        base_url = (self.config.servicenow_instance_url or "").rstrip("/")
+        if not base_url:
+            return
+        endpoint = f"{base_url}/api/now/table/incident/{ref.external_id}"
+        note = format_fix_pr_handoff_work_note(rationale)
 
         def _do_note() -> None:
             with self._get_client() as client:

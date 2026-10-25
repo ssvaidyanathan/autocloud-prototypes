@@ -387,6 +387,14 @@ async def handle_callback_report(
                 servicenow_adapter.post_fix_pr_note(sn_ref, pr_ref)
             except Exception as exc:
                 logger.warning("Failed to post fix PR work note to ServiceNow: %s", exc)
+        elif settings.autofix_enabled:
+            proposal = result.report.fix_proposal
+            try:
+                servicenow_adapter.post_fix_pr_handoff_note(
+                    sn_ref, proposal.rationale if proposal is not None else None
+                )
+            except Exception as exc:
+                logger.warning("Failed to post auto-fix hand-off work note to ServiceNow: %s", exc)
 
         if settings.enable_github_writeback:
             try:

@@ -7,7 +7,11 @@ import httpx
 import pytest
 from bridge.app.adapters.base import IncidentRef
 from bridge.app.adapters.github import GitHubAdapter, format_fix_pr_markdown
-from bridge.app.adapters.servicenow import ServiceNowAdapter, format_fix_pr_work_note
+from bridge.app.adapters.servicenow import (
+    ServiceNowAdapter,
+    format_fix_pr_handoff_work_note,
+    format_fix_pr_work_note,
+)
 from bridge.app.config import BridgeConfig
 from bridge.app.contracts.incident import Incident
 from bridge.app.contracts.report import FilePatch, FixProposal, PullRequestRef, Report
@@ -413,6 +417,46 @@ class TestLinkInjection:
         adapter.post_fix_pr_note(_SN_REF, _PR)
         assert captured == [
             ("/api/now/table/incident/abc", {"work_notes": format_fix_pr_work_note(_PR)})
+        ]
+
+    def test_servicenow_handoff_note_includes_rationale(self) -> None:
+        assert format_fix_pr_handoff_work_note("Referenced asset-file.txt is missing") == (
+            "[Auto-Fix Hand-off] No automated fix PR opened: Referenced asset-file.txt is "
+            "missing. Requires human attention."
+        )
+
+    def test_servicenow_handoff_note_does_not_double_trailing_period(self) -> None:
+        note = format_fix_pr_handoff_work_note("Confidence too low.")
+        assert note == (
+            "[Auto-Fix Hand-off] No automated fix PR opened: Confidence too low. "
+            "Requires human attention."
+        )
+
+    @pytest.mark.parametrize("rationale", [None, "", "   "])
+    def test_servicenow_handoff_note_default_without_rationale(
+        self, rationale: Optional[str]
+    ) -> None:
+        assert format_fix_pr_handoff_work_note(rationale) == (
+            "[Auto-Fix Hand-off] No automated fix could be safely proposed. "
+            "Requires human attention."
+        )
+
+    def test_servicenow_post_fix_pr_handoff_note(self) -> None:
+        captured: list[tuple[str, dict[str, Any]]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append((request.url.path, json.loads(request.content)))
+            return httpx.Response(200, json={"result": {}})
+
+        adapter = ServiceNowAdapter(
+            config=_config(), http_client=httpx.Client(transport=httpx.MockTransport(handler))
+        )
+        adapter.post_fix_pr_handoff_note(_SN_REF, "r")
+        assert captured == [
+            (
+                "/api/now/table/incident/abc",
+                {"work_notes": format_fix_pr_handoff_work_note("r")},
+            )
         ]
 
     def test_github_markdown_format(self) -> None:
