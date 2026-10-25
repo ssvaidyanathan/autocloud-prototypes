@@ -168,12 +168,13 @@ RUNNER_CLEANUP_ANCHOR_PATTERN = re.compile(
 )
 # Generic error indicators across build tools, test runners, and shells.
 # Upper-case-only forms (``FAIL``, ``FAILED``, ``Error N``) are scoped case-sensitive so
-# that prose such as "0 failed" does not match; ``failed: 0`` is excluded explicitly.
+# that prose such as "0 failed" does not match; zero-count forms (``failed: 0``,
+# ``0 FAILED``, ``FAILED: 0``) are excluded explicitly.
 ERROR_MARKER_PATTERN = re.compile(
     r"error:|failed:(?!\s*0\b)|fatal:|failure:|\berror\s*\[|\[error\]|\berr:|\berr!"
     r"|exception:|traceback \(most recent call last\)"
     r"|\berror\s+(?-i:[A-Z]+\d+):"
-    r"|(?-i:\bFAIL(?:ED)?\b)"
+    r"|(?-i:(?<!\b0\s)\bFAIL(?:ED)?\b(?!\s*:\s*0\b))"
     r"|(?-i:\bError [1-9]\d*\s*$)"
     r"|\bcommand not found\b",
     re.IGNORECASE,
@@ -278,6 +279,19 @@ def _tail_excerpt(lines: list[str], max_chars: int) -> str:
     return "\n".join(reversed(kept))
 
 
+def _tail_start_index(lines: list[str], max_chars: int) -> int:
+    """Return the earliest line index ``_tail_excerpt(lines, max_chars)`` would include."""
+    size = 0
+    start = len(lines)
+    for idx in range(len(lines) - 1, -1, -1):
+        cost = len(lines[idx]) + (1 if start < len(lines) else 0)
+        if size + cost > max_chars:
+            break
+        size += cost
+        start = idx
+    return start
+
+
 def _error_marker_indices(lines: list[str]) -> tuple[list[int], list[int]]:
     """Return ``(markers, decisive)`` line indices.
 
@@ -296,8 +310,11 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
     2. If decisive error markers exist (markers other than generic exit-status
        lines), keeps the decisive error lines plus the command header and
        surrounding context, prioritising the error lines themselves. Leftover
-       budget is then spent on contiguous lines working backwards from the last
-       decisive marker, and finally on the cleaned tail of the log.
+       budget is then spent on the contiguous lead-up to the last decisive marker
+       and on the cleaned tail of the log. The lead-up goes first when the last
+       decisive marker lies inside the window a plain tail excerpt would cover;
+       otherwise the tail goes first, so the excerpt never carries less of the
+       log's end than the cleaned tail would.
     3. Otherwise (no markers, or only generic exit lines) falls back to the
        cleaned tail of the log.
     """
@@ -347,15 +364,17 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
     if not selection.selected:
         return lines[decisive[-1]][:max_chars]
 
-    # Spend leftover budget: first the contiguous lead-up to the last decisive
-    # marker (compiler causes usually precede the summary error), then the
-    # cleaned tail, so an unrecognised cause near the end is not lost.
-    for idx in range(decisive[-1] - 1, -1, -1):
-        if not selection.try_add(idx):
-            break
-    for idx in range(len(lines) - 1, decisive[-1], -1):
-        if not selection.try_add(idx):
-            break
+    # Spend leftover budget on the contiguous lead-up to the last decisive marker
+    # (compiler causes usually precede the summary error) and on the cleaned tail.
+    # If the last decisive marker precedes the tail window (e.g. a mid-log false
+    # positive), the tail goes first so an unrecognised cause near the end is kept.
+    lead_up = range(decisive[-1] - 1, -1, -1)
+    tail = range(len(lines) - 1, decisive[-1], -1)
+    tail_first = decisive[-1] < _tail_start_index(lines, max_chars)
+    for fill in (tail, lead_up) if tail_first else (lead_up, tail):
+        for idx in fill:
+            if not selection.try_add(idx):
+                break
     return _render_excerpt(lines, selection.selected)
 
 

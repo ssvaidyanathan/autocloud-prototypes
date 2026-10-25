@@ -162,13 +162,14 @@ class TestErrorMarkerWindowing:
         ],
     )
     def test_mid_log_error_is_windowed_with_context(self, error_line: str) -> None:
-        excerpt = extract_decisive_log_excerpt(self._long_log(error_line), max_chars=800)
+        log_text = self._long_log(error_line)
+        # Window, not blind tail: the error is far from the end of the log.
+        assert error_line not in log_text[-800:]
+        excerpt = extract_decisive_log_excerpt(log_text, max_chars=800)
         assert error_line in excerpt
         assert "Running: make package" in excerpt
         assert "details: see trace below" in excerpt
         assert len(excerpt) <= 800
-        # Window, not blind tail: the very last log line is far from the error.
-        assert "more trailing output line 402" not in excerpt
 
     def test_window_respects_max_chars_with_many_markers(self) -> None:
         lines = [f"{_ts(i)}error: problem number {i} " + "x" * 80 for i in range(100)]
@@ -190,10 +191,20 @@ class TestErrorMarkerWindowing:
 
     @pytest.mark.parametrize(
         "line",
-        ["Tests: 10 passed, failed: 0", "Ran 12 tests, 0 failed", "all checks passed"],
+        [
+            "Tests: 10 passed, failed: 0",
+            "Ran 12 tests, 0 failed",
+            "all checks passed",
+            "Summary: 12 PASSED, 0 FAILED",
+            "FAILED: 0",
+        ],
     )
     def test_zero_failure_summaries_are_not_markers(self, line: str) -> None:
         assert not ERROR_MARKER_PATTERN.search(line)
+
+    @pytest.mark.parametrize("line", ["Summary: 11 PASSED, 1 FAILED", "10 FAILED", "FAILED: 3"])
+    def test_nonzero_failure_counts_are_markers(self, line: str) -> None:
+        assert ERROR_MARKER_PATTERN.search(line)
 
     def test_zero_failure_summary_does_not_displace_real_cause(self) -> None:
         lines = (
@@ -310,15 +321,26 @@ class TestExcerptNeverWorseThanTail:
         assert "##[error]Process completed with exit code 3." in excerpt
         assert len(excerpt) > 1000  # budget is spent, not shrunk to a few lines
 
-    def test_early_false_positive_marker_keeps_real_cause_near_tail(self) -> None:
+    @pytest.mark.parametrize(
+        "marker_index",
+        [
+            pytest.param(0, id="top"),
+            pytest.param(150, id="middle"),
+            pytest.param(-45, id="about-40-lines-above-cause"),
+        ],
+    )
+    def test_early_false_positive_marker_keeps_real_cause_near_tail(
+        self, marker_index: int
+    ) -> None:
         cause_lines = [
             "Charge processor returned unexpected status 503",
             "  while handling request id=42 for merchant=acme",
         ]
-        lines = ["config: retry-on-error: true", "config: timeout: 30s"]
-        lines += [f"processing batch {i} of transactions" for i in range(300)]
+        lines = [f"processing batch {i} of transactions" for i in range(300)]
         lines += cause_lines
         lines += ["##[error]Process completed with exit code 1."]
+        position = marker_index if marker_index >= 0 else len(lines) + marker_index
+        lines[position:position] = ["config: retry-on-error: true", "config: timeout: 30s"]
         log_text = "\n".join(lines)
         self._assert_tail_cause_kept(log_text, cause_lines, 1500)
         excerpt = extract_decisive_log_excerpt(log_text, max_chars=1500)
@@ -396,3 +418,4 @@ class TestSpecialistIntegration:
             _make_incident("pipeline"), {"id": 1}, {"name": "Migrate"}, log_text
         )
         assert "Process completed with exit code 2." in res.summary
+        assert "Process completed with exit code 2." in res.probable_cause
