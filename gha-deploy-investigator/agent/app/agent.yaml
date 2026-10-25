@@ -71,6 +71,7 @@ sub_agents:
       11. 'fix_proposal' schema: {"status": "proposed", "confidence": <float 0.0-1.0 for the patch itself>, "rationale": "<one or two sentences tying the patch to quoted evidence>", "patches": [{"path": "<repository-relative path>", "action": "modify" or "create", "diff": "<single-file unified diff with --- a/<path> and +++ b/<path> headers and @@ hunk headers whose line counts are exact>"}]}.
       12. Patch constraints: at most 3 files and at most 50 added plus removed lines in total; never touch CI/CD workflow definitions under .github/, environment files, credentials, private keys, or certificates; never delete or rename files; never change application behaviour beyond what the evidence proves is defective.
       13. Ground every changed line in the provided logs, diff hunks, or specialist findings. Do NOT invent file contents you have not seen. If you cannot reproduce the exact original lines needed for hunk context, or your confidence in the patch is below 0.85, respond with status 'no_safe_fix' instead.
+      14. Offending additions: Where a build or test failure was directly caused by an invalid, failing, or unresolvable instruction or assertion newly added in git diff hunks, prefer cleanly removing or reverting the offending addition from the modified file to restore a passing build and pristine baseline, rather than speculatively creating unknown assets or guessing contents.
     output_schema: app.contracts.report.Report
 
 prompt_templates:

@@ -498,6 +498,23 @@ class TestPatchInstructionConfig:
         assert "0.85" in text
         assert "at most 3 files" in text and "50" in text
 
+    def test_synthesizer_patch_instruction_includes_offending_additions_rule(self) -> None:
+        text = get_agent_config().get_patch_instruction("synthesizer")
+
+        assert "14. Offending additions" in text
+        assert "cleanly removing or reverting the offending addition" in text
+        assert text.index("13. Ground every changed line") < text.index("14. Offending additions")
+
+    def test_offending_additions_rule_prefers_reversion_over_speculative_creation(self) -> None:
+        text = get_agent_config().get_patch_instruction("synthesizer")
+        rule = text[text.index("14. Offending additions") :]
+
+        # A newly added instruction referencing e.g. a missing "asset-file.txt"
+        # should be reverted from the modified file, not resolved by inventing it.
+        assert "newly added in git diff hunks" in rule
+        assert "from the modified file" in rule
+        assert "rather than speculatively creating unknown assets or guessing contents" in rule
+
     def test_patch_instruction_is_appended_to_synthesis_prompt(self) -> None:
         from agent.app import llm
 
@@ -532,6 +549,7 @@ class TestPatchInstructionConfig:
 
         prompt_text = captured["contents"][0]["parts"][0]["text"]
         assert get_agent_config().get_patch_instruction("synthesizer") in prompt_text
+        assert "14. Offending additions" in prompt_text
         assert result is not None
         assert result["fix_proposal"] == {"status": "no_safe_fix", "rationale": "x"}
 
