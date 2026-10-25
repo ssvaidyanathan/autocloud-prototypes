@@ -95,3 +95,12 @@ resolve_apigee_token() {
     fi
     gcloud auth print-access-token 2>/dev/null || echo ""
 }
+
+# Resolve Cloud Monitoring Access Token
+resolve_monitoring_token() {
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        echo "mock-monitoring-token"
+        return 0
+    fi
+    gcloud auth print-access-token 2>/dev/null || echo ""
+}

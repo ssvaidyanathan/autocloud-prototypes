@@ -44,11 +44,15 @@ cd /workspace/alert-triage-agent
 # 1. Verify demo microservice endpoints
 ./scripts/verify-demo-infra.sh
 
-# 2. Reset any leftover faults from previous runs
+# 2. Reset any leftover faults from previous runs (waits for alerts to clear; use --no-wait for quick dev runs)
 ./scripts/reset-scenarios.sh
 ```
 
+> [!NOTE]
+> `reset-scenarios.sh` automatically polls Cloud Monitoring for open `ata-*` alerts and waits for a 5-minute quiet period to prevent lagged metric data (e.g. Apigee ingestion latency) from generating stray tickets. Use `./scripts/reset-scenarios.sh --no-wait` when quick iteration without waiting is desired.
+
 Ensure `/workspace/alert-triage-agent/.ata-api-key` contains the active Apigee consumer key.
+
 
 ---
 
@@ -181,11 +185,35 @@ To restore all demo services and Apigee proxies back to a healthy state:
 ./scripts/reset-scenarios.sh
 ```
 
+For rapid development runs where waiting for metric stabilization is not required:
+```bash
+./scripts/reset-scenarios.sh --no-wait
+```
+
+### Reset Execution Sequence & Metric Lag Safeguards
+
 This script:
 1. Calls `POST /admin/fault/reset` on all Cloud Run demo services.
 2. Terminates background PostgreSQL sleep connections and releases leaks.
 3. Restores healthy Apigee proxy revisions (`demo/apigee/`).
-4. Reverts any modified Cloud Run environment variables.
+4. Reverts any modified Cloud Run environment variables (pinned revisions).
+5. **Waits for open alerts to close & observes quiet period:** Polls the Cloud Monitoring Alerts API (read-only) for active `OPEN` alerts on `ata-*` policies (labeled `app=alert-triage-agent`) and waits until none are open, followed by a configurable quiet period (default 5 minutes / 300s).
+   - **Why resets wait for alerts to clear (Metric Lag Rationale):** Telemetry ingestion pipelines—specifically Apigee proxy metrics published to Cloud Monitoring—experience an ingestion lag of 1 to 3 minutes. If incident files and group state are archived immediately upon proxy restoration, lagging Apigee metric data can trigger a delayed alert (such as `ata-apigee-orders-429`) minutes after the reset has completed. Because prior incident files are already archived, the agent treats the late-arriving alert as a brand new incident and creates a stray ServiceNow ticket (e.g., finding `INC0010294`). Waiting until all open alerts have cleared plus the 5-minute quiet period guarantees that the metric ingestion window has fully stabilized before incident state is archived.
+6. **Archives active OKF files:** Only after all alerts have closed and the quiet period has elapsed does the script move active incident files from `gs://<bucket>/knowledge/incident-manager/*.md` to `archive/` and remove leftover root copies.
+7. **Verifies healthy baseline:** Confirms HTTP 200 health responses across all services and verifies 0 active incident groups on the bridge.
+8. **Preflights admin endpoints:** Verifies required fault injection endpoints (`/admin/fault/inject` and `/admin/leak-connections`) are active on deployed microservices.
+
+### CLI Options & Flags
+
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `--no-wait` | Skips polling Cloud Monitoring and bypasses the quiet period for quick developer resets | `false` |
+| `--quiet-period <duration>` | Quiet period window to maintain after all open alerts close (e.g. `300s`, `5m`) | `300s` (`5m`) |
+| `--timeout <duration>` | Maximum timeout to wait for open alerts to clear before failing with still-open alerts listed | `900s` (`15m`) |
+| `--poll-interval <duration>`| Interval between Cloud Monitoring alert queries | `15s` |
+| `--dry-run` | Simulates reset steps without issuing network mutations | `false` |
+| `--mock` | Executes in mock mode without GCP cloud dependencies | `false` |
+
 
 ---
 

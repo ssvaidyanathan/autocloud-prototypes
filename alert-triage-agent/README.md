@@ -808,9 +808,13 @@ Execute scenarios with logging and automated assertions:
 ```
 
 ### 4. Resetting Between Scenarios
-Reset injected faults, clear database sleep connections, restore Apigee proxies, and move active incidents to `archive/`:
+Reset injected faults, clear database sleep connections, restore Apigee proxies, wait for open alerts to close plus metric ingestion quiet period (5 min), and move active incidents to `archive/`:
 ```bash
+# Standard reset (waits for open ata-* alerts to close + 5m quiet period)
 ./scripts/reset-scenarios.sh
+
+# Quick dev reset (bypasses alert clearance wait and quiet period)
+./scripts/reset-scenarios.sh --no-wait
 ```
 
 ---
@@ -907,7 +911,7 @@ alert-triage-agent/
 │   ├── deploy-apigee-proxies.sh   # Deploys Apigee X proxies, products, and developer app
 │   ├── deploy-demo-infra.sh       # Staged deployer for database, apps, observability, Apigee
 │   ├── deploy-stage1.sh           # Core vertical slice deployment (tfstate, foundation, apps)
-│   ├── reset-scenarios.sh         # Clears faults, resets baselines, archives incident files
+│   ├── reset-scenarios.sh         # Clears faults, waits for alerts/quiet period, archives incident files
 │   ├── run-all-scenarios.sh       # Master scenario driver (--all, --priority, --scenario)
 │   ├── set-secrets.sh             # Interactive Secret Manager configuration for ServiceNow
 │   ├── verify-demo-infra.sh       # Verifies demo microservices and Apigee routing
