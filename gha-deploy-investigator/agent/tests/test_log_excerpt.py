@@ -8,6 +8,7 @@ import pytest
 from agent.app.contracts.incident import Incident
 from agent.app.specialists.pipeline_logs import (
     ERROR_MARKER_PATTERN,
+    EXCERPT_GAP_MARKER,
     PipelineLogsSpecialist,
     extract_decisive_log_excerpt,
     strip_runner_cleanup,
@@ -322,15 +323,24 @@ class TestExcerptNeverWorseThanTail:
         assert len(excerpt) > 1000  # budget is spent, not shrunk to a few lines
 
     @pytest.mark.parametrize(
+        "trailing_lines",
+        [
+            pytest.param(0, id="cause-at-end"),
+            pytest.param(15, id="cause-15-lines-before-end"),
+            pytest.param(60, id="cause-60-lines-before-end"),
+        ],
+    )
+    @pytest.mark.parametrize(
         "marker_index",
         [
-            pytest.param(0, id="top"),
-            pytest.param(150, id="middle"),
-            pytest.param(-45, id="about-40-lines-above-cause"),
+            pytest.param(0, id="marker-top"),
+            pytest.param(150, id="marker-middle"),
+            pytest.param(-40, id="marker-len-40"),
+            pytest.param(-30, id="marker-len-30"),
         ],
     )
     def test_early_false_positive_marker_keeps_real_cause_near_tail(
-        self, marker_index: int
+        self, marker_index: int, trailing_lines: int
     ) -> None:
         cause_lines = [
             "Charge processor returned unexpected status 503",
@@ -338,13 +348,47 @@ class TestExcerptNeverWorseThanTail:
         ]
         lines = [f"processing batch {i} of transactions" for i in range(300)]
         lines += cause_lines
+        lines += [f"cleanup step {i} ok" for i in range(trailing_lines)]
         lines += ["##[error]Process completed with exit code 1."]
         position = marker_index if marker_index >= 0 else len(lines) + marker_index
         lines[position:position] = ["config: retry-on-error: true", "config: timeout: 30s"]
-        log_text = "\n".join(lines)
-        self._assert_tail_cause_kept(log_text, cause_lines, 1500)
-        excerpt = extract_decisive_log_excerpt(log_text, max_chars=1500)
+        self._assert_tail_cause_kept("\n".join(lines), cause_lines, 1500)
+
+    def test_non_terminal_marker_keeps_cause_at_core_boundary(self) -> None:
+        """Narrowed guarantee: a cause within ``max_chars - core_chars`` is kept."""
+        max_chars = 1500
+        cause = "Charge processor returned unexpected status 503"
+        exit_line = "##[error]Process completed with exit code 1."
+        head = [f"processing batch {i} of transactions" for i in range(300)]
+        head[150:150] = ["config: retry-on-error: true", "config: timeout: 30s"]
+        # Core: the marker plus one line either side; no command header present.
+        core_text = "\n".join(head[149:152])
+        core_chars = len(core_text) + len("\n" + EXCERPT_GAP_MARKER + "\n")
+        budget = max_chars - core_chars
+
+        def build(k: int) -> str:
+            trailing = [f"cleanup step {i} ok" for i in range(k)]
+            return "\n".join([*head, cause, *trailing, exit_line])
+
+        k = 0
+        while cause in build(k + 1)[-budget:]:
+            k += 1
+        log_text = build(k)
+        assert cause in log_text[-budget:]
+        assert cause not in build(k + 1)[-budget:]
+        excerpt = extract_decisive_log_excerpt(log_text, max_chars=max_chars)
+        assert cause in excerpt
         assert "config: retry-on-error: true" in excerpt
+        assert len(excerpt) <= max_chars
+
+    def test_terminal_marker_keeps_marker_and_lead_up(self) -> None:
+        lines = [f"compiling module {i}" for i in range(300)]
+        lines += ["src/lib.rs:12:5: mismatched types", "error: could not compile `app`"]
+        lines += ["##[error]Process completed with exit code 101."]
+        excerpt = extract_decisive_log_excerpt("\n".join(lines), max_chars=1500)
+        assert "src/lib.rs:12:5: mismatched types" in excerpt
+        assert "error: could not compile `app`" in excerpt
+        assert len(excerpt) <= 1500
 
     def test_leftover_budget_is_spent_on_lead_up_context(self) -> None:
         lines = [f"preparing step {i}" for i in range(40)]

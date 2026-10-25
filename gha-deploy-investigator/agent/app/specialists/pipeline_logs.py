@@ -266,17 +266,10 @@ class _ExcerptSelection:
 
 
 def _tail_excerpt(lines: list[str], max_chars: int) -> str:
-    kept: list[str] = []
-    size = 0
-    for line in reversed(lines):
-        cost = len(line) + (1 if kept else 0)
-        if size + cost > max_chars:
-            break
-        kept.append(line)
-        size += cost
-    if not kept and lines:
-        return lines[-1][-max_chars:]
-    return "\n".join(reversed(kept))
+    start = _tail_start_index(lines, max_chars)
+    if start >= len(lines):
+        return lines[-1][-max_chars:] if lines else ""
+    return "\n".join(lines[start:])
 
 
 def _tail_start_index(lines: list[str], max_chars: int) -> int:
@@ -311,10 +304,18 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
        lines), keeps the decisive error lines plus the command header and
        surrounding context, prioritising the error lines themselves. Leftover
        budget is then spent on the contiguous lead-up to the last decisive marker
-       and on the cleaned tail of the log. The lead-up goes first when the last
-       decisive marker lies inside the window a plain tail excerpt would cover;
-       otherwise the tail goes first, so the excerpt never carries less of the
-       log's end than the cleaned tail would.
+       and on the cleaned tail of the log.
+
+       If the last decisive marker is non-terminal (it precedes the window a
+       plain tail excerpt would cover, or real non-exit output follows its
+       ``EXCERPT_CONTEXT_AFTER`` context lines), a small core is reserved first:
+       the first and last decisive lines, the line immediately before and after
+       each, and the command header. All remaining budget then goes to the
+       contiguous cleaned tail, read backwards from the end, before wider
+       context and lead-up. Guarantee: a cause within the last
+       ``max_chars - core_chars`` characters of the cleaned log is kept, where
+       ``core_chars`` is the rendered size of the core plus its separator
+       (``EXCERPT_GAP_MARKER`` and newlines) before the tail.
     3. Otherwise (no markers, or only generic exit lines) falls back to the
        cleaned tail of the log.
     """
@@ -340,10 +341,12 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
     priority: list[tuple[int, Optional[tuple[int, int]]]] = [
         (idx, None) for idx in [decisive[-1], decisive[0], *reversed(decisive), *generic]
     ]
+    header: list[int] = []
     for idx in range(decisive[0] - 1, -1, -1):
         if COMMAND_HEADER_PATTERN.match(lines[idx].strip()):
-            priority.append((idx, None))
+            header.append(idx)
             break
+    priority.extend((idx, None) for idx in header)
     for distance in range(1, max(EXCERPT_CONTEXT_BEFORE, EXCERPT_CONTEXT_AFTER) + 1):
         for idx in reversed(decisive):
             if distance <= EXCERPT_CONTEXT_BEFORE:
@@ -352,7 +355,32 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
                 priority.append((idx + distance, (idx, 1)))
     priority.extend((idx, None) for idx in range(decisive[0], decisive[-1] + 1))
 
+    # The last decisive marker is non-terminal when it precedes the window a plain
+    # tail excerpt would cover, or when real output follows its trailing context
+    # (e.g. a false-positive config echo above an unrecognised cause). Then only a
+    # small core (the first/last decisive lines, their adjacent lines and the
+    # command header) is reserved before the contiguous cleaned tail takes all
+    # remaining budget, so an unrecognised cause near the end is kept.
+    has_trailing_activity = any(
+        lines[i].strip() and not GENERIC_EXIT_LINE_PATTERN.search(lines[i])
+        for i in range(decisive[-1] + EXCERPT_CONTEXT_AFTER + 1, len(lines))
+    )
+    is_non_terminal = (
+        decisive[-1] < _tail_start_index(lines, max_chars) or has_trailing_activity
+    )
+
     selection = _ExcerptSelection(lines, max_chars)
+    tail = range(len(lines) - 1, decisive[-1], -1)
+    if is_non_terminal:
+        core = [decisive[-1], decisive[0], *header]
+        for marker in (decisive[-1], decisive[0]):
+            core += [marker - 1, marker + 1]
+        for idx in core:
+            if 0 <= idx < len(lines):
+                selection.try_add(idx)
+        for idx in range(len(lines) - 1, -1, -1):
+            if not selection.try_add(idx):
+                break
     blocked: set[tuple[int, int]] = set()
     for idx, key in priority:
         if idx < 0 or idx >= len(lines) or idx in selection.selected:
@@ -365,13 +393,10 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
         return lines[decisive[-1]][:max_chars]
 
     # Spend leftover budget on the contiguous lead-up to the last decisive marker
-    # (compiler causes usually precede the summary error) and on the cleaned tail.
-    # If the last decisive marker precedes the tail window (e.g. a mid-log false
-    # positive), the tail goes first so an unrecognised cause near the end is kept.
+    # (compiler causes usually precede the summary error). For a terminal marker the
+    # remaining cleaned tail follows; for a non-terminal one it is already seeded.
     lead_up = range(decisive[-1] - 1, -1, -1)
-    tail = range(len(lines) - 1, decisive[-1], -1)
-    tail_first = decisive[-1] < _tail_start_index(lines, max_chars)
-    for fill in (tail, lead_up) if tail_first else (lead_up, tail):
+    for fill in (lead_up,) if is_non_terminal else (lead_up, tail):
         for idx in fill:
             if not selection.try_add(idx):
                 break
