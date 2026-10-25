@@ -43,6 +43,7 @@ class BridgeConfig(BaseSettings):
     servicenow_assignment_group: Optional[str] = Field(default=None, alias="SERVICENOW_ASSIGNMENT_GROUP")
 
     is_local: bool = Field(default=False, alias="IS_LOCAL")
+    verifier_sa: Optional[str] = Field(default=None, alias="VERIFIER_SA")
     adapter_timeout_seconds: float = Field(default=30.0, alias="ADAPTER_TIMEOUT_SECONDS")
     cool_down_duration: float = Field(default=180.0, alias="COOL_DOWN_DURATION")
 

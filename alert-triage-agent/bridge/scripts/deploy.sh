@@ -51,6 +51,11 @@ gcloud builds submit "${BRIDGE_DIR}" \
 # 2. Deploy to Cloud Run
 # A single bridge instance is sufficient for this prototype; the bridge holds no grouping state (grouping, timers and suppression live in the agent).
 echo "Deploying Cloud Run service ${SERVICE_NAME}..."
+ENV_VARS="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${PROJECT_ID}-${NAME_PREFIX}-incidents,TASKS_QUEUE=${NAME_PREFIX}-triage-queue,AGENT_URL=${AGENT_URL},SERVICENOW_INSTANCE_URL=${SERVICENOW_INSTANCE_URL}"
+if [ -n "${VERIFIER_SA:-}" ]; then
+    ENV_VARS="${ENV_VARS},VERIFIER_SA=${VERIFIER_SA}"
+fi
+
 gcloud run deploy "${SERVICE_NAME}" \
     --project="${PROJECT_ID}" \
     --region="${REGION}" \
@@ -59,7 +64,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --allow-unauthenticated \
     --max-instances=1 \
     --labels="app=alert-triage-agent,component=${NAME_PREFIX}-bridge,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}" \
-    --set-env-vars="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${PROJECT_ID}-${NAME_PREFIX}-incidents,TASKS_QUEUE=${NAME_PREFIX}-triage-queue,AGENT_URL=${AGENT_URL},SERVICENOW_INSTANCE_URL=${SERVICENOW_INSTANCE_URL}" \
+    --set-env-vars="${ENV_VARS}" \
     --set-secrets="WEBHOOK_TOKEN=${NAME_PREFIX}-webhook-token:latest,SERVICENOW_USERNAME=${NAME_PREFIX}-servicenow-username:latest,SERVICENOW_PASSWORD=${NAME_PREFIX}-servicenow-password:latest"
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)")"

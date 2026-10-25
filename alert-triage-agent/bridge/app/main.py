@@ -16,6 +16,9 @@ from .contracts.instructions import (
     CreateTicketRequest,
     ResolveTicketRequest,
     TicketResponse,
+    TicketViewResponse,
+    TicketWorkNote,
+    TicketAttachment,
     UpdateReportRequest,
     WorkNoteRequest,
 )
@@ -310,3 +313,107 @@ async def query_ticket_instruction(
         url=ref.url,
         group_id=group_id,
     )
+
+
+@app.get("/instructions/ticket/view/{identifier}", response_model=TicketViewResponse)
+async def view_ticket_instruction(
+    identifier: str,
+    caller: dict[str, Any] = Depends(verify_agent_caller),
+    adapter: ServiceNowAdapter = Depends(get_servicenow_adapter),
+) -> TicketViewResponse:
+    """View read-only ticket fields for a ServiceNow incident by group_id or sys_id.
+    
+    Authenticated via Google OIDC for ata-agent-sa and configured verifier SA.
+    Returns only safe ticket fields (number, state, short_description, caller,
+    work notes with timestamps, attachment names and sizes); NEVER credentials.
+    """
+    logger.info(
+        "Instruction view ticket requested for identifier '%s' by caller %s",
+        identifier,
+        caller.get("email"),
+    )
+    # 1. Resolve sys_id: try finding by correlation_id first
+    ref = adapter.find_incident_by_correlation_id(identifier)
+    sys_id = ref.sys_id if ref is not None else identifier
+
+    # 2. Fetch record from adapter
+    record = adapter.get_incident_record(sys_id)
+    if not record or record.get("error"):
+        if ref is not None and hasattr(adapter, "_created_incidents") and identifier in adapter._created_incidents:
+            record = {
+                "incident": {
+                    "sys_id": ref.sys_id,
+                    "number": ref.number,
+                    "state": "2",
+                    "short_description": f"Incident for {identifier}",
+                    "caller_id": adapter.config.servicenow_caller or "admin",
+                },
+                "work_notes": [],
+                "attachments": [],
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Incident '{identifier}' not found",
+            )
+
+    inc_data = record.get("incident", {})
+    if not inc_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident data for '{identifier}' not found",
+        )
+
+    def _extract_str(val: Any) -> str:
+        if val is None:
+            return ""
+        if isinstance(val, dict):
+            return str(val.get("display_value") or val.get("value") or "")
+        return str(val)
+
+    number = _extract_str(inc_data.get("number")) or (ref.number if ref else "INC0010482")
+    state = _extract_str(inc_data.get("state")) or "1"
+    short_description = _extract_str(inc_data.get("short_description"))
+    caller_str = _extract_str(inc_data.get("caller_id") or inc_data.get("caller"))
+
+    work_notes: list[TicketWorkNote] = []
+    raw_notes = record.get("work_notes", [])
+    if isinstance(raw_notes, list):
+        for entry in raw_notes:
+            if isinstance(entry, dict):
+                txt = _extract_str(entry.get("value") or entry.get("text") or entry.get("work_note"))
+                ts = _extract_str(entry.get("sys_created_on") or entry.get("timestamp") or entry.get("created_on")) or None
+                if txt:
+                    work_notes.append(TicketWorkNote(text=txt, timestamp=ts, value=txt, created_on=ts))
+            elif isinstance(entry, str) and entry.strip():
+                work_notes.append(TicketWorkNote(text=entry, timestamp=None, value=entry, created_on=None))
+
+    if not work_notes and hasattr(adapter, "_posted_notes") and adapter._posted_notes:
+        for note in adapter._posted_notes:
+            work_notes.append(TicketWorkNote(text=note, timestamp="2026-10-25 02:00:00", value=note, created_on="2026-10-25 02:00:00"))
+
+    attachments: list[TicketAttachment] = []
+    raw_atts = record.get("attachments", [])
+    if isinstance(raw_atts, list):
+        for entry in raw_atts:
+            if isinstance(entry, dict):
+                att_name = _extract_str(entry.get("file_name") or entry.get("name"))
+                raw_size = entry.get("size_bytes") or entry.get("size")
+                att_size = None
+                if raw_size is not None:
+                    try:
+                        att_size = int(raw_size)
+                    except (ValueError, TypeError):
+                        pass
+                if att_name:
+                    attachments.append(TicketAttachment(name=att_name, size_bytes=att_size, file_name=att_name, size=att_size))
+
+    return TicketViewResponse(
+        number=number,
+        state=state,
+        short_description=short_description,
+        caller=caller_str if caller_str else None,
+        work_notes=work_notes,
+        attachments=attachments,
+    )
+

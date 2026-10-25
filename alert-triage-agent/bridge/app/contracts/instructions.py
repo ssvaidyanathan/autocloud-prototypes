@@ -48,3 +48,30 @@ class ActionStatusResponse(BaseModel):
     sys_id: Optional[str] = Field(default=None, description="ServiceNow incident sys_id")
     group_id: Optional[str] = Field(default=None, description="Canonical incident group identifier")
     message: Optional[str] = Field(default=None, description="Optional detail or error message")
+
+
+class TicketWorkNote(BaseModel):
+    """A single work note journal entry with text and timestamp."""
+    text: str = Field(..., description="Work note text")
+    timestamp: Optional[str] = Field(default=None, description="Timestamp when note was recorded")
+    value: Optional[str] = Field(default=None, description="Compatibility alias for text")
+    created_on: Optional[str] = Field(default=None, description="Compatibility alias for timestamp")
+
+
+class TicketAttachment(BaseModel):
+    """Metadata for an incident attachment."""
+    name: str = Field(..., description="Attachment file name")
+    size_bytes: Optional[int] = Field(default=None, description="Attachment file size in bytes")
+    file_name: Optional[str] = Field(default=None, description="Compatibility alias for name")
+    size: Optional[int] = Field(default=None, description="Compatibility alias for size_bytes")
+
+
+class TicketViewResponse(BaseModel):
+    """Read-only view of ServiceNow ticket fields. NEVER contains credentials."""
+    number: str = Field(..., description="ServiceNow incident number")
+    state: str = Field(..., description="ServiceNow incident state")
+    short_description: str = Field(..., description="Short description of incident")
+    caller: Optional[str] = Field(default=None, description="Caller name or identifier")
+    work_notes: list[TicketWorkNote] = Field(default_factory=list, description="Work notes text with timestamps")
+    attachments: list[TicketAttachment] = Field(default_factory=list, description="Attachment names and sizes")
+

@@ -45,6 +45,13 @@ async def verify_agent_caller(
             claims = {"email": expected_agent_sa, "aud": "https://wrong-service.a.run.app"}
         elif token in ("mock-agent-token", "test-agent-token", "valid-agent-token"):
             claims = {"email": expected_agent_sa, "aud": "mock-bridge-aud"}
+        elif token in ("mock-verifier-token", "valid-verifier-token"):
+            verifier_email = (
+                settings.verifier_sa.split(",")[0].strip()
+                if settings.verifier_sa
+                else "verifier-sa@example.iam.gserviceaccount.com"
+            )
+            claims = {"email": verifier_email, "aud": "mock-bridge-aud"}
         else:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -88,8 +95,14 @@ async def verify_agent_caller(
         f"{settings.name_prefix}-bridge-sa@{settings.project_id}.iam.gserviceaccount.com",
         "scion-fde-ops@deploy-demo-test.iam.gserviceaccount.com",
     }
+    if settings.verifier_sa:
+        for sa in settings.verifier_sa.split(","):
+            cleaned_sa = sa.strip()
+            if cleaned_sa:
+                allowed_callers.add(cleaned_sa)
+
     if caller_email not in allowed_callers:
-        logger.warning("Unauthorized caller email '%s' (expected %s)", caller_email, expected_agent_sa)
+        logger.warning("Unauthorized caller email '%s' (expected one of %s)", caller_email, allowed_callers)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Forbidden caller identity: {caller_email}",

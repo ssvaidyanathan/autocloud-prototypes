@@ -139,6 +139,25 @@ The system assigns least-privilege IAM roles to 6 dedicated service accounts:
 +--------------------+---------------------------------------+-----------------------------------------------+
 ```
 
+### 3.1. Read-Only Ticket Verification Endpoint (`GET /instructions/ticket/view/{group_id or sys_id}`)
+
+To verify ServiceNow ticket lifecycle state without distributing or exposing ServiceNow credentials:
+- **Endpoint:** `GET /instructions/ticket/view/{group_id or sys_id}`
+- **Authentication:** Google-signed OIDC ID token (`Bearer <id_token>`) from an allowlisted caller identity:
+  - `ata-agent-sa@{project_id}.iam.gserviceaccount.com`
+  - Configurable verifier SA specified by the `VERIFIER_SA` environment variable on `ata-bridge`.
+- **Response Fields:** Ticket metadata only:
+  - `number`: ServiceNow incident number (e.g. `INC0010482`)
+  - `state`: Current lifecycle state (`1` New, `2` In Progress, `6` Resolved, `7` Closed)
+  - `short_description`: Triage incident summary
+  - `caller`: Caller identity / display name
+  - `work_notes`: Journal entries with text and timestamps
+  - `attachments`: Attached artifact metadata (file names and sizes in bytes)
+- **Security Rule (No Direct ServiceNow Credentials):**
+  - Incident verification **NEVER** uses ServiceNow credentials directly.
+  - Verifiers, downstream operators, and automated audit tools never receive access to `ata-servicenow-username` or `ata-servicenow-password`.
+  - All verification queries flow strictly through the authenticated bridge verification endpoint, which acts as a secure boundary and returns sanitized ticket fields.
+
 ---
 
 ## 4. Cloud Tasks Queue Configuration

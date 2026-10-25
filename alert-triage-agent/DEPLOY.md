@@ -234,8 +234,29 @@ cd /workspace/alert-triage-agent/bridge
 > - `ENVIRONMENT`: Deployment environment label (`demo`, `staging`, `prod`; default: `demo`).
 > - `OWNER`: Owning engineering team or contact (`sre-prototypes`, `devops`; default: `sre-prototypes`).
 > - `NAME_PREFIX`: Resource name prefix (default: `ata`).
+> - `VERIFIER_SA`: Optional service account email authorized to invoke the read-only ticket verification endpoint.
 >
 > Example: `ENVIRONMENT=staging OWNER=infra-team ./scripts/deploy.sh`
+
+### Read-Only Ticket Verification Endpoint
+
+The bridge exposes a read-only endpoint for verifying incident tickets without distributing or handling ServiceNow credentials:
+```bash
+# Verify ticket status via the bridge (requires Google OIDC Bearer token from ata-agent-sa or VERIFIER_SA)
+curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+     "https://${NAME_PREFIX}-bridge-4klvlqnmpa-uw.a.run.app/instructions/ticket/view/${GROUP_ID_OR_SYS_ID}"
+```
+
+**Returned Fields (Credentials NEVER Returned):**
+- `number`: ServiceNow incident number (e.g. `INC0010482`)
+- `state`: Incident lifecycle state (`1` New, `2` In Progress, `6` Resolved, `7` Closed)
+- `short_description`: Triage summary
+- `caller`: Caller identity / display name
+- `work_notes`: Work note journal entries with timestamps
+- `attachments`: File names and sizes in bytes
+
+> [!IMPORTANT]
+> **Verification Credential Rule:** Ticket verification **never** uses ServiceNow credentials directly. Automated verifiers and auditors authenticate via Google-signed OIDC ID tokens. The bridge serves as a secure boundary, ensuring ServiceNow credentials remain isolated to the bridge runtime.
 
 ---
 

@@ -96,6 +96,7 @@ def mock_adapter(test_config):
                 "state": body.get("state", "1"),
                 "correlation_id": body.get("correlation_id", ""),
                 "short_description": body.get("short_description", ""),
+                "caller_id": {"display_value": "admin", "value": "usr-sn-admin-01"},
             }
             created_incidents[sys_id] = rec
             created_incidents[rec["correlation_id"]] = rec
@@ -111,6 +112,19 @@ def mock_adapter(test_config):
             if body.get("state") == "6":
                 resolved_incidents.append({"sys_id": sys_id, "body": body})
             return httpx.Response(200, json={"result": created_incidents.get(sys_id, {"sys_id": sys_id})})
+
+        if method == "GET" and "/api/now/table/sys_journal_field" in url_str:
+            entries = [
+                {"value": n, "sys_created_on": "2026-10-25 02:00:00"}
+                for n in posted_notes
+            ]
+            return httpx.Response(200, json={"result": entries})
+
+        if method == "GET" and "/api/now/attachment" in url_str:
+            return httpx.Response(
+                200,
+                json={"result": [{"file_name": "ata-diagnostic-report.html", "size_bytes": "4096"}]},
+            )
 
         if method == "POST" and "/api/now/attachment/file" in url_str:
             return httpx.Response(201, json={"result": {"sys_id": "att-mock-01"}})
@@ -339,3 +353,150 @@ def test_query_ticket_instruction_not_found(client):
 def test_query_ticket_instruction_auth_failure(client):
     """Assert query endpoint enforces authentication."""
     assert client.get("/instructions/ticket/query/any-group").status_code == 401
+
+
+# ==============================================================================
+# 6. GET /instructions/ticket/view/{group_id or sys_id} Tests
+# ==============================================================================
+
+def test_view_ticket_instruction_auth_required_401(client):
+    """Assert view endpoint enforces authentication: 401 when token is missing or invalid."""
+    # Missing auth header
+    assert client.get("/instructions/ticket/view/test-group").status_code == 401
+    # Invalid Bearer token
+    assert client.get(
+        "/instructions/ticket/view/test-group",
+        headers={"Authorization": "Bearer bad-token"},
+    ).status_code == 401
+
+
+def test_view_ticket_instruction_unauthorized_caller_403(client):
+    """Assert view endpoint rejects unauthorized service account identity with 403."""
+    # Unauthorized caller email
+    resp = client.get(
+        "/instructions/ticket/view/test-group",
+        headers={"Authorization": "Bearer unauthorized-sa-token"},
+    )
+    assert resp.status_code == 403
+    assert "forbidden" in resp.json()["detail"].lower()
+
+    # Wrong audience
+    resp_aud = client.get(
+        "/instructions/ticket/view/test-group",
+        headers={"Authorization": "Bearer wrong-audience-token"},
+    )
+    assert resp_aud.status_code == 403
+    assert "audience" in resp_aud.json()["detail"].lower()
+
+
+def test_view_ticket_instruction_by_group_id_and_sys_id(client, mock_adapter, sample_report):
+    """Assert view returns ticket fields, work notes with timestamps, attachments, and NEVER credentials."""
+    # 1. Create a ticket
+    create_req = CreateTicketRequest(
+        group_id=sample_report.group_id,
+        report=sample_report,
+    )
+    create_resp = client.post(
+        "/instructions/ticket/create",
+        json=create_req.model_dump(mode="json"),
+        headers=AUTH_HEADERS,
+    )
+    assert create_resp.status_code == 200
+    ticket_data = create_resp.json()
+    sys_id = ticket_data["sys_id"]
+    number = ticket_data["number"]
+
+    # 2. Append a work note
+    note_req = WorkNoteRequest(
+        sys_id=sys_id,
+        work_note="Triage investigation completed: root cause confirmed.",
+        group_id=sample_report.group_id,
+    )
+    note_resp = client.post(
+        "/instructions/ticket/work-note",
+        json=note_req.model_dump(mode="json"),
+        headers=AUTH_HEADERS,
+    )
+    assert note_resp.status_code == 200
+
+    # 3. Query view by group_id
+    view_resp = client.get(
+        f"/instructions/ticket/view/{sample_report.group_id}",
+        headers=AUTH_HEADERS,
+    )
+    assert view_resp.status_code == 200
+    data = view_resp.json()
+
+    # Validate required ticket fields
+    assert data["number"] == number
+    assert "state" in data
+    assert "short_description" in data
+    assert data["caller"] == "admin"
+
+    # Validate work notes are included with text and timestamps
+    assert len(data["work_notes"]) >= 1
+    for note in data["work_notes"]:
+        assert "text" in note
+        assert note["text"]  # Non-empty
+        assert "timestamp" in note
+
+    # Validate attachments are included with names and sizes
+    assert len(data["attachments"]) >= 1
+    for att in data["attachments"]:
+        assert "name" in att
+        assert att["name"]
+        assert "size_bytes" in att
+
+    # CRITICAL SECURITY ASSERTION: NEVER credentials in response
+    serialized = json.dumps(data).lower()
+    for sensitive_keyword in ("password", "webhook_token", "secret", "bearer", "token_param"):
+        assert sensitive_keyword not in serialized, f"Security violation: found '{sensitive_keyword}' in response"
+
+    # 4. Query view by sys_id directly
+    view_sys_resp = client.get(
+        f"/instructions/ticket/view/{sys_id}",
+        headers=AUTH_HEADERS,
+    )
+    assert view_sys_resp.status_code == 200
+    data_sys = view_sys_resp.json()
+    assert data_sys["number"] == number
+    assert len(data_sys["work_notes"]) >= 1
+
+
+def test_view_ticket_instruction_configurable_verifier_sa(client, test_config, mock_adapter, sample_report):
+    """Assert view endpoint allows a configurable verifier SA."""
+    # 1. Create a ticket
+    create_req = CreateTicketRequest(
+        group_id=sample_report.group_id,
+        report=sample_report,
+    )
+    client.post(
+        "/instructions/ticket/create",
+        json=create_req.model_dump(mode="json"),
+        headers=AUTH_HEADERS,
+    )
+
+    # Without verifier_sa configured, verifier token is rejected (email mismatch -> 403)
+    test_config.verifier_sa = None
+    resp_unconfigured = client.get(
+        f"/instructions/ticket/view/{sample_report.group_id}",
+        headers={"Authorization": "Bearer valid-verifier-token"},
+    )
+    assert resp_unconfigured.status_code == 403
+
+    # With verifier_sa configured, verifier token is accepted
+    test_config.verifier_sa = "verifier-auditor-sa@cloud-assist-fde-2.iam.gserviceaccount.com"
+    resp_configured = client.get(
+        f"/instructions/ticket/view/{sample_report.group_id}",
+        headers={"Authorization": "Bearer valid-verifier-token"},
+    )
+    assert resp_configured.status_code == 200
+    assert resp_configured.json()["number"]
+
+
+def test_view_ticket_instruction_not_found(client):
+    """Assert view endpoint returns 404 for unknown ticket / group."""
+    resp = client.get("/instructions/ticket/view/non-existent-group-xyz", headers=AUTH_HEADERS)
+    assert resp.status_code == 404
+    assert "not found" in resp.json()["detail"].lower()
+
