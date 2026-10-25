@@ -1,13 +1,13 @@
 import os
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, TypeGuard
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def synthesis_thinking_enabled(thinking_budget: Optional[int]) -> bool:
-    """A None or negative synthesis thinking budget disables thinkingConfig."""
+def synthesis_thinking_enabled(thinking_budget: Optional[int]) -> TypeGuard[int]:
+    """True when thinkingConfig should be sent; None or negative omits it."""
     return thinking_budget is not None and thinking_budget >= 0
 
 
@@ -33,8 +33,13 @@ class AgentConfig(BaseSettings):
     synthesis_max_output_tokens: int = Field(default=8192, gt=0)
     # Coupled to gemini_model: non-thinking models (e.g. the 2.0 family) reject
     # thinkingConfig outright, and gemini-2.5-pro rejects budgets below 128
-    # (so 0 is invalid there). Set to None or a negative value (e.g.
-    # SYNTHESIS_THINKING_BUDGET=-1) to omit thinkingConfig from the request.
+    # (so 0 is invalid there). None or a negative value (e.g.
+    # SYNTHESIS_THINKING_BUDGET=-1) omits thinkingConfig from the request; this
+    # is intended for models that reject it (non-thinking models). On 2.5
+    # thinking models omission means the model-default *dynamic* (unbounded)
+    # thinking, NOT disabled thinking (-1 is also Gemini's own "dynamic"
+    # value). To disable thinking on gemini-2.5-flash, use 0. The omitted case
+    # is not covered by the budget < max-output-tokens validator below.
     synthesis_thinking_budget: Optional[int] = Field(default=1024)
 
     # GitHub API configuration
@@ -52,8 +57,7 @@ class AgentConfig(BaseSettings):
     def validate_synthesis_budget(self) -> "AgentConfig":
         budget = self.synthesis_thinking_budget
         if (
-            budget is not None
-            and synthesis_thinking_enabled(budget)
+            synthesis_thinking_enabled(budget)
             and budget >= self.synthesis_max_output_tokens
         ):
             raise ValueError(
