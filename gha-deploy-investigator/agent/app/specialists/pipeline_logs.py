@@ -174,7 +174,7 @@ ERROR_MARKER_PATTERN = re.compile(
     r"error:|failed:(?!\s*0\b)|fatal:|failure:|\berror\s*\[|\[error\]|\berr:|\berr!"
     r"|exception:|traceback \(most recent call last\)"
     r"|\berror\s+(?-i:[A-Z]+\d+):"
-    r"|(?-i:(?<!\b0\s)\bFAIL(?:ED)?\b(?!\s*:\s*0\b))"
+    r"|(?-i:(?<!\b0\s)(?<!\b0\s\s)\bFAIL(?:ED)?\b(?!\s*:\s*0\b))"
     r"|(?-i:\bError [1-9]\d*\s*$)"
     r"|\bcommand not found\b",
     re.IGNORECASE,
@@ -303,8 +303,20 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
     2. If decisive error markers exist (markers other than generic exit-status
        lines), keeps the decisive error lines plus the command header and
        surrounding context, prioritising the error lines themselves. Leftover
-       budget is then spent on the contiguous lead-up to the last decisive marker
-       and on the cleaned tail of the log.
+       budget is then filled in this order, each stage stopping at the first
+       line that no longer fits:
+
+       a. the contiguous lead-up, read backwards from the line before the last
+          decisive marker (compiler/build causes usually precede the summary
+          error);
+       b. the inter-marker middle, read forwards from the first decisive marker
+          up to the last one;
+       c. for a terminal marker only, the cleaned tail after the last decisive
+          marker, read backwards from the end of the log.
+
+       Running the lead-up before the middle stops an earlier false-positive
+       marker from spending the budget on the lines that follow it, starving
+       an unrecognised cause just above the terminal error.
 
        If the last decisive marker is non-terminal (it precedes the window a
        plain tail excerpt would cover, or real non-exit output follows its
@@ -312,7 +324,8 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
        the first and last decisive lines, the line immediately before and after
        each, and the command header. All remaining budget then goes to the
        contiguous cleaned tail, read backwards from the end, before wider
-       context and lead-up. Guarantee: a cause within the last
+       context, the lead-up (a) and the middle (b); stage (c) is skipped.
+       Guarantee: a cause within the last
        ``max_chars - core_chars`` characters of the cleaned log is kept, where
        ``core_chars`` is the rendered size of the core plus its separator
        (``EXCERPT_GAP_MARKER`` and newlines) before the tail.
@@ -353,7 +366,6 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
                 priority.append((idx - distance, (idx, -1)))
             if distance <= EXCERPT_CONTEXT_AFTER:
                 priority.append((idx + distance, (idx, 1)))
-    priority.extend((idx, None) for idx in range(decisive[0], decisive[-1] + 1))
 
     # The last decisive marker is non-terminal when it precedes the window a plain
     # tail excerpt would cover, or when real output follows its trailing context
@@ -393,10 +405,13 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
         return lines[decisive[-1]][:max_chars]
 
     # Spend leftover budget on the contiguous lead-up to the last decisive marker
-    # (compiler causes usually precede the summary error). For a terminal marker the
-    # remaining cleaned tail follows; for a non-terminal one it is already seeded.
+    # first (compiler causes usually precede the summary error), then on the
+    # inter-marker middle, so an earlier false-positive marker cannot starve the
+    # lead-up. For a terminal marker the remaining cleaned tail follows; for a
+    # non-terminal one it is already seeded.
     lead_up = range(decisive[-1] - 1, -1, -1)
-    for fill in (lead_up,) if is_non_terminal else (lead_up, tail):
+    middle = range(decisive[0], decisive[-1])
+    for fill in (lead_up, middle) if is_non_terminal else (lead_up, middle, tail):
         for idx in fill:
             if not selection.try_add(idx):
                 break

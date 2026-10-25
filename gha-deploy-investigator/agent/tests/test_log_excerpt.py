@@ -197,6 +197,7 @@ class TestErrorMarkerWindowing:
             "Ran 12 tests, 0 failed",
             "all checks passed",
             "Summary: 12 PASSED, 0 FAILED",
+            "Summary: 12 PASSED, 0  FAILED",
             "FAILED: 0",
         ],
     )
@@ -293,8 +294,12 @@ class TestFallback:
         assert extract_decisive_log_excerpt("") == ""
 
 
-class TestExcerptNeverWorseThanTail:
-    """R1 regressions: the excerpt must keep the cause that the old blind tail kept."""
+class TestTailCauseRetention:
+    """R1 regressions: causes near the end of the log are retained in the excerpt.
+
+    Covers causes the old blind tail carried as well as unrecognised causes in the
+    lead-up to a terminal error that an earlier false-positive marker must not starve.
+    """
 
     @staticmethod
     def _assert_tail_cause_kept(log_text: str, cause_lines: list[str], max_chars: int) -> None:
@@ -388,6 +393,29 @@ class TestExcerptNeverWorseThanTail:
         excerpt = extract_decisive_log_excerpt("\n".join(lines), max_chars=1500)
         assert "src/lib.rs:12:5: mismatched types" in excerpt
         assert "error: could not compile `app`" in excerpt
+        assert len(excerpt) <= 1500
+
+    @pytest.mark.parametrize(
+        "marker_index", [pytest.param(0, id="fp-top"), pytest.param(150, id="fp-middle")]
+    )
+    @pytest.mark.parametrize("cause_distance", [15, 20, 30])
+    def test_earlier_false_positive_does_not_starve_terminal_lead_up(
+        self, marker_index: int, cause_distance: int
+    ) -> None:
+        """R4-1: inter-marker fill must not consume the lead-up budget."""
+        cause = "linker: undefined reference to `charge_card'"
+        terminal = "error: could not compile `app`"
+        lines = [f"compiling module {i}" for i in range(300)]
+        lines[marker_index:marker_index] = ["config: retry-on-error: true"]
+        lines += [cause]
+        lines += [f"compiling module tail {i}" for i in range(cause_distance - 1)]
+        lines += [terminal, "##[error]Process completed with exit code 101."]
+        log_text = "\n".join(lines)
+        assert lines.index(terminal) - lines.index(cause) == cause_distance
+        excerpt = extract_decisive_log_excerpt(log_text, max_chars=1500)
+        assert cause in excerpt
+        assert terminal in excerpt
+        assert "config: retry-on-error: true" in excerpt
         assert len(excerpt) <= 1500
 
     def test_leftover_budget_is_spent_on_lead_up_context(self) -> None:
