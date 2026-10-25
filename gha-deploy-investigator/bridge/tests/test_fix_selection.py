@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
+import pytest
 from bridge.app.contracts.findings import EvidenceItem
 from bridge.app.contracts.incident import Incident
 from bridge.app.contracts.report import (
@@ -10,6 +11,7 @@ from bridge.app.contracts.report import (
     ProbableRootCause,
     Report,
 )
+from bridge.app.fixer import selection
 from bridge.app.fixer.selection import (
     MAX_CONFIG_CANDIDATES,
     candidate_config_paths,
@@ -58,44 +60,89 @@ def _oom_report(**extra: object) -> Report:
     )
 
 
+def _agent_proposal(status: str = "proposed") -> FixProposal:
+    return FixProposal(
+        status=status,  # type: ignore[arg-type]
+        strategy="llm_patch",
+        rationale="r",
+        patches=[FilePatch(path="a.py", action="modify", diff="d")] if status == "proposed" else [],
+        target_branch_base="main",
+    )
+
+
 class TestSelectFixProposal:
-    def test_agent_proposal_wins_without_fetching(self) -> None:
-        agent = FixProposal(
-            status="proposed",
-            strategy="llm_patch",
-            rationale="r",
-            patches=[FilePatch(path="a.py", action="modify", diff="d")],
-            target_branch_base="main",
+    def test_lint_fixer_takes_precedence_over_agent_proposal(self) -> None:
+        agent = _agent_proposal()
+        fetch, _ = _files({"app/main.py": SOURCE})
+        report = Report(
+            summary="s",
+            fix_proposal=agent,
+            evidence_by_area={"x": [EvidenceItem(kind="log", excerpt=LINT)]},
         )
-        fetch, calls = _files({"app/main.py": SOURCE})
+        proposal = select_fix_proposal(_incident(), report, fetch)
+        assert proposal is not None
+        assert proposal is not agent
+        assert proposal.strategy == "deterministic_linter"
+        assert proposal.patches[0].content == "x = 1\n"
+
+    def test_memory_fixer_takes_precedence_over_agent_proposal(self) -> None:
+        agent = _agent_proposal()
+        fetch, calls = _files({"deploy/run.sh": "SERVICE_MEMORY=384Mi\n"})
+        proposal = select_fix_proposal(_incident(), _oom_report(fix_proposal=agent), fetch)
+        assert proposal is not None
+        assert proposal is not agent
+        assert proposal.strategy == "config_tuning"
+        assert proposal.patches[0].content == "SERVICE_MEMORY=768Mi\n"
+        assert calls == ["deploy/run.sh"]
+
+    def test_agent_proposal_chosen_when_no_deterministic_fixer_applies(self) -> None:
+        agent = _agent_proposal()
+        fetch, calls = _files({})
+        report = Report(summary="tests failed: assert 1 == 2", fix_proposal=agent)
+        assert select_fix_proposal(_incident(), report, fetch) is agent
+        assert calls == []
+
+    def test_agent_proposal_chosen_when_deterministic_fixer_cannot_produce_patch(self) -> None:
+        # OOM is diagnosed but no tunable memory setting exists in the referenced files,
+        # so config_tuning does not yield a proposed fix and the agent patch is used.
+        agent = _agent_proposal()
+        fetch, calls = _files({"deploy/run.sh": "echo deploying\n"})
+        proposal = select_fix_proposal(_incident(), _oom_report(fix_proposal=agent), fetch)
+        assert proposal is agent
+        assert calls == ["deploy/run.sh"]
+
+    def test_agent_proposal_chosen_when_deterministic_fixer_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def explode(*_: object) -> FixProposal:
+            raise RuntimeError("fixer bug")
+
+        monkeypatch.setattr(selection, "_lint_proposal", explode)
+        agent = _agent_proposal()
+        fetch, _ = _files({"app/main.py": SOURCE})
         report = Report(
             summary="s",
             fix_proposal=agent,
             evidence_by_area={"x": [EvidenceItem(kind="log", excerpt=LINT)]},
         )
         assert select_fix_proposal(_incident(), report, fetch) is agent
-        assert calls == []
 
-    def test_lint_fallback_when_agent_declined(self) -> None:
+    def test_lint_fixer_chosen_when_agent_declined(self) -> None:
         fetch, _ = _files({"app/main.py": SOURCE})
         report = Report(
             summary="s",
             evidence_by_area={"x": [EvidenceItem(kind="log", excerpt=LINT)]},
-            fix_proposal=FixProposal(
-                status="no_safe_fix", strategy="llm_patch", rationale="r", target_branch_base="main"
-            ),
+            fix_proposal=_agent_proposal("no_safe_fix"),
         )
         proposal = select_fix_proposal(_incident(), report, fetch)
         assert proposal is not None
         assert proposal.strategy == "deterministic_linter"
-        assert proposal.patches[0].content == "x = 1\n"
 
-    def test_memory_fallback_for_deploy_oom(self) -> None:
+    def test_memory_fixer_chosen_without_agent_proposal(self) -> None:
         fetch, calls = _files({"deploy/run.sh": "SERVICE_MEMORY=384Mi\n"})
         proposal = select_fix_proposal(_incident(), _oom_report(), fetch)
         assert proposal is not None
         assert proposal.strategy == "config_tuning"
-        assert proposal.patches[0].content == "SERVICE_MEMORY=768Mi\n"
         assert calls == ["deploy/run.sh"]
 
     def test_none_when_nothing_applies(self) -> None:
@@ -103,12 +150,24 @@ class TestSelectFixProposal:
         assert select_fix_proposal(_incident(), Report(summary="tests failed"), fetch) is None
         assert calls == []
 
+    def test_none_when_agent_declined_and_no_deterministic_fixer_applies(self) -> None:
+        fetch, _ = _files({})
+        report = Report(summary="tests failed", fix_proposal=_agent_proposal("no_safe_fix"))
+        assert select_fix_proposal(_incident(), report, fetch) is None
+
     def test_fetch_errors_and_non_strings_are_tolerated(self) -> None:
         def boom(path: str) -> Optional[str]:
             raise RuntimeError("github down")
 
         assert select_fix_proposal(_incident(), _oom_report(), boom) is None
         assert select_fix_proposal(_incident(), _oom_report(), lambda p: object()) is None  # type: ignore[arg-type,return-value]
+
+    def test_fetch_errors_fall_through_to_agent_proposal(self) -> None:
+        def boom(path: str) -> Optional[str]:
+            raise RuntimeError("github down")
+
+        agent = _agent_proposal()
+        assert select_fix_proposal(_incident(), _oom_report(fix_proposal=agent), boom) is agent
 
 
 class TestCandidateConfigPaths:

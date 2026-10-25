@@ -1,12 +1,17 @@
 """Choose which FixProposal (if any) the bridge should execute for a completed investigation.
 
 Order of preference:
-1. The agent's own proposal (``report.fix_proposal``) when its status is ``proposed``.
-2. The deterministic lint fixer (S1) when lint diagnostics are present in the evidence.
-3. The deterministic memory-config fixer (S4) for deploy-stage memory exhaustion.
+1. The deterministic lint fixer (S1) when lint diagnostics are present in the evidence.
+2. The deterministic memory-config fixer (S4) for deploy-stage memory exhaustion.
+3. The agent's own proposal (``report.fix_proposal``) when its status is ``proposed``.
+
+A deterministic fixer that claims the diagnosed failure takes precedence over the agent's
+LLM patch; the agent proposal is only considered when no deterministic fixer applies.
+Selection happens once, up front: if the chosen proposal later fails to apply, there is no
+retry with another candidate.
 
 File contents are read through a read-only ``fetch_file(path)`` callback bound to the
-failing commit. Fallback fixers never raise: any failure means "no proposal".
+failing commit. Deterministic fixers never raise: any failure means "no proposal".
 """
 
 import logging
@@ -83,30 +88,11 @@ def select_fix_proposal(
     incident: Incident, report: Report, fetch_file: FetchFile
 ) -> Optional[FixProposal]:
     """Return the proposal to execute, or None when nothing actionable is available."""
-    agent_proposal = report.fix_proposal
-    if agent_proposal is None:
-        logger.info("autofix.candidate incident=%s candidate=agent result=absent", incident.id)
-    elif agent_proposal.status == "proposed":
-        logger.info(
-            "autofix.chosen incident=%s candidate=agent strategy=%s patches=%d",
-            incident.id,
-            agent_proposal.strategy,
-            len(agent_proposal.patches),
-        )
-        return agent_proposal
-    else:
-        logger.info(
-            "autofix.candidate incident=%s candidate=agent result=rejected status=%s rationale=%r",
-            incident.id,
-            agent_proposal.status,
-            agent_proposal.rationale,
-        )
-
-    fallbacks: list[tuple[str, Callable[[], Optional[FixProposal]]]] = [
+    deterministic_candidates: list[tuple[str, Callable[[], Optional[FixProposal]]]] = [
         ("deterministic_linter", lambda: _lint_proposal(incident, report, fetch_file)),
         ("config_tuning", lambda: _memory_proposal(incident, report, fetch_file)),
     ]
-    for name, build in fallbacks:
+    for name, build in deterministic_candidates:
         try:
             proposal = build()
         except Exception as exc:
@@ -139,6 +125,25 @@ def select_fix_proposal(
             name,
             proposal.status,
             proposal.rationale,
+        )
+
+    agent_proposal = report.fix_proposal
+    if agent_proposal is None:
+        logger.info("autofix.candidate incident=%s candidate=agent result=absent", incident.id)
+    elif agent_proposal.status == "proposed":
+        logger.info(
+            "autofix.chosen incident=%s candidate=agent strategy=%s patches=%d",
+            incident.id,
+            agent_proposal.strategy,
+            len(agent_proposal.patches),
+        )
+        return agent_proposal
+    else:
+        logger.info(
+            "autofix.candidate incident=%s candidate=agent result=rejected status=%s rationale=%r",
+            incident.id,
+            agent_proposal.status,
+            agent_proposal.rationale,
         )
     logger.info("autofix.chosen incident=%s candidate=none", incident.id)
     return None
