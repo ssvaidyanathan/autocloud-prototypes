@@ -77,6 +77,11 @@ def parse_synthesis_payload(raw_text: str) -> Optional[dict[str, Any]]:
         return None
 
 
+def _config_value(cfg: Any, field_name: str) -> Any:
+    """Read a setting from cfg, defaulting to the AgentConfig field default."""
+    return getattr(cfg, field_name, AgentConfig.model_fields[field_name].default)
+
+
 def generate_gemini_synthesis(
     failing_job: dict[str, Any],
     failing_step: dict[str, Any],
@@ -85,9 +90,20 @@ def generate_gemini_synthesis(
     client: Optional[httpx.Client] = None,
     specialist_findings: Optional[dict[str, Any]] = None,
     diagnostic_summary: Optional[str] = None,
+    synthesis_status: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    """Generate grounded causal diagnosis using Vertex AI Gemini via REST API."""
+    """Generate grounded causal diagnosis using Vertex AI Gemini via REST API.
+
+    When ``synthesis_status`` is provided it is filled with ``outcome`` (one of
+    ``ok``, ``truncated``, ``unparseable``, ``empty``, ``error``, ``unavailable``)
+    and ``finish_reason`` so callers can surface synthesis failures in the report.
+    """
     cfg = config or get_settings()
+    status: dict[str, Any] = synthesis_status if synthesis_status is not None else {}
+    status["outcome"] = "unavailable"
+    status["finish_reason"] = None
+    max_output_tokens = _config_value(cfg, "synthesis_max_output_tokens")
+    thinking_budget = _config_value(cfg, "synthesis_thinking_budget")
 
     token = None
     project_id = getattr(cfg, "gcp_project", None)
@@ -122,7 +138,12 @@ def generate_gemini_synthesis(
 
     job_name = failing_job.get("name", "pipeline")
     step_name = failing_step.get("name", "execution")
-    log_excerpt = log_text[-4000:] if len(log_text) > 4000 else log_text
+    if specialist_findings and specialist_findings.get("runner_log_excerpt"):
+        log_excerpt = specialist_findings["runner_log_excerpt"]
+    else:
+        from .specialists.pipeline_logs import extract_decisive_log_excerpt
+
+        log_excerpt = extract_decisive_log_excerpt(log_text, max_chars=4000)
 
     findings_parts = []
     if diagnostic_summary:
@@ -189,8 +210,9 @@ def generate_gemini_synthesis(
         ],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 4096,
+            "maxOutputTokens": max_output_tokens,
             "responseMimeType": "application/json",
+            "thinkingConfig": {"thinkingBudget": thinking_budget},
         },
     }
 
@@ -207,26 +229,49 @@ def generate_gemini_synthesis(
             logger.warning(
                 "Vertex AI Gemini API returned status %d: %s", resp.status_code, resp.text
             )
+            status["outcome"] = "error"
             return None
 
         result_data = resp.json()
         candidates = result_data.get("candidates", [])
         if not candidates:
             logger.warning("Vertex AI Gemini response had no candidates: %s", result_data)
+            status["outcome"] = "empty"
             return None
 
         first_candidate = candidates[0]
+        finish_reason = first_candidate.get("finishReason")
+        status["finish_reason"] = finish_reason
+        truncated = finish_reason == "MAX_TOKENS"
+        if truncated:
+            logger.warning(
+                "Vertex AI Gemini synthesis hit MAX_TOKENS (maxOutputTokens=%d, "
+                "thinkingBudget=%d); response may be truncated",
+                max_output_tokens,
+                thinking_budget,
+            )
         content_parts = first_candidate.get("content", {}).get("parts", [])
-        if not content_parts:
-            return None
-
-        raw_text = content_parts[0].get("text", "").strip()
+        raw_text = "".join(
+            p.get("text", "") for p in content_parts if not p.get("thought", False)
+        ).strip()
         if not raw_text:
+            status["outcome"] = "truncated" if truncated else "empty"
             return None
 
-        return parse_synthesis_payload(raw_text)
+        parsed = parse_synthesis_payload(raw_text)
+        if parsed is None:
+            logger.warning(
+                "Vertex AI Gemini synthesis response unparseable (finishReason=%s, len=%d)",
+                finish_reason,
+                len(raw_text),
+            )
+            status["outcome"] = "truncated" if truncated else "unparseable"
+            return None
+        status["outcome"] = "truncated" if truncated else "ok"
+        return parsed
     except Exception as exc:
         logger.warning("Vertex AI Gemini synthesis call failed: %s", exc)
+        status["outcome"] = "error"
         return None
     finally:
         if owns_client:

@@ -39,6 +39,24 @@ def render_servicenow_html(report: Report) -> str:
         ),
     ]
 
+    # Caveats first, so diagnosis-quality warnings (e.g. heuristic fallback after
+    # failed LLM synthesis) are never lost to work-note truncation.
+    if report.caveats:
+        lines.extend(
+            [
+                (
+                    '    <div style="margin-bottom: 12px; padding: 10px; background: #ffebe9; '
+                    'border-left: 4px solid #cf222e; border-radius: 2px;">'
+                ),
+                '      <div style="font-weight: 600; color: #a40e26;">Caveats</div>',
+                '      <ul style="margin: 4px 0 0 0; padding-left: 20px;">',
+            ]
+        )
+        for caveat in report.caveats[:10]:
+            caveat_text = caveat[:500] + "..." if len(caveat) > 500 else caveat
+            lines.append(f"        <li>{html.escape(caveat_text)}</li>")
+        lines.extend(["      </ul>", "    </div>"])
+
     # Summary (safely truncate if necessary before HTML formatting)
     safe_summary = (
         report.summary[:2000] + "... (truncated)" if len(report.summary) > 2000 else report.summary

@@ -534,6 +534,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
         failing_step: dict[str, Any],
         log_text: str,
         sub_stage: str,
+        client: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
     ) -> DiagnosticResult:
         annotations: list[CheckRunAnnotation] = []
         if sub_stage == "lint":
@@ -561,6 +563,15 @@ class PipelineLogsSpecialist(BaseSpecialist):
                     console_url=incident.external_url,
                 )
             )
+
+        # Ground downstream synthesis in the commit diff even when the ADK
+        # runner's findings omitted it.
+        if not any(e.kind == "git_diff" for e in evidence_items):
+            diff_data = self._resolve_diff_data(incident, None, client, config)
+            if diff_data:
+                self._append_git_diff_evidence(
+                    evidence_items, diff_data, incident, datetime.now(timezone.utc)
+                )
 
         diag = DiagnosticResult(
             stage=sub_stage,
@@ -629,7 +640,14 @@ class PipelineLogsSpecialist(BaseSpecialist):
                 findings = run_sync(self._execute_adk_runner(agent, runner_prompt))
                 if findings and (self.skill_tracker.queries_run or findings.queries_run):
                     return self._findings_to_diagnostic_result(
-                        findings, incident, failing_job, failing_step, log_text, sub_stage
+                        findings,
+                        incident,
+                        failing_job,
+                        failing_step,
+                        log_text,
+                        sub_stage,
+                        client=client,
+                        config=config,
                     )
             except Exception as exc:
                 logger.info("PipelineLogsSpecialist ADK runner pass skipped/failed: %s", exc)

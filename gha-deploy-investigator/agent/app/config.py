@@ -2,7 +2,7 @@ import os
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +23,10 @@ class AgentConfig(BaseSettings):
     bridge_service_url: str = ""
     vertex_ai_location: str = "us-central1"
     gemini_model: str
+    # Gemini synthesis generation budget. Thinking tokens count against
+    # maxOutputTokens on thinking models, so both are tunable together.
+    synthesis_max_output_tokens: int = Field(default=8192, gt=0)
+    synthesis_thinking_budget: int = Field(default=1024, ge=0)
 
     # GitHub API configuration
     github_api_url: str = "https://api.github.com"

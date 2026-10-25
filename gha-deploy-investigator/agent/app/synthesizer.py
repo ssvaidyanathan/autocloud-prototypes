@@ -84,6 +84,7 @@ class SynthesizerAgent:
 
         # Attempt Vertex AI Gemini synthesis
         llm_result: Optional[dict[str, Any]] = None
+        synthesis_status: dict[str, Any] = {}
         if self.llm_client is not None and hasattr(self.llm_client, "synthesize"):
             try:
                 llm_result = self.llm_client.synthesize(
@@ -160,6 +161,7 @@ class SynthesizerAgent:
                     config=self.config,
                     specialist_findings=spec_findings,
                     diagnostic_summary=diag_summary,
+                    synthesis_status=synthesis_status,
                 )
             except Exception as llm_exc:
                 logger.info("Vertex AI Gemini synthesis not available or failed: %s", llm_exc)
@@ -201,6 +203,7 @@ class SynthesizerAgent:
             text=root_cause_text,
             confidence=confidence_val,
         )
+        caveats = _synthesis_caveats(synthesis_status, self.synthesizer_mode)
 
         stage_label = diagnostic_result.stage if diagnostic_result else "execution"
         summary = (
@@ -310,7 +313,7 @@ class SynthesizerAgent:
             unrelated_observations=unrelated_observations,
             specialists_status=specialists_status,
             skills_used=skills_used,
-            caveats=[],
+            caveats=caveats,
             annotations=annotations,
             queries_appendix=queries_appendix,
             metadata={
@@ -320,9 +323,48 @@ class SynthesizerAgent:
                 "repo": incident.github_repo,
                 "run_id": incident.github_run_id,
                 "synthesizer_mode": self.synthesizer_mode,
+                "heuristic_fallback": self.synthesizer_mode == "heuristic_fallback",
+                "synthesis_outcome": synthesis_status.get("outcome"),
+                "synthesis_finish_reason": synthesis_status.get("finish_reason"),
             },
             fix_proposal=fix_proposal,
         )
+
+
+_SYNTHESIS_FAILURE_REASONS: dict[str, str] = {
+    "truncated": "response truncated at the output token limit",
+    "unparseable": "response could not be parsed",
+    "empty": "empty response",
+    "error": "model call error",
+}
+
+
+def _synthesis_caveats(synthesis_status: dict[str, Any], synthesizer_mode: str) -> list[str]:
+    """Human-readable notes that make LLM synthesis failure visible in the report."""
+    caveats: list[str] = []
+    outcome = synthesis_status.get("outcome")
+    finish_reason = synthesis_status.get("finish_reason")
+    if outcome == "truncated":
+        caveats.append(
+            "LLM synthesis truncated: the model stopped at its output token limit "
+            f"(finishReason={finish_reason}); its response may be incomplete."
+        )
+    elif outcome == "unparseable":
+        caveats.append(
+            "LLM synthesis unparseable: the model response could not be parsed as a "
+            f"synthesis payload (finishReason={finish_reason})."
+        )
+    if synthesizer_mode == "heuristic_fallback":
+        if outcome in _SYNTHESIS_FAILURE_REASONS:
+            cause = f"LLM synthesis failed ({_SYNTHESIS_FAILURE_REASONS[outcome]})"
+        else:
+            cause = "LLM synthesis was unavailable"
+        caveats.append(
+            f"Heuristic diagnosis because {cause}: the root cause and actions in this "
+            "report come from deterministic specialist heuristics, not LLM synthesis, "
+            "and no LLM fix proposal was generated."
+        )
+    return caveats
 
 
 def synthesize_report(

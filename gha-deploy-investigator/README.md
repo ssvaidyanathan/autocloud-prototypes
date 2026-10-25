@@ -427,6 +427,7 @@ The prototype has been validated through unassisted live evaluation against Goog
 3. **Declarative Cloud Run Deployment Invariant**: Google Cloud Run retains environment variables across revisions by default unless explicitly cleared. Deployment scripts must pass `--clear-env-vars` when deploying without overrides to prevent stale configuration bleed.
 4. **ServiceNow Role Requirements**: The integration user configured in `SERVICENOW_USERNAME` must possess `itil` table permissions and attachment upload permissions (`soap_ecc` or equivalent).
 5. **Single Execution Scope**: The prototype evaluates individual workflow run failures; cross-run flaky test clustering and global repository trend analysis are queued for future releases.
+6. **Heuristic Fallback When LLM Synthesis Fails**: If Gemini synthesis is truncated at its output token limit (`finishReason=MAX_TOKENS`), returns an unparseable payload, errors, or is unavailable, the report falls back to deterministic specialist heuristics and no LLM fix proposal is produced. This is never silent: the report carries a `Heuristic diagnosis because LLM synthesis failed (...)` caveat plus `metadata.heuristic_fallback`, `metadata.synthesis_outcome`, and `metadata.synthesis_finish_reason`, and the ServiceNow work note renders the caveat at the top. The synthesis token budget is tunable via `SYNTHESIS_MAX_OUTPUT_TOKENS` (default 8192) and `SYNTHESIS_THINKING_BUDGET` (default 1024); thinking tokens count against the output budget on thinking models.
 
 ---
 
