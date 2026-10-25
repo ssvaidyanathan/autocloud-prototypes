@@ -418,6 +418,58 @@ class TestTailCauseRetention:
         assert "config: retry-on-error: true" in excerpt
         assert len(excerpt) <= 1500
 
+    @pytest.mark.parametrize(
+        "fp_indices",
+        [
+            pytest.param((50,), id="1fp"),
+            pytest.param((50, 120), id="2fp"),
+            pytest.param((50, 120, 200), id="3fp"),
+        ],
+    )
+    @pytest.mark.parametrize("cause_distance", [8, 12, 18, 25])
+    def test_multiple_false_positives_do_not_starve_terminal_lead_up(
+        self, fp_indices: tuple[int, ...], cause_distance: int
+    ) -> None:
+        """R5-1: earlier false-positive markers' context must not starve the lead-up.
+
+        Uses realistic ~50-char lines, where each false positive's context costs
+        the most budget. The documented guarantee is that the contiguous lead-up
+        within ``max_chars // 2`` characters above the terminal marker is kept,
+        however many false positives precede it; causes 8 and 12 lines up fall
+        inside it, 18 and 25 lines up (~920 / ~1,275 chars) fall outside it, so
+        for those only the reserved window itself is asserted.
+        """
+        max_chars = 1500
+        cause = "linker: undefined reference to `charge_card'"
+        terminal = "error: could not compile `app`"
+        lines = [f"compiling module {i:03d} of the payments service crate" for i in range(300)]
+        for offset, fp_index in enumerate(fp_indices):
+            lines.insert(fp_index + offset, "config: retry-on-error: true")
+        lines += [cause]
+        lines += [
+            f"compiling module {i:03d} of the payments service crate"
+            for i in range(300, 300 + cause_distance - 1)
+        ]
+        lines += [terminal, "##[error]Process completed with exit code 101."]
+        cause_idx, terminal_idx = lines.index(cause), lines.index(terminal)
+        assert terminal_idx - cause_idx == cause_distance
+        assert lines.count("config: retry-on-error: true") == len(fp_indices)
+
+        excerpt = extract_decisive_log_excerpt("\n".join(lines), max_chars=max_chars)
+        assert terminal in excerpt
+        assert len(excerpt) <= max_chars
+
+        # Widest contiguous lead-up ending at the terminal marker that fits in
+        # half the budget must be kept verbatim.
+        start = terminal_idx
+        while len("\n".join(lines[start - 1 : terminal_idx + 1])) <= max_chars // 2:
+            start -= 1
+        assert "\n".join(lines[start : terminal_idx + 1]) in excerpt
+        if cause_idx >= start:
+            assert cause in excerpt
+        else:
+            assert cause_distance >= 18  # geometry guard: only the far causes are outside
+
     def test_leftover_budget_is_spent_on_lead_up_context(self) -> None:
         lines = [f"preparing step {i}" for i in range(40)]
         lines += ["error: something broke"]

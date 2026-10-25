@@ -249,6 +249,11 @@ class _ExcerptSelection:
         gaps = segments - 1
         return chars + gaps * len(EXCERPT_GAP_MARKER) + (count + gaps - 1)
 
+    @property
+    def chars_used(self) -> int:
+        """Rendered size of the current selection."""
+        return self._size(self._chars, len(self.selected), self._segments)
+
     def try_add(self, idx: int) -> bool:
         """Add ``idx`` if the rendered excerpt still fits; return whether it is selected."""
         if idx in self.selected:
@@ -314,9 +319,11 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
        c. for a terminal marker only, the cleaned tail after the last decisive
           marker, read backwards from the end of the log.
 
-       Running the lead-up before the middle stops an earlier false-positive
-       marker from spending the budget on the lines that follow it, starving
-       an unrecognised cause just above the terminal error.
+       For a terminal marker, up to half the budget is reserved for the
+       contiguous lead-up (the last decisive line and the lines before it)
+       before any other marker's context is added. Guarantee: a cause within
+       ``max_chars // 2`` characters above the last decisive marker is kept,
+       regardless of the number of earlier false positives.
 
        If the last decisive marker is non-terminal (it precedes the window a
        plain tail excerpt would cover, or real non-exit output follows its
@@ -392,6 +399,12 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
                 selection.try_add(idx)
         for idx in range(len(lines) - 1, -1, -1):
             if not selection.try_add(idx):
+                break
+    else:
+        # Terminal marker: reserve up to half the budget for the contiguous lead-up
+        # before other markers' context can spend it.
+        for idx in [decisive[-1], *range(decisive[-1] - 1, -1, -1)]:
+            if selection.chars_used > max_chars // 2 or not selection.try_add(idx):
                 break
     blocked: set[tuple[int, int]] = set()
     for idx, key in priority:
