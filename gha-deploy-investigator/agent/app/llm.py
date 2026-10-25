@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Any, Optional
 
 import google.auth
@@ -9,6 +10,71 @@ from google.auth.transport.requests import Request
 from .config import AgentConfig, get_settings
 
 logger = logging.getLogger(__name__)
+
+
+_CODE_FENCE_OPEN_RE = re.compile(r"^```(?:json)?\s*", re.IGNORECASE)
+_CODE_FENCE_CLOSE_RE = re.compile(r"\s*```$")
+
+
+def parse_synthesis_payload(raw_text: str) -> Optional[dict[str, Any]]:
+    """Parse a synthesizer model response into a synthesis dict.
+
+    Single deterministic parse path: strip markdown code fences, trim any
+    wrapper text outside the outermost JSON object, decode, and validate.
+    Returns None (with a warning) when the payload is not a valid synthesis
+    object; no heuristic field extraction is attempted.
+    """
+    if not raw_text or not raw_text.strip():
+        return None
+
+    text = _CODE_FENCE_OPEN_RE.sub("", raw_text.strip())
+    text = _CODE_FENCE_CLOSE_RE.sub("", text).strip()
+
+    first_idx = text.find("{")
+    last_idx = text.rfind("}")
+    if first_idx == -1 or last_idx < first_idx:
+        logger.warning(
+            "Synthesis response contained no JSON object (len=%d): %.200r",
+            len(raw_text),
+            raw_text,
+        )
+        return None
+
+    json_str = text[first_idx : last_idx + 1]
+    try:
+        parsed = json.loads(json_str)
+        if not isinstance(parsed, dict) or "root_cause" not in parsed:
+            logger.warning(
+                "Synthesis response JSON is not an object with root_cause: %.200r",
+                json_str,
+            )
+            return None
+
+        causal = parsed.get("causal_remediation")
+        if causal is None:
+            causal = parsed.get("remediation_actions", [])
+        causal_list = [str(a).strip() for a in (causal or []) if str(a).strip()]
+        unrelated_list = [
+            str(o).strip() for o in (parsed.get("unrelated_observations") or []) if str(o).strip()
+        ]
+        synthesis: dict[str, Any] = {
+            "root_cause": str(parsed["root_cause"]).strip(),
+            "causal_remediation": causal_list,
+            "unrelated_observations": unrelated_list,
+            "remediation_actions": causal_list,
+            "confidence": float(parsed.get("confidence", 0.95)),
+        }
+        if parsed.get("fix_proposal") is not None:
+            synthesis["fix_proposal"] = parsed["fix_proposal"]
+        return synthesis
+    except Exception as exc:
+        logger.warning(
+            "Failed to parse synthesis response JSON (%s: %s): %.200r",
+            type(exc).__name__,
+            exc,
+            json_str,
+        )
+        return None
 
 
 def generate_gemini_synthesis(
@@ -158,107 +224,7 @@ def generate_gemini_synthesis(
         if not raw_text:
             return None
 
-        import re
-
-        clean_text = raw_text.strip()
-        clean_text = re.sub(r"^```(?:json)?\s*", "", clean_text, flags=re.IGNORECASE)
-        clean_text = re.sub(r"\s*```$", "", clean_text)
-        clean_text = clean_text.strip()
-
-        try:
-            parsed = json.loads(clean_text)
-            if isinstance(parsed, dict) and "root_cause" in parsed:
-                causal = parsed.get("causal_remediation")
-                if causal is None:
-                    causal = parsed.get("remediation_actions", [])
-                causal_list = [str(a).strip() for a in (causal or []) if str(a).strip()]
-                unrelated_list = [
-                    str(o).strip()
-                    for o in parsed.get("unrelated_observations", [])
-                    if str(o).strip()
-                ]
-                synthesis: dict[str, Any] = {
-                    "root_cause": str(parsed["root_cause"]).strip(),
-                    "causal_remediation": causal_list,
-                    "unrelated_observations": unrelated_list,
-                    "remediation_actions": causal_list,
-                    "confidence": float(parsed.get("confidence", 0.95)),
-                }
-                if "fix_proposal" in parsed:
-                    synthesis["fix_proposal"] = parsed["fix_proposal"]
-                return synthesis
-        except Exception:
-            # Fallback: search for first { and last }
-            m = re.search(r"(\{.*\})", clean_text, re.DOTALL)
-            if m:
-                try:
-                    parsed = json.loads(m.group(1))
-                    if isinstance(parsed, dict) and "root_cause" in parsed:
-                        causal = parsed.get("causal_remediation")
-                        if causal is None:
-                            causal = parsed.get("remediation_actions", [])
-                        causal_list = [str(a).strip() for a in (causal or []) if str(a).strip()]
-                        unrelated_list = [
-                            str(o).strip()
-                            for o in parsed.get("unrelated_observations", [])
-                            if str(o).strip()
-                        ]
-                        return {
-                            "root_cause": str(parsed["root_cause"]).strip(),
-                            "causal_remediation": causal_list,
-                            "unrelated_observations": unrelated_list,
-                            "remediation_actions": causal_list,
-                            "confidence": float(parsed.get("confidence", 0.95)),
-                        }
-                except Exception:
-                    pass
-
-        # Defensive extraction for broken or truncated JSON:
-        # Extract root_cause without returning raw JSON syntax/brackets.
-        extracted_cause = None
-        rc_match = re.search(r'"root_cause"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"?', clean_text)
-        if rc_match:
-            extracted_cause = rc_match.group(1).replace(r"\"", '"').strip()
-
-        if not extracted_cause:
-            # Strip brackets, braces, and JSON keys to obtain clean prose
-            cleaned_prose = re.sub(r"^\{\s*\"root_cause\"\s*:\s*\"?", "", clean_text)
-            cleaned_prose = re.sub(
-                r"\"?\s*,?\s*\"(?:causal_remediation|remediation_actions|unrelated_observations)\".*$",
-                "",
-                cleaned_prose,
-                flags=re.DOTALL,
-            )
-            cleaned_prose = re.sub(r"\"?\s*\}\s*$", "", cleaned_prose)
-            extracted_cause = cleaned_prose.strip(' \t\n\r"{}')
-
-        extracted_actions = []
-        rem_match = re.search(r'"causal_remediation"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL)
-        if not rem_match:
-            rem_match = re.search(r'"remediation_actions"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL)
-        if rem_match:
-            actions_raw = rem_match.group(1)
-            for act in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', actions_raw):
-                extracted_actions.append(act.replace(r"\"", '"').strip())
-
-        extracted_unrelated = []
-        unrelated_match = re.search(
-            r'"unrelated_observations"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL
-        )
-        if unrelated_match:
-            unrelated_raw = unrelated_match.group(1)
-            for obs in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', unrelated_raw):
-                extracted_unrelated.append(obs.replace(r"\"", '"').strip())
-
-        return {
-            "root_cause": (
-                extracted_cause or "Automated diagnosis identified deployment failure."
-            ),
-            "causal_remediation": extracted_actions,
-            "unrelated_observations": extracted_unrelated,
-            "remediation_actions": extracted_actions,
-            "confidence": 0.90,
-        }
+        return parse_synthesis_payload(raw_text)
     except Exception as exc:
         logger.warning("Vertex AI Gemini synthesis call failed: %s", exc)
         return None

@@ -5,7 +5,7 @@ import httpx
 import pytest
 from agent.app.config import AgentConfig
 from agent.app.contracts.incident import Incident
-from agent.app.llm import generate_gemini_synthesis
+from agent.app.llm import generate_gemini_synthesis, parse_synthesis_payload
 from agent.app.synthesizer import synthesize_report
 
 
@@ -171,7 +171,7 @@ class TestVertexAIGemini:
         assert gen_cfg.get("maxOutputTokens") == 4096
         assert gen_cfg.get("responseMimeType") == "application/json"
 
-    def test_generate_gemini_synthesis_defensive_json_truncation_fallback(
+    def test_generate_gemini_synthesis_truncated_json_returns_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         cfg = AgentConfig(
@@ -214,11 +214,8 @@ class TestVertexAIGemini:
             client=client,
         )
 
-        assert res is not None
-        # Root cause must be clean prose, not containing JSON syntax or unparsed brackets
-        assert not res["root_cause"].startswith("{")
-        assert '"root_cause"' not in res["root_cause"]
-        assert "The deployment failed because permission was denied on" in res["root_cause"]
+        # Truncated JSON is invalid JSON: no heuristic extraction, no fallback.
+        assert res is None
 
     def test_generate_gemini_synthesis_includes_structured_specialist_findings(
         self, monkeypatch: pytest.MonkeyPatch
@@ -674,3 +671,80 @@ class TestVertexAIGemini:
         assert report.unrelated_observations == ["Warning: module xyz deprecated."]
         assert report.recommended_actions == ["Correct assertion in test_calc.py."]
 
+
+
+_FIX_PROPOSAL = {
+    "summary": "Pin the base image tag.",
+    "files": [{"path": "Dockerfile", "patch": "-FROM python\n+FROM python:3.12-slim\n"}],
+}
+
+
+def _synthesis_json(**overrides: Any) -> str:
+    payload: dict[str, Any] = {
+        "root_cause": "  Build failed because the base image tag was not found.  ",
+        "causal_remediation": ["Pin the base image tag.", "  ", ""],
+        "unrelated_observations": ["Deprecated action warning."],
+        "confidence": 0.88,
+        "fix_proposal": _FIX_PROPOSAL,
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
+class TestParseSynthesisPayload:
+    def test_parse_synthesis_payload_plain_json_with_fix_proposal(self) -> None:
+        res = parse_synthesis_payload(_synthesis_json())
+        assert res is not None
+        assert res["root_cause"] == "Build failed because the base image tag was not found."
+        assert res["causal_remediation"] == ["Pin the base image tag."]
+        assert res["remediation_actions"] == ["Pin the base image tag."]
+        assert res["unrelated_observations"] == ["Deprecated action warning."]
+        assert res["confidence"] == 0.88
+        assert res["fix_proposal"] == _FIX_PROPOSAL
+
+    def test_parse_synthesis_payload_markdown_fenced_json_with_fix_proposal(self) -> None:
+        raw = "```JSON\n" + _synthesis_json() + "\n```"
+        res = parse_synthesis_payload(raw)
+        assert res is not None
+        assert res["fix_proposal"] == _FIX_PROPOSAL
+
+    def test_parse_synthesis_payload_wrapped_with_preamble_and_postamble(self) -> None:
+        raw = "Here is the analysis:\n" + _synthesis_json() + "\nHope this helps!"
+        res = parse_synthesis_payload(raw)
+        assert res is not None
+        assert res["root_cause"] == "Build failed because the base image tag was not found."
+        assert res["fix_proposal"] == _FIX_PROPOSAL
+
+    def test_parse_synthesis_payload_invalid_json_returns_none(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        raw = '{"root_cause": "Build failed", "fix_proposal": {"summary": "x",}'
+        with caplog.at_level("WARNING", logger="agent.app.llm"):
+            res = parse_synthesis_payload(raw)
+        assert res is None
+        assert any("Failed to parse synthesis response" in r.message for r in caplog.records)
+
+    def test_parse_synthesis_payload_no_json_object_returns_none(self) -> None:
+        assert parse_synthesis_payload("The build failed, sorry.") is None
+        assert parse_synthesis_payload("") is None
+        assert parse_synthesis_payload("   ") is None
+
+    def test_parse_synthesis_payload_without_fix_proposal(self) -> None:
+        payload = json.loads(_synthesis_json())
+        del payload["fix_proposal"]
+        del payload["causal_remediation"]
+        payload["remediation_actions"] = ["Use legacy key."]
+        res = parse_synthesis_payload(json.dumps(payload))
+        assert res is not None
+        assert "fix_proposal" not in res
+        assert res["causal_remediation"] == ["Use legacy key."]
+
+    def test_parse_synthesis_payload_null_fix_proposal_is_omitted(self) -> None:
+        res = parse_synthesis_payload(_synthesis_json(fix_proposal=None))
+        assert res is not None
+        assert "fix_proposal" not in res
+
+    def test_parse_synthesis_payload_missing_root_cause_returns_none(self) -> None:
+        payload = json.loads(_synthesis_json())
+        del payload["root_cause"]
+        assert parse_synthesis_payload(json.dumps(payload)) is None
