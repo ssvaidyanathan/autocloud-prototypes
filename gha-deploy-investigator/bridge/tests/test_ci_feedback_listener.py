@@ -11,6 +11,7 @@ from bridge.app.core.tasks import DispatchResult
 from bridge.app.fixer.ci_listener import (
     CIFeedbackListener,
     build_failure_note,
+    build_inconclusive_note,
     build_success_note,
     parse_original_run_id,
 )
@@ -65,8 +66,15 @@ def _workflow_run_payload(
 class _Recorder:
     """httpx MockTransport handler emulating ServiceNow + GitHub endpoints."""
 
-    def __init__(self, incidents: Optional[list[dict[str, Any]]] = None) -> None:
+    def __init__(
+        self,
+        incidents: Optional[list[dict[str, Any]]] = None,
+        jobs: Optional[dict[str, list[dict[str, Any]]]] = None,
+        jobs_status: int = 200,
+    ) -> None:
         self.incidents = incidents if incidents is not None else []
+        self.jobs = jobs if jobs is not None else {}
+        self.jobs_status = jobs_status
         self.requests: list[httpx.Request] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -74,6 +82,11 @@ class _Recorder:
         path = request.url.path
         if request.method == "GET" and path == "/api/now/table/incident":
             return httpx.Response(200, json={"result": self.incidents})
+        if request.method == "GET" and path.endswith("/jobs") and "/actions/runs/" in path:
+            if self.jobs_status != 200:
+                return httpx.Response(self.jobs_status, json={"message": "server error"})
+            run_id = path.split("/actions/runs/", 1)[1].split("/", 1)[0]
+            return httpx.Response(200, json={"jobs": self.jobs.get(run_id, [])})
         if request.method == "PATCH" and path.startswith("/api/now/table/incident/"):
             return httpx.Response(200, json={"result": {"sys_id": path.rsplit("/", 1)[-1]}})
         if request.method == "POST" and path.endswith("/comments"):
@@ -179,7 +192,7 @@ def test_ci_feedback_success_updates_servicenow() -> None:
     assert outcome.work_note_posted is True
     assert outcome.incident_sys_id == "sn-sys-1"
 
-    lookup = recorder.requests[0]
+    lookup = next(r for r in recorder.requests if r.url.path == "/api/now/table/incident")
     assert lookup.method == "GET"
     assert f"correlation_idSTARTSWITHgdi:{REPO}:123:" in lookup.url.params["sysparm_query"]
 
@@ -323,3 +336,145 @@ def test_non_autofix_branch_still_enqueues_investigation(mock_dispatcher: MagicM
     incident = mock_dispatcher.dispatch.call_args[0][0]
     assert incident.github_branch == "main"
     listener.handle_autofix_workflow_run.assert_not_called()
+
+
+# ------------------------------------------------- original-vs-fix job comparison
+
+
+def _job(name: str, conclusion: Optional[str]) -> dict[str, Any]:
+    return {"name": name, "conclusion": conclusion, "status": "completed"}
+
+
+def test_ci_feedback_inconclusive_when_failed_job_skipped_on_fix_branch() -> None:
+    settings = _settings(enable_github_writeback=True)
+    recorder = _Recorder(
+        incidents=[ORIGINAL_INCIDENT],
+        jobs={
+            "123": [_job("build", "success"), _job("release-step", "failure")],
+            "999": [_job("build", "success"), _job("release-step", "skipped")],
+        },
+    )
+    listener = _listener(settings, recorder)
+
+    outcome = listener.handle_autofix_workflow_run(
+        _workflow_run_payload("autofix/run-123", "success", pr_numbers=[42]), settings
+    )
+
+    assert outcome.outcome == "verification_inconclusive"
+    assert outcome.work_note_posted is True
+    expected_note = build_inconclusive_note("autofix/run-123", RUN_URL, ["release-step"])
+    assert recorder.patches() == [{"work_notes": expected_note}]
+    note = recorder.patches()[0]["work_notes"]
+    assert "INCONCLUSIVE" in note
+    assert "'release-step'" in note
+    assert RUN_URL in note
+    assert "requires human validation" in note
+    assert "PASSED" not in note
+
+    assert outcome.github_writeback_posted is True
+    comments = recorder.comments()
+    assert len(comments) == 1
+    body = json.loads(comments[0].content)["body"]
+    assert body.startswith("### Auto-Fix Verification: INCONCLUSIVE")
+    assert "'release-step'" in body
+    assert "did not run on the fix branch; requires human validation." in body
+    assert "PASSED" not in body
+
+    job_paths = {r.url.path for r in recorder.requests if r.url.path.endswith("/jobs")}
+    assert job_paths == {
+        f"/repos/{REPO}/actions/runs/123/jobs",
+        f"/repos/{REPO}/actions/runs/999/jobs",
+    }
+
+
+def test_ci_feedback_inconclusive_when_failed_job_missing_on_fix_branch() -> None:
+    settings = _settings()
+    recorder = _Recorder(
+        incidents=[ORIGINAL_INCIDENT],
+        jobs={
+            "123": [_job("lint", "success"), _job("integration", "timed_out")],
+            "999": [_job("lint", "success")],
+        },
+    )
+    listener = _listener(settings, recorder)
+
+    outcome = listener.handle_autofix_workflow_run(
+        _workflow_run_payload("autofix/run-123", "success"), settings
+    )
+
+    assert outcome.outcome == "verification_inconclusive"
+    assert recorder.patches() == [
+        {"work_notes": build_inconclusive_note("autofix/run-123", RUN_URL, ["integration"])}
+    ]
+
+
+def test_ci_feedback_passed_when_failed_job_succeeds_on_fix_branch() -> None:
+    settings = _settings(enable_github_writeback=True)
+    recorder = _Recorder(
+        incidents=[ORIGINAL_INCIDENT],
+        jobs={
+            "123": [_job("release-step", "failure")],
+            "999": [_job("release-step", "success")],
+        },
+    )
+    listener = _listener(settings, recorder)
+
+    outcome = listener.handle_autofix_workflow_run(
+        _workflow_run_payload("autofix/run-123", "success", pr_numbers=[42]), settings
+    )
+
+    assert outcome.outcome == "verification_passed"
+    assert recorder.patches() == [{"work_notes": build_success_note("autofix/run-123", RUN_URL)}]
+    comments = recorder.comments()
+    assert len(comments) == 1
+    body = json.loads(comments[0].content)["body"]
+    assert "Auto-Fix Verification: PASSED" in body
+    assert "INCONCLUSIVE" not in body
+
+
+def test_ci_feedback_job_listing_error_falls_back_to_passed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _settings(enable_github_writeback=True)
+    recorder = _Recorder(incidents=[ORIGINAL_INCIDENT], jobs_status=500)
+    listener = _listener(settings, recorder)
+
+    with caplog.at_level("WARNING", logger="bridge.app.fixer.ci_listener"):
+        outcome = listener.handle_autofix_workflow_run(
+            _workflow_run_payload("autofix/run-123", "success", pr_numbers=[42]), settings
+        )
+
+    assert outcome.outcome == "verification_passed"
+    assert outcome.work_note_posted is True
+    assert recorder.patches() == [{"work_notes": build_success_note("autofix/run-123", RUN_URL)}]
+    assert outcome.github_writeback_posted is True
+    assert "Failed to fetch workflow run jobs" in caplog.text
+
+
+def test_ci_feedback_job_listing_network_failure_falls_back_to_passed() -> None:
+    settings = _settings()
+    recorder = _Recorder(incidents=[ORIGINAL_INCIDENT])
+    listener = _listener(settings, recorder)
+    github = MagicMock(spec=GitHubAdapter)
+    github.get_workflow_run_jobs.side_effect = httpx.ConnectError("network down")
+    listener._github_adapter = github
+
+    outcome = listener.handle_autofix_workflow_run(
+        _workflow_run_payload("autofix/run-123", "success"), settings
+    )
+
+    assert outcome.outcome == "verification_passed"
+    assert recorder.patches() == [{"work_notes": build_success_note("autofix/run-123", RUN_URL)}]
+
+
+def test_ci_feedback_failure_conclusion_skips_job_comparison() -> None:
+    settings = _settings()
+    recorder = _Recorder(incidents=[ORIGINAL_INCIDENT])
+    listener = _listener(settings, recorder)
+
+    outcome = listener.handle_autofix_workflow_run(
+        _workflow_run_payload("autofix/run-123", "failure"), settings
+    )
+
+    assert outcome.outcome == "verification_failed"
+    assert not any(r.url.path.endswith("/jobs") for r in recorder.requests)

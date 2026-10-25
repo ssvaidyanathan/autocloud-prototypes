@@ -83,6 +83,24 @@ class GitHubAdapter(BaseAdapter):
         timeout = getattr(self.config, "adapter_timeout_seconds", 30.0)
         return httpx.Client(headers=headers, timeout=timeout)
 
+    def get_workflow_run_jobs(self, repo_str: str, run_id: int | str) -> list[dict[str, Any]]:
+        """Fetch jobs for a workflow run via GitHub API."""
+        if not repo_str or "/" not in repo_str:
+            return []
+        owner, repo_name = repo_str.split("/", 1)
+        api_url = (self.config.github_api_url or "https://api.github.com").rstrip("/")
+        endpoint = f"{api_url}/repos/{owner}/{repo_name}/actions/runs/{run_id}/jobs"
+
+        token = self._get_writeback_token(repo_str)
+        headers = {"Accept": "application/vnd.github+json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        with self._get_client() as client:
+            resp = client.get(endpoint, headers=headers, params={"per_page": 100})
+            resp.raise_for_status()
+            jobs = resp.json().get("jobs", [])
+        return [j for j in jobs if isinstance(j, dict)] if isinstance(jobs, list) else []
+
     def verify(self, request: Request, payload: bytes) -> bool:
         """Verify inbound webhook HMAC SHA-256 signature."""
         secret = self.config.github_webhook_secret

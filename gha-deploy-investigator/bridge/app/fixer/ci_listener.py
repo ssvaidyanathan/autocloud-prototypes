@@ -48,6 +48,14 @@ def build_failure_note(branch: str, run_url: str) -> str:
     )
 
 
+def build_inconclusive_note(branch: str, run_url: str, unverified_jobs: list[str]) -> str:
+    return (
+        f"[Auto-Fix Verification] Auto-fix PR on branch {branch} verification INCONCLUSIVE: "
+        f"{', '.join(repr(j) for j in unverified_jobs)} did not run on the fix branch ({run_url}); "
+        "requires human validation."
+    )
+
+
 @dataclass
 class AutofixRunInfo:
     """Fields extracted from a ``workflow_run`` webhook for an auto-fix branch."""
@@ -214,7 +222,11 @@ class CIFeedbackListener:
         adapter._execute_with_retry(_do_patch)
 
     def post_github_feedback(
-        self, info: AutofixRunInfo, passed: bool, settings: BridgeConfig
+        self,
+        info: AutofixRunInfo,
+        passed: Optional[bool],
+        settings: BridgeConfig,
+        unverified_jobs: Optional[list[str]] = None,
     ) -> bool:
         """Comment on the auto-fix PR (or head commit) with the verification result."""
         repo_str = info.repo_full_name
@@ -232,17 +244,27 @@ class CIFeedbackListener:
         else:
             return False
 
-        verdict = "PASSED" if passed else "FAILED"
-        follow_up = (
-            "Ready for human review and merge."
-            if passed
-            else "Requires human attention. No further automated fix will be attempted."
-        )
-        body = (
-            f"### Auto-Fix Verification: {verdict}\n\n"
-            f"CI on branch `{info.head_branch}` {verdict.lower()} "
-            f"([run]({info.html_url or '#'})). {follow_up}"
-        )
+        if unverified_jobs:
+            verdict = "INCONCLUSIVE"
+            body = (
+                f"### Auto-Fix Verification: {verdict}\n\n"
+                f"CI on branch `{info.head_branch}` verification {verdict.lower()} "
+                f"([run]({info.html_url or '#'})). Job(s) "
+                f"{', '.join(repr(j) for j in unverified_jobs)} "
+                "did not run on the fix branch; requires human validation."
+            )
+        else:
+            verdict = "PASSED" if passed else "FAILED"
+            follow_up = (
+                "Ready for human review and merge."
+                if passed
+                else "Requires human attention. No further automated fix will be attempted."
+            )
+            body = (
+                f"### Auto-Fix Verification: {verdict}\n\n"
+                f"CI on branch `{info.head_branch}` {verdict.lower()} "
+                f"([run]({info.html_url or '#'})). {follow_up}"
+            )
 
         adapter = self._github(settings)
         token = adapter._get_writeback_token(repo_str)
@@ -253,6 +275,39 @@ class CIFeedbackListener:
             resp = client.post(comment_url, json={"body": body}, headers=headers)
             resp.raise_for_status()
         return True
+
+    def find_unverified_jobs(self, info: AutofixRunInfo, settings: BridgeConfig) -> list[str]:
+        """Return jobs that failed in the original run but did not succeed in the fix run.
+
+        Job names are discovered dynamically from the original run's failing jobs. A job
+        that was skipped, cancelled, or absent on the fix branch is unverified. Returns an
+        empty list when the comparison cannot be made (missing ids, API errors).
+        """
+        if not info.original_run_id or info.run_id is None:
+            return []
+        github = self._github(settings)
+        try:
+            original_jobs = github.get_workflow_run_jobs(info.repo_full_name, info.original_run_id)
+            fix_jobs = github.get_workflow_run_jobs(info.repo_full_name, info.run_id)
+        except Exception as exc:
+            logger.warning("Failed to fetch workflow run jobs for verification comparison: %s", exc)
+            return []
+
+        failing_original_jobs: list[str] = []
+        for job in original_jobs:
+            name = job.get("name")
+            if name and job.get("conclusion") in FAILURE_CONCLUSIONS:
+                if name not in failing_original_jobs:
+                    failing_original_jobs.append(str(name))
+        if not failing_original_jobs:
+            return []
+
+        fix_job_map = {j["name"]: j.get("conclusion") for j in fix_jobs if "name" in j}
+        return [
+            name
+            for name in failing_original_jobs
+            if fix_job_map.get(name) not in SUCCESS_CONCLUSIONS
+        ]
 
     # --------------------------------------------------------------- entrypoint
 
@@ -290,9 +345,18 @@ class CIFeedbackListener:
             logger.info("Duplicate auto-fix verification event for %s; skipping", branch)
             return CIFeedbackOutcome("duplicate_ignored", branch, conclusion)
 
-        outcome = CIFeedbackOutcome(
-            "verification_passed" if passed else "verification_failed", branch, conclusion
-        )
+        unverified_jobs = self.find_unverified_jobs(info, cfg) if passed else []
+        if unverified_jobs:
+            logger.warning(
+                "Auto-fix verification on %s inconclusive; jobs did not run: %s",
+                branch,
+                unverified_jobs,
+            )
+            outcome_kind = "verification_inconclusive"
+            note = build_inconclusive_note(branch, info.html_url, unverified_jobs)
+        else:
+            outcome_kind = "verification_passed" if passed else "verification_failed"
+        outcome = CIFeedbackOutcome(outcome_kind, branch, conclusion)
 
         try:
             incident = self.resolve_incident(info, cfg)
@@ -328,7 +392,12 @@ class CIFeedbackListener:
 
         if cfg.enable_github_writeback:
             try:
-                outcome.github_writeback_posted = self.post_github_feedback(info, passed, cfg)
+                if unverified_jobs:
+                    outcome.github_writeback_posted = self.post_github_feedback(
+                        info, passed=None, settings=cfg, unverified_jobs=unverified_jobs
+                    )
+                else:
+                    outcome.github_writeback_posted = self.post_github_feedback(info, passed, cfg)
             except Exception as exc:
                 logger.warning("Failed to post auto-fix verification to GitHub: %s", exc)
 
