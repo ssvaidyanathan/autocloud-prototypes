@@ -167,9 +167,15 @@ RUNNER_CLEANUP_ANCHOR_PATTERN = re.compile(
     r"^(?:##\[group\])?\s*post[- ]job clean ?up", re.IGNORECASE
 )
 # Generic error indicators across build tools, test runners, and shells.
+# Upper-case-only forms (``FAIL``, ``FAILED``, ``Error N``) are scoped case-sensitive so
+# that prose such as "0 failed" does not match; ``failed: 0`` is excluded explicitly.
 ERROR_MARKER_PATTERN = re.compile(
-    r"error:|failed:|fatal:|failure:|error \[|\[error\]|\berr:|\berr!|exception:"
-    r"|traceback \(most recent call last\)",
+    r"error:|failed:(?!\s*0\b)|fatal:|failure:|\berror\s*\[|\[error\]|\berr:|\berr!"
+    r"|exception:|traceback \(most recent call last\)"
+    r"|\berror\s+(?-i:[A-Z]+\d+):"
+    r"|(?-i:\bFAIL(?:ED)?\b)"
+    r"|(?-i:\bError [1-9]\d*\s*$)"
+    r"|\bcommand not found\b",
     re.IGNORECASE,
 )
 # Runner summary lines that only restate the exit status, not the cause.
@@ -221,6 +227,43 @@ def _render_excerpt(lines: list[str], selected: set[int]) -> str:
     return "\n".join(rendered)
 
 
+class _ExcerptSelection:
+    """Set of selected line indices with incrementally tracked rendered size.
+
+    The rendered size matches ``len(_render_excerpt(lines, selected))`` without
+    re-rendering: line lengths, plus one ``EXCERPT_GAP_MARKER`` between
+    non-contiguous segments, plus one newline between consecutive rendered items.
+    """
+
+    def __init__(self, lines: list[str], max_chars: int) -> None:
+        self.lines = lines
+        self.max_chars = max_chars
+        self.selected: set[int] = set()
+        self._chars = 0
+        self._segments = 0
+
+    def _size(self, chars: int, count: int, segments: int) -> int:
+        if count == 0:
+            return 0
+        gaps = segments - 1
+        return chars + gaps * len(EXCERPT_GAP_MARKER) + (count + gaps - 1)
+
+    def try_add(self, idx: int) -> bool:
+        """Add ``idx`` if the rendered excerpt still fits; return whether it is selected."""
+        if idx in self.selected:
+            return True
+        has_prev = idx - 1 in self.selected
+        has_next = idx + 1 in self.selected
+        segments = self._segments + 1 - int(has_prev) - int(has_next)
+        chars = self._chars + len(self.lines[idx])
+        if self._size(chars, len(self.selected) + 1, segments) > self.max_chars:
+            return False
+        self.selected.add(idx)
+        self._chars = chars
+        self._segments = segments
+        return True
+
+
 def _tail_excerpt(lines: list[str], max_chars: int) -> str:
     kept: list[str] = []
     size = 0
@@ -235,33 +278,45 @@ def _tail_excerpt(lines: list[str], max_chars: int) -> str:
     return "\n".join(reversed(kept))
 
 
+def _error_marker_indices(lines: list[str]) -> tuple[list[int], list[int]]:
+    """Return ``(markers, decisive)`` line indices.
+
+    ``markers`` are lines matching ``ERROR_MARKER_PATTERN``; ``decisive`` is the
+    subset that is not a generic exit-status restatement.
+    """
+    markers = [idx for idx, line in enumerate(lines) if ERROR_MARKER_PATTERN.search(line)]
+    decisive = [idx for idx in markers if not GENERIC_EXIT_LINE_PATTERN.search(lines[idx])]
+    return markers, decisive
+
+
 def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
     """Select the error-bearing portion of a step log within ``max_chars``.
 
     1. Strips trailing runner post-step cleanup output.
-    2. If error markers exist, keeps the decisive error lines plus the command
-       header and surrounding context, prioritising the error lines themselves.
-    3. Otherwise falls back to the cleaned tail of the log.
+    2. If decisive error markers exist (markers other than generic exit-status
+       lines), keeps the decisive error lines plus the command header and
+       surrounding context, prioritising the error lines themselves. Leftover
+       budget is then spent on contiguous lines working backwards from the last
+       decisive marker, and finally on the cleaned tail of the log.
+    3. Otherwise (no markers, or only generic exit lines) falls back to the
+       cleaned tail of the log.
     """
     if not log_text:
         return ""
     lines = strip_runner_cleanup(log_text)
-    if not lines:
-        return log_text[-max_chars:]
+    if not any(line.strip() for line in lines):
+        return ""
 
     clip = max(max_chars - len(EXCERPT_GAP_MARKER), 1)
     lines = [
         line if len(line) <= max_chars else line[:clip] + EXCERPT_GAP_MARKER for line in lines
     ]
 
-    markers = [idx for idx, line in enumerate(lines) if ERROR_MARKER_PATTERN.search(line)]
-    if not markers:
-        return _tail_excerpt(lines, max_chars)
-
-    decisive = [idx for idx in markers if not GENERIC_EXIT_LINE_PATTERN.search(lines[idx])]
+    markers, decisive = _error_marker_indices(lines)
     if not decisive:
-        decisive = markers
-    generic = [idx for idx in markers if idx not in decisive]
+        return _tail_excerpt(lines, max_chars)
+    decisive_set = set(decisive)
+    generic = [idx for idx in markers if idx not in decisive_set]
 
     # Each entry is (line index, expansion key). Context expansion around a marker
     # stops in a direction once a line no longer fits, keeping context contiguous.
@@ -280,21 +335,28 @@ def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
                 priority.append((idx + distance, (idx, 1)))
     priority.extend((idx, None) for idx in range(decisive[0], decisive[-1] + 1))
 
-    selected: set[int] = set()
+    selection = _ExcerptSelection(lines, max_chars)
     blocked: set[tuple[int, int]] = set()
     for idx, key in priority:
-        if idx < 0 or idx >= len(lines) or idx in selected:
+        if idx < 0 or idx >= len(lines) or idx in selection.selected:
             continue
         if key is not None and key in blocked:
             continue
-        candidate = selected | {idx}
-        if len(_render_excerpt(lines, candidate)) <= max_chars:
-            selected = candidate
-        elif key is not None:
+        if not selection.try_add(idx) and key is not None:
             blocked.add(key)
-    if not selected:
+    if not selection.selected:
         return lines[decisive[-1]][:max_chars]
-    return _render_excerpt(lines, selected)
+
+    # Spend leftover budget: first the contiguous lead-up to the last decisive
+    # marker (compiler causes usually precede the summary error), then the
+    # cleaned tail, so an unrecognised cause near the end is not lost.
+    for idx in range(decisive[-1] - 1, -1, -1):
+        if not selection.try_add(idx):
+            break
+    for idx in range(len(lines) - 1, decisive[-1], -1):
+        if not selection.try_add(idx):
+            break
+    return _render_excerpt(lines, selection.selected)
 
 
 class PipelineLogsSpecialist(BaseSpecialist):
@@ -940,16 +1002,15 @@ class PipelineLogsSpecialist(BaseSpecialist):
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Unknown Step")
         lines = [line.strip() for line in strip_runner_cleanup(log_text) if line.strip()]
-        error_lines = [
-            line_item
-            for line_item in lines
-            if any(k in line_item.lower() for k in ("error", "fatal", "failed", "exception"))
-        ]
-        culprit = (
-            error_lines[-1]
-            if error_lines
-            else (lines[-1] if lines else "Process terminated with non-zero exit code")
-        )
+        markers, decisive = _error_marker_indices(lines)
+        if decisive:
+            culprit = lines[decisive[-1]]
+        elif markers:
+            culprit = lines[markers[-1]]
+        elif lines:
+            culprit = lines[-1]
+        else:
+            culprit = "Process terminated with non-zero exit code"
 
         now = datetime.now(timezone.utc)
         evidence_items = [

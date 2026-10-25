@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from agent.app.contracts.incident import Incident
 from agent.app.specialists.pipeline_logs import (
+    ERROR_MARKER_PATTERN,
     PipelineLogsSpecialist,
     extract_decisive_log_excerpt,
     strip_runner_cleanup,
@@ -148,8 +149,16 @@ class TestErrorMarkerWindowing:
             "npm ERR! code ELIFECYCLE",
             "RuntimeError: unexpected state",
             "[ERROR] Failed to execute goal compile",
-            "error [E0425]: cannot find value `x` in this scope",
+            "error[E0425]: cannot find value `x` in this scope",
             "FAILED: build.ninja target out/app",
+            "src/a.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+            "Program.cs(3,5): error CS0103: The name 'foo' does not exist",
+            "make: *** [Makefile:3: all] Error 1",
+            "--- FAIL: TestCharge (0.00s)",
+            "FAIL: test_x (tests.test_mod.T)",
+            "BUILD FAILED",
+            "FAILED tests/a.py::test_total",
+            "bash: line 1: foo: command not found",
         ],
     )
     def test_mid_log_error_is_windowed_with_context(self, error_line: str) -> None:
@@ -178,6 +187,45 @@ class TestErrorMarkerWindowing:
         excerpt = extract_decisive_log_excerpt("\n".join(lines), max_chars=400)
         assert "Error: cannot open configuration file settings.toml" in excerpt
         assert len(excerpt) <= 400
+
+    @pytest.mark.parametrize(
+        "line",
+        ["Tests: 10 passed, failed: 0", "Ran 12 tests, 0 failed", "all checks passed"],
+    )
+    def test_zero_failure_summaries_are_not_markers(self, line: str) -> None:
+        assert not ERROR_MARKER_PATTERN.search(line)
+
+    def test_zero_failure_summary_does_not_displace_real_cause(self) -> None:
+        lines = (
+            ["routine output"] * 200
+            + ["error: linker command failed with exit code 1"]
+            + ["unrelated output"] * 200
+            + ["Tests: 10 passed, failed: 0"]
+        )
+        excerpt = extract_decisive_log_excerpt("\n".join(lines), max_chars=400)
+        assert "error: linker command failed with exit code 1" in excerpt
+        assert len(excerpt) <= 400
+
+    def test_rustc_cause_above_summary_error_is_kept(self) -> None:
+        lines = [f"   Compiling dep{i} v0.1.{i}" for i in range(80)]
+        lines += [
+            "   Compiling app v0.1.0 (/home/runner/work/app/app)",
+            "error[E0425]: cannot find value `totl` in this scope",
+            " --> src/main.rs:4:20",
+            "  |",
+            '4 |     println!("{}", totl);',
+            "  |                    ^^^^ help: a local variable with a similar name exists",
+            "",
+            "For more information about this error, try `rustc --explain E0425`.",
+            'error: could not compile `app` (bin "app") due to 1 previous error',
+            "##[error]Process completed with exit code 101.",
+        ]
+        log_text = "\n".join(lines)
+        excerpt = extract_decisive_log_excerpt(log_text, max_chars=1500)
+        assert "error[E0425]: cannot find value `totl` in this scope" in excerpt
+        assert "src/main.rs:4:20" in excerpt
+        assert "error: could not compile `app`" in excerpt
+        assert len(excerpt) <= 1500
 
     def test_single_oversized_error_line_is_clipped(self) -> None:
         excerpt = extract_decisive_log_excerpt("error: " + "y" * 5000, max_chars=200)
@@ -233,6 +281,60 @@ class TestFallback:
         assert extract_decisive_log_excerpt("") == ""
 
 
+class TestExcerptNeverWorseThanTail:
+    """R1 regressions: the excerpt must keep the cause that the old blind tail kept."""
+
+    @staticmethod
+    def _assert_tail_cause_kept(log_text: str, cause_lines: list[str], max_chars: int) -> None:
+        for cause in cause_lines:
+            # Precondition: the old blind tail carried the cause.
+            assert cause in log_text[-max_chars:]
+        excerpt = extract_decisive_log_excerpt(log_text, max_chars=max_chars)
+        for cause in cause_lines:
+            assert cause in excerpt
+        assert len(excerpt) <= max_chars
+
+    def test_unrecognised_cause_with_only_generic_exit_line_keeps_tail(self) -> None:
+        cause_lines = [
+            "Deploy target prod-eu rejected the artifact signature",
+            "  signature digest sha256:abc123 does not match the trusted key set",
+        ]
+        lines = [f"uploading chunk {i} of artifact" for i in range(300)]
+        lines += cause_lines
+        lines += ["##[error]Process completed with exit code 3."]
+        log_text = "\n".join(lines) + "\n" + _cleanup_noise(500)
+        self._assert_tail_cause_kept("\n".join(lines), cause_lines, 1500)
+        excerpt = extract_decisive_log_excerpt(log_text, max_chars=1500)
+        for cause in cause_lines:
+            assert cause in excerpt
+        assert "##[error]Process completed with exit code 3." in excerpt
+        assert len(excerpt) > 1000  # budget is spent, not shrunk to a few lines
+
+    def test_early_false_positive_marker_keeps_real_cause_near_tail(self) -> None:
+        cause_lines = [
+            "Charge processor returned unexpected status 503",
+            "  while handling request id=42 for merchant=acme",
+        ]
+        lines = ["config: retry-on-error: true", "config: timeout: 30s"]
+        lines += [f"processing batch {i} of transactions" for i in range(300)]
+        lines += cause_lines
+        lines += ["##[error]Process completed with exit code 1."]
+        log_text = "\n".join(lines)
+        self._assert_tail_cause_kept(log_text, cause_lines, 1500)
+        excerpt = extract_decisive_log_excerpt(log_text, max_chars=1500)
+        assert "config: retry-on-error: true" in excerpt
+
+    def test_leftover_budget_is_spent_on_lead_up_context(self) -> None:
+        lines = [f"preparing step {i}" for i in range(40)]
+        lines += ["error: something broke"]
+        excerpt = extract_decisive_log_excerpt("\n".join(lines), max_chars=1500)
+        # The whole short log fits, so nothing should be dropped.
+        assert excerpt == "\n".join(lines)
+
+    def test_log_with_only_cleanup_returns_empty(self) -> None:
+        assert extract_decisive_log_excerpt(_cleanup_noise(500)) == ""
+
+
 class TestSpecialistIntegration:
     @pytest.fixture(autouse=True)
     def _no_diff(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -276,9 +378,21 @@ class TestSpecialistIntegration:
         res = PipelineLogsSpecialist()._diagnose_generic(
             _make_incident("pipeline"), {"id": 1}, {"name": "Migrate"}, log_text
         )
+        decisive = "fatal: database schema version mismatch"
+        assert decisive in res.summary
+        assert decisive in res.probable_cause
+        assert "Process completed with exit code" not in res.summary
+        assert "Process completed with exit code" not in res.probable_cause
         excerpt = _runner_log_excerpt(res)
-        assert excerpt.startswith("Step 'Migrate' failed:")
+        assert excerpt.startswith(f"Step 'Migrate' failed: {decisive}")
         assert "fatal: database schema version mismatch" in excerpt
         assert "Invoking migrate.sh" in excerpt
         assert "Cleaning up orphan processes" not in excerpt
         assert "--unset-all" not in excerpt
+
+    def test_diagnose_generic_falls_back_to_exit_line_when_no_cause_marker(self) -> None:
+        log_text = "doing work\nstill working\n##[error]Process completed with exit code 2.\n"
+        res = PipelineLogsSpecialist()._diagnose_generic(
+            _make_incident("pipeline"), {"id": 1}, {"name": "Migrate"}, log_text
+        )
+        assert "Process completed with exit code 2." in res.summary
