@@ -558,7 +558,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
             evidence_items.append(
                 EvidenceItem(
                     kind="github_runner_log",
-                    excerpt=log_text[:1000],
+                    excerpt=extract_decisive_log_excerpt(log_text, max_chars=1500),
                     timestamp=datetime.now(timezone.utc),
                     console_url=incident.external_url,
                 )

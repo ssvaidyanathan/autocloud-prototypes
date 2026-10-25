@@ -7,7 +7,7 @@ import google.auth
 import httpx
 from google.auth.transport.requests import Request
 
-from .config import AgentConfig, get_settings
+from .config import AgentConfig, get_settings, synthesis_thinking_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +77,19 @@ def parse_synthesis_payload(raw_text: str) -> Optional[dict[str, Any]]:
         return None
 
 
-def _config_value(cfg: Any, field_name: str) -> Any:
-    """Read a setting from cfg, defaulting to the AgentConfig field default."""
-    return getattr(cfg, field_name, AgentConfig.model_fields[field_name].default)
+def _config_value(cfg: Any, field_name: str, allow_none: bool = False) -> Any:
+    """Read an int setting from cfg, defaulting to the AgentConfig field default.
+
+    Duck-typed configs (e.g. ``MagicMock``) may return non-int attributes; those
+    fall back to the default rather than leaking into the request payload.
+    """
+    default = AgentConfig.model_fields[field_name].default
+    value = getattr(cfg, field_name, default)
+    if value is None and allow_none:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return default
 
 
 def generate_gemini_synthesis(
@@ -103,7 +113,7 @@ def generate_gemini_synthesis(
     status["outcome"] = "unavailable"
     status["finish_reason"] = None
     max_output_tokens = _config_value(cfg, "synthesis_max_output_tokens")
-    thinking_budget = _config_value(cfg, "synthesis_thinking_budget")
+    thinking_budget = _config_value(cfg, "synthesis_thinking_budget", allow_none=True)
 
     token = None
     project_id = getattr(cfg, "gcp_project", None)
@@ -201,6 +211,14 @@ def generate_gemini_synthesis(
     if patch_guidance:
         prompt = "\n".join((prompt, patch_guidance, ""))
 
+    generation_config: dict[str, Any] = {
+        "temperature": 0.2,
+        "maxOutputTokens": max_output_tokens,
+        "responseMimeType": "application/json",
+    }
+    if synthesis_thinking_enabled(thinking_budget):
+        generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+
     request_body = {
         "contents": [
             {
@@ -208,12 +226,7 @@ def generate_gemini_synthesis(
                 "parts": [{"text": prompt}],
             }
         ],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": max_output_tokens,
-            "responseMimeType": "application/json",
-            "thinkingConfig": {"thinkingBudget": thinking_budget},
-        },
+        "generationConfig": generation_config,
     }
 
     headers = {
@@ -246,7 +259,7 @@ def generate_gemini_synthesis(
         if truncated:
             logger.warning(
                 "Vertex AI Gemini synthesis hit MAX_TOKENS (maxOutputTokens=%d, "
-                "thinkingBudget=%d); response may be truncated",
+                "thinkingBudget=%s); response may be truncated",
                 max_output_tokens,
                 thinking_budget,
             )

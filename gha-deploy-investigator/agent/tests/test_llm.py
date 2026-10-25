@@ -1,5 +1,6 @@
 import json
 from typing import Any, Optional
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -842,6 +843,92 @@ class TestGeminiSynthesisGeneration:
 
         assert cfg.synthesis_max_output_tokens == 16000
         assert cfg.synthesis_thinking_budget == 0
+
+    @pytest.mark.parametrize("budget", [None, -1])
+    def test_thinking_config_omitted_when_disabled(
+        self, monkeypatch: pytest.MonkeyPatch, budget: Optional[int]
+    ) -> None:
+        captured: dict[str, Any] = {}
+        client = _mock_gemini_client(
+            monkeypatch,
+            {"content": {"parts": [{"text": _synthesis_json()}]}},
+            captured,
+        )
+        cfg = _gemini_cfg(synthesis_thinking_budget=budget)
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text="error: build failed",
+            config=cfg,
+            client=client,
+        )
+
+        assert res is not None
+        gen_cfg = captured["generationConfig"]
+        assert "thinkingConfig" not in gen_cfg
+        assert gen_cfg["maxOutputTokens"] == 8192
+
+    def test_thinking_disabled_via_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SYNTHESIS_THINKING_BUDGET", "-1")
+
+        assert _gemini_cfg().synthesis_thinking_budget == -1
+
+    def test_default_config_includes_thinking_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+        client = _mock_gemini_client(
+            monkeypatch,
+            {"content": {"parts": [{"text": _synthesis_json()}]}},
+            captured,
+        )
+
+        generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text="error: build failed",
+            config=_gemini_cfg(),
+            client=client,
+        )
+
+        assert captured["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 1024}
+
+    @pytest.mark.parametrize("budget", [4096, 5000])
+    def test_config_rejects_thinking_budget_not_below_max_tokens(self, budget: int) -> None:
+        with pytest.raises(ValueError, match="synthesis_thinking_budget"):
+            _gemini_cfg(synthesis_max_output_tokens=4096, synthesis_thinking_budget=budget)
+
+    def test_config_allows_large_budget_when_thinking_disabled(self) -> None:
+        cfg = _gemini_cfg(synthesis_max_output_tokens=4096, synthesis_thinking_budget=-1)
+
+        assert cfg.synthesis_thinking_budget == -1
+
+    def test_mock_config_falls_back_to_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+        client = _mock_gemini_client(
+            monkeypatch,
+            {"content": {"parts": [{"text": _synthesis_json()}]}},
+            captured,
+        )
+        cfg = MagicMock()
+        cfg.gcp_project = "test-proj-123"
+        cfg.vertex_ai_location = "us-central1"
+        cfg.gemini_model = "test-gemini-model"
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text="error: build failed",
+            config=cfg,
+            client=client,
+        )
+
+        assert res is not None
+        gen_cfg = captured["generationConfig"]
+        assert gen_cfg["maxOutputTokens"] == 8192
+        assert gen_cfg["thinkingConfig"] == {"thinkingBudget": 1024}
+        json.dumps(captured)
 
     def test_multi_part_response_concatenated_excluding_thoughts(
         self, monkeypatch: pytest.MonkeyPatch

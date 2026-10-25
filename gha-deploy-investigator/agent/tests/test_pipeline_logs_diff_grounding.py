@@ -123,3 +123,28 @@ def test_no_diff_evidence_when_diff_has_no_files() -> None:
     res = _to_result(PipelineLogsSpecialist(), _findings([]), _make_incident())
 
     assert all(e.kind != "git_diff" for e in res.evidence_items)
+
+
+def test_fallback_runner_log_evidence_uses_decisive_excerpt() -> None:
+    preamble = "\n".join(f"Step setup line {i}: downloading dependency" for i in range(200))
+    decisive = "error: cannot find module 'missing_mod' imported from src/app.py"
+    cleanup = "\n".join(
+        ["##[group]Post job cleanup.", "Removing credentials config", "##[endgroup]"] * 200
+    )
+    exit_line = "##[error]Process completed with exit code 1."
+    log_text = "\n".join([preamble, decisive, exit_line, cleanup])
+    assert decisive not in log_text[:1000]
+
+    res = PipelineLogsSpecialist()._findings_to_diagnostic_result(
+        _findings([]),
+        _make_incident(github_repo=None, github_head_sha=None),
+        {"name": "build-job"},
+        {"name": "Build image"},
+        log_text,
+        "build",
+    )
+
+    runner_logs = [e for e in res.evidence_items if e.kind == "github_runner_log"]
+    assert len(runner_logs) == 1
+    assert decisive in runner_logs[0].excerpt
+    assert len(runner_logs[0].excerpt) <= 1500
