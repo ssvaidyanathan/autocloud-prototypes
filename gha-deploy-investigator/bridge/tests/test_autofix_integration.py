@@ -254,7 +254,11 @@ class TestAutofixEndToEnd:
         assert "fix_pr_url" not in cb.json()
         assert len(ticket_state.servicenow_incidents) == 1
         assert len(github_state.check_runs) == 1
-        assert "[Auto-Fix Hand-off] No automated fix PR opened" in _work_notes()
+        notes = _work_notes()
+        assert (
+            "[Auto-Fix Hand-off] No automated fix PR opened: An automated fix was proposed "
+            "but could not be applied: Remove unused import (F401). Requires human attention."
+        ) in notes
 
     def test_no_proposal_posts_default_handoff_note(self, harness: dict[str, Any]) -> None:
         client = harness["configure"](_settings(autofix_enabled=True))

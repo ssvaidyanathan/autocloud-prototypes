@@ -389,10 +389,17 @@ async def handle_callback_report(
                 logger.warning("Failed to post fix PR work note to ServiceNow: %s", exc)
         elif settings.autofix_enabled:
             proposal = result.report.fix_proposal
+            handoff_reason: Optional[str] = None
+            if proposal is not None:
+                if proposal.status == "proposed":
+                    # A fix was proposed but the writer failed or the patch did not apply.
+                    handoff_reason = "An automated fix was proposed but could not be applied"
+                    if proposal.rationale:
+                        handoff_reason = f"{handoff_reason}: {proposal.rationale}"
+                else:
+                    handoff_reason = proposal.rationale
             try:
-                servicenow_adapter.post_fix_pr_handoff_note(
-                    sn_ref, proposal.rationale if proposal is not None else None
-                )
+                servicenow_adapter.post_fix_pr_handoff_note(sn_ref, handoff_reason)
             except Exception as exc:
                 logger.warning("Failed to post auto-fix hand-off work note to ServiceNow: %s", exc)
 

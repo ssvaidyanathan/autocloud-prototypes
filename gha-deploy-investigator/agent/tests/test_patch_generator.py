@@ -515,6 +515,19 @@ class TestPatchInstructionConfig:
         assert "from the modified file" in rule
         assert "rather than speculatively creating unknown assets or guessing contents" in rule
 
+    def test_offending_additions_rule_protects_failing_test_assertions(self) -> None:
+        text = get_agent_config().get_patch_instruction("synthesizer")
+        rule = text[text.index("14. Offending additions") :]
+        qualifier = rule[: rule.index("newly added in git diff hunks")]
+
+        # A newly added assertion that fails may be exposing a real bug; the rule
+        # must not license deleting it just because it fails.
+        assert "failing" not in qualifier
+        assert "assertion" not in qualifier
+        assert "invalid or unresolvable instruction" in qualifier
+        assert "Never remove or weaken a test or assertion merely because it fails" in rule
+        assert "fix the code or respond with status 'no_safe_fix'" in rule
+
     def test_patch_instruction_is_appended_to_synthesis_prompt(self) -> None:
         from agent.app import llm
 
