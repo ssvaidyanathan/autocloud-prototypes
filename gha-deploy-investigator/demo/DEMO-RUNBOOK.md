@@ -12,6 +12,7 @@ When a GitHub Actions workflow run fails, the autonomous diagnostic bridge and i
 3. **Reverse Incident Creation & Dual Write-Back**:
    - **ServiceNow**: Upon completion callback, create an incident directly in state **In Progress (2)** with structured work notes and attach a standalone HTML investigation report.
    - **GitHub**: Post a neutral Check Run linking to the ServiceNow incident and a rich, collapsible PR/commit comment with root cause, decisive evidence quotes, causal remediation, and segregated unrelated observations.
+4. **Auto-Fix PR** (when the bridge runs with `AUTOFIX_ENABLED=true`): Open one fix PR from `autofix/run-<run_id>`, record its link in the ServiceNow work notes, and post the fix PR's CI verification result back to the same incident. The incident stays In Progress for human review (see [Section 4](#4-reset--cleanup-procedure)).
 
 ```
 +-------------------+      +-------------------+      +---------------------+
@@ -49,9 +50,6 @@ mkdir -p ~/demo-workspace && cd ~/demo-workspace
 
 # 1. Clone the prototype repository (contains scenario injection scripts)
 git clone https://github.com/ssvaidyanathan/autocloud-prototypes.git
-cd autocloud-prototypes
-git checkout feat/gha-deploy-investigator   # PR branch until merged into main
-cd ..
 
 # 2. Clone the target demo pipeline repository
 git clone https://github.com/ssvaidyanathan/gdi-sample-pipeline-app.git
@@ -96,7 +94,7 @@ Each scenario follows a standardized operational cycle:
 2. `git pull origin main` to ensure a pristine local branch.
 3. Inject defect and commit: `../autocloud-prototypes/gha-deploy-investigator/demo/scenarios/trigger-<scenario>-failure.sh . --commit && git push origin main`
 4. Observe the pipeline failure and autonomous investigation on ServiceNow and GitHub.
-5. Reset by **merging the auto-fix PR** once its CI is green (see [Section 4A](#a-primary-reset-merge-the-auto-fix-pr)). If no fix PR is opened, or its CI fails, fall back to `git revert` (see [Section 4B](#b-fallback-reset-git-revert)).
+5. Reset: close the auto-fix PR with its branch deleted (if one was opened), then `git revert` the scenario commit on `main` and push (see [Section 4](#4-reset--cleanup-procedure)). **Do not merge the fix PR.**
 6. Confirm the pipeline on `main` completes with all jobs green before moving to the next scenario.
 
 ---
@@ -104,7 +102,7 @@ Each scenario follows a standardized operational cycle:
 ### Scenario 1: Lint & Code Style Violation
 
 #### Injected Defect
-Introduces an unused import (`F401`) and multiple statements on a single line (`E702`) into `app/main.py`.
+Prepends a currency-formatting helper to `app/main.py` with an unused import (`F401`) and multiple statements on a single line (`E702`). Because the helper sits above the module's existing imports, Ruff also reports those imports as `E402` (module-level import not at top of file).
 
 #### Step 1: Inject & Push
 From within `gdi-sample-pipeline-app`:
@@ -117,13 +115,15 @@ git pull origin main
 ```
 
 #### Step 2: Pipeline Stage Failure & Timing
-- **Failing Job/Step**: `lint` job -> `Run Ruff Lint` step.
-- **Expected Duration**: Workflow fails in approximately 15–30 seconds.
-- **Log Snippet**:
+- **Failing Job/Step**: `Code Quality & Lint` job -> `Run Ruff Lint` step.
+- **Expected Duration**: Workflow fails in approximately 1–2 minutes.
+- **Log Snippet** (abridged):
   ```
   app/main.py:1:8: F401 [*] `math` imported but never used
   app/main.py:5:35: E702 Multiple statements on one line (semicolon)
-  Found 2 errors.
+  app/main.py:7:1: E402 Module level import not at top of file
+  ...
+  Found 9 errors.
   ```
 
 #### Step 3: Expected ServiceNow Write-Back
@@ -134,7 +134,7 @@ git pull origin main
 
 #### Step 4: Expected GitHub Write-Back
 - **Check Run**: `Autocloud / ServiceNow Incident Link` (conclusion: `neutral`) linking to ServiceNow ticket.
-- **Annotations**: Inline check run annotations on `app/main.py` lines 1 and 5.
+- **Annotations**: Inline check run annotations on the reported `app/main.py` violation lines.
 - **Commit Comment**: Collapsible breakdown with root cause, log evidence, and suggested fix.
 
 #### Step 5: What a Good Diagnosis Looks Like
@@ -145,20 +145,25 @@ git pull origin main
   - Split multi-statement line into separate statements or remove trailing semicolon.
 - **Unrelated Observations**: Empty or notes any non-fatal pre-existing tooling warnings.
 
+#### Expected Auto-Fix PR (`deterministic_linter`)
+- The bridge's deterministic lint fixer opens one PR from `autofix/run-<run_id>`. The diff touches
+  only `app/main.py`: the unused import is removed, the helper is moved below the imports, and the
+  multi-statement line is split.
+- ServiceNow gets an `[Auto-Fix Initiated] Pull Request #<n> ...` work note with the PR link.
+- The PR's CI runs lint, tests and build, which all go green. `Deploy to Cloud Run` shows as
+  skipped (it only runs on pushes to `main`).
+- A PR comment and an `[Auto-Fix Verification] ... PASSED CI verification ... Ready for human review and merge.`
+  work note follow. The incident stays In Progress.
+
 #### Step 6: Reset
-1. **Primary — merge the auto-fix PR.** Wait for the `autofix/run-<run_id>` PR's CI to go green
-   (ServiceNow gets an `[Auto-Fix Verification] ... PASSED` work note), then merge it:
-   ```bash
-   cd gdi-sample-pipeline-app
-   gh pr list --head autofix/run-<run_id>
-   gh pr merge <pr_number> --squash --delete-branch
-   git pull origin main
-   ```
-2. **Fallback — revert.** If no fix PR was opened, or its CI failed:
-   ```bash
-   cd gdi-sample-pipeline-app
-   git revert HEAD --no-edit && git push origin main
-   ```
+Close the fix PR without merging, then revert the scenario commit (see [Section 4](#4-reset--cleanup-procedure)):
+```bash
+cd gdi-sample-pipeline-app
+gh pr list --head autofix/run-<run_id>    # find the fix PR, if one was opened
+gh pr close <pr_number> --delete-branch   # skip if no fix PR was opened
+git pull origin main
+git revert HEAD --no-edit && git push origin main
+```
 *Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 ---
@@ -179,12 +184,12 @@ git pull origin main
 ```
 
 #### Step 2: Pipeline Stage Failure & Timing
-- **Failing Job/Step**: `test` job -> `Run Pytest` step.
+- **Failing Job/Step**: `Unit & Integration Tests` job -> `Run Pytest` step.
 - **Expected Duration**: Workflow fails in approximately 20–40 seconds.
 - **Log Snippet**:
   ```
   FAILED tests/test_main.py::test_customer_tier_discount_calculation - AssertionError: Order discount tier mismatch: expected $100.00, got $75.50
-  1 failed, 7 passed in 0.85s
+  1 failed, 5 passed in 0.85s
   ```
 
 #### Step 3: Expected ServiceNow Write-Back
@@ -204,20 +209,25 @@ git pull origin main
 - **Diff-Grounded Remediation Rule**: Because the commit diff touches **only test files**, the causal remediation strictly targets correcting the test logic or assertion, **never** recommending changes to application business logic.
 - **Warning Segregation**: Non-fatal runtime warnings (e.g., deprecation warnings from test frameworks) appear strictly under **Unrelated Observations**, never in causal remediation.
 
+#### Expected Auto-Fix PR (`llm_patch`)
+- The agent's LLM patch opens one PR from `autofix/run-<run_id>`. The diff touches only
+  `tests/test_main.py`.
+- The seeded test compares hardcoded values with no application code behind them, so the only
+  passing fix edits the test so the two values match (either the expected or the actual value).
+  A reviewer should reject an auto-fix that edits test expectations; that is the human-review
+  step this feature keeps.
+- `[Auto-Fix Initiated]` work note with the PR link, then the PR's CI goes green, then a PR comment
+  and an `[Auto-Fix Verification] ... PASSED` work note. The incident stays In Progress.
+
 #### Step 6: Reset
-1. **Primary — merge the auto-fix PR.** Wait for the `autofix/run-<run_id>` PR's CI to go green
-   (ServiceNow gets an `[Auto-Fix Verification] ... PASSED` work note), then merge it:
-   ```bash
-   cd gdi-sample-pipeline-app
-   gh pr list --head autofix/run-<run_id>
-   gh pr merge <pr_number> --squash --delete-branch
-   git pull origin main
-   ```
-2. **Fallback — revert.** If no fix PR was opened, or its CI failed:
-   ```bash
-   cd gdi-sample-pipeline-app
-   git revert HEAD --no-edit && git push origin main
-   ```
+Close the fix PR without merging, then revert the scenario commit (see [Section 4](#4-reset--cleanup-procedure)):
+```bash
+cd gdi-sample-pipeline-app
+gh pr list --head autofix/run-<run_id>    # find the fix PR, if one was opened
+gh pr close <pr_number> --delete-branch   # skip if no fix PR was opened
+git pull origin main
+git revert HEAD --no-edit && git push origin main
+```
 *Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 ---
@@ -238,7 +248,7 @@ git pull origin main
 ```
 
 #### Step 2: Pipeline Stage Failure & Timing
-- **Failing Job/Step**: `build` job -> `Build and push container image` step.
+- **Failing Job/Step**: `Container Build & Package` job -> `Build Container Image` step.
 - **Expected Duration**: Workflow fails in approximately 45–90 seconds.
 - **Log Snippet**:
   ```
@@ -261,20 +271,26 @@ git pull origin main
   - Add the missing `config/cache-warmup.json` asset to the repository build context, OR
   - Remove the invalid `COPY` instruction from `Dockerfile`.
 
+#### Expected Auto-Fix PR (`llm_patch`)
+- The agent's LLM patch opens one PR from `autofix/run-<run_id>` touching `Dockerfile` and/or
+  `config/`. The ideal fix removes the offending `COPY` line; the LLM may instead add a placeholder
+  `config/cache-warmup.json`. Either can happen, because LLM output varies.
+- `[Auto-Fix Initiated]` work note with the PR link, then the PR's CI goes green, then a PR comment
+  and an `[Auto-Fix Verification] ... PASSED` work note.
+- If the agent finds no safe fix, no PR is opened. The incident instead gets an
+  `[Auto-Fix Hand-off] No automated fix PR opened: <reason>. Requires human attention.` work note.
+  That is the designed no-fix path and counts as correct behaviour.
+- Either way the incident stays In Progress.
+
 #### Step 6: Reset
-1. **Primary — merge the auto-fix PR.** Wait for the `autofix/run-<run_id>` PR's CI to go green
-   (ServiceNow gets an `[Auto-Fix Verification] ... PASSED` work note), then merge it:
-   ```bash
-   cd gdi-sample-pipeline-app
-   gh pr list --head autofix/run-<run_id>
-   gh pr merge <pr_number> --squash --delete-branch
-   git pull origin main
-   ```
-2. **Fallback — revert.** If no fix PR was opened, or its CI failed:
-   ```bash
-   cd gdi-sample-pipeline-app
-   git revert HEAD --no-edit && git push origin main
-   ```
+Close the fix PR without merging, then revert the scenario commit (see [Section 4](#4-reset--cleanup-procedure)):
+```bash
+cd gdi-sample-pipeline-app
+gh pr list --head autofix/run-<run_id>    # find the fix PR, if one was opened
+gh pr close <pr_number> --delete-branch   # skip if no fix PR was opened
+git pull origin main
+git revert HEAD --no-edit && git push origin main
+```
 *Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 ---
@@ -321,79 +337,89 @@ git pull origin main
 - **Unrelated Observations**: Any auxiliary deployment warnings placed in separate section.
 
 #### Expected Auto-Fix PR (`config_tuning`)
-Unless the agent proposes its own patch, the bridge's deterministic memory-config fixer opens a
-PR from `autofix/run-<run_id>` that **tunes the container memory limit allocation** in
-`scripts/deploy.sh`. It doubles the declared default, capped at 2048Mi. Here that is
-`MEMORY="${MEMORY:-256Mi}"` → `MEMORY="${MEMORY:-512Mi}"`. The fixer only changes the numeric
-memory value. It does **not** remove `CACHE_PREWARM_BUFFER_MB=2048` from `EXTRA_ENV_VARS`.
-Because the failure log reports more than 512 MiB in use, the fix PR's CI may still fail on OOM.
-In that case use the revert fallback below.
+Deterministic fixers take precedence over the agent's LLM patch, so the bridge's memory-config
+fixer opens one PR from `autofix/run-<run_id>` that **tunes the container memory limit allocation**
+in `scripts/deploy.sh`. It doubles the declared default, capped at 2048Mi. Here that is a one-line
+change: `MEMORY="${MEMORY:-256Mi}"` → `MEMORY="${MEMORY:-512Mi}"`. The fixer only changes the
+numeric memory value. It does **not** remove `CACHE_PREWARM_BUFFER_MB=2048` from `EXTRA_ENV_VARS`.
+
+- `[Auto-Fix Initiated]` work note with the PR link.
+- The PR's CI runs lint, tests and build, which pass. `Deploy to Cloud Run` is **skipped**, because
+  it only runs on pushes to `main`.
+- A PR comment and a work note then report `[Auto-Fix Verification] ... verification INCONCLUSIVE:
+  'Deploy to Cloud Run' did not run on the fix branch ...; requires human validation.`
+  This must say **INCONCLUSIVE**, not PASSED: the job that failed never re-ran on the fix branch.
+- The incident stays In Progress.
 
 #### Step 6: Reset
-1. **Primary — merge the auto-fix PR.** Wait for the `autofix/run-<run_id>` PR's CI to go green
-   (ServiceNow gets an `[Auto-Fix Verification] ... PASSED` work note), then merge it:
-   ```bash
-   cd gdi-sample-pipeline-app
-   gh pr list --head autofix/run-<run_id>
-   gh pr merge <pr_number> --squash --delete-branch
-   git pull origin main
-   ```
-   Merging restores a 512Mi memory limit but leaves `CACHE_PREWARM_BUFFER_MB=2048` configured.
-   For a byte-exact baseline before the next scenario, also run the local clean-slate script
-   ([Section 4C](#c-local-clean-slate)).
-2. **Fallback — revert.** If no fix PR was opened, or its CI failed:
-   ```bash
-   cd gdi-sample-pipeline-app
-   git revert HEAD --no-edit && git push origin main
-   ```
+Close the fix PR without merging, then revert the scenario commit (see [Section 4](#4-reset--cleanup-procedure)):
+```bash
+cd gdi-sample-pipeline-app
+gh pr list --head autofix/run-<run_id>    # find the fix PR, if one was opened
+gh pr close <pr_number> --delete-branch   # skip if no fix PR was opened
+git pull origin main
+git revert HEAD --no-edit && git push origin main
+```
+*Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 #### Note on Declarative Deployment Invariant
-`scripts/deploy.sh` enforces `--clear-env-vars` when `EXTRA_ENV_VARS` is empty. Reverting the scenario commit (or running the clean-slate reset) empties `EXTRA_ENV_VARS`, which clears `CACHE_PREWARM_BUFFER_MB=2048` from the Cloud Run service and returns it to baseline. The auto-fix PR alone only raises the memory limit, so it does not clear that variable.
+`scripts/deploy.sh` enforces `--clear-env-vars` when `EXTRA_ENV_VARS` is empty. Reverting the scenario commit (or running the clean-slate reset) empties `EXTRA_ENV_VARS`, which clears `CACHE_PREWARM_BUFFER_MB=2048` from the Cloud Run service and returns it to baseline. The auto-fix PR only raises the memory limit and does not clear that variable, which is another reason to reset by revert rather than by merging the fix PR.
 
 ---
 
 ## 4. Reset & Cleanup Procedure
 
-The demo baseline is restored by the auto-fix PR itself. The full flow is:
+With auto-fix ON, every scenario follows the same flow:
 
-**trigger failure → fix PR created → fix PR CI runs and goes green → MERGE fix PR → baseline restored.**
+**trigger failure → incident + fix PR created → fix PR CI runs → verification note posted → CLOSE fix PR (branch deleted) → REVERT trigger commit on `main` → `main` green.**
+
+**Do not merge the fix PRs.** A merged fix stays on `main`, so the next run of that scenario no
+longer reproduces the failure. The fix PR exists to be reviewed, not to restore the demo baseline.
 
 Prerequisite: the bridge must run with `AUTOFIX_ENABLED=true` and a GitHub App/token that can
 create branches and pull requests on the demo repository. With the kill switch off
-(`AUTOFIX_ENABLED=false`, the default) no fix PR is opened, so use the fallback in 4B.
+(`AUTOFIX_ENABLED=false`, the default) no fix PR or auto-fix notes are produced. Skip the
+close step and just revert (step 3 of 4B).
 
-### A. Primary Reset: Merge the Auto-Fix PR
+### A. What to Expect from Auto-Fix
 
-1. After the investigation completes, the bridge opens a PR from `autofix/run-<run_id>` into the
-   failing branch (`main`). The PR link appears in:
-   - the ServiceNow incident work notes (`[Auto-Fix Initiated] Pull Request #<n> ...`), and
+1. After the investigation completes, the bridge opens **one** PR from `autofix/run-<run_id>`
+   into the failing branch (`main`). The PR link appears in:
+   - the ServiceNow incident work notes (`[Auto-Fix Initiated] Pull Request #<n> created on branch autofix/run-<run_id> ... <PR link>`), and
    - the `Autocloud / ServiceNow Incident Link` Check Run on the failing commit.
-2. CI runs on the `autofix/*` branch. Those runs are verification only: the bridge records the
-   result on the original ServiceNow incident and **never** starts a new investigation or another
-   fix attempt for them.
-3. When the fix PR's CI is green (`[Auto-Fix Verification] ... PASSED` work note), review and merge it:
-   ```bash
-   cd gdi-sample-pipeline-app
-   gh pr merge <pr_number> --squash --delete-branch
-   git pull origin main
-   ```
-4. Confirm the pipeline on `main` completes green before starting the next scenario.
+2. CI runs on the fix PR. Those runs are verification only: the bridge posts the result as a PR
+   comment and an `[Auto-Fix Verification]` work note on the original incident. It **never**
+   opens a new incident, starts a new investigation, or makes another fix attempt for them.
+   There is exactly **1 attempt** per incident.
+3. The verification result is one of:
+   - `PASSED`: every job that failed on `main` re-ran on the fix branch and passed (S1, S2, S3).
+   - `INCONCLUSIVE`: a job that failed on `main` did not run on the fix branch. `Deploy to Cloud Run`
+     only runs on pushes to `main`, so the S4 fix PR always ends here and needs human validation.
+   - `FAILED`: the fix PR's CI failed. The note says it requires human attention, and no further
+     automated fix is attempted.
+4. If no safe fix can be proposed, no PR is opened. Instead the incident gets an
+   `[Auto-Fix Hand-off] ... Requires human attention.` work note. This is the designed no-fix path.
+5. Whatever the outcome, the incident stays **In Progress**. The bridge never resolves or closes it.
 
-### B. Fallback Reset: `git revert`
+### B. Reset: Close the Fix PR, then Revert
 
-Use this when **no fix PR was generated** (for example the proposal was `no_safe_fix` or
-`unsupported`, or guardrails rejected it), or when **the fix PR's CI fails**
-(`[Auto-Fix Verification] ... FAILED` work note):
+Run this after the verification note (or hand-off note) has posted:
 
 ```bash
 cd gdi-sample-pipeline-app
-# Close the failed fix PR (if any) and delete its branch
+# 1. Find the fix PR (skip steps 1-2 if no fix PR was opened)
+gh pr list --head autofix/run-<run_id>
+# 2. Close it without merging and delete its branch
 gh pr close <pr_number> --delete-branch
-# Revert the offending scenario commit on main
-git revert <offending_commit_sha> --no-edit && git push origin main
+# 3. Revert the scenario commit on main and push
+git pull origin main
+git revert HEAD --no-edit && git push origin main
 ```
 
-If the scenario commit is still `HEAD`, `git revert HEAD --no-edit` is equivalent.
+If another commit has landed on `main` after the scenario commit, `HEAD` is no longer the scenario
+commit. Revert it by SHA instead: `git revert <scenario_commit_sha> --no-edit`.
+
+Then wait for the pipeline on `main` to complete green before starting the next scenario.
 
 ### C. Local Clean Slate
 
