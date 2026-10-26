@@ -58,7 +58,7 @@ When a CI/CD pipeline fails, engineers often spend hours on repetitive manual tr
 3. **Telemetry correlation**: Correlates runner logs, commit diffs, and Cloud Run telemetry using Vertex AI Gemini (`gemini-2.5-flash`), separating the causal fix from incidental warnings.
 4. **ServiceNow incident**: Opens a ServiceNow ticket (`POST /api/now/table/incident`) with diagnostic work notes and attaches a standalone HTML report (`POST /api/now/attachment/file`).
 5. **GitHub write-back**: Creates or updates a GitHub Check Run that links to the ServiceNow ticket, and posts a commit comment or a collapsible pull request comment with the root cause and copy-paste remediation commands.
-6. **Read-only tools**: Every diagnostic tool is decorated with `@readonly_tool`, and AST static verification prevents tools from changing code or the repository.
+6. **Read-only tools**: Every diagnostic tool is registered through `@readonly_tool`. The tool registry refuses to register a mutating tool, and each specialist checks at startup that every registered tool is read-only. Tests in `agent/tests/` check the same invariant.
 
 ---
 
@@ -112,7 +112,7 @@ uv pip install -e "./bridge[dev]" -e "./agent[dev]" -e "./demo[dev]"
 ### Integration Guides (GitHub App & ServiceNow)
 
 After deployment, configure the two external integrations:
-- **GitHub App**: Configure your personal or organization GitHub App as described in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Subscribe to `workflow_run`, `workflow_job`, and `check_run` events. Set the Webhook URL to `https://${BRIDGE_URL}/webhook/github` and the secret to the value stored in `${NAME_PREFIX}-github-webhook-secret`.
+- **GitHub App**: Configure your personal or organization GitHub App as described in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Subscribe to `workflow_run`, `workflow_job`, and `check_run` events. Set the Webhook URL to `${BRIDGE_URL}/webhook/github` (the `bridge_url` Terraform output already includes `https://`) and the secret to the value stored in `${NAME_PREFIX}-github-webhook-secret`.
 - **ServiceNow**: Give the integration user the `itil` role and attachment upload permissions. To prevent ticket recursion, configure a Business Rule exclusion filter (`correlation_display != "gha-deploy-investigator"`) as described in [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ### Try the Demo
@@ -319,6 +319,8 @@ Configuration comes from environment variables and Google Secret Manager. Nothin
 | Gemini Model | `GEMINI_MODEL` | *None* | Yes | Vertex AI Gemini model name for diagnostic synthesis |
 | Vertex AI Location | `VERTEX_AI_LOCATION` | `us-central1` | No | GCP region for Vertex AI Gemini API endpoint |
 | GitHub App ID | `GITHUB_APP_ID` | *None* | Yes (for App) | Numeric GitHub App ID for authenticated repo API queries |
+| Synthesis Output Budget | `SYNTHESIS_MAX_OUTPUT_TOKENS` | `8192` | No | Max output tokens for Gemini synthesis. On thinking models, thinking tokens count against this budget |
+| Synthesis Thinking Budget | `SYNTHESIS_THINKING_BUDGET` | `1024` | No | Gemini thinking budget. Must be below `SYNTHESIS_MAX_OUTPUT_TOKENS` (checked at startup). `0` disables thinking on gemini-2.5-flash; a negative value omits `thinkingConfig` (see [Section 8](#8-prototype-status--known-limitations)) |
 
 ### Secret Manager Secret Names
 
@@ -397,7 +399,7 @@ To add a runbook for a new pipeline failure mode:
 ## 7. Security Model & Production Guardrails
 
 - **Read-only IAM roles**: The runtime service account `gdi-agent-sa` has only read-only viewer roles (`roles/logging.viewer`, `roles/run.viewer`) plus `roles/aiplatform.user` for Gemini model invocation. It cannot change production resources, restart services, or modify customer repositories.
-- **Internal ingress**: `gdi-agent` uses internal ingress (`INGRESS_TRAFFIC_INTERNAL_ONLY`) and is not reachable from the public internet. Only Google Cloud Tasks within the same VPC can invoke it, using OIDC authentication.
+- **Internal ingress and IAM**: `gdi-agent` uses internal ingress (`INGRESS_TRAFFIC_INTERNAL_ONLY`) and is not reachable from the public internet. Cloud Tasks in the same project passes the ingress check. Only the Tasks invoker service account (`${NAME_PREFIX}-tasks-invoker-sa`) has `roles/run.invoker` on the service, and each task carries an OIDC token for that account with the agent URL as audience.
 - **No secrets in the repository or Terraform state**: Tokens, passwords, and private keys are stored only in Google Secret Manager. Terraform declares only the secret containers (metadata).
 - **HMAC webhook verification**: Inbound webhooks need a valid `X-Hub-Signature-256` HMAC signature computed with `GITHUB_WEBHOOK_SECRET`. Unsigned or tampered requests are rejected with HTTP 401.
 - **Delivery deduplication**: Deterministic task naming (`inv-<run_id>`) in Cloud Tasks and `CallbackDedupRegistry` in Bridge prevent duplicate runs or concurrent LLM execution.
@@ -915,7 +917,7 @@ Organization Policies in enterprise GCP environments can block parts of the depl
    - *Remediation*: Request a project-level policy exemption, or deploy an External Application Load Balancer with Cloud Armor and set Cloud Run ingress to `internal-and-cloud-load-balancing`.
 2. **Ingress Controls**:
    - `gdi-bridge`: Requires `all` (or `internal-and-cloud-load-balancing` behind Cloud Load Balancing).
-   - `gdi-agent`: Requires `internal` (`INGRESS_TRAFFIC_INTERNAL_ONLY`); only Cloud Tasks within the project VPC can reach it.
+   - `gdi-agent`: Requires `internal` (`INGRESS_TRAFFIC_INTERNAL_ONLY`). Cloud Tasks in the same project can reach it, authenticated with an OIDC token for the Tasks invoker service account.
 3. **Workload Identity Federation Restrictions (`constraints/iam.workloadIdentityPoolProviders`)**:
    - Allow `https://token.actions.githubusercontent.com` as an OIDC provider for keyless GitHub Actions authentication.
 4. **Service Account Key Creation (`constraints/iam.disableServiceAccountKeyCreation`)**:
@@ -937,7 +939,10 @@ python3 scripts/check-no-rootcause-overrides.py
 # 3. Anti-tamper de-overfitting guard across agent source and skills
 bash scripts/check-no-demo-overfit.sh
 
-# 4. Forbidden literal scanner & markdown relative link checker
+# 3b. AST guard against hardcoded prompts and instructions in agent/app
+python3 scripts/check-no-inline-prompts.py
+
+# 4. Forbidden literal scanner & markdown relative link checker (reads FORBIDDEN_LITERALS)
 bash scripts/check-no-literal-projects.sh
 
 # 5. Automated test suite (unit and component tests across all modules)
@@ -948,7 +953,9 @@ ruff check bridge agent demo
 
 # 7. Terraform formatting and validation across stacks
 for stack in agent/infra/terraform bridge/infra/terraform demo/infra/terraform; do
-  (cd "$stack" && terraform fmt -check && terraform init -backend=false && terraform validate)
+  terraform -chdir="$stack" fmt -check
+  terraform -chdir="$stack" init -backend=false
+  terraform -chdir="$stack" validate
 done
 ```
 
@@ -1058,7 +1065,15 @@ gha-deploy-investigator/
 │   │   ├── specialists/           # Pipeline logs, runtime health, and IaC specialists
 │   │   ├── tools/                 # Read-only GitHub and Cloud Run diagnostic tools
 │   │   ├── contracts/             # Data transfer models (byte-identical with bridge)
+│   │   ├── agent.yaml             # Declarative agent tree (dispatcher and sub-agents)
+│   │   ├── agent_config.py        # Loader for agent.yaml
+│   │   ├── callback.py            # Result callback to the bridge (ID-token authenticated)
+│   │   ├── config.py              # Agent settings (pydantic-settings)
 │   │   ├── dispatcher.py          # Investigation orchestration & callback delivery
+│   │   ├── llm.py                 # Gemini synthesis call and response parsing
+│   │   ├── log_utils.py           # Error-line extraction from runner logs
+│   │   ├── main.py                # FastAPI entry point (/investigate, /health)
+│   │   ├── patch_extractor.py     # LLM patch extraction and validation for auto-fix
 │   │   ├── skills_loader.py       # Dynamic skill discovery and runbook loader
 │   │   ├── synthesizer.py         # Vertex AI Gemini root cause reasoning
 │   │   └── triage.py              # Pipeline stage classifier & planner
@@ -1077,7 +1092,11 @@ gha-deploy-investigator/
 │   │   ├── adapters/              # GitHub Actions and ServiceNow Table/Attachment adapters
 │   │   ├── core/                  # Webhook auth, delivery deduplication, Cloud Tasks
 │   │   ├── contracts/             # Data transfer models (byte-identical with agent)
-│   │   └── templates/             # Responsive HTML dossier & ServiceNow work notes renderer
+│   │   ├── fixer/                 # Auto-fix: fix selection, generators, PR writer, CI listener
+│   │   ├── github/                # GitHub App authentication
+│   │   ├── templates/             # Responsive HTML dossier & ServiceNow work notes renderer
+│   │   ├── config.py              # Bridge settings (pydantic-settings)
+│   │   └── main.py                # FastAPI entry point (webhooks, callback, health)
 │   ├── infra/terraform/           # Bridge Cloud Run, Cloud Tasks queue & IAM infrastructure
 │   ├── tests/                     # Offline bridge unit and component tests
 │   ├── Dockerfile                 # Multi-stage production container build
@@ -1086,20 +1105,27 @@ gha-deploy-investigator/
 │   ├── sample-pipeline-app/       # Standalone customer FastAPI service with 4-stage CI/CD
 │   ├── scenarios/                 # Deterministic failure triggers (lint, test, build, deploy)
 │   ├── infra/terraform/           # Workload Identity Federation (WIF) & demo Artifact Registry
+│   ├── tests/                     # Offline demo scenario tests
 │   ├── DEMO-RUNBOOK.md            # Scenario walkthrough, specifications & invariants
+│   ├── README.md                  # Demo directory overview
+│   ├── pyproject.toml             # Demo dependencies and dev packages
 │   └── seed-demo-repo.sh          # Seeder script for standalone customer repository
 ├── docs/                          # Architecture & operations documentation
 │   ├── ARCHITECTURE.md            # System architecture, contract models & isolation
 │   ├── CONFIGURATION.md           # Complete environment variable & secret reference
 │   └── DEPLOY.md                  # End-to-end GCP deployment guide
 ├── scripts/                       # Quality gates & deployment automation tooling
+│   ├── bootstrap-tfstate.sh       # GCS state bucket bootstrap & backend.hcl generator
 │   ├── check-contracts.sh         # Byte-identical contract validator
 │   ├── check-markdown-links.py    # Relative markdown link resolver
 │   ├── check-no-demo-overfit.sh   # Anti-tamper de-overfitting guard
+│   ├── check-no-inline-prompts.py # AST guard against hardcoded prompts in agent/app
 │   ├── check-no-literal-projects.sh # Forbidden literal & un-externalized model scanner
 │   ├── check-no-rootcause-overrides.py # AST guard against post-LLM template overrides
 │   ├── copy-secrets.sh            # Secret replication helper from existing deployments
 │   └── upload-github-app-credentials.sh # GitHub App credentials uploader
+├── .env.example                   # Sample local environment variables
+├── AGENTS.md                      # Guide for AI coding assistants
 ├── pytest.ini                     # Offline pytest test suite configuration
 ├── ruff.toml                      # Linter & formatter configuration
 └── README.md                      # Primary project documentation
