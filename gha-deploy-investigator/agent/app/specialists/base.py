@@ -18,6 +18,16 @@ from ..tools.registry import default_registry
 logger = logging.getLogger(__name__)
 
 
+# Captures a unified diff hunk header up to its closing ``@@``; anything after it is the
+# optional function/section heading that git appends, which is not part of the change.
+_HUNK_HEADING_RE = re.compile(r"^(@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@).*$", re.MULTILINE)
+
+
+def strip_hunk_headings(patch: str) -> str:
+    """Drop the trailing heading text from every hunk header in ``patch``."""
+    return _HUNK_HEADING_RE.sub(r"\1", patch)
+
+
 def format_git_diff_excerpt(diff_data: Optional[dict[str, Any]], max_patch_len: int = 2000) -> str:
     """Format git diff files and patch hunks into structured evidence text."""
     if not isinstance(diff_data, dict) or "files" not in diff_data:
@@ -38,7 +48,7 @@ def format_git_diff_excerpt(diff_data: Optional[dict[str, Any]], max_patch_len: 
             fn = re.sub(r"^\.?/", "", f.get("filename", ""))
             patch = f.get("patch")
             if patch and isinstance(patch, str) and patch.strip():
-                patches.append(f"--- {fn}\n+++ {fn}\n{patch.strip()}")
+                patches.append(f"--- {fn}\n+++ {fn}\n{strip_hunk_headings(patch.strip())}")
 
     if not patches:
         return header
