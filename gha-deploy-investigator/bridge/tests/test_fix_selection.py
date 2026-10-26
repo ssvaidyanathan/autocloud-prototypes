@@ -1,3 +1,4 @@
+import difflib
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -190,3 +191,126 @@ class TestCandidateConfigPaths:
     def test_candidate_count_is_bounded(self) -> None:
         text = " ".join(f"c{i}.yaml" for i in range(MAX_CONFIG_CANDIDATES + 5))
         assert len(candidate_config_paths(Report(summary=text))) == MAX_CONFIG_CANDIDATES
+
+
+REVERT_AFTER = "#!/usr/bin/env bash\nSERVICE_MEMORY=192Mi\nRUN_MODE=normal\nlaunch svc\n"
+REVERT_PATCH = (
+    "@@ -1,4 +1,4 @@\n #!/usr/bin/env bash\n-SERVICE_MEMORY=384Mi\n+SERVICE_MEMORY=192Mi\n"
+    " RUN_MODE=normal\n launch svc"
+)
+
+
+def _two_hunk_yaml_patch() -> str:
+    """Patch changing key4 to ``alpha: 1`` and key31 to ``beta: 2`` (two separate hunks)."""
+    lines = [f"key{i}: v" for i in range(1, 41)]
+    changed = list(lines)
+    changed[3] = "alpha: 1"
+    changed[30] = "beta: 2"
+    return "\n".join(list(difflib.unified_diff(lines, changed, lineterm=""))[2:])
+
+
+def _commit_fetcher(commit: Optional[dict] = None, error: Optional[Exception] = None):
+    calls: list[int] = []
+
+    def fetch_commit() -> Optional[dict]:
+        calls.append(1)
+        if error is not None:
+            raise error
+        return commit
+
+    return fetch_commit, calls
+
+
+def _revert_commit(path: str = "deploy/run.sh", patch: str = REVERT_PATCH) -> dict:
+    return {
+        "sha": "fedcba9876543210",
+        "parents": [{"sha": "p"}],
+        "files": [{"filename": path, "status": "modified", "patch": patch}],
+    }
+
+
+class TestCommitHunkRevertPrecedence:
+    def test_linter_takes_precedence_over_revert(self) -> None:
+        fetch, _ = _files({"app/main.py": SOURCE})
+        fetch_commit, commit_calls = _commit_fetcher(_revert_commit())
+        report = Report(
+            summary="Lint failed; deploy/run.sh also changed",
+            evidence_by_area={"x": [EvidenceItem(kind="log", excerpt=LINT)]},
+        )
+        proposal = select_fix_proposal(_incident(), report, fetch, fetch_commit)
+        assert proposal is not None and proposal.strategy == "deterministic_linter"
+        assert commit_calls == []
+
+    def test_revert_takes_precedence_over_config_tuning_and_agent(self) -> None:
+        agent = _agent_proposal()
+        fetch, calls = _files({"deploy/run.sh": REVERT_AFTER})
+        fetch_commit, _ = _commit_fetcher(_revert_commit())
+        proposal = select_fix_proposal(
+            _incident(), _oom_report(fix_proposal=agent), fetch, fetch_commit
+        )
+        assert proposal is not None and proposal.strategy == "commit_hunk_revert"
+        assert proposal is not agent
+        assert proposal.patches[0].path == "deploy/run.sh"
+        assert "+SERVICE_MEMORY=384Mi" in (proposal.patches[0].diff or "")
+        assert calls == []
+
+    def test_config_tuning_when_commit_has_no_config_change(self) -> None:
+        fetch, _ = _files({"deploy/run.sh": "SERVICE_MEMORY=384Mi\n"})
+        fetch_commit, _ = _commit_fetcher(
+            _revert_commit("app/core.py", "@@ -1 +1 @@\n-a = 1\n+a = 2")
+        )
+        proposal = select_fix_proposal(_incident(), _oom_report(), fetch, fetch_commit)
+        assert proposal is not None and proposal.strategy == "config_tuning"
+
+    def test_agent_when_revert_does_not_claim(self) -> None:
+        agent = _agent_proposal()
+        fetch, _ = _files({})
+        fetch_commit, _ = _commit_fetcher(_revert_commit())
+        report = Report(summary="Unit tests failed in tests/test_core.py", fix_proposal=agent)
+        assert select_fix_proposal(_incident(), report, fetch, fetch_commit) is agent
+
+    def test_revert_skipped_without_commit_fetcher(self) -> None:
+        fetch, _ = _files({"deploy/run.sh": "SERVICE_MEMORY=384Mi\n"})
+        proposal = select_fix_proposal(_incident(), _oom_report(), fetch)
+        assert proposal is not None and proposal.strategy == "config_tuning"
+
+    def test_commit_fetch_error_is_not_applicable(self) -> None:
+        fetch, _ = _files({"deploy/run.sh": "SERVICE_MEMORY=384Mi\n"})
+        fetch_commit, calls = _commit_fetcher(error=RuntimeError("boom"))
+        proposal = select_fix_proposal(_incident(), _oom_report(), fetch, fetch_commit)
+        assert calls == [1]
+        assert proposal is not None and proposal.strategy == "config_tuning"
+
+    def test_commit_diff_evidence_does_not_select_hunks(self) -> None:
+        patch = _two_hunk_yaml_patch()
+        fetch_commit, _ = _commit_fetcher(_revert_commit("deploy/app.yaml", patch))
+        agent = _agent_proposal()
+        diff_evidence = EvidenceItem(kind="git_diff", excerpt=f"Diff Hunks:\n{patch}")
+        report = Report(
+            summary="Rollout of deploy/app.yaml failed",
+            evidence_by_area={"iac": [diff_evidence]},
+            fix_proposal=agent,
+        )
+        fetch, _ = _files({})
+        assert select_fix_proposal(_incident(), report, fetch, fetch_commit) is agent
+        report.evidence_by_area["iac"].append(EvidenceItem(kind="log", excerpt="beta: 2 rejected"))
+        proposal = select_fix_proposal(_incident(), report, fetch, fetch_commit)
+        assert proposal is not None and proposal.strategy == "commit_hunk_revert"
+        assert "+key31: v" in (proposal.patches[0].diff or "")
+        assert "alpha" not in (proposal.patches[0].diff or "")
+
+    def test_annotation_messages_count_as_line_evidence(self) -> None:
+        patch = _two_hunk_yaml_patch()
+        fetch_commit, _ = _commit_fetcher(_revert_commit("deploy/app.yaml", patch))
+        report = Report(
+            summary="Rollout of deploy/app.yaml failed",
+            annotations=[
+                CheckRunAnnotation(
+                    path="other/file.yaml", start_line=1, end_line=1, message="alpha: 1 invalid"
+                )
+            ],
+        )
+        fetch, _ = _files({})
+        proposal = select_fix_proposal(_incident(), report, fetch, fetch_commit)
+        assert proposal is not None and proposal.strategy == "commit_hunk_revert"
+        assert "+key4: v" in (proposal.patches[0].diff or "")
