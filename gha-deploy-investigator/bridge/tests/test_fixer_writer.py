@@ -188,9 +188,7 @@ class TestFixPRWriterPrimitives:
 
         client = httpx.Client(transport=httpx.MockTransport(spy))
         writer = FixPRWriter(config=_config(), http_client=client)
-        sha = writer.commit_patch(
-            OWNER, REPO, "autofix/run-1", _proposal().patches[0], "fix: lint"
-        )
+        sha = writer.commit_patch(OWNER, REPO, "autofix/run-1", _proposal().patches[0], "fix: lint")
         assert sha.startswith("commit-")
         assert captured[0]["sha"] == "blob-app/main.py"
         assert captured[0]["branch"] == "autofix/run-1"

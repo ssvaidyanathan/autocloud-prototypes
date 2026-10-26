@@ -296,9 +296,7 @@ class GitHubAdapter(BaseAdapter):
                     if report.causal_remediation
                     else report.recommended_actions
                 )
-                actions_md = (
-                    "\n".join(f"- {act}" for act in remediation_items) or "- Review logs"
-                )
+                actions_md = "\n".join(f"- {act}" for act in remediation_items) or "- Review logs"
                 evidence_lines = []
                 for area, items in report.evidence_by_area.items():
                     for item in items:
