@@ -1,7 +1,7 @@
 import posixpath
 import re
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional
 
 from ..contracts.incident import Incident
 from ..contracts.report import FilePatch, FixProposal, PullRequestRef, Report
@@ -175,6 +175,18 @@ class FixPRWriterBase(ABC):
 
     def fetch_file_content(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
         """Return the file content at ``ref``, or None if unavailable (read-only helper)."""
+        return None
+
+    def fetch_commit(self, owner: str, repo: str, sha: str) -> Optional[dict[str, Any]]:
+        """Return the REST commit object (with per-file patches), or None (read-only helper)."""
+        return None
+
+    def fetch_commit_pulls(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+        """Return pull requests associated with a commit (read-only helper)."""
+        return []
+
+    def fetch_default_branch(self, owner: str, repo: str) -> Optional[str]:
+        """Return the repository's default branch name, or None (read-only helper)."""
         return None
 
     @abstractmethod

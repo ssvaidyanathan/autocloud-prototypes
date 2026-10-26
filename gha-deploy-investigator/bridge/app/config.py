@@ -78,6 +78,9 @@ class BridgeConfig(BaseSettings):
 
     # Auto-fix PR Configuration
     autofix_enabled: bool = False
+    # GitHub login of the account that authors auto-fix commits/PRs (e.g. a GitHub App's
+    # "<app-slug>[bot]"). Used by the repeat-fix guard; unset disables the author check.
+    autofix_bot_login: Optional[str] = None
 
     @property
     def is_local(self) -> bool:

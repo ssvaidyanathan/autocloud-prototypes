@@ -509,6 +509,20 @@ class ServiceNowAdapter(BaseAdapter):
 
         self._execute_with_retry(_do_note)
 
+    def post_work_note(self, ref: IncidentRef, note: str) -> None:
+        """Post a pre-formatted work note verbatim (e.g. the repeat-fix guard note)."""
+        base_url = (self.config.servicenow_instance_url or "").rstrip("/")
+        if not base_url:
+            return
+        endpoint = f"{base_url}/api/now/table/incident/{ref.external_id}"
+
+        def _do_note() -> None:
+            with self._get_client() as client:
+                resp = client.patch(endpoint, json={"work_notes": note})
+                resp.raise_for_status()
+
+        self._execute_with_retry(_do_note)
+
     def post_failure(self, ref: IncidentRef, error: str) -> None:
         """Post failure note to ServiceNow."""
         base_url = (self.config.servicenow_instance_url or "").rstrip("/")

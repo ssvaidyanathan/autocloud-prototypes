@@ -35,12 +35,37 @@ class FakeGitHub:
         self.calls: list[tuple[str, str]] = []
         self.fail_put = False
         self.deleted_refs: list[str] = []
+        # Read-only metadata used by the revert fixer and the repeat-fix guard.
+        self.repo_info: Optional[dict[str, Any]] = None
+        self.commits: dict[str, dict[str, Any]] = {}
+        self.commit_pulls: dict[str, list[dict[str, Any]]] = {}
+        self.lookup_errors: set[str] = set()
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         method = request.method
         self.calls.append((method, path))
         body = json.loads(request.content) if request.content else {}
+
+        if method == "GET" and path == PREFIX:
+            if "repo" in self.lookup_errors:
+                return httpx.Response(500, json={"message": "repo lookup failed"})
+            if self.repo_info is None:
+                return httpx.Response(404, json={"message": "Not Found"})
+            return httpx.Response(200, json=self.repo_info)
+
+        if method == "GET" and path.startswith(f"{PREFIX}/commits/"):
+            sha, _, tail = path.split("/commits/", 1)[1].partition("/")
+            if tail == "pulls":
+                if "pulls" in self.lookup_errors:
+                    return httpx.Response(500, json={"message": "pulls lookup failed"})
+                return httpx.Response(200, json=self.commit_pulls.get(sha, []))
+            if not tail:
+                if "commit" in self.lookup_errors:
+                    return httpx.Response(500, json={"message": "commit lookup failed"})
+                if sha not in self.commits:
+                    return httpx.Response(404, json={"message": "Not Found"})
+                return httpx.Response(200, json=self.commits[sha])
 
         if method == "POST" and path == f"{PREFIX}/git/refs":
             ref = body["ref"]
