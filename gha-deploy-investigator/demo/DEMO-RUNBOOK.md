@@ -302,17 +302,25 @@ git pull origin main
 Deterministic fixers take precedence over the agent's LLM patch. When the diagnosis names
 `Dockerfile`, a container build definition that the failing commit modified, the bridge's
 hunk-revert fixer opens one PR from `autofix/run-<run_id>` that reverts **only the offending diff
-hunk** of `Dockerfile` in the scenario commit. Here that hunk is the appended
-`COPY config/cache-warmup.json ...` instruction, so the expected diff removes that line and nothing
-else. The fixer computes the patch by inverting the commit's own hunk, so no LLM output is involved.
+hunk** of `Dockerfile` in the scenario commit. Here that hunk is the block the trigger script
+appended: a blank line, the `# cache-warmup configuration asset ...` comment and the
+`COPY config/cache-warmup.json ...` instruction. The expected diff removes those three lines and
+nothing else. The fixer computes the patch by inverting the commit's own hunk, so no LLM output is
+involved.
 - If the diagnosis does not name `Dockerfile`, or the hunk is ambiguous (for example several
   hunks with none quoted by the evidence), the revert fixer does not claim the failure and the
   agent's `llm_patch` is used instead, as before. Its fix may remove the `COPY` line or add a
   placeholder `config/cache-warmup.json`, because LLM output varies.
 - `[Auto-Fix Initiated]` work note with the PR link, then the PR's CI runs. The expected result is
   green CI, then a PR comment and an `[Auto-Fix Verification] ... PASSED` work note.
-- If the revert patch does not apply to the current `main`, no PR is opened and no other fixer is
-  tried. The incident gets an `[Auto-Fix Hand-off]` work note that carries the revert rationale.
+- The revert patch is built from the failing commit's own hunk and applied on a fix branch created
+  from that commit (not from the current `main`), so it is expected to apply. If `main` has since
+  changed the same lines, the PR shows a merge conflict for the reviewer. If the bridge nevertheless
+  cannot write the fix (a guardrail rejects it, the patch fails to resolve at that commit, or
+  creating the branch, commit or PR fails), no PR is opened and no other fixer is tried. The
+  incident gets an `[Auto-Fix Hand-off] No automated fix PR opened: An automated fix was proposed
+  but could not be applied: <rationale>. Requires human attention.` work note, where `<rationale>`
+  is the revert rationale.
 - **Status:** expected behaviour, derived from the code.
   Not yet verified live: this `commit_hunk_revert` outcome is covered by the bridge's unit and
   integration tests (synthetic fixtures) but has not been observed in a live run of this scenario.
@@ -390,8 +398,14 @@ the evidence (or flagged by a report annotation) are reverted.
   does not claim the failure. The memory-config fixer (`config_tuning`) then handles the OOM as
   before: it doubles the declared memory default, capped at 2048Mi (`256Mi` → `512Mi`), and does
   **not** remove `CACHE_PREWARM_BUFFER_MB=2048`.
-- If the revert patch does not apply to the current `main`, no PR is opened and no other fixer is
-  tried. The incident gets an `[Auto-Fix Hand-off]` work note that carries the revert rationale.
+- The revert patch is built from the failing commit's own hunk and applied on a fix branch created
+  from that commit (not from the current `main`), so it is expected to apply. If `main` has since
+  changed the same lines, the PR shows a merge conflict for the reviewer. If the bridge nevertheless
+  cannot write the fix (a guardrail rejects it, the patch fails to resolve at that commit, or
+  creating the branch, commit or PR fails), no PR is opened and no other fixer is tried. The
+  incident gets an `[Auto-Fix Hand-off] No automated fix PR opened: An automated fix was proposed
+  but could not be applied: <rationale>. Requires human attention.` work note, where `<rationale>`
+  is the revert rationale.
 - **Status:** expected behaviour, derived from the code.
   Not yet verified live: this `commit_hunk_revert` outcome is covered by the bridge's unit and
   integration tests (synthetic fixtures) but has not been observed in a live run of this scenario.
@@ -467,10 +481,14 @@ rebase merges of fix PRs.
    a merged auto-fix (a merge of an `autofix/` branch, or a commit by the `AUTOFIX_BOT_LOGIN`
    account), the previous automated fix did not work. The bridge then opens **no** fix PR and makes
    no fix attempt. The incident gets an `[Auto-Fix Repeat Failure Guard] Failing commit <sha> on
-   '<default-branch>' is a merge of auto-fix PR #<n> (branch autofix/run-<run_id>). The previous
+   '<default-branch>' is a merge of auto-fix PR #<n> (branch autofix/run-<fix_run_id>). The previous
    automated remediation was ineffective and the workflow run <run_id> failed. Halting automated fix
    attempts to prevent retry loops. Requires human attention.` work note, and the same text is
-   appended to the Check Run and the commit comment. If the guard cannot read the default branch
+   appended to the Check Run and the commit comment. Here `<fix_run_id>` is the earlier run that
+   produced the merged auto-fix and `<run_id>` is the current failing run. When no PR number is
+   found, the origin clause reads `is a merge of auto-fix branch <branch> (no associated PR number
+   found)`; for a commit by the bot account with no auto-fix branch, it reads `was authored by the
+   auto-fix account <login>`. If the guard cannot read the default branch
    from GitHub, it does not apply and the normal auto-fix path runs. This guard is covered by tests
    but has not yet been exercised in a live run.
 6. Whatever the outcome, the incident stays **In Progress**. The bridge never resolves or closes it.
