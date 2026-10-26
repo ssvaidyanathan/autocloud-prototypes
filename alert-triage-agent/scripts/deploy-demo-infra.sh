@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 echo "=== Deploying ATA Demo Infrastructure (Stage 2) ==="
 
 # 1. Database Tier
 echo "--> Applying database Terraform..."
-(cd /workspace/alert-triage-agent/infra/terraform/database && \
-  /home/scion/.local/bin/terraform init -input=false && \
-  /home/scion/.local/bin/terraform apply -auto-approve -input=false)
+(cd "${REPO_DIR}/infra/terraform/database" && \
+  terraform init -input=false && \
+  terraform apply -auto-approve -input=false)
 
 # 2. Applications Tier
 echo "--> Applying applications Terraform..."
-(cd /workspace/alert-triage-agent/infra/terraform/applications && \
-  /home/scion/.local/bin/terraform init -input=false && \
-  /home/scion/.local/bin/terraform apply -auto-approve -input=false)
+(cd "${REPO_DIR}/infra/terraform/applications" && \
+  terraform init -input=false && \
+  terraform apply -auto-approve -input=false)
 
 # 3. Observability Tier
 echo "--> Applying observability Terraform..."
-(cd /workspace/alert-triage-agent/infra/terraform/observability && \
-  /home/scion/.local/bin/terraform init -input=false && \
-  /home/scion/.local/bin/terraform apply -auto-approve -input=false)
+(cd "${REPO_DIR}/infra/terraform/observability" && \
+  terraform init -input=false && \
+  terraform apply -auto-approve -input=false)
 
 # 4. Apigee Proxies
 echo "--> Deploying Apigee Proxies..."
-/workspace/alert-triage-agent/scripts/deploy-apigee-proxies.sh
+"${SCRIPT_DIR}/deploy-apigee-proxies.sh"
 
 echo "=== Demo Infrastructure Deployed Successfully ==="

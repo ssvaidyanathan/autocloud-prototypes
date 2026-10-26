@@ -433,7 +433,7 @@ Before deploying, ensure you have:
 Bootstrap the Google Cloud Storage backend for Terraform state storage with uniform bucket-level access and versioning:
 
 ```bash
-cd /workspace/alert-triage-agent
+cd alert-triage-agent
 ./scripts/bootstrap-tfstate.sh \
   --project-id "${PROJECT_ID}" \
   --region "${REGION}" \
@@ -450,7 +450,7 @@ This ensures `gs://${PROJECT_ID}-${NAME_PREFIX}-tfstate` exists with encryption 
 The foundation module provisions the GCS incidents bucket, creates 6 dedicated service accounts, configures Secret Manager placeholders, and provisions Cloud Tasks queues:
 
 ```bash
-cd /workspace/alert-triage-agent/infra/terraform/foundation
+cd alert-triage-agent/infra/terraform/foundation
 terraform init -reconfigure -backend-config=backend.hcl
 
 terraform plan \
@@ -477,7 +477,7 @@ cd ../../..
 Provisions a Cloud SQL PostgreSQL 15 instance with IAM database authentication enabled:
 
 ```bash
-cd /workspace/alert-triage-agent/infra/terraform/database
+cd alert-triage-agent/infra/terraform/database
 terraform init -reconfigure -backend-config=backend.hcl
 
 terraform plan \
@@ -503,7 +503,7 @@ gcloud sql connect "${NAME_PREFIX}-inventory-db" --user=postgres --database=inve
 Deploys internal demo microservices on Cloud Run with IAM service account identities:
 
 ```bash
-cd /workspace/alert-triage-agent/infra/terraform/applications
+cd alert-triage-agent/infra/terraform/applications
 terraform init -reconfigure -backend-config=backend.hcl
 
 terraform plan \
@@ -528,7 +528,7 @@ cd ../../..
 Package and deploy the Apigee API proxies to environment `prod`, configure developer credentials, and obtain an API consumer key:
 
 ```bash
-cd /workspace/alert-triage-agent
+cd alert-triage-agent
 ./scripts/deploy-apigee-proxies.sh
 ```
 
@@ -544,7 +544,7 @@ cd /workspace/alert-triage-agent
 Deploys Cloud Monitoring alert policies and links them to the `ata-bridge` notification channel:
 
 ```bash
-cd /workspace/alert-triage-agent/infra/terraform/observability
+cd alert-triage-agent/infra/terraform/observability
 terraform init -reconfigure -backend-config=backend.hcl
 
 terraform plan \
@@ -575,17 +575,17 @@ Deploy the custom FastMCP tools server, the multi-agent ADK runtime, and the bri
 
 ```bash
 # 1. Deploy FastMCP tools server
-cd /workspace/alert-triage-agent/tools
+cd alert-triage-agent/tools
 ./scripts/deploy.sh
 cd ../..
 
 # 2. Deploy multi-agent ADK runtime
-cd /workspace/alert-triage-agent/agent
+cd alert-triage-agent/agent
 ./scripts/deploy.sh
 cd ../..
 
 # 3. Deploy bridge webhook service
-cd /workspace/alert-triage-agent/bridge
+cd alert-triage-agent/bridge
 ./scripts/deploy.sh
 cd ../..
 ```
@@ -597,7 +597,7 @@ cd ../..
 Store ServiceNow credentials safely in Google Secret Manager without echoing passwords:
 
 ```bash
-cd /workspace/alert-triage-agent
+cd alert-triage-agent
 ./scripts/set-secrets.sh
 ```
 
@@ -732,14 +732,14 @@ All pull requests must pass the following checks cleanly:
 
 ```bash
 # 1. Run full test suite using project virtualenv
-/workspace/venv/bin/pytest tests/ -v
+pytest tests/ -v
 
 # 2. Run core correlation and scenario test suites
-/workspace/venv/bin/pytest tests/test_scenarios_e2e.py
-/workspace/venv/bin/pytest tests/test_correlation_scoring.py
-/workspace/venv/bin/pytest tests/test_agent_grouping_and_timers.py
-/workspace/venv/bin/pytest tests/test_no_fabricated_data.py
-/workspace/venv/bin/pytest tests/test_container_import_layout.py
+pytest tests/test_scenarios_e2e.py
+pytest tests/test_correlation_scoring.py
+pytest tests/test_agent_grouping_and_timers.py
+pytest tests/test_no_fabricated_data.py
+pytest tests/test_container_import_layout.py
 
 # 3. Linting and formatting checks
 ruff check bridge agent tools

@@ -6,6 +6,7 @@ REGION="${REGION:-us-west1}"
 ENV_NAME="${ENV_NAME:-prod}"
 NAME_PREFIX="${NAME_PREFIX:-ata}"
 SA_EMAIL="ata-apigee-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "=== Deploying Apigee Proxies to ${PROJECT_ID} (env: ${ENV_NAME}) ==="
 
@@ -64,7 +65,7 @@ create_or_update_targetserver "ata-inventory-target" "${INV_HOST}"
 # Helper to deploy a proxy bundle
 deploy_proxy() {
   local proxy_name="$1"
-  local bundle_dir="/workspace/alert-triage-agent/demo/apigee/${proxy_name}"
+  local bundle_dir="${SCRIPT_DIR}/../demo/apigee/${proxy_name}"
   local zip_file="/tmp/${proxy_name}.zip"
 
   echo "--> Packaging ${proxy_name}..."
@@ -149,5 +150,5 @@ echo "Host: 8.233.247.52.nip.io"
 echo "Orders BasePath: /ata/orders/v1"
 echo "Inventory BasePath: /ata/inventory/v1"
 echo "API Key: ${API_KEY}"
-(umask 077 && echo "${API_KEY}" > /workspace/alert-triage-agent/.ata-api-key)
-chmod 600 /workspace/alert-triage-agent/.ata-api-key
+(umask 077 && echo "${API_KEY}" > "${SCRIPT_DIR}/../.ata-api-key")
+chmod 600 "${SCRIPT_DIR}/../.ata-api-key"

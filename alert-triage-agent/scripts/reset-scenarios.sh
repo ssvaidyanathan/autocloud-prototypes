@@ -301,10 +301,6 @@ if [ -f "${SCRIPT_DIR}/deploy-apigee-proxies.sh" ] && [ "${MOCK_MODE}" = "false"
     "${SCRIPT_DIR}/deploy-apigee-proxies.sh" > /dev/null 2>&1 || \
         log_warn "Apigee redeployment skipped or permissions restricted in test runner."
     log_success "    Apigee proxy baselines restored."
-elif [ -f "/workspace/alert-triage-agent/scripts/deploy-apigee-proxies.sh" ] && [ "${MOCK_MODE}" = "false" ] && [ "${DRY_RUN}" = "false" ]; then
-    /workspace/alert-triage-agent/scripts/deploy-apigee-proxies.sh > /dev/null 2>&1 || \
-        log_warn "Apigee redeployment skipped or permissions restricted in test runner."
-    log_success "    Apigee proxy baselines restored."
 else
     log_info "    Apigee restore simulation completed."
 fi

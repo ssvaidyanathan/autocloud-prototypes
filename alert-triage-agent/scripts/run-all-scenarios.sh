@@ -43,6 +43,14 @@ while [[ $# -gt 0 ]]; do
             TARGET_SCENARIO="$2"
             shift 2
             ;;
+        --hold)
+            export ATA_HOLD_DURATION="$2"
+            shift 2
+            ;;
+        --hold=*)
+            export ATA_HOLD_DURATION="${1#*=}"
+            shift
+            ;;
         --dry-run)
             export DRY_RUN="true"
             shift
@@ -52,7 +60,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Usage: $0 [--priority|--all|--scenario <s1..s5>|--dry-run|--mock]"
+            echo "Usage: $0 [--priority|--all|--scenario <s1..s5>|--hold <duration>|--dry-run|--mock]"
             exit 0
             ;;
         *)

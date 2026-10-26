@@ -84,7 +84,7 @@ Ensure the following tools and permissions are configured on your operator works
 
 > [!IMPORTANT]
 > **Resource Labels & Metadata Policy:**
-> All newly provisioned or deployed resources in `cloud-assist-fde-2` must carry standard labels (`app=alert-triage-agent`, `component`, `role`, `tier`, `env`, `managed-by`, `owner`). For resources that do not natively support GCP labels (such as Apigee API proxies and Cloud Tasks queues), metadata must be recorded in proxy bundle `<Description>` tags. Refer to [`CONFIGURATION.md`](file:///workspace/pr-ata-labels/alert-triage-agent/CONFIGURATION.md#7-labels--metadata) for the complete label specification, allowed values, and agent ingestion rules.
+> All newly provisioned or deployed resources in `cloud-assist-fde-2` must carry standard labels (`app=alert-triage-agent`, `component`, `role`, `tier`, `env`, `managed-by`, `owner`). For resources that do not natively support GCP labels (such as Apigee API proxies and Cloud Tasks queues), metadata must be recorded in proxy bundle `<Description>` tags. Refer to [`CONFIGURATION.md`](CONFIGURATION.md#7-labels--metadata) for the complete label specification, allowed values, and agent ingestion rules.
 
 ---
 
@@ -93,7 +93,7 @@ Ensure the following tools and permissions are configured on your operator works
 Bootstrap the remote Google Cloud Storage backend for Terraform state storage and distributed locking:
 
 ```bash
-cd /workspace/alert-triage-agent
+cd alert-triage-agent
 ./scripts/bootstrap-tfstate.sh
 ```
 
@@ -106,7 +106,7 @@ This ensures `gs://cloud-assist-fde-2-ata-tfstate/` exists with uniform bucket-l
 The foundation module enables required Google Cloud APIs, provisions the primary GCS incidents bucket, creates 6 dedicated service accounts with least-privilege IAM roles, configures Secret Manager secret holders, and deploys Cloud Tasks queues for alert triage and delayed timer evaluation.
 
 ```bash
-cd /workspace/alert-triage-agent/infra/terraform/foundation
+cd alert-triage-agent/infra/terraform/foundation
 terraform init -backend-config=backend.hcl
 terraform plan -out=tfplan
 terraform apply tfplan
@@ -133,7 +133,7 @@ terraform apply tfplan
 Provisions a Cloud SQL PostgreSQL 15 instance with IAM database authentication enabled (no static database passwords):
 
 ```bash
-cd /workspace/alert-triage-agent/infra/terraform/database
+cd alert-triage-agent/infra/terraform/database
 terraform init -backend-config=backend.hcl
 terraform plan -out=tfplan
 terraform apply tfplan
@@ -143,7 +143,7 @@ terraform apply tfplan
 Apply the schema and seed mock inventory catalog items:
 ```bash
 # Connect using Cloud SQL Auth Proxy or gcloud sql connect
-gcloud sql connect ata-inventory-db --user=postgres --database=inventory < /workspace/alert-triage-agent/demo/db/schema.sql
+gcloud sql connect ata-inventory-db --user=postgres --database=inventory < demo/db/schema.sql
 ```
 
 ---
@@ -153,7 +153,7 @@ gcloud sql connect ata-inventory-db --user=postgres --database=inventory < /work
 Deploys internal demo microservices on Cloud Run with IAM service account identities:
 
 ```bash
-cd /workspace/alert-triage-agent/infra/terraform/applications
+cd alert-triage-agent/infra/terraform/applications
 terraform init -backend-config=backend.hcl
 terraform plan -out=tfplan
 terraform apply tfplan
@@ -171,7 +171,7 @@ terraform apply tfplan
 Package and deploy the Apigee API proxies to environment `prod`, configure developer credentials, and obtain an API consumer key:
 
 ```bash
-cd /workspace/alert-triage-agent
+cd alert-triage-agent
 ./scripts/deploy-apigee-proxies.sh
 ```
 
@@ -183,7 +183,7 @@ cd /workspace/alert-triage-agent
   - `VA-VerifyKey-Header` & `VA-VerifyKey-Query`: Enforces valid API key for consumer requests.
   - `SA-SpikeArrest`: Rate limiting set to 60 requests per minute (`60pm`).
   - `ML-CloudLogging`: Structured request/response logging directly to Google Cloud Logging.
-- **Output:** The generated API key is stored in `/workspace/alert-triage-agent/.ata-api-key`.
+- **Output:** The generated API key is stored in `.ata-api-key`.
 
 ---
 
@@ -192,7 +192,7 @@ cd /workspace/alert-triage-agent
 Deploys Cloud Monitoring alert policies and links them to the `ata-bridge` notification channel:
 
 ```bash
-cd /workspace/alert-triage-agent/infra/terraform/observability
+cd alert-triage-agent/infra/terraform/observability
 terraform init -backend-config=backend.hcl
 terraform plan -out=tfplan
 terraform apply tfplan
@@ -216,15 +216,15 @@ Deploy the custom FastMCP tools server, the multi-agent ADK runtime, and the bri
 
 ```bash
 # 1. Deploy ata-tools FastMCP Server
-cd /workspace/alert-triage-agent/tools
+cd alert-triage-agent/tools
 ./scripts/deploy.sh
 
 # 2. Deploy ata-agent ADK Runtime
-cd /workspace/alert-triage-agent/agent
+cd alert-triage-agent/agent
 ./scripts/deploy.sh
 
 # 3. Deploy ata-bridge Webhook Dispatcher
-cd /workspace/alert-triage-agent/bridge
+cd alert-triage-agent/bridge
 ./scripts/deploy.sh
 ```
 
@@ -265,7 +265,7 @@ curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
 Store ServiceNow credentials safely into Google Secret Manager without echoing passwords:
 
 ```bash
-cd /workspace/alert-triage-agent
+cd alert-triage-agent
 ./scripts/set-secrets.sh
 ```
 

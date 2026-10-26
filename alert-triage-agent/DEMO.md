@@ -4,7 +4,217 @@ This guide is for SRE operators, site leads, and evaluators demonstrating the ca
 
 ---
 
-## 1. Demo Architecture & Triage Workflow
+## 1. Run It Yourself (Operator Runbook)
+
+Follow this section to execute scenarios directly from your laptop.
+
+### 1.1 Prerequisites & Laptop Setup
+
+1. **Authenticate with Google Cloud:**
+   ```bash
+   gcloud auth login
+   gcloud config set project cloud-assist-fde-2
+   ```
+   > [!IMPORTANT]
+   > Authenticate using your individual user credentials. Do NOT mint tokens for service accounts or use `--impersonate-service-account`. Scenario scripts automatically detect user accounts and fall back to audience-free identity tokens for Cloud Run invocation.
+
+2. **Check Out the Branch:**
+   ```bash
+   gh pr checkout 40
+   cd alert-triage-agent
+   ```
+
+3. **Verify Required IAM Roles on `cloud-assist-fde-2`:**
+   Ensure your GCP user account has the following roles:
+   - `roles/run.invoker` (Cloud Run Invoker) on `ata-inventory-api` and `ata-orders-api` (to trigger demo endpoints `/admin/fault/inject` and `/admin/leak-connections`)
+   - `roles/apigee.admin` or `roles/apigee.readOnly` (to read developer app consumer keys)
+   - `roles/storage.objectViewer` on `gs://cloud-assist-fde-2-ata-incidents` (to read OKF incident files via `check-result.sh`)
+   - `roles/monitoring.viewer` (to query Cloud Monitoring alert states during resets)
+
+4. **Acquire Apigee Consumer API Key:**
+   Retrieve the consumer key for `ata-demo-app` using your gcloud user credentials:
+   ```bash
+   curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+     "https://apigee.googleapis.com/v1/organizations/cloud-assist-fde-2/developers/ata-dev@example.com/apps/ata-demo-app" \
+     | python3 -c "import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])" > .ata-api-key
+   chmod 600 .ata-api-key
+   ```
+   *(Alternatively: `export ATA_API_KEY="..."`). The `.ata-api-key` file is gitignored.*
+
+5. **Verify Baseline Health:**
+   ```bash
+   # 1. Verify demo microservice endpoints
+   ./scripts/verify-demo-infra.sh
+
+   # 2. Reset any leftover faults from previous runs
+   ./scripts/reset-scenarios.sh
+   ```
+
+---
+
+### 1.2 Scenario-by-Scenario Guide (S1 through S5)
+
+Run scenarios sequentially. Always run `./scripts/reset-scenarios.sh` between scenarios to clear faults and allow metric lag windows to settle.
+
+```
+Scenario Workflow:
+[Inject & Sustained Traffic] ---> [Wait for Hold Window] ---> [check-result.sh] ---> [Verify ServiceNow] ---> [reset-scenarios.sh]
+```
+
+---
+
+#### Scenario S1: Backend 5xx Error Spike
+
+Injects an internal 500 error fault at an 85% error rate into `ata-inventory-api` and drives sustained traffic through Apigee.
+
+- **Exact Command:**
+  ```bash
+  ./scripts/scenarios/s1_backend_5xx.sh --hold 7m
+  ```
+- **How Long to Wait:**
+  **7 minutes** (default `--hold 7m`). The script provides real-time progress every 15s. This duration ensures Cloud Monitoring 5-minute alignment windows evaluate and trigger `ata-inventory-5xx` and `ata-inventory-latency`, and allows the single-dispatch windowing lock to complete.
+  *(Press `Ctrl-C` at any time to safely stop traffic early and view next steps).*
+- **Check Results Command:**
+  ```bash
+  ./scripts/scenarios/check-result.sh --scenario s1
+  ```
+  *(To inspect only incidents created since you started: pass `--since <START_TIMESTAMP>` displayed in the script header).*
+- **What to Look for in ServiceNow:**
+  - **Ticket Count:** Exactly **1** Incident Ticket (e.g. `INC0010482`).
+  - **Title / Short Description:** `P1 Incident: ata-inventory-api - Elevated upstream HTTP 5xx error rate (85%)`
+  - **Origin Attribution:** `ata-inventory-api`
+  - **Work Notes & Links:**
+    - Structured 4-bullet SRE summary (Problem, Systems, Observations, Recommended Actions)
+    - Blast radius: `ata-inventory-v1`, `ata-orders-api`, `ata-orders-v1`
+    - Propagated alert labels: `app=alert-triage-agent`, `component=ata-inventory-api`, `severity=p1`, `signal=5xx`, `tier=service`
+    - Attached self-contained diagnostic HTML investigation report
+- **Reset Command Before Next Scenario:**
+  ```bash
+  ./scripts/reset-scenarios.sh
+  ```
+
+---
+
+#### Scenario S2: Backend Latency Degradation
+
+Injects an artificial 6500ms latency delay into `ata-inventory-api`, exceeding Apigee's 5000ms target timeout.
+
+- **Exact Command:**
+  ```bash
+  ./scripts/scenarios/s2_backend_latency.sh --hold 7m
+  ```
+- **How Long to Wait:**
+  **7 minutes** (default `--hold 7m`). Sustains requests with 6.5s latency to ensure Cloud Monitoring latency policies trigger.
+- **Check Results Command:**
+  ```bash
+  ./scripts/scenarios/check-result.sh --scenario s2
+  ```
+- **What to Look for in ServiceNow:**
+  - **Ticket Count:** Exactly **1** Incident Ticket.
+  - **Title / Short Description:** Backend latency degradation on `ata-inventory-api`.
+  - **Origin Attribution:** `ata-inventory-api` (Upstream origin).
+  - **Work Notes & Links:**
+    - Root cause analysis attributing latency to backend response time exceeding Apigee 5s timeout
+    - Blast radius: `ata-inventory-api`, `ata-apigee-inventory-v1`, `ata-apigee-orders-v1`, `ata-orders-api`
+    - Attached diagnostic HTML investigation report
+- **Reset Command Before Next Scenario:**
+  ```bash
+  ./scripts/reset-scenarios.sh
+  ```
+
+---
+
+#### Scenario S3: Concurrent Disjoint Incidents
+
+Simultaneously triggers Scenario S1 on `ata-inventory-api` and strict SpikeArrest rate limiting (`1pm`) on `ata-orders-v1`.
+
+- **Exact Command:**
+  ```bash
+  ./scripts/scenarios/s3_concurrent_disjoint.sh --hold 7m
+  ```
+- **How Long to Wait:**
+  **7 minutes** (default `--hold 7m`). Generates concurrent traffic streams to inventory (driving 5xx errors) and orders (driving 429 rate limits).
+- **Check Results Command:**
+  ```bash
+  ./scripts/scenarios/check-result.sh --scenario s3
+  ```
+- **What to Look for in ServiceNow:**
+  - **Ticket Count:** **EXACTLY 2 DISTINCT SERVICENOW TICKETS** (Proves the correlation engine splits concurrent independent incidents rather than false merging).
+  - **Ticket 1 (Inventory Group):**
+    - Origin: `ata-inventory-api`
+    - Root Cause: 5xx Application Error in inventory service
+    - Alerts: `ata-inventory-5xx`, `ata-inventory-latency`
+  - **Ticket 2 (Orders Group):**
+    - Origin: `ata-orders-v1`
+    - Root Cause: SpikeArrest rate limiting in Apigee orders proxy
+    - Alerts: `ata-apigee-orders-429`
+  - **Work Notes & Links:** Correlation engine multi-factor score < 35 pts (below auto-new group threshold); separate blast radiuses and HTML diagnostic reports on each ticket.
+- **Reset Command Before Next Scenario:**
+  ```bash
+  ./scripts/reset-scenarios.sh
+  ```
+
+---
+
+#### Scenario S4: Database Connection Pool Exhaustion
+
+Simulates a database connection leak exhausting Cloud SQL PostgreSQL backend connections.
+
+- **Exact Command:**
+  ```bash
+  ./scripts/scenarios/s4_db_connection_pool.sh --hold 7m
+  ```
+- **How Long to Wait:**
+  **7 minutes** (default `--hold 7m`). Leaks connections and sustains traffic to observe downstream database starvation.
+- **Check Results Command:**
+  ```bash
+  ./scripts/scenarios/check-result.sh --scenario s4
+  ```
+- **What to Look for in ServiceNow:**
+  - **Ticket Count:** Exactly **1** Incident Ticket.
+  - **Title / Short Description:** Database connection pool exhaustion on Cloud SQL.
+  - **Origin Attribution:** `ata-inventory-db` (Cloud SQL instance identified by earliest onset timestamp).
+  - **Work Notes & Links:**
+    - Causal failure chain: `ata-inventory-db` -> `ata-inventory-api` -> `ata-orders-api` -> Apigee proxies
+    - Root cause: PostgreSQL connection starvation / pool exhaustion
+    - Attached diagnostic HTML investigation report
+- **Reset Command Before Next Scenario:**
+  ```bash
+  ./scripts/reset-scenarios.sh
+  ```
+
+---
+
+#### Scenario S5: Bad Deploy / Config Failure
+
+Deploys a new Cloud Run revision of `ata-inventory-api` configured with invalid IAM database credentials.
+
+- **Exact Command:**
+  ```bash
+  ./scripts/scenarios/s5_bad_deploy.sh --hold 7m
+  ```
+- **How Long to Wait:**
+  **7 minutes** (default `--hold 7m`). Sustains traffic against the failing revision.
+- **Check Results Command:**
+  ```bash
+  ./scripts/scenarios/check-result.sh --scenario s5
+  ```
+- **What to Look for in ServiceNow:**
+  - **Ticket Count:** Exactly **1** Incident Ticket.
+  - **Title / Short Description:** Database authentication / configuration deployment failure.
+  - **Origin Attribution:** Explicitly named Cloud Run revision (e.g. `ata-inventory-api-00062-6pj`).
+  - **Work Notes & Links:**
+    - Distinction between change-induced configuration failure and runtime resource exhaustion
+    - Rollback instructions targeting previous healthy revision
+    - Attached diagnostic HTML investigation report
+- **Reset Command Before Next Scenario:**
+  ```bash
+  ./scripts/reset-scenarios.sh
+  ```
+
+---
+
+## 2. Demo Architecture & Triage Workflow
 
 ```
 [Fault Injected] ---> [Apigee / Cloud Run / Cloud SQL] ---> [Cloud Monitoring Fires]
@@ -34,29 +244,7 @@ This guide is for SRE operators, site leads, and evaluators demonstrating the ca
 
 ---
 
-## 2. Environment Preparation
-
-Before executing scenarios, verify that demo credentials and services are reachable:
-
-```bash
-cd /workspace/alert-triage-agent
-
-# 1. Verify demo microservice endpoints
-./scripts/verify-demo-infra.sh
-
-# 2. Reset any leftover faults from previous runs (waits for alerts to clear; use --no-wait for quick dev runs)
-./scripts/reset-scenarios.sh
-```
-
-> [!NOTE]
-> `reset-scenarios.sh` automatically polls Cloud Monitoring for open `ata-*` alerts and waits for a 5-minute quiet period to prevent lagged metric data (e.g. Apigee ingestion latency) from generating stray tickets. Use `./scripts/reset-scenarios.sh --no-wait` when quick iteration without waiting is desired.
-
-Ensure `/workspace/alert-triage-agent/.ata-api-key` contains the active Apigee consumer key.
-
-
----
-
-## 3. Scenario Matrix & Walkthrough (S1–S5)
+## 3. Scenario Matrix (S1–S5)
 
 | ID | Failure Scenario | Target Layer | Expected Groups | Expected Tickets | Origin Component |
 | :---: | :--- | :--- | :---: | :---: | :--- |
@@ -65,115 +253,6 @@ Ensure `/workspace/alert-triage-agent/.ata-api-key` contains the active Apigee c
 | **S3** | **Concurrent Disjoint** | Cloud Run & Apigee simultaneously | **2** | **2** | `ata-orders-v1` & `ata-inventory-api` |
 | **S4** | **DB Connection Pool** | Cloud SQL (`ata-inventory-db`) | 1 | 1 | `ata-inventory-db` |
 | **S5** | **Bad Deploy / Config Failure** | Cloud Run (`ata-inventory-api`) | 1 | 1 | Explicit revision (e.g. `ata-inventory-api-00062-6pj`) |
-
----
-
-### Scenario S1: Backend 5xx Error Spike
-
-Injects an internal 500 error fault at an 85% error rate into `ata-inventory-api`.
-
-```bash
-./scripts/scenarios/s1_backend_5xx.sh
-```
-
-- **Fault Mechanism:** `POST /admin/fault/inject` with `{"type": "500", "rate": 0.85}`.
-- **Traffic:** Requests sent via Apigee gateway (`/ata/inventory/v1/items`).
-- **Alerts Triggered:**
-  - `ata-inventory-5xx` (Cloud Run error rate > 5%)
-  - `ata-inventory-latency` (Cloud Run inventory latency > 2s triggered by error handling delay)
-  - *Non-firing alert note:* `ata-apigee-orders-5xx` does not open because traffic directed to inventory does not hit the orders proxy, and orders proxy sees no downstream 5xx without concurrent order traffic.
-- **Triage Result:**
-  - **1 Incident Group, 1 ServiceNow Ticket**
-  - **Origin:** `ata-inventory-api`
-  - **Blast Radius:** `ata-inventory-v1`, `ata-orders-api`, `ata-orders-v1`
-  - **Root Cause:** Internal application exception in inventory service.
-
----
-
-### Scenario S2: Backend Latency Degradation
-
-Injects an artificial 6500ms latency delay into `ata-inventory-api`, exceeding Apigee's 5000ms target timeout.
-
-```bash
-./scripts/scenarios/s2_backend_latency.sh
-```
-
-- **Fault Mechanism:** `POST /admin/fault/inject` with `{"type": "latency", "delay_ms": 6500}`.
-- **Alerts Triggered:**
-  - `ata-inventory-latency` (Cloud Run latency > 2s on `ata-inventory-api`)
-  - *Non-firing alert note:* `ata-orders-latency` and Apigee 504 do not fire because isolated inventory delay triggers `ata-inventory-latency` directly, while Apigee's default target timeout (55s) exceeds the 6.5s delay and orders-api client handling completes gracefully without breaching caller thresholds.
-- **Triage Result:**
-  - **1 Incident Group, 1 ServiceNow Ticket**
-  - **Origin:** `ata-inventory-api`
-  - **Blast Radius:** `ata-inventory-api`, `ata-apigee-inventory-v1`, `ata-apigee-orders-v1`, `ata-orders-api`
-  - **Root Cause:** Backend response time exceeding Apigee 5s target timeout.
-
----
-
-### Scenario S3: Concurrent Disjoint Incidents
-
-Simultaneously triggers Scenario S1 on `ata-inventory-api` and rate limiting on `ata-orders-v1`.
-
-```bash
-./scripts/scenarios/s3_concurrent_disjoint.sh
-```
-
-- **Fault Mechanism:** Concurrently triggers 500 error on `ata-inventory-api` and deploys strict SpikeArrest (`<Rate>1pm</Rate>`) on `ata-orders-v1`.
-- **Alerts Triggered:**
-  - Group 1 (Inventory): `ata-inventory-5xx` (Cloud Run error rate > 5%) and `ata-inventory-latency` (Cloud Run latency > 2s)
-  - Group 2 (Orders): `ata-apigee-orders-429` (Apigee orders proxy 429 rate limit spike)
-  - *Non-firing alert note:* There is no `ata-apigee-inventory-5xx` policy configured in the project; inventory failures trigger Cloud Run alerts directly.
-- **Correlation Evaluation:**
-  - Topology distance: 2 hops.
-  - Causal failure chain: `client_429` vs `backend_5xx` -> incompatible (0 pts).
-  - Total multi-factor score: < 35 pts (below auto-new group threshold).
-- **Triage Result:**
-  - **Exactly 2 Distinct Incident Groups, 2 Distinct ServiceNow Tickets**
-  - **Origin:** Group 1: `ata-inventory-api` | Group 2: `ata-orders-v1`
-  - **Blast Radius:** Group 1: `ata-inventory-api, ata-apigee-inventory-v1, ata-apigee-orders-v1, ata-orders-api` | Group 2: `ata-orders-api, ata-apigee-orders-v1, ata-orders-v1`
-  - Proves the system does not incorrectly merge independent, concurrent incidents.
-
----
-
-### Scenario S4: Database Connection Pool Exhaustion
-
-Simulates a database connection leak exhausting Cloud SQL PostgreSQL backend connections.
-
-```bash
-./scripts/scenarios/s4_db_connection_pool.sh
-```
-
-- **Fault Mechanism:** Rapidly acquires and leaks PostgreSQL connections via `POST /admin/leak-connections` and background `SELECT pg_sleep(300)`.
-- **Alerts Triggered:**
-  - `ata-cloudsql-connections-critical` (Cloud SQL connections > 20 backends / ~80% of max 25)
-  - `ata-inventory-latency` (Cloud Run inventory latency > 2s under connection starvation)
-  - *Non-firing alert note:* `ata-inventory-5xx` and Apigee 502/504 do not fire because connection pool saturation causes request threads to block waiting for database connections, manifesting as severe backend latency rather than immediate application 5xx errors or proxy gateway timeouts.
-- **Triage Result:**
-  - **1 Incident Group, 1 ServiceNow Ticket**
-  - **Origin:** `ata-inventory-db` (earliest onset timestamp)
-  - **Blast Radius:** `ata-inventory-db` -> `ata-inventory-api` -> `ata-orders-api` -> Apigee Proxies
-  - **Root Cause:** PostgreSQL connection starvation / pool exhaustion.
-
----
-
-### Scenario S5: Bad Deploy / Config Failure
-
-Deploys a new Cloud Run revision of `ata-inventory-api` configured with invalid IAM database credentials.
-
-```bash
-./scripts/scenarios/s5_bad_deploy.sh
-```
-
-- **Fault Mechanism:** `gcloud run services update` with invalid database user.
-- **Alerts Triggered:**
-  - `ata-inventory-5xx` (Cloud Run inventory 5xx rate > 5%)
-  - `ata-inventory-latency` (Cloud Run inventory latency > 2s)
-  - *Non-firing alert note:* Zero Cloud SQL alerts fire because authentication fails during connection initialization in Cloud Run before establishing valid database sessions.
-- **Triage Result:**
-  - **1 Incident Group, 1 ServiceNow Ticket**
-  - **Origin:** `ata-inventory-api` explicitly named revision (e.g. `ata-inventory-api-00062-6pj`)
-  - **Blast Radius:** `ata-inventory-api`, `ata-apigee-inventory-v1`, `ata-apigee-orders-v1`, `ata-orders-api`
-  - **Root Cause:** Change-induced database authentication failure.
 
 ---
 
@@ -214,7 +293,6 @@ This script:
 | `--dry-run` | Simulates reset steps without issuing network mutations | `false` |
 | `--mock` | Executes in mock mode without GCP cloud dependencies | `false` |
 
-
 ---
 
 ## 5. Master Scenario Driver
@@ -228,8 +306,8 @@ To execute scenarios automatically with logging and result assertions:
 # Run full scenario suite (S1 through S5)
 ./scripts/run-all-scenarios.sh --all
 
-# Run a specific scenario
-./scripts/run-all-scenarios.sh --scenario s3
+# Run a specific scenario with custom hold duration
+./scripts/run-all-scenarios.sh --scenario s3 --hold 5m
 
 # Dry-run validation mode (no network modification)
 ./scripts/run-all-scenarios.sh --dry-run
@@ -239,7 +317,20 @@ To execute scenarios automatically with logging and result assertions:
 
 ## 6. Inspecting Generated Artifacts
 
-### 1. View Generated GCS OKF Incident Files
+### 1. Result Checker Script
+Run the automated result checker to inspect OKF incident files in GCS and validate against DEMO.md expectations:
+```bash
+# Inspect all recent incidents
+./scripts/scenarios/check-result.sh
+
+# Filter to incidents created since a timestamp
+./scripts/scenarios/check-result.sh --since "2026-10-26T22:00:00Z"
+
+# Compare against specific scenario expectation
+./scripts/scenarios/check-result.sh --scenario s3
+```
+
+### 2. View Raw GCS OKF Incident Files
 Inspect active incident Markdown files stored in Cloud Storage under `knowledge/incident-manager/`:
 ```bash
 gsutil ls -l gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/
@@ -272,7 +363,7 @@ servicenow_number: INC0010482
 ---
 ```
 
-### 2. View ServiceNow Incident Records
+### 3. View ServiceNow Incident Records
 Log into the ServiceNow instance (e.g. `https://<instance>.service-now.com`) and navigate to **Incidents > All**:
 - **Number:** `INC0010482`
 - **Short Description:** Executive summary with origin attribution and priority.

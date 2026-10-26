@@ -22,8 +22,10 @@ echo "==================================================================="
 
 # 1. Run Automated Python E2E Test Suite
 log_info "--> 1. Running Automated E2E Pytest Suite..."
-PYTEST_BIN="/workspace/venv/bin/pytest"
-if [ ! -f "${PYTEST_BIN}" ]; then
+PYTEST_BIN="$(command -v pytest || true)"
+if [ -z "${PYTEST_BIN}" ] && [ -x "/workspace/venv/bin/pytest" ]; then
+    PYTEST_BIN="/workspace/venv/bin/pytest"
+elif [ -z "${PYTEST_BIN}" ]; then
     PYTEST_BIN="pytest"
 fi
 

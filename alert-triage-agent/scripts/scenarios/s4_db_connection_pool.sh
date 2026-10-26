@@ -20,7 +20,45 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/scenarios/common.sh
 source "${SCRIPT_DIR}/common.sh"
 
+HOLD_DURATION="${ATA_HOLD_DURATION:-7m}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --hold)
+            HOLD_DURATION="$2"
+            shift 2
+            ;;
+        --hold=*)
+            HOLD_DURATION="${1#*=}"
+            shift
+            ;;
+        --dry-run)
+            export DRY_RUN="true"
+            shift
+            ;;
+        --mock)
+            export MOCK_MODE="true"
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--hold <duration>] [--dry-run] [--mock]"
+            echo "  --hold <duration>   Sustained traffic duration (default: 7m, e.g. 7m, 420s, 0s)"
+            echo "  --dry-run           Simulate fault injection and traffic without network calls"
+            echo "  --mock              Run in mock mode without GCP cloud dependencies"
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+HOLD_SECS="$(parse_duration "${HOLD_DURATION}")"
+SCENARIO_START_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
 log_info "=== Starting Scenario S4: Database Connection Pool Exhaustion ==="
+log_info "Start Time: ${SCENARIO_START_TIME} | Hold Duration: ${HOLD_SECS}s (${HOLD_DURATION})"
 
 if [ "${RUN_PREFLIGHT:-false}" = "true" ]; then
     "${SCRIPT_DIR}/preflight.sh"
@@ -40,14 +78,16 @@ log_info "--> Triggering connection leak on ${INV_URL}/admin/leak-connections...
 if [ "${DRY_RUN}" = "true" ]; then
     log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/leak-connections -d '{\"count\": 85}'"
 else
-    # Call leak endpoint repeatedly to exhaust pool
     for batch in 1 2 3; do
-        LEAK_RESP=$(curl -s -X POST \
+        HTTP_CODE=$(curl -s -o /tmp/ata-s4-leak-resp.txt -w "%{http_code}" -X POST \
             "${AUTH_HEADER[@]}" \
             -H "Content-Type: application/json" \
             -d '{"count": 30}' \
-            "${INV_URL}/admin/leak-connections" || echo '{"status":"mocked"}')
-        log_info "    Batch ${batch} leak response: ${LEAK_RESP}"
+            "${INV_URL}/admin/leak-connections" || echo "000")
+        check_cloud_run_auth "${HTTP_CODE}" "${INV_URL}/admin/leak-connections" || true
+        LEAK_RESP="$(cat /tmp/ata-s4-leak-resp.txt 2>/dev/null || echo '{"status":"mocked"}')"
+        rm -f /tmp/ata-s4-leak-resp.txt
+        log_info "    Batch ${batch} leak response (HTTP ${HTTP_CODE}): ${LEAK_RESP}"
     done
 fi
 
@@ -73,24 +113,80 @@ except Exception as e:
     print(f'Direct Cloud SQL connection helper note: {e}')
 " 2>/dev/null || true
 
-# 3. Generate Traffic to Observe Downstream Starvation
-log_info "--> Generating traffic to verify downstream database connection errors..."
+# 3. Generate Sustained Traffic to Observe Downstream Starvation
+log_info "--> Initiating sustained traffic loop (hold duration: ${HOLD_SECS}s / ${HOLD_DURATION})..."
+log_info "    Driving traffic through Apigee (/ata/inventory/v1/items and /ata/orders/v1/orders)..."
+
 KEY_HEADER=()
 if [ -n "${API_KEY}" ]; then
     KEY_HEADER=(-H "x-api-key: ${API_KEY}")
 fi
 
-if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
-    FAIL_COUNT=0
-    for i in 1 2 3; do
-        STATUS=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
+STOP_TRAFFIC=false
+cleanup_s4() {
+    STOP_TRAFFIC=true
+    kill $(jobs -p) 2>/dev/null || true
+    pkill -f "pg_sleep" 2>/dev/null || true
+    echo ""
+    log_warn "Traffic generation interrupted by user (Ctrl-C). Finishing scenario..."
+}
+trap cleanup_s4 INT TERM
+
+TOTAL_REQUESTS=0
+FAIL_COUNT=0
+START_EPOCH=$(date +%s)
+LAST_REPORT=${START_EPOCH}
+LAST_LEAK_PULSE=${START_EPOCH}
+
+if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ] || [ "${HOLD_SECS}" -le 0 ]; then
+    log_info "    [MOCK/DRY-RUN] Simulating DB starvation traffic wave (0s hold)..."
+    log_info "    Requests completed: 6, simulated connection errors / 500 responses: 4"
+else
+    while true; do
+        if [ "${STOP_TRAFFIC}" = "true" ]; then
+            break
+        fi
+
+        CURRENT_EPOCH=$(date +%s)
+        ELAPSED=$((CURRENT_EPOCH - START_EPOCH))
+        if [ ${ELAPSED} -ge ${HOLD_SECS} ]; then
+            break
+        fi
+
+        # Pulse connection leak every 60s to maintain pool saturation
+        if [ $((CURRENT_EPOCH - LAST_LEAK_PULSE)) -ge 60 ]; then
+            curl -s -X POST "${AUTH_HEADER[@]}" -H "Content-Type: application/json" \
+                -d '{"count": 20}' "${INV_URL}/admin/leak-connections" >/dev/null 2>&1 || true
+            LAST_LEAK_PULSE=${CURRENT_EPOCH}
+        fi
+
+        STATUS_INV=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
             "${KEY_HEADER[@]}" \
-            "https://${APIGEE_HOST}/ata/inventory/v1/items" || echo "500")
-        if [ "${STATUS}" = "500" ]; then
+            "https://${APIGEE_HOST}/ata/inventory/v1/items" || echo "000")
+        STATUS_ORD=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
+            "${KEY_HEADER[@]}" \
+            -H "Content-Type: application/json" -X POST \
+            "https://${APIGEE_HOST}/ata/orders/v1/orders" \
+            -d '{"item_id":"item-101","quantity":1}' || echo "000")
+
+        TOTAL_REQUESTS=$((TOTAL_REQUESTS + 2))
+        if [ "${STATUS_INV}" = "500" ] || [ "${STATUS_INV}" = "503" ]; then
             FAIL_COUNT=$((FAIL_COUNT + 1))
         fi
+        if [ "${STATUS_ORD}" = "500" ] || [ "${STATUS_ORD}" = "502" ] || [ "${STATUS_ORD}" = "504" ]; then
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
+
+        if [ $((CURRENT_EPOCH - LAST_REPORT)) -ge 15 ]; then
+            PCT=$(( (ELAPSED * 100) / (HOLD_SECS > 0 ? HOLD_SECS : 1) ))
+            log_info "[$(date +'%T')] S4 progress: ${ELAPSED}s / ${HOLD_SECS}s (${PCT}%) | Sent: ${TOTAL_REQUESTS} reqs (Failures: ${FAIL_COUNT}) | Recent: inv=${STATUS_INV} ord=${STATUS_ORD}"
+            LAST_REPORT=${CURRENT_EPOCH}
+        fi
+
+        sleep 1
     done
-    log_info "    Items query completed. 500 Responses observed: ${FAIL_COUNT}"
+    trap - INT TERM
+    log_info "    Traffic generation completed: ${TOTAL_REQUESTS} requests sent (${FAIL_COUNT} failures observed)."
 fi
 
 # 4. Scenario Assertion & Summary
@@ -101,3 +197,24 @@ log_info "  - Total Tickets: 1 ServiceNow Incident Ticket"
 log_info "  - Origin Attribution: ata-inventory-db (Earliest onset timestamp)"
 log_info "  - Blast Radius: ata-inventory-db -> ata-inventory-api -> ata-orders-api -> Apigee Proxies"
 log_info "  - Root Cause: PostgreSQL connection starvation / pool exhaustion."
+
+cat <<EOF
+
+===================================================================
+                       NEXT STEPS
+===================================================================
+1. Verify Triage & Correlation Results:
+   ./scripts/scenarios/check-result.sh --since "${SCENARIO_START_TIME}" --scenario s4
+
+2. Check Incident in ServiceNow:
+   - Expected Ticket Count: 1
+   - Expected Origin: ata-inventory-db (earliest onset timestamp)
+   - Expected Root Cause: PostgreSQL connection starvation / pool exhaustion
+   - Blast Radius: ata-inventory-db -> ata-inventory-api -> ata-orders-api -> Apigee Proxies
+   - Verify HTML diagnostic report is attached to ServiceNow ticket
+
+3. Reset Environment Before Running Next Scenario:
+   ./scripts/reset-scenarios.sh
+===================================================================
+
+EOF

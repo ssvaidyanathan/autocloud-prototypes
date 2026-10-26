@@ -256,7 +256,7 @@ Client traffic reaching the demo microservices routes through Apigee X environme
 | **API Product** | `ata-product` | Bundles `ata-orders-v1` and `ata-inventory-v1`. |
 | **Developer Account** | `ata-dev@example.com` | Registered Apigee developer identity. |
 | **Developer App** | `ata-demo-app` | Registered application holding API credentials. |
-| **Credential Key File** | `/workspace/alert-triage-agent/.ata-api-key` | Stores consumer API key. |
+| **Credential Key File** | `.ata-api-key` | Stores consumer API key (gitignored). |
 | **Authentication Header** | `x-api-key: <KEY>` | Header enforced on protected proxy endpoints. |
 | **Query Parameter Auth** | `?apikey=<KEY>` | Query parameter fallback for API key validation. |
 

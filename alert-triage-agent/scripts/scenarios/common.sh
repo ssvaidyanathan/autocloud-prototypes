@@ -39,19 +39,52 @@ export PINNED_INVENTORY_DIGEST="${PINNED_INVENTORY_DIGEST:-sha256:24b07eaa50db6d
 export PINNED_INVENTORY_IMAGE="${PINNED_INVENTORY_IMAGE:-us-west1-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${NAME_PREFIX}-inventory-api@${PINNED_INVENTORY_DIGEST}}"
 export PINNED_INVENTORY_REVISION="${PINNED_INVENTORY_REVISION:-ata-inventory-api-00070-6nq}"
 
+# Duration Parser (supports Xm, Xs, or raw seconds)
+parse_duration() {
+    local val="$1"
+    if [[ "${val}" =~ ^([0-9]+)[mM]$ ]]; then
+        echo $((${BASH_REMATCH[1]} * 60))
+    elif [[ "${val}" =~ ^([0-9]+)[sS]?$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        echo "${val}"
+    fi
+}
+
 # Resolve API Key
 resolve_api_key() {
-    local key_file="${SCRIPT_DIR}/../../.ata-api-key"
-    local alt_key_file="/workspace/alert-triage-agent/.ata-api-key"
     if [ -n "${ATA_API_KEY:-}" ]; then
         echo "${ATA_API_KEY}"
+        return 0
+    fi
+
+    local key_file="${SCRIPT_DIR}/../../.ata-api-key"
+    local repo_key_file="${SCRIPT_DIR}/../../../.ata-api-key"
+    local pwd_key_file="${PWD}/.ata-api-key"
+
+    if [ -f "${pwd_key_file}" ]; then
+        cat "${pwd_key_file}"
+        return 0
     elif [ -f "${key_file}" ]; then
         cat "${key_file}"
-    elif [ -f "${alt_key_file}" ]; then
-        cat "${alt_key_file}"
-    else
-        echo ""
+        return 0
+    elif [ -f "${repo_key_file}" ]; then
+        cat "${repo_key_file}"
+        return 0
     fi
+
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        echo "mock-apigee-api-key"
+        return 0
+    fi
+
+    log_error "Apigee consumer API key not found." >&2
+    log_error "Please set the ATA_API_KEY environment variable or write the key to .ata-api-key." >&2
+    log_error "To retrieve your consumer key using your own gcloud credentials, run:" >&2
+    log_error "  curl -s -H \"Authorization: Bearer \$(gcloud auth print-access-token)\" \\" >&2
+    log_error "    \"https://apigee.googleapis.com/v1/organizations/${PROJECT_ID}/developers/ata-dev@example.com/apps/ata-demo-app\" \\" >&2
+    log_error "    | python3 -c \"import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])\" > .ata-api-key" >&2
+    return 1
 }
 
 # Resolve Cloud Run Service URLs
@@ -74,17 +107,41 @@ resolve_service_url() {
 }
 
 # Resolve Bearer Token for Cloud Run IAM Invocation
+# Note: For user credentials (gcloud auth login), custom audiences are unsupported;
+# falls back to gcloud auth print-identity-token without audiences. Never mints tokens for service accounts.
 resolve_id_token() {
     local aud="${1:-}"
-    if [ -n "${aud}" ]; then
-        gcloud auth print-identity-token --audiences="${aud}" 2>/dev/null || echo ""
-        return 0
-    fi
     if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
         echo "mock-id-token"
         return 0
     fi
-    gcloud auth print-identity-token 2>/dev/null || echo ""
+
+    local token=""
+    if [ -n "${aud}" ]; then
+        token="$(gcloud auth print-identity-token --audiences="${aud}" 2>/dev/null || true)"
+    fi
+    if [ -z "${token}" ]; then
+        token="$(gcloud auth print-identity-token 2>/dev/null || true)"
+    fi
+
+    if [ -z "${token}" ]; then
+        log_warn "Could not resolve identity token via 'gcloud auth print-identity-token'."
+        log_warn "Ensure you are authenticated ('gcloud auth login') and have 'roles/run.invoker' on Cloud Run demo services."
+    fi
+
+    echo "${token}"
+}
+
+# Verify authorization for Cloud Run response codes
+check_cloud_run_auth() {
+    local status="$1"
+    local target="$2"
+    if [ "${status}" = "401" ] || [ "${status}" = "403" ]; then
+        log_error "Unauthorized (HTTP ${status}) accessing ${target}."
+        log_error "Ensure your user account ('gcloud auth login') has the 'roles/run.invoker' (Cloud Run Invoker) role on the demo services in project ${PROJECT_ID}."
+        return 1
+    fi
+    return 0
 }
 
 # Resolve Apigee Management Token

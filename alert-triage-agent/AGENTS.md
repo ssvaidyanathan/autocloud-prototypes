@@ -148,13 +148,13 @@ All changes must pass automated verification cleanly before committing.
 
 ```bash
 # Execute the full automated test suite using the project virtualenv:
-/workspace/venv/bin/pytest tests/
+pytest tests/
 
 # Run specific functional test suites:
-/workspace/venv/bin/pytest tests/test_scenarios_e2e.py
-/workspace/venv/bin/pytest tests/test_correlation_scoring.py
-/workspace/venv/bin/pytest tests/test_container_import_layout.py
-/workspace/venv/bin/pytest tests/test_no_fabricated_data.py
+pytest tests/test_scenarios_e2e.py
+pytest tests/test_correlation_scoring.py
+pytest tests/test_container_import_layout.py
+pytest tests/test_no_fabricated_data.py
 ```
 
 ---
