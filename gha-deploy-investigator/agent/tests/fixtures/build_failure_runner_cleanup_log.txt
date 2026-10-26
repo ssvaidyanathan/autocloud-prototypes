@@ -1,0 +1,25 @@
+2026-10-25T00:43:55.1234567Z ##[group]Run docker build -t sample-pipeline-app:dc42836 .
+2026-10-25T00:43:55.1245678Z #1 [internal] load build definition from Dockerfile
+2026-10-25T00:43:55.1256789Z #1 transferring dockerfile: 1.23kB done
+2026-10-25T00:43:55.1267890Z #1 DONE 0.0s
+2026-10-25T00:43:55.1278901Z #2 [internal] load metadata for docker.io/library/python:3.12-slim
+2026-10-25T00:43:55.1289012Z #2 DONE 0.2s
+2026-10-25T00:43:55.1290123Z #3 [1/4] FROM docker.io/library/python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+2026-10-25T00:43:55.1301234Z #3 DONE 0.0s
+2026-10-25T00:43:55.1312345Z #4 [internal] load build context
+2026-10-25T00:43:55.1323456Z #4 transferring context: 42B done
+2026-10-25T00:43:55.1334567Z #4 DONE 0.0s
+2026-10-25T00:43:55.1345678Z #5 [2/4] COPY config/cache-warmup.json /app/config/cache-warmup.json
+2026-10-25T00:43:55.1356789Z #5 ERROR: failed to calculate checksum of ref: "/config/cache-warmup.json": not found
+2026-10-25T00:43:55.1367890Z ------
+2026-10-25T00:43:55.1378901Z  > [2/4] COPY config/cache-warmup.json /app/config/cache-warmup.json:
+2026-10-25T00:43:55.1389012Z ------
+2026-10-25T00:43:55.1390123Z ERROR: failed to solve: failed to compute cache key: failed to calculate checksum of ref: "/config/cache-warmup.json": not found
+2026-10-25T00:43:55.1401234Z ##[error]Process completed with exit code 1.
+2026-10-25T00:43:55.1412345Z ##[group]Post job cleanup.
+2026-10-25T00:43:55.1423456Z Removing credentials config...
+2026-10-25T00:43:55.1434567Z Cleaning up orphan processes...
+2026-10-25T00:43:55.1445678Z /usr/bin/git config --global --unset-all includeIf.gitdir:.path /home/runner/work/_temp/.gitconfig
+2026-10-25T00:43:55.1456789Z /usr/bin/git config --global --unset-all http.https://github.com/.extraheader
+2026-10-25T00:43:55.1467890Z /usr/bin/git config --global --unset-all core.sshCommand
+2026-10-25T00:43:55.1478901Z Finishing: Build Container Image

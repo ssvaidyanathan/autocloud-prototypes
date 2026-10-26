@@ -1,14 +1,95 @@
 import json
 import logging
+import re
 from typing import Any, Optional
 
 import google.auth
 import httpx
 from google.auth.transport.requests import Request
 
-from .config import AgentConfig, get_settings
+from .config import AgentConfig, get_settings, synthesis_thinking_enabled
 
 logger = logging.getLogger(__name__)
+
+
+_CODE_FENCE_OPEN_RE = re.compile(r"^```(?:json)?\s*", re.IGNORECASE)
+_CODE_FENCE_CLOSE_RE = re.compile(r"\s*```$")
+
+
+def parse_synthesis_payload(raw_text: str) -> Optional[dict[str, Any]]:
+    """Parse a synthesizer model response into a synthesis dict.
+
+    Single deterministic parse path: strip markdown code fences, trim any
+    wrapper text outside the outermost JSON object, decode, and validate.
+    Returns None (with a warning) when the payload is not a valid synthesis
+    object; no heuristic field extraction is attempted.
+    """
+    if not raw_text or not raw_text.strip():
+        return None
+
+    text = _CODE_FENCE_OPEN_RE.sub("", raw_text.strip())
+    text = _CODE_FENCE_CLOSE_RE.sub("", text).strip()
+
+    first_idx = text.find("{")
+    last_idx = text.rfind("}")
+    if first_idx == -1 or last_idx < first_idx:
+        logger.warning(
+            "Synthesis response contained no JSON object (len=%d): %.200r",
+            len(raw_text),
+            raw_text,
+        )
+        return None
+
+    json_str = text[first_idx : last_idx + 1]
+    try:
+        parsed = json.loads(json_str)
+        if not isinstance(parsed, dict) or "root_cause" not in parsed:
+            logger.warning(
+                "Synthesis response JSON is not an object with root_cause: %.200r",
+                json_str,
+            )
+            return None
+
+        causal = parsed.get("causal_remediation")
+        if causal is None:
+            causal = parsed.get("remediation_actions", [])
+        causal_list = [str(a).strip() for a in (causal or []) if str(a).strip()]
+        unrelated_list = [
+            str(o).strip() for o in (parsed.get("unrelated_observations") or []) if str(o).strip()
+        ]
+        synthesis: dict[str, Any] = {
+            "root_cause": str(parsed["root_cause"]).strip(),
+            "causal_remediation": causal_list,
+            "unrelated_observations": unrelated_list,
+            "remediation_actions": causal_list,
+            "confidence": float(parsed.get("confidence", 0.95)),
+        }
+        if parsed.get("fix_proposal") is not None:
+            synthesis["fix_proposal"] = parsed["fix_proposal"]
+        return synthesis
+    except Exception as exc:
+        logger.warning(
+            "Failed to parse synthesis response JSON (%s: %s): %.200r",
+            type(exc).__name__,
+            exc,
+            json_str,
+        )
+        return None
+
+
+def _config_value(cfg: Any, field_name: str, allow_none: bool = False) -> Any:
+    """Read an int setting from cfg, defaulting to the AgentConfig field default.
+
+    Duck-typed configs (e.g. ``MagicMock``) may return non-int attributes; those
+    fall back to the default rather than leaking into the request payload.
+    """
+    default = AgentConfig.model_fields[field_name].default
+    value = getattr(cfg, field_name, default)
+    if value is None and allow_none:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return default
 
 
 def generate_gemini_synthesis(
@@ -19,9 +100,20 @@ def generate_gemini_synthesis(
     client: Optional[httpx.Client] = None,
     specialist_findings: Optional[dict[str, Any]] = None,
     diagnostic_summary: Optional[str] = None,
+    synthesis_status: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    """Generate grounded causal diagnosis using Vertex AI Gemini via REST API."""
+    """Generate grounded causal diagnosis using Vertex AI Gemini via REST API.
+
+    When ``synthesis_status`` is provided it is filled with ``outcome`` (one of
+    ``ok``, ``truncated``, ``unparseable``, ``empty``, ``error``, ``unavailable``)
+    and ``finish_reason`` so callers can surface synthesis failures in the report.
+    """
     cfg = config or get_settings()
+    status: dict[str, Any] = synthesis_status if synthesis_status is not None else {}
+    status["outcome"] = "unavailable"
+    status["finish_reason"] = None
+    max_output_tokens = _config_value(cfg, "synthesis_max_output_tokens")
+    thinking_budget = _config_value(cfg, "synthesis_thinking_budget", allow_none=True)
 
     token = None
     project_id = getattr(cfg, "gcp_project", None)
@@ -56,7 +148,12 @@ def generate_gemini_synthesis(
 
     job_name = failing_job.get("name", "pipeline")
     step_name = failing_step.get("name", "execution")
-    log_excerpt = log_text[-4000:] if len(log_text) > 4000 else log_text
+    if specialist_findings and specialist_findings.get("runner_log_excerpt"):
+        log_excerpt = specialist_findings["runner_log_excerpt"]
+    else:
+        from .specialists.pipeline_logs import extract_decisive_log_excerpt
+
+        log_excerpt = extract_decisive_log_excerpt(log_text, max_chars=4000)
 
     findings_parts = []
     if diagnostic_summary:
@@ -107,6 +204,20 @@ def generate_gemini_synthesis(
         findings_context=findings_context,
         log_excerpt=log_excerpt,
     )
+    try:
+        patch_guidance = get_agent_config().get_patch_instruction("synthesizer")
+    except (KeyError, ValueError):
+        patch_guidance = ""
+    if patch_guidance:
+        prompt = "\n".join((prompt, patch_guidance, ""))
+
+    generation_config: dict[str, Any] = {
+        "temperature": 0.2,
+        "maxOutputTokens": max_output_tokens,
+        "responseMimeType": "application/json",
+    }
+    if synthesis_thinking_enabled(thinking_budget):
+        generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
 
     request_body = {
         "contents": [
@@ -115,11 +226,7 @@ def generate_gemini_synthesis(
                 "parts": [{"text": prompt}],
             }
         ],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": 4096,
-            "responseMimeType": "application/json",
-        },
+        "generationConfig": generation_config,
     }
 
     headers = {
@@ -135,123 +242,49 @@ def generate_gemini_synthesis(
             logger.warning(
                 "Vertex AI Gemini API returned status %d: %s", resp.status_code, resp.text
             )
+            status["outcome"] = "error"
             return None
 
         result_data = resp.json()
         candidates = result_data.get("candidates", [])
         if not candidates:
             logger.warning("Vertex AI Gemini response had no candidates: %s", result_data)
+            status["outcome"] = "empty"
             return None
 
         first_candidate = candidates[0]
-        content_parts = first_candidate.get("content", {}).get("parts", [])
-        if not content_parts:
-            return None
-
-        raw_text = content_parts[0].get("text", "").strip()
-        if not raw_text:
-            return None
-
-        import re
-
-        clean_text = raw_text.strip()
-        clean_text = re.sub(r"^```(?:json)?\s*", "", clean_text, flags=re.IGNORECASE)
-        clean_text = re.sub(r"\s*```$", "", clean_text)
-        clean_text = clean_text.strip()
-
-        try:
-            parsed = json.loads(clean_text)
-            if isinstance(parsed, dict) and "root_cause" in parsed:
-                causal = parsed.get("causal_remediation")
-                if causal is None:
-                    causal = parsed.get("remediation_actions", [])
-                causal_list = [str(a).strip() for a in (causal or []) if str(a).strip()]
-                unrelated_list = [
-                    str(o).strip()
-                    for o in parsed.get("unrelated_observations", [])
-                    if str(o).strip()
-                ]
-                return {
-                    "root_cause": str(parsed["root_cause"]).strip(),
-                    "causal_remediation": causal_list,
-                    "unrelated_observations": unrelated_list,
-                    "remediation_actions": causal_list,
-                    "confidence": float(parsed.get("confidence", 0.95)),
-                }
-        except Exception:
-            # Fallback: search for first { and last }
-            m = re.search(r"(\{.*\})", clean_text, re.DOTALL)
-            if m:
-                try:
-                    parsed = json.loads(m.group(1))
-                    if isinstance(parsed, dict) and "root_cause" in parsed:
-                        causal = parsed.get("causal_remediation")
-                        if causal is None:
-                            causal = parsed.get("remediation_actions", [])
-                        causal_list = [str(a).strip() for a in (causal or []) if str(a).strip()]
-                        unrelated_list = [
-                            str(o).strip()
-                            for o in parsed.get("unrelated_observations", [])
-                            if str(o).strip()
-                        ]
-                        return {
-                            "root_cause": str(parsed["root_cause"]).strip(),
-                            "causal_remediation": causal_list,
-                            "unrelated_observations": unrelated_list,
-                            "remediation_actions": causal_list,
-                            "confidence": float(parsed.get("confidence", 0.95)),
-                        }
-                except Exception:
-                    pass
-
-        # Defensive extraction for broken or truncated JSON:
-        # Extract root_cause without returning raw JSON syntax/brackets.
-        extracted_cause = None
-        rc_match = re.search(r'"root_cause"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"?', clean_text)
-        if rc_match:
-            extracted_cause = rc_match.group(1).replace(r"\"", '"').strip()
-
-        if not extracted_cause:
-            # Strip brackets, braces, and JSON keys to obtain clean prose
-            cleaned_prose = re.sub(r"^\{\s*\"root_cause\"\s*:\s*\"?", "", clean_text)
-            cleaned_prose = re.sub(
-                r"\"?\s*,?\s*\"(?:causal_remediation|remediation_actions|unrelated_observations)\".*$",
-                "",
-                cleaned_prose,
-                flags=re.DOTALL,
+        finish_reason = first_candidate.get("finishReason")
+        status["finish_reason"] = finish_reason
+        truncated = finish_reason == "MAX_TOKENS"
+        if truncated:
+            logger.warning(
+                "Vertex AI Gemini synthesis hit MAX_TOKENS (maxOutputTokens=%d, "
+                "thinkingBudget=%s); response may be truncated",
+                max_output_tokens,
+                thinking_budget,
             )
-            cleaned_prose = re.sub(r"\"?\s*\}\s*$", "", cleaned_prose)
-            extracted_cause = cleaned_prose.strip(' \t\n\r"{}')
+        content_parts = first_candidate.get("content", {}).get("parts", [])
+        raw_text = "".join(
+            p.get("text", "") for p in content_parts if not p.get("thought", False)
+        ).strip()
+        if not raw_text:
+            status["outcome"] = "truncated" if truncated else "empty"
+            return None
 
-        extracted_actions = []
-        rem_match = re.search(r'"causal_remediation"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL)
-        if not rem_match:
-            rem_match = re.search(r'"remediation_actions"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL)
-        if rem_match:
-            actions_raw = rem_match.group(1)
-            for act in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', actions_raw):
-                extracted_actions.append(act.replace(r"\"", '"').strip())
-
-        extracted_unrelated = []
-        unrelated_match = re.search(
-            r'"unrelated_observations"\s*:\s*\[(.*?)\]', clean_text, re.DOTALL
-        )
-        if unrelated_match:
-            unrelated_raw = unrelated_match.group(1)
-            for obs in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', unrelated_raw):
-                extracted_unrelated.append(obs.replace(r"\"", '"').strip())
-
-        return {
-            "root_cause": (
-                extracted_cause or "Automated diagnosis identified deployment failure."
-            ),
-            "causal_remediation": extracted_actions,
-            "unrelated_observations": extracted_unrelated,
-            "remediation_actions": extracted_actions,
-            "confidence": 0.90,
-        }
+        parsed = parse_synthesis_payload(raw_text)
+        if parsed is None:
+            logger.warning(
+                "Vertex AI Gemini synthesis response unparseable (finishReason=%s, len=%d)",
+                finish_reason,
+                len(raw_text),
+            )
+            status["outcome"] = "truncated" if truncated else "unparseable"
+            return None
+        status["outcome"] = "truncated" if truncated else "ok"
+        return parsed
     except Exception as exc:
         logger.warning("Vertex AI Gemini synthesis call failed: %s", exc)
+        status["outcome"] = "error"
         return None
     finally:
         if owns_client:

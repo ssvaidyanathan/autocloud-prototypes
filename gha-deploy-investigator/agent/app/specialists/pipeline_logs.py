@@ -138,6 +138,299 @@ DOCKER_RUN_FAILED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Decisive log excerpt selection
+# ---------------------------------------------------------------------------
+
+# Lines emitted by the GitHub Actions runner after the step body finished
+# (post-step cleanup, credential removal, orphan-process teardown).
+RUNNER_CLEANUP_LINE_PATTERN = re.compile(
+    r"^(?:"
+    r"(?:##\[(?:group|endgroup)\])?\s*post[- ]job clean ?up"
+    r"|##\[endgroup\]\s*$"
+    r"|cleaning up orphan process"
+    r"|terminate orphan process"
+    r"|removing credentials? config"
+    r"|(?:removing|cleaning up|revoking)\b.*\bcredentials?\b"
+    r"|.*\bgit\b.*\bconfig\b.*--unset"
+    r"|finishing:"
+    r"|\[command\]\S*git(?:\s|$)"
+    r"|git version \d"
+    r"|temporarily overriding home="
+    r"|adding repository directory to the temporary git global config"
+    r"|http\.https://\S+\.extraheader\s*$"
+    r")",
+    re.IGNORECASE,
+)
+# Section header that opens the runner post-job cleanup block.
+RUNNER_CLEANUP_ANCHOR_PATTERN = re.compile(
+    r"^(?:##\[group\])?\s*post[- ]job clean ?up", re.IGNORECASE
+)
+# Generic error indicators across build tools, test runners, and shells.
+# Upper-case-only forms (``FAIL``, ``FAILED``, ``Error N``) are scoped case-sensitive so
+# that prose such as "0 failed" does not match; zero-count forms (``failed: 0``,
+# ``0 FAILED``, ``FAILED: 0``) are excluded explicitly.
+ERROR_MARKER_PATTERN = re.compile(
+    r"error:|failed:(?!\s*0\b)|fatal:|failure:|\berror\s*\[|\[error\]|\berr:|\berr!"
+    r"|exception:|traceback \(most recent call last\)"
+    r"|\berror\s+(?-i:[A-Z]+\d+):"
+    r"|(?-i:(?<!\b0\s)(?<!\b0\s\s)\bFAIL(?:ED)?\b(?!\s*:\s*0\b))"
+    r"|(?-i:\bError [1-9]\d*\s*$)"
+    r"|\bcommand not found\b",
+    re.IGNORECASE,
+)
+# Runner summary lines that only restate the exit status, not the cause.
+GENERIC_EXIT_LINE_PATTERN = re.compile(
+    r"process completed with exit code \d+|exited with (?:exit )?code \d+",
+    re.IGNORECASE,
+)
+# Lines that announce which command a step is running.
+COMMAND_HEADER_PATTERN = re.compile(r"^(?:##\[group\])?Run\s|^\[command\]")
+
+EXCERPT_CONTEXT_BEFORE = 6
+EXCERPT_CONTEXT_AFTER = 10
+EXCERPT_GAP_MARKER = "..."
+
+
+def strip_runner_cleanup(log_text: str) -> list[str]:
+    """Return log lines (timestamps removed) with trailing runner cleanup stripped.
+
+    Everything from the first post-job cleanup header that follows the last error
+    marker is dropped, then remaining trailing cleanup/blank lines are removed from
+    the bottom up until real step output is reached.
+    """
+    lines = [TIMESTAMP_PREFIX.sub("", raw).rstrip() for raw in log_text.splitlines()]
+
+    last_marker = -1
+    for idx, line in enumerate(lines):
+        if ERROR_MARKER_PATTERN.search(line):
+            last_marker = idx
+    for idx in range(last_marker + 1, len(lines)):
+        if RUNNER_CLEANUP_ANCHOR_PATTERN.match(lines[idx].strip()):
+            lines = lines[:idx]
+            break
+
+    while lines and (
+        not lines[-1].strip() or RUNNER_CLEANUP_LINE_PATTERN.match(lines[-1].strip())
+    ):
+        lines.pop()
+    return lines
+
+
+def _render_excerpt(lines: list[str], selected: set[int]) -> str:
+    rendered: list[str] = []
+    previous: Optional[int] = None
+    for idx in sorted(selected):
+        if previous is not None and idx != previous + 1:
+            rendered.append(EXCERPT_GAP_MARKER)
+        rendered.append(lines[idx])
+        previous = idx
+    return "\n".join(rendered)
+
+
+class _ExcerptSelection:
+    """Set of selected line indices with incrementally tracked rendered size.
+
+    The rendered size matches ``len(_render_excerpt(lines, selected))`` without
+    re-rendering: line lengths, plus one ``EXCERPT_GAP_MARKER`` between
+    non-contiguous segments, plus one newline between consecutive rendered items.
+    """
+
+    def __init__(self, lines: list[str], max_chars: int) -> None:
+        self.lines = lines
+        self.max_chars = max_chars
+        self.selected: set[int] = set()
+        self._chars = 0
+        self._segments = 0
+
+    def _size(self, chars: int, count: int, segments: int) -> int:
+        if count == 0:
+            return 0
+        gaps = segments - 1
+        return chars + gaps * len(EXCERPT_GAP_MARKER) + (count + gaps - 1)
+
+    @property
+    def chars_used(self) -> int:
+        """Rendered size of the current selection."""
+        return self._size(self._chars, len(self.selected), self._segments)
+
+    def try_add(self, idx: int) -> bool:
+        """Add ``idx`` if the rendered excerpt still fits; return whether it is selected."""
+        if idx in self.selected:
+            return True
+        has_prev = idx - 1 in self.selected
+        has_next = idx + 1 in self.selected
+        segments = self._segments + 1 - int(has_prev) - int(has_next)
+        chars = self._chars + len(self.lines[idx])
+        if self._size(chars, len(self.selected) + 1, segments) > self.max_chars:
+            return False
+        self.selected.add(idx)
+        self._chars = chars
+        self._segments = segments
+        return True
+
+
+def _tail_excerpt(lines: list[str], max_chars: int) -> str:
+    start = _tail_start_index(lines, max_chars)
+    if start >= len(lines):
+        return lines[-1][-max_chars:] if lines else ""
+    return "\n".join(lines[start:])
+
+
+def _tail_start_index(lines: list[str], max_chars: int) -> int:
+    """Return the earliest line index ``_tail_excerpt(lines, max_chars)`` would include."""
+    size = 0
+    start = len(lines)
+    for idx in range(len(lines) - 1, -1, -1):
+        cost = len(lines[idx]) + (1 if start < len(lines) else 0)
+        if size + cost > max_chars:
+            break
+        size += cost
+        start = idx
+    return start
+
+
+def _error_marker_indices(lines: list[str]) -> tuple[list[int], list[int]]:
+    """Return ``(markers, decisive)`` line indices.
+
+    ``markers`` are lines matching ``ERROR_MARKER_PATTERN``; ``decisive`` is the
+    subset that is not a generic exit-status restatement.
+    """
+    markers = [idx for idx, line in enumerate(lines) if ERROR_MARKER_PATTERN.search(line)]
+    decisive = [idx for idx in markers if not GENERIC_EXIT_LINE_PATTERN.search(lines[idx])]
+    return markers, decisive
+
+
+def extract_decisive_log_excerpt(log_text: str, max_chars: int = 1500) -> str:
+    """Select the error-bearing portion of a step log within ``max_chars``.
+
+    1. Strips trailing runner post-step cleanup output.
+    2. If decisive error markers exist (markers other than generic exit-status
+       lines), keeps the decisive error lines plus the command header and
+       surrounding context, prioritising the error lines themselves. Leftover
+       budget is then filled in this order, each stage stopping at the first
+       line that no longer fits:
+
+       a. the contiguous lead-up, read backwards from the line before the last
+          decisive marker (compiler/build causes usually precede the summary
+          error);
+       b. the inter-marker middle, read forwards from the first decisive marker
+          up to the last one;
+       c. for a terminal marker only, the cleaned tail after the last decisive
+          marker, read backwards from the end of the log.
+
+       For a terminal marker, up to half the budget is reserved for the
+       contiguous lead-up (the last decisive line and the lines before it)
+       before any other marker's context is added. Guarantee: a cause within
+       ``max_chars // 2`` characters above the last decisive marker is kept,
+       regardless of the number of earlier false positives.
+
+       If the last decisive marker is non-terminal (it precedes the window a
+       plain tail excerpt would cover, or real non-exit output follows its
+       ``EXCERPT_CONTEXT_AFTER`` context lines), a small core is reserved first:
+       the first and last decisive lines, the line immediately before and after
+       each, and the command header. All remaining budget then goes to the
+       contiguous cleaned tail, read backwards from the end, before wider
+       context, the lead-up (a) and the middle (b); stage (c) is skipped.
+       Guarantee: a cause within the last
+       ``max_chars - core_chars`` characters of the cleaned log is kept, where
+       ``core_chars`` is the rendered size of the core plus its separator
+       (``EXCERPT_GAP_MARKER`` and newlines) before the tail.
+    3. Otherwise (no markers, or only generic exit lines) falls back to the
+       cleaned tail of the log.
+    """
+    if not log_text:
+        return ""
+    lines = strip_runner_cleanup(log_text)
+    if not any(line.strip() for line in lines):
+        return ""
+
+    clip = max(max_chars - len(EXCERPT_GAP_MARKER), 1)
+    lines = [
+        line if len(line) <= max_chars else line[:clip] + EXCERPT_GAP_MARKER for line in lines
+    ]
+
+    markers, decisive = _error_marker_indices(lines)
+    if not decisive:
+        return _tail_excerpt(lines, max_chars)
+    decisive_set = set(decisive)
+    generic = [idx for idx in markers if idx not in decisive_set]
+
+    # Each entry is (line index, expansion key). Context expansion around a marker
+    # stops in a direction once a line no longer fits, keeping context contiguous.
+    priority: list[tuple[int, Optional[tuple[int, int]]]] = [
+        (idx, None) for idx in [decisive[-1], decisive[0], *reversed(decisive), *generic]
+    ]
+    header: list[int] = []
+    for idx in range(decisive[0] - 1, -1, -1):
+        if COMMAND_HEADER_PATTERN.match(lines[idx].strip()):
+            header.append(idx)
+            break
+    priority.extend((idx, None) for idx in header)
+    for distance in range(1, max(EXCERPT_CONTEXT_BEFORE, EXCERPT_CONTEXT_AFTER) + 1):
+        for idx in reversed(decisive):
+            if distance <= EXCERPT_CONTEXT_BEFORE:
+                priority.append((idx - distance, (idx, -1)))
+            if distance <= EXCERPT_CONTEXT_AFTER:
+                priority.append((idx + distance, (idx, 1)))
+
+    # The last decisive marker is non-terminal when it precedes the window a plain
+    # tail excerpt would cover, or when real output follows its trailing context
+    # (e.g. a false-positive config echo above an unrecognised cause). Then only a
+    # small core (the first/last decisive lines, their adjacent lines and the
+    # command header) is reserved before the contiguous cleaned tail takes all
+    # remaining budget, so an unrecognised cause near the end is kept.
+    has_trailing_activity = any(
+        lines[i].strip() and not GENERIC_EXIT_LINE_PATTERN.search(lines[i])
+        for i in range(decisive[-1] + EXCERPT_CONTEXT_AFTER + 1, len(lines))
+    )
+    is_non_terminal = (
+        decisive[-1] < _tail_start_index(lines, max_chars) or has_trailing_activity
+    )
+
+    selection = _ExcerptSelection(lines, max_chars)
+    tail = range(len(lines) - 1, decisive[-1], -1)
+    if is_non_terminal:
+        core = [decisive[-1], decisive[0], *header]
+        for marker in (decisive[-1], decisive[0]):
+            core += [marker - 1, marker + 1]
+        for idx in core:
+            if 0 <= idx < len(lines):
+                selection.try_add(idx)
+        for idx in range(len(lines) - 1, -1, -1):
+            if not selection.try_add(idx):
+                break
+    else:
+        # Terminal marker: reserve up to half the budget for the contiguous lead-up
+        # before other markers' context can spend it.
+        for idx in [decisive[-1], *range(decisive[-1] - 1, -1, -1)]:
+            if selection.chars_used > max_chars // 2 or not selection.try_add(idx):
+                break
+    blocked: set[tuple[int, int]] = set()
+    for idx, key in priority:
+        if idx < 0 or idx >= len(lines) or idx in selection.selected:
+            continue
+        if key is not None and key in blocked:
+            continue
+        if not selection.try_add(idx) and key is not None:
+            blocked.add(key)
+    if not selection.selected:
+        return lines[decisive[-1]][:max_chars]
+
+    # Spend leftover budget on the contiguous lead-up to the last decisive marker
+    # first (compiler causes usually precede the summary error), then on the
+    # inter-marker middle, so an earlier false-positive marker cannot starve the
+    # lead-up. For a terminal marker the remaining cleaned tail follows; for a
+    # non-terminal one it is already seeded.
+    lead_up = range(decisive[-1] - 1, -1, -1)
+    middle = range(decisive[0], decisive[-1])
+    for fill in (lead_up, middle) if is_non_terminal else (lead_up, middle, tail):
+        for idx in fill:
+            if not selection.try_add(idx):
+                break
+    return _render_excerpt(lines, selection.selected)
+
+
 class PipelineLogsSpecialist(BaseSpecialist):
     """Diagnoses lint, test, and container packaging failures from CI logs and git diffs."""
 
@@ -241,6 +534,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
         failing_step: dict[str, Any],
         log_text: str,
         sub_stage: str,
+        client: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
     ) -> DiagnosticResult:
         annotations: list[CheckRunAnnotation] = []
         if sub_stage == "lint":
@@ -263,11 +558,20 @@ class PipelineLogsSpecialist(BaseSpecialist):
             evidence_items.append(
                 EvidenceItem(
                     kind="github_runner_log",
-                    excerpt=log_text[:1000],
+                    excerpt=extract_decisive_log_excerpt(log_text, max_chars=1500),
                     timestamp=datetime.now(timezone.utc),
                     console_url=incident.external_url,
                 )
             )
+
+        # Ground downstream synthesis in the commit diff even when the ADK
+        # runner's findings omitted it.
+        if not any(e.kind == "git_diff" for e in evidence_items):
+            diff_data = self._resolve_diff_data(incident, None, client, config)
+            if diff_data:
+                self._append_git_diff_evidence(
+                    evidence_items, diff_data, incident, datetime.now(timezone.utc)
+                )
 
         diag = DiagnosticResult(
             stage=sub_stage,
@@ -336,7 +640,14 @@ class PipelineLogsSpecialist(BaseSpecialist):
                 findings = run_sync(self._execute_adk_runner(agent, runner_prompt))
                 if findings and (self.skill_tracker.queries_run or findings.queries_run):
                     return self._findings_to_diagnostic_result(
-                        findings, incident, failing_job, failing_step, log_text, sub_stage
+                        findings,
+                        incident,
+                        failing_job,
+                        failing_step,
+                        log_text,
+                        sub_stage,
+                        client=client,
+                        config=config,
                     )
             except Exception as exc:
                 logger.info("PipelineLogsSpecialist ADK runner pass skipped/failed: %s", exc)
@@ -401,10 +712,72 @@ class PipelineLogsSpecialist(BaseSpecialist):
             )
         else:
             res = self._diagnose_generic(
-                incident, failing_job, failing_step, log_text, diff_data=diff_data
+                incident,
+                failing_job,
+                failing_step,
+                log_text,
+                client,
+                config,
+                diff_data=diff_data,
             )
 
         return self.skill_tracker.populate_diagnostic_result(res)
+
+    def _resolve_diff_data(
+        self,
+        incident: Incident,
+        diff_data: Optional[dict[str, Any]],
+        client: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Return diff_data, fetching the incident's commit diff when not already provided."""
+        if diff_data is not None or not (incident.github_repo and incident.github_head_sha):
+            return diff_data
+        try:
+            return self.tracked_tool_call(
+                "get_commit_diff",
+                {"repo": incident.github_repo, "head_sha": incident.github_head_sha},
+                lambda: get_commit_diff(
+                    repo=incident.github_repo,
+                    head_sha=incident.github_head_sha,
+                    client=client,
+                    config=config,
+                ),
+            )
+        except Exception as exc:
+            logger.debug("Could not fetch commit diff: %s", exc)
+            return None
+
+    @staticmethod
+    def _append_git_diff_evidence(
+        evidence_items: list[EvidenceItem],
+        diff_data: Optional[dict[str, Any]],
+        incident: Incident,
+        now: datetime,
+    ) -> list[str]:
+        """Append a git_diff evidence item carrying unified diff hunks.
+
+        Returns the normalized list of changed file paths (empty if no diff).
+        """
+        if not (isinstance(diff_data, dict) and "files" in diff_data):
+            return []
+        changed_files = [
+            re.sub(r"^\.?/", "", f.get("filename", ""))
+            for f in diff_data["files"]
+            if isinstance(f, dict) and f.get("filename")
+        ]
+        if changed_files:
+            diff_excerpt = format_git_diff_excerpt(diff_data)
+            if diff_excerpt:
+                evidence_items.append(
+                    EvidenceItem(
+                        kind="git_diff",
+                        excerpt=diff_excerpt,
+                        timestamp=now,
+                        console_url=incident.external_url,
+                    )
+                )
+        return changed_files
 
     def _diagnose_lint(
         self,
@@ -424,7 +797,15 @@ class PipelineLogsSpecialist(BaseSpecialist):
 
         total_errors = len(parsed_items)
         if total_errors == 0:
-            return self._diagnose_generic(incident, failing_job, failing_step, log_text)
+            return self._diagnose_generic(
+                incident,
+                failing_job,
+                failing_step,
+                log_text,
+                client,
+                config,
+                diff_data=diff_data,
+            )
 
         # Group by file
         files_map: dict[str, list[dict[str, Any]]] = {}
@@ -464,38 +845,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
 
         # Correlate with commit diff if available
         diff_info = ""
-        changed_files: list[str] = []
-        if diff_data is None and incident.github_repo and incident.github_head_sha:
-            try:
-                diff_data = self.tracked_tool_call(
-                    "get_commit_diff",
-                    {"repo": incident.github_repo, "head_sha": incident.github_head_sha},
-                    lambda: get_commit_diff(
-                        repo=incident.github_repo,
-                        head_sha=incident.github_head_sha,
-                        client=client,
-                        config=config,
-                    ),
-                )
-            except Exception as exc:
-                logger.debug("Could not fetch commit diff: %s", exc)
-
-        if diff_data and "files" in diff_data:
-            changed_files = [
-                re.sub(r"^\.?/", "", f.get("filename", ""))
-                for f in diff_data["files"]
-                if f.get("filename")
-            ]
-            if changed_files:
-                diff_excerpt = format_git_diff_excerpt(diff_data)
-                evidence_items.append(
-                    EvidenceItem(
-                        kind="git_diff",
-                        excerpt=diff_excerpt,
-                        timestamp=now,
-                        console_url=incident.external_url,
-                    )
-                )
+        diff_data = self._resolve_diff_data(incident, diff_data, client, config)
+        changed_files = self._append_git_diff_evidence(evidence_items, diff_data, incident, now)
 
         violating_files = list(files_map.keys())
         confirmed_files = [f for f in violating_files if f in changed_files]
@@ -618,7 +969,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
         elif assert_matches:
             assertion_msg = assert_matches[0].group("msg").strip()
 
-        tail_log = log_text[-1500:] if len(log_text) > 1500 else log_text
+        tail_log = extract_decisive_log_excerpt(log_text, max_chars=1500)
         evidence_items: list[EvidenceItem] = []
         evidence_items.append(
             EvidenceItem(
@@ -629,24 +980,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
             )
         )
 
-        if diff_data and "files" in diff_data:
-            changed_files = [
-                re.sub(r"^\.?/", "", f.get("filename", ""))
-                for f in diff_data["files"]
-                if f.get("filename")
-            ]
-            if changed_files:
-                evidence_items.append(
-                    EvidenceItem(
-                        kind="git_diff",
-                        excerpt=(
-                            f"Commit diff touched {len(changed_files)} file(s): "
-                            f"{', '.join(changed_files)}"
-                        ),
-                        timestamp=now,
-                        console_url=incident.external_url,
-                    )
-                )
+        diff_data = self._resolve_diff_data(incident, diff_data, client, config)
+        self._append_git_diff_evidence(evidence_items, diff_data, incident, now)
 
         summary = (
             f"Unit/Integration test failure in step '{step_name}': "
@@ -721,7 +1056,7 @@ class PipelineLogsSpecialist(BaseSpecialist):
                 "Verify base image and network connectivity to package registries",
             ]
 
-        build_log_tail = log_text[-1500:] if len(log_text) > 1500 else log_text
+        build_log_tail = extract_decisive_log_excerpt(log_text, max_chars=1500)
         evidence_items.append(
             EvidenceItem(
                 kind="github_runner_log",
@@ -731,24 +1066,8 @@ class PipelineLogsSpecialist(BaseSpecialist):
             )
         )
 
-        if diff_data and "files" in diff_data:
-            changed_files = [
-                re.sub(r"^\.?/", "", f.get("filename", ""))
-                for f in diff_data["files"]
-                if f.get("filename")
-            ]
-            if changed_files:
-                evidence_items.append(
-                    EvidenceItem(
-                        kind="git_diff",
-                        excerpt=(
-                            f"Commit diff touched {len(changed_files)} file(s): "
-                            f"{', '.join(changed_files)}"
-                        ),
-                        timestamp=now,
-                        console_url=incident.external_url,
-                    )
-                )
+        diff_data = self._resolve_diff_data(incident, diff_data, client, config)
+        self._append_git_diff_evidence(evidence_items, diff_data, incident, now)
 
         return DiagnosticResult(
             stage="build",
@@ -767,49 +1086,37 @@ class PipelineLogsSpecialist(BaseSpecialist):
         failing_job: dict[str, Any],
         failing_step: dict[str, Any],
         log_text: str,
+        client: Optional[Any] = None,
+        config: Optional[AgentConfig] = None,
         diff_data: Optional[dict[str, Any]] = None,
     ) -> DiagnosticResult:
         step_name = failing_step.get("name", "Unknown Step")
-        lines = [line.strip() for line in log_text.splitlines() if line.strip()]
-        error_lines = [
-            line_item
-            for line_item in lines
-            if any(k in line_item.lower() for k in ("error", "fatal", "failed", "exception"))
-        ]
-        culprit = (
-            error_lines[-1]
-            if error_lines
-            else (lines[-1] if lines else "Process terminated with non-zero exit code")
-        )
+        lines = [line.strip() for line in strip_runner_cleanup(log_text) if line.strip()]
+        markers, decisive = _error_marker_indices(lines)
+        if decisive:
+            culprit = lines[decisive[-1]]
+        elif markers:
+            culprit = lines[markers[-1]]
+        elif lines:
+            culprit = lines[-1]
+        else:
+            culprit = "Process terminated with non-zero exit code"
 
         now = datetime.now(timezone.utc)
         evidence_items = [
             EvidenceItem(
                 kind="github_runner_log",
-                excerpt=f"Step '{step_name}' failed: {culprit}",
+                excerpt=(
+                    f"Step '{step_name}' failed: {culprit}\n"
+                    f"{extract_decisive_log_excerpt(log_text, max_chars=1500)}"
+                ),
                 timestamp=now,
                 console_url=incident.external_url,
             )
         ]
 
-        if diff_data and "files" in diff_data:
-            changed_files = [
-                re.sub(r"^\.?/", "", f.get("filename", ""))
-                for f in diff_data["files"]
-                if f.get("filename")
-            ]
-            if changed_files:
-                evidence_items.append(
-                    EvidenceItem(
-                        kind="git_diff",
-                        excerpt=(
-                            f"Commit diff touched {len(changed_files)} file(s): "
-                            f"{', '.join(changed_files)}"
-                        ),
-                        timestamp=now,
-                        console_url=incident.external_url,
-                    )
-                )
+        diff_data = self._resolve_diff_data(incident, diff_data, client, config)
+        self._append_git_diff_evidence(evidence_items, diff_data, incident, now)
 
         return DiagnosticResult(
             stage="pipeline_logs",

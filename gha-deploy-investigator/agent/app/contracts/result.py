@@ -4,7 +4,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .incident import Incident
-from .report import Report
+from .report import PullRequestRef, Report
 
 
 class InvestigationResult(BaseModel):
@@ -19,6 +19,7 @@ class InvestigationResult(BaseModel):
     report: Optional[Report] = None
     error: Optional[str] = None
     incident: Optional[Incident] = None
+    pull_request: Optional[PullRequestRef] = None
 
     @model_validator(mode="after")
     def validate_pairwise_status_payload(self) -> "InvestigationResult":

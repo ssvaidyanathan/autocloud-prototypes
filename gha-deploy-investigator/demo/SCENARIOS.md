@@ -27,11 +27,12 @@ This directory contains deterministic failure injection and reset tooling for te
 ### Scenario 1: Lint & Code Style Violation
 - **Stage**: `lint`
 - **Trigger**: `demo/scenarios/trigger-lint-failure.sh [TARGET_DIR] [--commit]`
-- **Injected Defect**: Unused imports (`F401`) and multiple statements on a single line (`E702`) in `app/main.py`.
+- **Injected Defect**: Unused imports (`F401`) and multiple statements on a single line (`E702`) in `app/main.py`. The helper is prepended above the existing imports, so Ruff also reports them as `E402`.
 - **Commit Message**: `refactor(orders): add order export and currency formatting helper`
 - **Verification**: `ruff check app/`
 - **Diagnosed By**: `PipelineLogsSpecialist`
 - **Expected Outcome**: Stage identified as `lint`, root cause pointing to `app/main.py` violations, structured annotations generated.
+- **Expected Auto-Fix** (with `AUTOFIX_ENABLED=true`): `deterministic_linter` PR touching only `app/main.py`; fix PR CI green; verification `PASSED`.
 
 ### Scenario 2: Broken Unit Test Assertion
 - **Stage**: `test`
@@ -41,6 +42,7 @@ This directory contains deterministic failure injection and reset tooling for te
 - **Verification**: `pytest tests/ -v`
 - **Diagnosed By**: `PipelineLogsSpecialist`
 - **Expected Outcome**: Stage identified as `test`, root cause identifies failing assertion function and expected vs actual values.
+- **Expected Auto-Fix** (with `AUTOFIX_ENABLED=true`): `llm_patch` PR editing only `tests/test_main.py` so the asserted values match; fix PR CI green; verification `PASSED`. A reviewer should reject a fix that edits test expectations.
 
 ### Scenario 3: Container Build Asset Packaging Failure
 - **Stage**: `build`
@@ -50,6 +52,7 @@ This directory contains deterministic failure injection and reset tooling for te
 - **Verification**: `docker build -t sample-pipeline-app:test .`
 - **Diagnosed By**: `PipelineLogsSpecialist`
 - **Expected Outcome**: Stage identified as `build`, root cause highlights missing build context file `config/cache-warmup.json`.
+- **Expected Auto-Fix** (with `AUTOFIX_ENABLED=true`): `llm_patch` PR touching `Dockerfile` and/or `config/`; fix PR CI green; verification `PASSED`. If no safe fix is found, no PR is opened and the incident gets an `[Auto-Fix Hand-off]` work note instead.
 
 ### Scenario 4: Runtime OOM / Deploy Container Crash
 - **Stage**: `deploy`
@@ -59,6 +62,9 @@ This directory contains deterministic failure injection and reset tooling for te
 - **Verification**: `./scripts/deploy.sh` (Cloud Run container startup OOM exit 137)
 - **Diagnosed By**: `RuntimeHealthSpecialist`
 - **Expected Outcome**: Stage identified as `deploy`, root cause diagnoses exit code 137 (OOM), recommends remediation action `--memory 1Gi`.
+- **Expected Auto-Fix** (with `AUTOFIX_ENABLED=true`): `config_tuning` PR changing one line in `scripts/deploy.sh` (`MEMORY` 256Mi → 512Mi); lint, tests and build pass but `Deploy to Cloud Run` is skipped on the fix branch, so verification is `INCONCLUSIVE` (requires human validation), not `PASSED`.
+
+In every scenario the bridge makes exactly 1 fix attempt, records the fix PR link in the ServiceNow work notes, and leaves the incident In Progress for human review. The fix PR's own CI run never creates a new incident or a second PR.
 
 ### Declarative Environment Behavior (`--clear-env-vars`)
 In Google Cloud Run, `gcloud run deploy` commands preserve previously configured environment variables across service revisions unless explicitly cleared or overwritten. If an injection script or prior release configured temporary environment variables (such as `EXTRA_ENV_VARS="CACHE_PREWARM_BUFFER_MB=2048"` in Scenario 4), a subsequent deployment or revert commit that omits `EXTRA_ENV_VARS` would otherwise retain the stale variable in the newly created revision.
@@ -73,7 +79,12 @@ To enforce strictly declarative deployments:
 
 ## Reset Workflow
 
-To restore the target repository to a pristine baseline state:
+For live runs with auto-fix enabled, reset by closing the fix PR with its branch deleted, then
+`git revert` the scenario commit on `main`, push, and wait for `main` to go green. Do **not** merge
+fix PRs: a merged fix stays on `main` and the scenario no longer reproduces. See
+[DEMO-RUNBOOK.md, Section 4](DEMO-RUNBOOK.md#4-reset--cleanup-procedure).
+
+To restore a target working tree to a pristine baseline state with the reset script:
 
 ```bash
 # Basic reset on working tree

@@ -1,11 +1,12 @@
 import json
-from typing import Any
+from typing import Any, Optional
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 from agent.app.config import AgentConfig
 from agent.app.contracts.incident import Incident
-from agent.app.llm import generate_gemini_synthesis
+from agent.app.llm import generate_gemini_synthesis, parse_synthesis_payload
 from agent.app.synthesizer import synthesize_report
 
 
@@ -168,10 +169,11 @@ class TestVertexAIGemini:
 
         assert res is not None
         gen_cfg = captured_request.get("generationConfig", {})
-        assert gen_cfg.get("maxOutputTokens") == 4096
+        assert gen_cfg.get("maxOutputTokens") == 8192
         assert gen_cfg.get("responseMimeType") == "application/json"
+        assert gen_cfg.get("thinkingConfig") == {"thinkingBudget": 1024}
 
-    def test_generate_gemini_synthesis_defensive_json_truncation_fallback(
+    def test_generate_gemini_synthesis_truncated_json_returns_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         cfg = AgentConfig(
@@ -214,11 +216,8 @@ class TestVertexAIGemini:
             client=client,
         )
 
-        assert res is not None
-        # Root cause must be clean prose, not containing JSON syntax or unparsed brackets
-        assert not res["root_cause"].startswith("{")
-        assert '"root_cause"' not in res["root_cause"]
-        assert "The deployment failed because permission was denied on" in res["root_cause"]
+        # Truncated JSON is invalid JSON: no heuristic extraction, no fallback.
+        assert res is None
 
     def test_generate_gemini_synthesis_includes_structured_specialist_findings(
         self, monkeypatch: pytest.MonkeyPatch
@@ -674,3 +673,508 @@ class TestVertexAIGemini:
         assert report.unrelated_observations == ["Warning: module xyz deprecated."]
         assert report.recommended_actions == ["Correct assertion in test_calc.py."]
 
+
+
+_FIX_PROPOSAL = {
+    "summary": "Pin the base image tag.",
+    "files": [{"path": "Dockerfile", "patch": "-FROM python\n+FROM python:3.12-slim\n"}],
+}
+
+
+def _synthesis_json(**overrides: Any) -> str:
+    payload: dict[str, Any] = {
+        "root_cause": "  Build failed because the base image tag was not found.  ",
+        "causal_remediation": ["Pin the base image tag.", "  ", ""],
+        "unrelated_observations": ["Deprecated action warning."],
+        "confidence": 0.88,
+        "fix_proposal": _FIX_PROPOSAL,
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
+class TestParseSynthesisPayload:
+    def test_parse_synthesis_payload_plain_json_with_fix_proposal(self) -> None:
+        res = parse_synthesis_payload(_synthesis_json())
+        assert res is not None
+        assert res["root_cause"] == "Build failed because the base image tag was not found."
+        assert res["causal_remediation"] == ["Pin the base image tag."]
+        assert res["remediation_actions"] == ["Pin the base image tag."]
+        assert res["unrelated_observations"] == ["Deprecated action warning."]
+        assert res["confidence"] == 0.88
+        assert res["fix_proposal"] == _FIX_PROPOSAL
+
+    def test_parse_synthesis_payload_markdown_fenced_json_with_fix_proposal(self) -> None:
+        raw = "```JSON\n" + _synthesis_json() + "\n```"
+        res = parse_synthesis_payload(raw)
+        assert res is not None
+        assert res["fix_proposal"] == _FIX_PROPOSAL
+
+    def test_parse_synthesis_payload_wrapped_with_preamble_and_postamble(self) -> None:
+        raw = "Here is the analysis:\n" + _synthesis_json() + "\nHope this helps!"
+        res = parse_synthesis_payload(raw)
+        assert res is not None
+        assert res["root_cause"] == "Build failed because the base image tag was not found."
+        assert res["fix_proposal"] == _FIX_PROPOSAL
+
+    def test_parse_synthesis_payload_invalid_json_returns_none(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        raw = '{"root_cause": "Build failed", "fix_proposal": {"summary": "x",}'
+        with caplog.at_level("WARNING", logger="agent.app.llm"):
+            res = parse_synthesis_payload(raw)
+        assert res is None
+        assert any("Failed to parse synthesis response" in r.message for r in caplog.records)
+
+    def test_parse_synthesis_payload_no_json_object_returns_none(self) -> None:
+        assert parse_synthesis_payload("The build failed, sorry.") is None
+        assert parse_synthesis_payload("") is None
+        assert parse_synthesis_payload("   ") is None
+
+    def test_parse_synthesis_payload_without_fix_proposal(self) -> None:
+        payload = json.loads(_synthesis_json())
+        del payload["fix_proposal"]
+        del payload["causal_remediation"]
+        payload["remediation_actions"] = ["Use legacy key."]
+        res = parse_synthesis_payload(json.dumps(payload))
+        assert res is not None
+        assert "fix_proposal" not in res
+        assert res["causal_remediation"] == ["Use legacy key."]
+
+    def test_parse_synthesis_payload_null_fix_proposal_is_omitted(self) -> None:
+        res = parse_synthesis_payload(_synthesis_json(fix_proposal=None))
+        assert res is not None
+        assert "fix_proposal" not in res
+
+    def test_parse_synthesis_payload_missing_root_cause_returns_none(self) -> None:
+        payload = json.loads(_synthesis_json())
+        del payload["root_cause"]
+        assert parse_synthesis_payload(json.dumps(payload)) is None
+
+
+def _gemini_cfg(**overrides: Any) -> AgentConfig:
+    fields: dict[str, Any] = {
+        "app_env": "production",
+        "gcp_project": "test-proj-123",
+        "vertex_ai_location": "us-central1",
+        "gemini_model": "test-gemini-model",
+    }
+    fields.update(overrides)
+    return AgentConfig(**fields)
+
+
+class _MockCreds:
+    valid = True
+    token = "mock-vertex-bearer-token"
+
+    def refresh(self, req: Any) -> None:
+        pass
+
+
+def _mock_gemini_client(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate: dict[str, Any],
+    captured: Optional[dict[str, Any]] = None,
+) -> httpx.Client:
+    monkeypatch.setattr("google.auth.default", lambda scopes: (_MockCreds(), "test-proj-123"))
+
+    def mock_post(url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+        if captured is not None:
+            captured.update(kwargs.get("json", {}))
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", str(url)),
+            json={"candidates": [candidate]},
+        )
+
+    client = httpx.Client()
+    client.post = mock_post  # type: ignore[method-assign]
+    return client
+
+
+def _prompt_text(request_body: dict[str, Any]) -> str:
+    return str(request_body["contents"][0]["parts"][0]["text"])
+
+
+def _cleanup_tail(min_chars: int) -> str:
+    block = [
+        "##[group]Post job cleanup.",
+        "[command]/usr/bin/git version",
+        "Removing credentials config",
+        "Cleaning up orphan processes",
+        "##[endgroup]",
+    ]
+    lines: list[str] = []
+    while len("\n".join(lines)) < min_chars:
+        lines.extend(block)
+    return "\n".join(lines)
+
+
+class TestGeminiSynthesisGeneration:
+    def test_generation_budget_comes_from_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+        client = _mock_gemini_client(
+            monkeypatch,
+            {"content": {"parts": [{"text": _synthesis_json()}]}},
+            captured,
+        )
+        cfg = _gemini_cfg(synthesis_max_output_tokens=12345, synthesis_thinking_budget=321)
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text="error: build failed",
+            config=cfg,
+            client=client,
+        )
+
+        assert res is not None
+        gen_cfg = captured["generationConfig"]
+        assert gen_cfg["maxOutputTokens"] == 12345
+        assert gen_cfg["thinkingConfig"] == {"thinkingBudget": 321}
+
+    def test_generation_budget_read_from_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SYNTHESIS_MAX_OUTPUT_TOKENS", "16000")
+        monkeypatch.setenv("SYNTHESIS_THINKING_BUDGET", "0")
+
+        cfg = _gemini_cfg()
+
+        assert cfg.synthesis_max_output_tokens == 16000
+        assert cfg.synthesis_thinking_budget == 0
+
+    @pytest.mark.parametrize("budget", [None, -1])
+    def test_thinking_config_omitted_when_disabled(
+        self, monkeypatch: pytest.MonkeyPatch, budget: Optional[int]
+    ) -> None:
+        captured: dict[str, Any] = {}
+        client = _mock_gemini_client(
+            monkeypatch,
+            {"content": {"parts": [{"text": _synthesis_json()}]}},
+            captured,
+        )
+        cfg = _gemini_cfg(synthesis_thinking_budget=budget)
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text="error: build failed",
+            config=cfg,
+            client=client,
+        )
+
+        assert res is not None
+        gen_cfg = captured["generationConfig"]
+        assert "thinkingConfig" not in gen_cfg
+        assert gen_cfg["maxOutputTokens"] == 8192
+
+    def test_thinking_disabled_via_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SYNTHESIS_THINKING_BUDGET", "-1")
+
+        assert _gemini_cfg().synthesis_thinking_budget == -1
+
+    def test_default_config_includes_thinking_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+        client = _mock_gemini_client(
+            monkeypatch,
+            {"content": {"parts": [{"text": _synthesis_json()}]}},
+            captured,
+        )
+
+        generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text="error: build failed",
+            config=_gemini_cfg(),
+            client=client,
+        )
+
+        assert captured["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 1024}
+
+    @pytest.mark.parametrize("budget", [4096, 5000])
+    def test_config_rejects_thinking_budget_not_below_max_tokens(self, budget: int) -> None:
+        with pytest.raises(ValueError, match="synthesis_thinking_budget"):
+            _gemini_cfg(synthesis_max_output_tokens=4096, synthesis_thinking_budget=budget)
+
+    def test_config_allows_large_budget_when_thinking_disabled(self) -> None:
+        cfg = _gemini_cfg(synthesis_max_output_tokens=4096, synthesis_thinking_budget=-1)
+
+        assert cfg.synthesis_thinking_budget == -1
+
+    def test_mock_config_falls_back_to_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+        client = _mock_gemini_client(
+            monkeypatch,
+            {"content": {"parts": [{"text": _synthesis_json()}]}},
+            captured,
+        )
+        cfg = MagicMock()
+        cfg.gcp_project = "test-proj-123"
+        cfg.vertex_ai_location = "us-central1"
+        cfg.gemini_model = "test-gemini-model"
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text="error: build failed",
+            config=cfg,
+            client=client,
+        )
+
+        assert res is not None
+        gen_cfg = captured["generationConfig"]
+        assert gen_cfg["maxOutputTokens"] == 8192
+        assert gen_cfg["thinkingConfig"] == {"thinkingBudget": 1024}
+        json.dumps(captured)
+
+    def test_multi_part_response_concatenated_excluding_thoughts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        payload = _synthesis_json()
+        split = len(payload) // 2
+        client = _mock_gemini_client(
+            monkeypatch,
+            {
+                "content": {
+                    "parts": [
+                        {"text": "Reasoning about the failure {not json", "thought": True},
+                        {"text": payload[:split]},
+                        {"text": payload[split:]},
+                    ]
+                },
+                "finishReason": "STOP",
+            },
+        )
+        status: dict[str, Any] = {}
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text="error: build failed",
+            config=_gemini_cfg(),
+            client=client,
+            synthesis_status=status,
+        )
+
+        assert res is not None
+        assert res["root_cause"] == "Build failed because the base image tag was not found."
+        assert status == {"outcome": "ok", "finish_reason": "STOP"}
+
+    def test_max_tokens_truncation_logged_and_reported(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = _mock_gemini_client(
+            monkeypatch,
+            {
+                "content": {"parts": [{"text": _synthesis_json()[:120]}]},
+                "finishReason": "MAX_TOKENS",
+            },
+        )
+        status: dict[str, Any] = {}
+
+        with caplog.at_level("WARNING", logger="agent.app.llm"):
+            res = generate_gemini_synthesis(
+                failing_job={"name": "build"},
+                failing_step={"name": "Build"},
+                log_text="error: build failed",
+                config=_gemini_cfg(),
+                client=client,
+                synthesis_status=status,
+            )
+
+        assert res is None
+        assert status == {"outcome": "truncated", "finish_reason": "MAX_TOKENS"}
+        assert any("MAX_TOKENS" in r.getMessage() for r in caplog.records)
+
+    def test_unparseable_response_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = _mock_gemini_client(
+            monkeypatch,
+            {"content": {"parts": [{"text": "not a json payload"}]}, "finishReason": "STOP"},
+        )
+        status: dict[str, Any] = {}
+
+        res = generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text="error: build failed",
+            config=_gemini_cfg(),
+            client=client,
+            synthesis_status=status,
+        )
+
+        assert res is None
+        assert status == {"outcome": "unparseable", "finish_reason": "STOP"}
+
+    def test_log_excerpt_prefers_runner_log_excerpt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+        client = _mock_gemini_client(
+            monkeypatch, {"content": {"parts": [{"text": _synthesis_json()}]}}, captured
+        )
+        runner_excerpt = "error: specialist-selected decisive excerpt"
+
+        generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text="raw step log body that should not be the excerpt",
+            config=_gemini_cfg(),
+            client=client,
+            specialist_findings={"runner_log_excerpt": runner_excerpt},
+        )
+
+        prompt = _prompt_text(captured)
+        assert runner_excerpt in prompt
+        assert "raw step log body that should not be the excerpt" not in prompt
+
+    def test_log_excerpt_uses_decisive_excerpt_not_cleanup_tail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+        client = _mock_gemini_client(
+            monkeypatch, {"content": {"parts": [{"text": _synthesis_json()}]}}, captured
+        )
+        decisive = "ERROR: failed to solve: module resolution failed for src/app.py"
+        tail = _cleanup_tail(6000)
+        log_text = "\n".join(["Step 3/7 : RUN make build", decisive, "Error: exit code 1", tail])
+        assert decisive not in log_text[-4000:]
+
+        generate_gemini_synthesis(
+            failing_job={"name": "build"},
+            failing_step={"name": "Build"},
+            log_text=log_text,
+            config=_gemini_cfg(),
+            client=client,
+        )
+
+        prompt = _prompt_text(captured)
+        assert decisive in prompt
+        assert "Cleaning up orphan processes" not in prompt
+
+
+def _synth_incident() -> Incident:
+    return Incident(
+        id="inc-synth-status",
+        source="github",
+        external_id="2",
+        external_key="repo#2",
+        title="Build failure",
+        description="Failed step",
+        severity="P2",
+        opened_at="2026-10-17T00:00:00Z",
+        github_repo="owner/app",
+    )
+
+
+class TestSynthesisFailureVisibility:
+    def _run(
+        self, monkeypatch: pytest.MonkeyPatch, outcome: Optional[str], result: Any
+    ) -> Any:
+        def fake(**kwargs: Any) -> Any:
+            status = kwargs.get("synthesis_status")
+            if status is not None and outcome is not None:
+                status["outcome"] = outcome
+                status["finish_reason"] = "MAX_TOKENS" if outcome == "truncated" else "STOP"
+            return result
+
+        monkeypatch.setattr("agent.app.llm.generate_gemini_synthesis", fake)
+        return synthesize_report(
+            incident=_synth_incident(),
+            failed_job={"name": "build-job"},
+            failed_step={"name": "build-step"},
+            log_text="error: build failed",
+        )
+
+    def test_truncated_synthesis_surfaces_note_and_heuristic_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        report = self._run(monkeypatch, "truncated", None)
+
+        assert any("synthesis truncated" in c for c in report.caveats)
+        assert any(
+            "Heuristic diagnosis because LLM synthesis failed (response truncated" in c
+            for c in report.caveats
+        )
+        assert report.metadata["synthesizer_mode"] == "heuristic_fallback"
+        assert report.metadata["heuristic_fallback"] is True
+        assert report.metadata["synthesis_outcome"] == "truncated"
+        assert report.metadata["synthesis_finish_reason"] == "MAX_TOKENS"
+
+    def test_unparseable_synthesis_surfaces_note(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        report = self._run(monkeypatch, "unparseable", None)
+
+        assert any("synthesis unparseable" in c for c in report.caveats)
+        assert any(
+            "Heuristic diagnosis because LLM synthesis failed (response could not be parsed)"
+            in c
+            for c in report.caveats
+        )
+        assert report.metadata["heuristic_fallback"] is True
+
+    def test_unavailable_synthesis_marks_report_heuristic(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        report = self._run(monkeypatch, None, None)
+
+        assert report.metadata["heuristic_fallback"] is True
+        assert [
+            c
+            for c in report.caveats
+            if "Heuristic diagnosis because LLM synthesis was unavailable" in c
+        ]
+        assert not [c for c in report.caveats if "truncated" in c or "unparseable" in c]
+
+    def test_successful_synthesis_has_no_failure_caveats(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        report = self._run(
+            monkeypatch,
+            "ok",
+            {"root_cause": "LLM root cause", "remediation_actions": [], "confidence": 0.9},
+        )
+
+        assert report.caveats == []
+        assert report.metadata["synthesizer_mode"] == "llm"
+        assert report.metadata["heuristic_fallback"] is False
+        assert report.metadata["synthesis_outcome"] == "ok"
+
+    def test_truncated_but_parsed_synthesis_still_noted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        report = self._run(
+            monkeypatch,
+            "truncated",
+            {"root_cause": "LLM root cause", "remediation_actions": [], "confidence": 0.9},
+        )
+
+        assert report.metadata["synthesizer_mode"] == "llm"
+        assert any("synthesis truncated" in c for c in report.caveats)
+        assert not [c for c in report.caveats if "Heuristic diagnosis because" in c]
+
+
+def test_heuristic_caveat_reaches_servicenow_work_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End to end: failed synthesis -> agent report caveat -> rendered ServiceNow note."""
+    from bridge.app.contracts.report import Report as BridgeReport
+    from bridge.app.templates.renderer import chunk_servicenow_work_note, render_servicenow_html
+
+    def fake(**kwargs: Any) -> None:
+        kwargs["synthesis_status"].update(outcome="unparseable", finish_reason="STOP")
+        return None
+
+    monkeypatch.setattr("agent.app.llm.generate_gemini_synthesis", fake)
+    report = synthesize_report(
+        incident=_synth_incident(),
+        failed_job={"name": "build-job"},
+        failed_step={"name": "build-step"},
+        log_text="error: build failed",
+    )
+    bridge_report = BridgeReport.model_validate(report.model_dump(mode="json"))
+
+    note = chunk_servicenow_work_note(render_servicenow_html(bridge_report))[0]
+
+    assert bridge_report.metadata["heuristic_fallback"] is True
+    assert "Heuristic diagnosis because LLM synthesis failed" in note
+    assert "LLM synthesis unparseable" in note

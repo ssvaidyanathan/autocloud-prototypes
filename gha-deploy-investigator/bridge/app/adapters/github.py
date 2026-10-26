@@ -9,11 +9,19 @@ from fastapi import Request
 
 from ..config import BridgeConfig, get_settings
 from ..contracts.incident import Incident
-from ..contracts.report import Report
+from ..contracts.report import PullRequestRef, Report
 from ..github.auth import GitHubAppAuth
 from .base import BaseAdapter, IncidentRef, parse_utc_datetime
 
 logger = logging.getLogger(__name__)
+
+
+def format_fix_pr_markdown(pull_request: PullRequestRef) -> str:
+    """Markdown bullet linking to an opened auto-fix pull request."""
+    return (
+        f"* 🛠️ **Automated Fix PR:** [#{pull_request.pr_number}]({pull_request.pr_url}) "
+        "has been opened with proposed remediation."
+    )
 
 
 class _ReusableClientWrapper:
@@ -74,6 +82,24 @@ class GitHubAdapter(BaseAdapter):
             headers["Authorization"] = f"Bearer {self.config.github_token}"
         timeout = getattr(self.config, "adapter_timeout_seconds", 30.0)
         return httpx.Client(headers=headers, timeout=timeout)
+
+    def get_workflow_run_jobs(self, repo_str: str, run_id: int | str) -> list[dict[str, Any]]:
+        """Fetch jobs for a workflow run via GitHub API."""
+        if not repo_str or "/" not in repo_str:
+            return []
+        owner, repo_name = repo_str.split("/", 1)
+        api_url = (self.config.github_api_url or "https://api.github.com").rstrip("/")
+        endpoint = f"{api_url}/repos/{owner}/{repo_name}/actions/runs/{run_id}/jobs"
+
+        token = self._get_writeback_token(repo_str)
+        headers = {"Accept": "application/vnd.github+json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        with self._get_client() as client:
+            resp = client.get(endpoint, headers=headers, params={"per_page": 100})
+            resp.raise_for_status()
+            jobs = resp.json().get("jobs", [])
+        return [j for j in jobs if isinstance(j, dict)] if isinstance(jobs, list) else []
 
     def verify(self, request: Request, payload: bytes) -> bool:
         """Verify inbound webhook HMAC SHA-256 signature."""
@@ -170,8 +196,14 @@ class GitHubAdapter(BaseAdapter):
             github_commit_author=author,
         )
 
-    def post_report_link(self, incident: Incident, report: Report, ref: IncidentRef) -> None:
-        """Post a Check Run on commit SHA linking to the ServiceNow incident."""
+    def post_report_link(
+        self,
+        incident: Incident,
+        report: Report,
+        ref: IncidentRef,
+        pull_request: Optional[PullRequestRef] = None,
+    ) -> None:
+        """Post a Check Run on commit SHA linking to the ServiceNow incident (and fix PR)."""
         repo_str = incident.github_repo or incident.service_hint or ""
         if not incident.github_head_sha or not repo_str or "/" not in repo_str:
             logger.warning(
@@ -222,6 +254,9 @@ class GitHubAdapter(BaseAdapter):
             "summary": summary,
             "text": report.summary,
         }
+        fix_pr_md = format_fix_pr_markdown(pull_request) if pull_request else None
+        if fix_pr_md:
+            output_data["text"] = f"{report.summary}\n\n{fix_pr_md}"
         if report.annotations:
             output_data["annotations"] = [
                 {
@@ -306,6 +341,8 @@ class GitHubAdapter(BaseAdapter):
                             "</details>\n",
                         ]
                     )
+                if fix_pr_md:
+                    comment_lines.extend([fix_pr_md, ""])
                 comment_lines.extend(
                     [
                         "---",

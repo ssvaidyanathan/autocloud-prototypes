@@ -7,7 +7,7 @@ from typing import Any, Optional
 from jinja2 import Environment, FileSystemLoader
 
 from ..contracts.incident import Incident
-from ..contracts.report import Report
+from ..contracts.report import PullRequestRef, Report
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent
 
@@ -38,6 +38,24 @@ def render_servicenow_html(report: Report) -> str:
             'border-radius: 0 0 4px 4px; background: #ffffff;">'
         ),
     ]
+
+    # Caveats first, so diagnosis-quality warnings (e.g. heuristic fallback after
+    # failed LLM synthesis) are never lost to work-note truncation.
+    if report.caveats:
+        lines.extend(
+            [
+                (
+                    '    <div style="margin-bottom: 12px; padding: 10px; background: #ffebe9; '
+                    'border-left: 4px solid #cf222e; border-radius: 2px;">'
+                ),
+                '      <div style="font-weight: 600; color: #a40e26;">Caveats</div>',
+                '      <ul style="margin: 4px 0 0 0; padding-left: 20px;">',
+            ]
+        )
+        for caveat in report.caveats[:10]:
+            caveat_text = caveat[:500] + "..." if len(caveat) > 500 else caveat
+            lines.append(f"        <li>{html.escape(caveat_text)}</li>")
+        lines.extend(["      </ul>", "    </div>"])
 
     # Summary (safely truncate if necessary before HTML formatting)
     safe_summary = (
@@ -178,6 +196,7 @@ def render_standalone_html(
     incident: Optional[Incident] = None,
     config: Optional[Any] = None,
     generated_at: Optional[datetime] = None,
+    pull_request: Optional[PullRequestRef] = None,
 ) -> str:
     """Render standalone elaborate diagnostic dossier HTML report for ticket attachments."""
     if incident is None and isinstance(incident_ref, Incident):
@@ -259,6 +278,8 @@ def render_standalone_html(
         servicenow_url=servicenow_url,
         model_name=model_name,
         generated_at=gen_time,
+        fix_proposal=report.fix_proposal,
+        pull_request=pull_request,
     )
 
 

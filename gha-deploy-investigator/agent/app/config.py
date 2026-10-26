@@ -1,9 +1,14 @@
 import os
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, TypeGuard
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def synthesis_thinking_enabled(thinking_budget: Optional[int]) -> TypeGuard[int]:
+    """True when thinkingConfig should be sent; None or negative omits it."""
+    return thinking_budget is not None and thinking_budget >= 0
 
 
 class AgentConfig(BaseSettings):
@@ -23,6 +28,21 @@ class AgentConfig(BaseSettings):
     bridge_service_url: str = ""
     vertex_ai_location: str = "us-central1"
     gemini_model: str
+    # Gemini synthesis generation budget. Thinking tokens count against
+    # maxOutputTokens on thinking models, so both are tunable together.
+    synthesis_max_output_tokens: int = Field(default=8192, gt=0)
+    # Coupled to gemini_model: non-thinking models (e.g. the 2.0 family) reject
+    # thinkingConfig outright, and gemini-2.5-pro rejects budgets below 128
+    # (so 0 is invalid there). None or a negative value (e.g.
+    # SYNTHESIS_THINKING_BUDGET=-1) omits thinkingConfig from the request; this
+    # is intended for models that reject it (non-thinking models). On
+    # gemini-2.5-flash / 2.5-pro, omission means the model-default *dynamic*
+    # thinking (not bounded by synthesis_max_output_tokens), NOT disabled
+    # thinking (-1 is also Gemini's own "dynamic" value); gemini-2.5-flash-lite
+    # has thinking off by default, so omission there means no thinking. To
+    # disable thinking on gemini-2.5-flash, use 0. The omitted case is not
+    # covered by the budget < max-output-tokens validator below.
+    synthesis_thinking_budget: Optional[int] = Field(default=1024)
 
     # GitHub API configuration
     github_api_url: str = "https://api.github.com"
@@ -34,6 +54,17 @@ class AgentConfig(BaseSettings):
     def is_local(self) -> bool:
         env_val = self.app_env or self.environment
         return env_val.lower() in ("local", "dev", "development", "test", "testing")
+
+    @model_validator(mode="after")
+    def validate_synthesis_budget(self) -> "AgentConfig":
+        budget = self.synthesis_thinking_budget
+        if synthesis_thinking_enabled(budget) and budget >= self.synthesis_max_output_tokens:
+            raise ValueError(
+                "synthesis_thinking_budget must be less than synthesis_max_output_tokens "
+                "when thinking is enabled (thinking tokens count against the output "
+                "budget, so the response would always be truncated)"
+            )
+        return self
 
     @model_validator(mode="after")
     def resolve_project_defaults(self) -> "AgentConfig":

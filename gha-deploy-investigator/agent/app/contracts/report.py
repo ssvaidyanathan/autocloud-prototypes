@@ -63,6 +63,35 @@ class CheckRunAnnotation(BaseModel):
     raw_details: Optional[str] = None
 
 
+class FilePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    action: Literal["modify", "create", "delete"]
+    content: Optional[str] = None
+    diff: Optional[str] = None
+
+
+class FixProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["proposed", "no_safe_fix", "unsupported"]
+    strategy: Literal["deterministic_linter", "llm_patch", "config_tuning"]
+    rationale: str
+    patches: list[FilePatch] = Field(default_factory=list)
+    target_branch_base: str
+
+
+class PullRequestRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pr_number: int
+    pr_url: str
+    branch_name: str
+    head_sha: str
+    status: Literal["opened", "ci_pending", "ci_passed", "ci_failed"]
+
+
 class Report(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -81,3 +110,4 @@ class Report(BaseModel):
     annotations: list[CheckRunAnnotation] = Field(default_factory=list)
     queries_appendix: dict[str, list[str]] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    fix_proposal: Optional[FixProposal] = None

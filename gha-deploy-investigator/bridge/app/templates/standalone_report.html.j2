@@ -236,6 +236,19 @@
       background: #f3f4f6;
       text-decoration: none;
     }
+    .autofix-box {
+      background-color: #dafbe1;
+      border-left: 4px solid #1a7f37;
+      padding: 16px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+    }
+    .autofix-title {
+      font-weight: 700;
+      color: #116329;
+      margin-bottom: 6px;
+      font-size: 15px;
+    }
   </style>
 </head>
 <body>
@@ -326,6 +339,32 @@
         <li style="margin-bottom: 4px;">{{ caveat }}</li>
         {% endfor %}
       </ul>
+    </div>
+    {% endif %}
+
+    {% if pull_request or fix_proposal %}
+    <div class="section">
+      <h2>Automated Fix PR</h2>
+      <div class="autofix-box">
+        {% if pull_request %}
+        <div class="autofix-title">Pull Request #{{ pull_request.pr_number }} opened</div>
+        <div><strong>Pull Request:</strong> <a href="{{ pull_request.pr_url }}" target="_blank" rel="noopener">{{ pull_request.pr_url }}</a></div>
+        <div><strong>Branch:</strong> <code>{{ pull_request.branch_name }}</code></div>
+        <div><strong>Status:</strong> {{ pull_request.status }}</div>
+        {% else %}
+        <div class="autofix-title">Fix Proposal: {{ fix_proposal.status }}</div>
+        {% endif %}
+        {% if fix_proposal %}
+        <div><strong>Strategy:</strong> {{ fix_proposal.strategy }}</div>
+        <div><strong>Rationale:</strong> {{ fix_proposal.rationale }}</div>
+        {% endif %}
+      </div>
+      {% if fix_proposal and fix_proposal.patches %}
+      {% for patch in fix_proposal.patches %}
+      <div><strong>{{ patch.path }}</strong> ({{ patch.action }})</div>
+      {% if patch.diff %}<pre><code>{{ patch.diff }}</code></pre>{% endif %}
+      {% endfor %}
+      {% endif %}
     </div>
     {% endif %}
 

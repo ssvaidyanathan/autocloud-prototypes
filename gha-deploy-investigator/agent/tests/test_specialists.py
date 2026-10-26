@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from agent.app.contracts.incident import Incident
@@ -489,3 +490,156 @@ class TestSpecialists:
             "Active revision from previous deployment" in e.excerpt
             for e in res.evidence_items
         )
+
+
+_DIFF_PATCH = (
+    "@@ -10,7 +10,7 @@ def compute_total(items):\n"
+    "-    return sum(items)\n"
+    "+    return sum(items) + 1\n"
+)
+_DIFF_DATA = {"files": [{"filename": "./pkg/calc.py", "patch": _DIFF_PATCH}]}
+
+_DIAGNOSE_CASES = [
+    (
+        "_diagnose_test",
+        "test",
+        {"name": "Run Tests"},
+        "FAILED tests/test_calc.py::test_total - AssertionError: assert 7 == 6\n",
+    ),
+    (
+        "_diagnose_build",
+        "build",
+        {"name": "Build Image"},
+        "ERROR: failed to solve: process did not complete successfully\n",
+    ),
+    (
+        "_diagnose_generic",
+        "pipeline",
+        {"name": "Custom Step"},
+        "Error: step exited with code 2\n",
+    ),
+]
+
+
+def _git_diff_excerpts(res: Any) -> list[str]:
+    return [e.excerpt for e in res.evidence_items if e.kind == "git_diff"]
+
+
+class TestPipelineLogsDiffHunkEvidence:
+    """git_diff evidence must carry unified diff hunks, not just a file list."""
+
+    @pytest.mark.parametrize(("method", "stage", "step", "log_text"), _DIAGNOSE_CASES)
+    def test_provided_diff_data_includes_hunks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        method: str,
+        stage: str,
+        step: dict[str, Any],
+        log_text: str,
+    ) -> None:
+        def _fail(**kwargs: Any) -> Any:
+            raise AssertionError("get_commit_diff must not be called when diff_data is given")
+
+        monkeypatch.setattr("agent.app.specialists.pipeline_logs.get_commit_diff", _fail)
+        specialist = PipelineLogsSpecialist()
+        incident = _make_incident(stage)
+
+        res = getattr(specialist, method)(
+            incident, {"id": 1, "name": "job"}, step, log_text, diff_data=_DIFF_DATA
+        )
+
+        excerpts = _git_diff_excerpts(res)
+        assert len(excerpts) == 1
+        assert "Commit diff touched 1 file(s): pkg/calc.py" in excerpts[0]
+        assert "Diff Hunks:" in excerpts[0]
+        assert "-    return sum(items)" in excerpts[0]
+        assert "+    return sum(items) + 1" in excerpts[0]
+        assert not any("get_commit_diff" in q for q in specialist.skill_tracker.queries_run)
+
+    @pytest.mark.parametrize(("method", "stage", "step", "log_text"), _DIAGNOSE_CASES)
+    def test_missing_diff_data_is_fetched_via_tracked_tool_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        method: str,
+        stage: str,
+        step: dict[str, Any],
+        log_text: str,
+    ) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def _fake_diff(**kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            return _DIFF_DATA
+
+        monkeypatch.setattr("agent.app.specialists.pipeline_logs.get_commit_diff", _fake_diff)
+        specialist = PipelineLogsSpecialist()
+        incident = _make_incident(stage)
+
+        res = getattr(specialist, method)(incident, {"id": 1, "name": "job"}, step, log_text)
+
+        assert len(calls) == 1
+        assert calls[0]["repo"] == incident.github_repo
+        assert calls[0]["head_sha"] == incident.github_head_sha
+        assert any("get_commit_diff" in q for q in specialist.skill_tracker.queries_run)
+        excerpts = _git_diff_excerpts(res)
+        assert len(excerpts) == 1
+        assert "+    return sum(items) + 1" in excerpts[0]
+
+    @pytest.mark.parametrize(("method", "stage", "step", "log_text"), _DIAGNOSE_CASES)
+    def test_no_fetch_without_repo_or_sha(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        method: str,
+        stage: str,
+        step: dict[str, Any],
+        log_text: str,
+    ) -> None:
+        def _fail(**kwargs: Any) -> Any:
+            raise AssertionError("get_commit_diff must not be called without repo/sha")
+
+        monkeypatch.setattr("agent.app.specialists.pipeline_logs.get_commit_diff", _fail)
+        specialist = PipelineLogsSpecialist()
+        incident = _make_incident(stage).model_copy(update={"github_head_sha": None})
+
+        res = getattr(specialist, method)(incident, {"id": 1, "name": "job"}, step, log_text)
+
+        assert _git_diff_excerpts(res) == []
+
+    @pytest.mark.parametrize(("method", "stage", "step", "log_text"), _DIAGNOSE_CASES)
+    def test_synthesizer_diff_info_contains_hunks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        method: str,
+        stage: str,
+        step: dict[str, Any],
+        log_text: str,
+    ) -> None:
+        from agent.app.config import AgentConfig
+        from agent.app.synthesizer import SynthesizerAgent
+
+        specialist = PipelineLogsSpecialist()
+        incident = _make_incident(stage)
+        diag = getattr(specialist, method)(
+            incident, {"id": 1, "name": "job"}, step, log_text, diff_data=_DIFF_DATA
+        )
+
+        captured: dict[str, Any] = {}
+
+        def _fake_synthesis(**kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs.get("specialist_findings") or {})
+            return {"root_cause": "stub", "remediation_actions": [], "confidence": 0.9}
+
+        monkeypatch.setattr("agent.app.llm.generate_gemini_synthesis", _fake_synthesis)
+        cfg = AgentConfig(app_env="production", gcp_project="test-proj")
+        SynthesizerAgent(config=cfg).synthesize(
+            incident=incident,
+            failed_job={"name": "job"},
+            failed_step=step,
+            log_text=log_text,
+            diagnostic_result=diag,
+        )
+
+        diff_info = captured.get("diff_info") or ""
+        assert "Diff Hunks:" in diff_info
+        assert "--- pkg/calc.py" in diff_info
+        assert "+    return sum(items) + 1" in diff_info
