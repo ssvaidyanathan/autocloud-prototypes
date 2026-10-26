@@ -74,10 +74,13 @@ def test_scenario_scripts_mock_hold_zero(sc):
 
 def test_common_api_key_error_when_missing(tmp_path):
     """Verify resolve_api_key prints clear error and instructions if key is missing."""
+    isolated_dir = tmp_path / "pkg" / "scripts" / "scenarios"
+    isolated_dir.mkdir(parents=True, exist_ok=True)
+
     test_sh = tmp_path / "test_key.sh"
     test_sh.write_text(f"""#!/usr/bin/env bash
 set -e
-SCRIPT_DIR="{SCENARIOS_DIR}"
+SCRIPT_DIR="{isolated_dir}"
 source "{SCENARIOS_DIR}/common.sh"
 resolve_api_key
 """)
@@ -100,3 +103,36 @@ resolve_api_key
     assert "Apigee consumer API key not found" in res.stderr
     assert "developers/ata-dev@example.com/apps/ata-demo-app" in res.stderr
     assert ".ata-api-key" in res.stderr
+
+
+def test_common_api_key_success_when_present(tmp_path):
+    """Verify resolve_api_key returns the key from .ata-api-key when present."""
+    isolated_dir = tmp_path / "pkg" / "scripts" / "scenarios"
+    isolated_dir.mkdir(parents=True, exist_ok=True)
+    key_file = tmp_path / ".ata-api-key"
+    key_file.write_text("test-consumer-key-12345\n")
+
+    test_sh = tmp_path / "test_key.sh"
+    test_sh.write_text(f"""#!/usr/bin/env bash
+set -e
+SCRIPT_DIR="{isolated_dir}"
+source "{SCENARIOS_DIR}/common.sh"
+resolve_api_key
+""")
+    test_sh.chmod(0o755)
+
+    env = os.environ.copy()
+    env.pop("ATA_API_KEY", None)
+    env["MOCK_MODE"] = "false"
+    env["DRY_RUN"] = "false"
+
+    res = subprocess.run(
+        [str(test_sh)],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert res.returncode == 0
+    assert "test-consumer-key-12345" in res.stdout

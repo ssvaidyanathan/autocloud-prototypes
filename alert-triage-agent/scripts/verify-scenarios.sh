@@ -22,14 +22,15 @@ echo "==================================================================="
 
 # 1. Run Automated Python E2E Test Suite
 log_info "--> 1. Running Automated E2E Pytest Suite..."
-PYTEST_BIN="$(command -v pytest || true)"
-if [ -z "${PYTEST_BIN}" ] && [ -x "/workspace/venv/bin/pytest" ]; then
-    PYTEST_BIN="/workspace/venv/bin/pytest"
-elif [ -z "${PYTEST_BIN}" ]; then
-    PYTEST_BIN="pytest"
+if command -v pytest >/dev/null 2>&1; then
+    PYTEST_CMD=(pytest)
+elif python3 -m pytest --version >/dev/null 2>&1; then
+    PYTEST_CMD=(python3 -m pytest)
+else
+    PYTEST_CMD=(pytest)
 fi
 
-${PYTEST_BIN} "${SCRIPT_DIR}/../tests/test_scenarios_e2e.py" -v
+"${PYTEST_CMD[@]}" "${SCRIPT_DIR}/../tests/test_scenarios_e2e.py" -v
 log_success "    Automated test assertions passed."
 
 # 2. Verify Fault Control Telemetry Exclusion Guardrail
