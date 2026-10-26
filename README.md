@@ -45,7 +45,7 @@ A repo of Autocloud prototypes
 | **Integrations** | GitHub App (Check Runs, PRs, Actions API), ServiceNow (Table & Attachment API), Cloud Run, Vertex AI |
 | **Cloud Run Services (default prefix)** | `gdi-bridge`, `gdi-agent` |
 | **State & Persistence** | Stateless event processing; Cloud Tasks asynchronous queue; in-memory query cache |
-| **Docs & Quick-Start** | [Documentation](gha-deploy-investigator/) • [Deployment Walkthrough](gha-deploy-investigator/#9-full-step-by-step-gcp-deployment-walkthrough) • [Demo Runbook](gha-deploy-investigator/demo/DEMO-RUNBOOK.md) (step-by-step lint, test, build, and deploy failure scenarios) |
+| **Docs & Quick-Start** | [Documentation](gha-deploy-investigator/) • [Deployment Walkthrough](gha-deploy-investigator/#9-full-step-by-step-gcp-deployment-walkthrough) |
 
 ## Shared Utilities
 
