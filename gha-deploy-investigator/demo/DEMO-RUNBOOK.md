@@ -464,7 +464,7 @@ cd gdi-sample-pipeline-app
 ```
 
 The reset script idempotently:
-1. With `--commit`, reverts `HEAD` if the target is a git repository and `HEAD` is a scenario commit (matched by the `refactor(orders)`, `feat(pricing)`, `chore(deps)`, or `feat(cache)` prefix of the scenario commit messages).
+1. With `--commit`, reverts `HEAD` if the target is a git repository and `HEAD` is a scenario commit (matched when `refactor(orders)`, `feat(pricing)`, `chore(deps)`, or `feat(cache)` appears anywhere in the commit message). Because this is a substring match, an unrelated commit at `HEAD` containing one of these strings (for example a Dependabot `chore(deps)` bump) would also be reverted. The script also restores the four scenario files with `git checkout --`, discarding any uncommitted edits to them.
 2. Restores `app/main.py`, `tests/test_main.py`, `Dockerfile`, and `scripts/deploy.sh` to baseline, removing all injected defect lines.
 3. Cleans any `.bak` or `.orig` temporary files.
 
