@@ -273,7 +273,7 @@ sequenceDiagram
     - `trigger-lint-failure.sh`: adds an unused import (`F401`) and multiple statements on one line (`E702`) to `app/main.py`.
     - `trigger-test-failure.sh`: adds a promotional tier calculation regression to `tests/test_main.py`.
     - `trigger-build-failure.sh`: makes the `Dockerfile` reference a missing build context file.
-    - `trigger-deploy-failure.sh`: makes `scripts/deploy.sh` exhaust the container memory limit (OOM, exit 137).
+    - `trigger-deploy-failure.sh`: sets `MEMORY=256Mi` and a 2048 MB cache pre-warm buffer in `scripts/deploy.sh`, so the container OOMs on startup (exit 137).
     - `reset-scenarios.sh`: reverts scenario commits idempotently and leaves a clean working tree.
   - `demo/seed-demo-repo.sh`: seeds the customer demo repository for live evaluation.
   - `demo/infra/terraform/`: provisions Workload Identity Federation (WIF) Pool, Provider, Artifact Registry, and least-privilege CI/CD service accounts for keyless GitHub Actions authentication.
@@ -953,7 +953,7 @@ done
 ```
 
 ### Offline Multi-Service Simulation
-Unit and component tests run fully offline, with no network or cloud access. Tests in `bridge/tests/` and `agent/tests/` use local mock servers:
+Unit and component tests run fully offline, with no external network or cloud access. Tests in `bridge/tests/` and `agent/tests/` use local mock servers:
 - `fake_github_server.py`: Simulates GitHub Actions jobs, runner log streams, check runs, and issue comments.
 - `fake_ticket_server.py`: Simulates ServiceNow Table and Attachment REST APIs.
 
