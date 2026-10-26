@@ -155,7 +155,7 @@ git pull origin main
 
 #### Step 3: Expected ServiceNow Write-Back
 - **Incident State**: Created in state `In Progress (2)`.
-- **Short Description**: `[CI/CD Failure] ssvaidyanathan/gdi-sample-pipeline-app (lint)`
+- **Short Description**: `[gdi-demo] [CI/CD Failure] ssvaidyanathan/gdi-sample-pipeline-app (lint)` (prefixed with `[<name_prefix>-<env>]` per bridge configuration)
 - **Work Notes**: HTML summary detailing violations with file:line coordinates.
 - **Attachment**: Downloadable HTML investigation report `ci_cd_investigation_report_INC00XXXXX.html`.
 
@@ -245,6 +245,10 @@ git pull origin main
   step this feature keeps.
 - `[Auto-Fix Initiated]` work note with the PR link, then the PR's CI goes green, then a PR comment
   and an `[Auto-Fix Verification] ... PASSED` work note. The incident stays In Progress.
+- If the agent's LLM synthesis produces an unparseable or structurally invalid patch (for example,
+  omitting diff context indentation), pre-flight validation rejects it with `status="no_safe_fix"`.
+  The incident instead receives an `[Auto-Fix Hand-off] No automated fix PR opened: <reason>. Requires human attention.`
+  work note (observed on run `40404106492`, incident `INC0010313`).
 
 #### Step 6: Reset
 Close the fix PR without merging, then revert the scenario commit (see [Section 4](#4-reset--cleanup-procedure)):
@@ -321,9 +325,8 @@ involved.
   incident gets an `[Auto-Fix Hand-off] No automated fix PR opened: An automated fix was proposed
   but could not be applied: <rationale>. Requires human attention.` work note, where `<rationale>`
   is the revert rationale.
-- **Status:** expected behaviour, derived from the code.
-  Not yet verified live: this `commit_hunk_revert` outcome is covered by the bridge's unit and
-  integration tests (synthetic fixtures) but has not been observed in a live run of this scenario.
+- **Status:** Verified live (workflow run `40401627318`, incident `INC0010310`, PR `#12` reverting
+  the added `COPY` instruction and comment; fix CI run `40401895559` passed with `[Auto-Fix Verification] ... PASSED`).
 - If the agent finds no safe fix, no PR is opened. The incident instead gets an
   `[Auto-Fix Hand-off] No automated fix PR opened: <reason>. Requires human attention.` work note.
   That is the designed no-fix path and counts as correct behaviour.
@@ -406,9 +409,10 @@ the evidence (or flagged by a report annotation) are reverted.
   incident gets an `[Auto-Fix Hand-off] No automated fix PR opened: An automated fix was proposed
   but could not be applied: <rationale>. Requires human attention.` work note, where `<rationale>`
   is the revert rationale.
-- **Status:** expected behaviour, derived from the code.
-  Not yet verified live: this `commit_hunk_revert` outcome is covered by the bridge's unit and
-  integration tests (synthetic fixtures) but has not been observed in a live run of this scenario.
+- **Status:** Verified live (workflow run `40402473890`, incident `INC0010311`, PR `#13` reverting
+  the memory reduction and removing `CACHE_PREWARM_BUFFER_MB=2048`; fix CI run `40402843081` reported
+  `[Auto-Fix Verification] ... INCONCLUSIVE`). Verified green on `main` after merging PR `#13`
+  (merge `4040bad`, workflow run `40403056634` green across all jobs including `Deploy to Cloud Run`).
 
 - `[Auto-Fix Initiated]` work note with the PR link.
 - The PR's CI runs lint, tests and build, which pass. `Deploy to Cloud Run` is **skipped**, because
