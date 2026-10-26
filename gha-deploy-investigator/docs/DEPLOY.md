@@ -357,7 +357,7 @@ This ensures pull requests and branch builds run linting, unit testing, and loca
 1. Open your GitHub App settings (e.g. via GitHub Developer Settings).
 2. Set **Webhook URL** to:
    ```
-   https://${BRIDGE_URL}/webhook/github
+   ${BRIDGE_URL}/webhook/github
    ```
 3. Set **Webhook Secret** to the secret string populated into `${NAME_PREFIX}-github-webhook-secret`.
 4. Permissions required:
