@@ -136,3 +136,32 @@ resolve_api_key
     )
     assert res.returncode == 0
     assert "test-consumer-key-12345" in res.stdout
+
+
+def test_verify_demo_infra_help():
+    """Verify verify-demo-infra.sh --help displays options."""
+    verify_script = Path(__file__).parent.parent / "scripts" / "verify-demo-infra.sh"
+    res = subprocess.run(
+        [str(verify_script), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    assert "--mock" in res.stdout
+    assert "--dry-run" in res.stdout
+
+
+def test_verify_demo_infra_mock():
+    """Verify verify-demo-infra.sh --mock passes all checks."""
+    verify_script = Path(__file__).parent.parent / "scripts" / "verify-demo-infra.sh"
+    res = subprocess.run(
+        [str(verify_script), "--mock"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    assert "Verifying ATA Demo Infrastructure & Endpoints (MOCK/DRY-RUN)" in res.stdout
+    assert "Verification Complete: All Checks Passed" in res.stdout
+

@@ -19,6 +19,10 @@ resource "google_monitoring_alert_policy" "orders_5xx" {
   combiner              = "OR"
   notification_channels = [local.notification_channel_id]
 
+  alert_strategy {
+    auto_close = "1800s"
+  }
+
   conditions {
     display_name = "Cloud Run orders 5xx error rate"
     condition_threshold {
@@ -52,6 +56,10 @@ resource "google_monitoring_alert_policy" "orders_latency" {
   combiner              = "OR"
   notification_channels = [local.notification_channel_id]
 
+  alert_strategy {
+    auto_close = "1800s"
+  }
+
   conditions {
     display_name = "Cloud Run orders latency > 2s"
     condition_threshold {
@@ -83,6 +91,10 @@ resource "google_monitoring_alert_policy" "inventory_5xx" {
   display_name          = "${var.name_prefix}-inventory-5xx"
   combiner              = "OR"
   notification_channels = [local.notification_channel_id]
+
+  alert_strategy {
+    auto_close = "1800s"
+  }
 
   conditions {
     display_name = "Cloud Run inventory 5xx error rate"
@@ -117,6 +129,10 @@ resource "google_monitoring_alert_policy" "inventory_latency" {
   combiner              = "OR"
   notification_channels = [local.notification_channel_id]
 
+  alert_strategy {
+    auto_close = "1800s"
+  }
+
   conditions {
     display_name = "Cloud Run inventory latency > 2s"
     condition_threshold {
@@ -148,6 +164,10 @@ resource "google_monitoring_alert_policy" "apigee_orders_5xx" {
   display_name          = "${var.name_prefix}-apigee-orders-5xx"
   combiner              = "OR"
   notification_channels = [local.notification_channel_id]
+
+  alert_strategy {
+    auto_close = "1800s"
+  }
 
   conditions {
     display_name = "Apigee orders proxy 5xx spike"
@@ -182,6 +202,10 @@ resource "google_monitoring_alert_policy" "apigee_orders_429" {
   combiner              = "OR"
   notification_channels = [local.notification_channel_id]
 
+  alert_strategy {
+    auto_close = "1800s"
+  }
+
   conditions {
     display_name = "Apigee orders proxy 429 rate limit spike"
     condition_threshold {
@@ -215,6 +239,10 @@ resource "google_monitoring_alert_policy" "cloudsql_connections" {
   combiner              = "OR"
   notification_channels = [local.notification_channel_id]
 
+  alert_strategy {
+    auto_close = "1800s"
+  }
+
   conditions {
     display_name = "Cloud SQL connection count critical"
     condition_threshold {
@@ -246,6 +274,10 @@ resource "google_monitoring_alert_policy" "cloudsql_cpu" {
   display_name          = "${var.name_prefix}-cloudsql-cpu-high"
   combiner              = "OR"
   notification_channels = [local.notification_channel_id]
+
+  alert_strategy {
+    auto_close = "1800s"
+  }
 
   conditions {
     display_name = "Cloud SQL CPU utilization > 85%"

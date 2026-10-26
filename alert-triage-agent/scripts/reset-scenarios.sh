@@ -42,6 +42,8 @@ NO_WAIT="${ATA_RESET_NO_WAIT:-${NO_WAIT:-false}}"
 QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-300}}")"
 WAIT_TIMEOUT_SECS="$(parse_duration "${ATA_RESET_TIMEOUT:-${WAIT_TIMEOUT:-900}}")"
 POLL_INTERVAL_SECS="$(parse_duration "${ATA_RESET_POLL_INTERVAL:-${POLL_INTERVAL:-15}}")"
+MAX_ALERT_AGE_SECS="$(parse_duration "${ATA_RESET_MAX_ALERT_AGE:-${MAX_ALERT_AGE:-3600}}")"
+RESET_START_TIME="$(date +%s)"
 
 # Parse CLI arguments
 while [[ $# -gt 0 ]]; do
@@ -74,6 +76,22 @@ while [[ $# -gt 0 ]]; do
             POLL_INTERVAL_SECS="$(parse_duration "${1#*=}")"
             shift
             ;;
+        --max-alert-age)
+            MAX_ALERT_AGE_SECS="$(parse_duration "$2")"
+            shift 2
+            ;;
+        --max-alert-age=*)
+            MAX_ALERT_AGE_SECS="$(parse_duration "${1#*=}")"
+            shift
+            ;;
+        --serving-revisions)
+            ATA_SERVING_REVISIONS="$2"
+            shift 2
+            ;;
+        --serving-revisions=*)
+            ATA_SERVING_REVISIONS="${1#*=}"
+            shift
+            ;;
         --dry-run)
             export DRY_RUN="true"
             shift
@@ -90,6 +108,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --quiet-period <duration>  Quiet period after alerts close (default: 300s / 5m)"
             echo "  --timeout <duration>       Max timeout waiting for alerts to close (default: 900s / 15m)"
             echo "  --poll-interval <duration> Polling interval for alert queries (default: 15s)"
+            echo "  --max-alert-age <duration> Max age of open alerts before reset start (default: 60m / 3600s)"
+            echo "  --serving-revisions <list> Comma or space separated list of active Cloud Run revisions"
             echo "  --dry-run                  Simulate reset without network modifications"
             echo "  --mock                     Run in mock mode without GCP cloud dependencies"
             echo "  -h, --help                 Display this help message"
@@ -102,20 +122,105 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+get_serving_revisions() {
+    local revs=()
+    if [ -n "${PINNED_INVENTORY_REVISION:-}" ]; then
+        revs+=("${PINNED_INVENTORY_REVISION}")
+    fi
+    if [ -n "${ATA_SERVING_REVISIONS:-}" ]; then
+        for r in ${ATA_SERVING_REVISIONS//,/ }; do
+            revs+=("${r}")
+        done
+    fi
+
+    if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
+        for svc in "${NAME_PREFIX}-inventory-api" "${NAME_PREFIX}-orders-api"; do
+            local svc_revs
+            svc_revs="$(gcloud run services describe "${svc}" \
+                --project="${PROJECT_ID}" \
+                --region="${REGION}" \
+                --format="value(status.traffic[].revisionName)" 2>/dev/null || true)"
+            if [ -n "${svc_revs}" ]; then
+                for r in ${svc_revs}; do
+                    revs+=("${r}")
+                done
+            fi
+            local latest_ready
+            latest_ready="$(gcloud run services describe "${svc}" \
+                --project="${PROJECT_ID}" \
+                --region="${REGION}" \
+                --format="value(status.latestReadyRevisionName)" 2>/dev/null || true)"
+            if [ -n "${latest_ready}" ]; then
+                revs+=("${latest_ready}")
+            fi
+        done
+    fi
+    echo "${revs[@]:-}"
+}
+
 query_open_ata_alerts() {
     local proj="$1"
     local tok="$2"
+    local reset_start="${3:-$(date +%s)}"
+    local max_age_secs="${4:-3600}"
+    local serving_revs="${5:-}"
 
     python3 -c '
-import sys, json, urllib.request, urllib.error
+import sys, json, urllib.request, urllib.error, re
+from datetime import datetime, timezone
+
+def parse_time_to_epoch(ts_str):
+    if not ts_str:
+        return None
+    try:
+        return float(ts_str)
+    except (ValueError, TypeError):
+        pass
+    try:
+        s = str(ts_str).rstrip("Z")
+        if "." in s:
+            parts = s.split(".")
+            frac = (parts[1] + "000000")[:6]
+            s = f"{parts[0]}.{frac}"
+            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+        else:
+            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+def extract_revision(alert):
+    res = alert.get("resource") or {}
+    labels = res.get("labels") or {}
+    if "revision_name" in labels:
+        return labels["revision_name"]
+    metric = alert.get("metric") or {}
+    m_labels = metric.get("labels") or {}
+    if "revision_name" in m_labels:
+        return m_labels["revision_name"]
+    top_labels = alert.get("labels") or {}
+    for k, v in top_labels.items():
+        if "revision_name" in k:
+            return v
+    res_str = str(alert.get("resourceName") or alert.get("resource_name") or "")
+    m = re.search(r"revision_name[=\s:]+([a-zA-Z0-9_-]+)", res_str)
+    if m:
+        return m.group(1)
+    return None
 
 project_id = sys.argv[1]
 token = sys.argv[2]
+reset_start_time = float(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else 0.0
+max_alert_age_secs = float(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else 3600.0
+serving_revisions_raw = sys.argv[5] if len(sys.argv) > 5 else ""
+serving_revs_set = set(r.strip() for r in serving_revisions_raw.replace(",", " ").split() if r.strip())
+
 if not token:
-    print("[]")
+    print(json.dumps({"active": [], "ignored": []}))
     sys.exit(0)
 
-open_alerts = []
+active_alerts = []
+ignored_alerts = []
 page_token = None
 
 while True:
@@ -146,20 +251,45 @@ while True:
 
         if is_ata:
             alert_id = alert.get("name", "").split("/")[-1]
-            open_alerts.append({
+            open_time_str = alert.get("openTime") or alert.get("started_at") or ""
+            open_epoch = parse_time_to_epoch(open_time_str)
+            rev = extract_revision(alert)
+
+            ignore_reasons = []
+
+            # 1. Non-serving revision check
+            if rev and serving_revs_set and (rev not in serving_revs_set):
+                ignore_reasons.append(f"Non-serving revision ({rev})")
+
+            # 2. Stale age check
+            if open_epoch is not None and reset_start_time > 0:
+                cutoff_time = reset_start_time - max_alert_age_secs
+                if open_epoch < cutoff_time:
+                    age_min = int((reset_start_time - open_epoch) / 60)
+                    max_min = int(max_alert_age_secs / 60)
+                    ignore_reasons.append(f"Opened > {max_min}m before reset started ({age_min}m ago)")
+
+            alert_entry = {
                 "id": alert_id,
                 "name": alert.get("name", ""),
                 "policy_display": disp or pol_name,
                 "policy_name": pol_name,
-                "open_time": alert.get("openTime", ""),
-            })
+                "open_time": open_time_str,
+                "revision": rev or "",
+            }
+
+            if ignore_reasons:
+                alert_entry["ignore_reasons"] = ignore_reasons
+                ignored_alerts.append(alert_entry)
+            else:
+                active_alerts.append(alert_entry)
 
     page_token = data.get("nextPageToken")
     if not page_token:
         break
 
-print(json.dumps(open_alerts))
-' "${proj}" "${tok}"
+print(json.dumps({"active": active_alerts, "ignored": ignored_alerts}))
+' "${proj}" "${tok}" "${reset_start}" "${max_age_secs}" "${serving_revs}"
 }
 
 wait_for_open_alerts() {
@@ -179,9 +309,16 @@ wait_for_open_alerts() {
     start_time=$(date +%s)
     local deadline=$((start_time + WAIT_TIMEOUT_SECS))
     local quiet_start=""
+    local first_poll="true"
+
+    local serving_revs
+    serving_revs="$(get_serving_revisions)"
 
     log_info "    Polling Cloud Monitoring API (read-only) for OPEN alerts on ata-* policies (label app=alert-triage-agent)..."
-    log_info "    Max timeout: ${WAIT_TIMEOUT_SECS}s | Quiet period: ${QUIET_PERIOD_SECS}s | Polling interval: ${POLL_INTERVAL_SECS}s"
+    log_info "    Max timeout: ${WAIT_TIMEOUT_SECS}s | Quiet period: ${QUIET_PERIOD_SECS}s | Polling interval: ${POLL_INTERVAL_SECS}s | Max alert age: ${MAX_ALERT_AGE_SECS}s"
+    if [ -n "${serving_revs}" ]; then
+        log_info "    Serving revisions scoped: ${serving_revs}"
+    fi
 
     while true; do
         local now
@@ -196,33 +333,52 @@ wait_for_open_alerts() {
         fi
 
         local open_alerts_json
-        open_alerts_json="$(query_open_ata_alerts "${PROJECT_ID}" "${token}")"
+        open_alerts_json="$(query_open_ata_alerts "${PROJECT_ID}" "${token}" "${RESET_START_TIME}" "${MAX_ALERT_AGE_SECS}" "${serving_revs}")"
         local count
-        count=$(echo "${open_alerts_json}" | python3 -c "import sys, json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+        count=$(echo "${open_alerts_json}" | python3 -c "import sys, json; data=json.load(sys.stdin); print(len(data.get('active', [])))" 2>/dev/null || echo "0")
+
+        if [ "${first_poll}" = "true" ]; then
+            first_poll="false"
+            local ignored_count
+            ignored_count=$(echo "${open_alerts_json}" | python3 -c "import sys, json; data=json.load(sys.stdin); print(len(data.get('ignored', [])))" 2>/dev/null || echo "0")
+            if [ "${ignored_count}" -gt 0 ]; then
+                log_info "    Ignored ${ignored_count} stale/non-serving open alert(s):"
+                echo "${open_alerts_json}" | python3 - << 'PYEOF'
+import sys, json
+data = json.load(sys.stdin)
+for a in data.get('ignored', []):
+    reasons = "; ".join(a.get('ignore_reasons', []))
+    rev_info = f" (rev: {a.get('revision')})" if a.get('revision') else ""
+    print(f"      - [{a.get('id')}] Policy: {a.get('policy_display')}{rev_info} | Reason: {reasons} | Open: {a.get('open_time')}")
+PYEOF
+            fi
+        fi
 
         if [ "${now}" -ge "${deadline}" ] && [ "${count}" -gt 0 ]; then
             log_error "Timed out waiting for open ATA alerts to close after ${WAIT_TIMEOUT_SECS}s (${elapsed}s elapsed)!"
             log_error "Still-open alerts (${count} total):"
-            echo "${open_alerts_json}" | python3 -c '
+            echo "${open_alerts_json}" | python3 - << 'PYEOF' >&2
 import sys, json
-alerts = json.load(sys.stdin)
-for a in alerts:
-    print(f"  - [{a.get(\"id\")}] Policy: {a.get(\"policy_display\")} | Open time: {a.get(\"open_time\")} | Resource: {a.get(\"name\")}")
-' >&2
+data = json.load(sys.stdin)
+for a in data.get('active', []):
+    print(f"  - [{a.get('id')}] Policy: {a.get('policy_display')} | Open time: {a.get('open_time')} | Resource: {a.get('name')}")
+PYEOF
             exit 1
         fi
 
         if [ "${count}" -gt 0 ]; then
             quiet_start=""
             local alert_summary
-            alert_summary=$(echo "${open_alerts_json}" | python3 -c '
+            alert_summary=$(echo "${open_alerts_json}" | python3 - << 'PYEOF' 2>/dev/null || echo ""
 import sys, json
-alerts = json.load(sys.stdin)
-items = [f"{a.get(\"policy_display\")} ({a.get(\"id\")})" for a in alerts[:5]]
+data = json.load(sys.stdin)
+alerts = data.get('active', [])
+items = [f"{a.get('policy_display')} ({a.get('id')})" for a in alerts[:5]]
 if len(alerts) > 5:
     items.append(f"...+{len(alerts)-5} more")
 print(", ".join(items))
-' 2>/dev/null || echo "")
+PYEOF
+)
 
             log_info "    [Progress] Elapsed: ${elapsed}s / ${WAIT_TIMEOUT_SECS}s | Still open: ${count} alert(s) [${alert_summary}]"
             sleep "${POLL_INTERVAL_SECS}"
