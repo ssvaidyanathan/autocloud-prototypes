@@ -917,7 +917,7 @@ Organization Policies in enterprise GCP environments can block parts of the depl
    - *Remediation*: Request a project-level policy exemption, or deploy an External Application Load Balancer with Cloud Armor and set Cloud Run ingress to `internal-and-cloud-load-balancing`.
 2. **Ingress Controls**:
    - `gdi-bridge`: Requires `all` (or `internal-and-cloud-load-balancing` behind Cloud Load Balancing).
-   - `gdi-agent`: Requires `internal` (`INGRESS_TRAFFIC_INTERNAL_ONLY`). Cloud Tasks in the same project can reach it, authenticated with an OIDC token for the Tasks invoker service account.
+   - `gdi-agent`: Requires `internal` (`INGRESS_TRAFFIC_INTERNAL_ONLY`). Cloud Tasks in the same project can reach it, authenticated with an OIDC token for the Tasks invoker service account. The bridge attaches that token only when `TASKS_INVOKER_SA` is set (`bridge/app/core/tasks.py`).
 3. **Workload Identity Federation Restrictions (`constraints/iam.workloadIdentityPoolProviders`)**:
    - Allow `https://token.actions.githubusercontent.com` as an OIDC provider for keyless GitHub Actions authentication.
 4. **Service Account Key Creation (`constraints/iam.disableServiceAccountKeyCreation`)**:
