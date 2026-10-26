@@ -85,6 +85,22 @@ demo-workspace/
 - **ServiceNow Console**: Access incidents at `https://<your-instance>.service-now.com` (Filter: `correlation_display=gha-deploy-investigator`).
 - **GitHub Actions Console**: Track workflow runs at `https://github.com/ssvaidyanathan/gdi-sample-pipeline-app/actions`.
 
+### D. Seeding the Demo Repository (Administrators Only)
+Skip this step if `ssvaidyanathan/gdi-sample-pipeline-app` already exists. To seed it for live end-to-end evaluation, run from `autocloud-prototypes/gha-deploy-investigator`:
+
+```bash
+# 1. Seed the demo app into a temporary directory or dedicated worktree
+./demo/seed-demo-repo.sh /tmp/gdi-sample-pipeline-app
+
+# 2. Push to the GitHub remote (done by the deployment administrator)
+cd /tmp/gdi-sample-pipeline-app
+git remote add origin https://github.com/ssvaidyanathan/gdi-sample-pipeline-app.git
+git branch -M main
+# git push -u origin main
+```
+
+The seeded repository contains only the customer-facing microservice (`sample-pipeline-app/`) with its multi-stage CI/CD pipeline (`.github/workflows/pipeline.yml`), Docker packaging, tests, and deployment scripts. No fault injection tooling or evaluation answers are copied into it (see [Section 6](#6-scenario-tooling-design--invariants)).
+
 ---
 
 ## 3. Scenario Execution Walkthrough
@@ -96,6 +112,17 @@ Each scenario follows a standardized operational cycle:
 4. Observe the pipeline failure and autonomous investigation on ServiceNow and GitHub.
 5. Reset: close the auto-fix PR with its branch deleted (if one was opened), then `git revert` the scenario commit on `main` and push (see [Section 4](#4-reset--cleanup-procedure)). **Do not merge the fix PR.**
 6. Confirm the pipeline on `main` completes with all jobs green before moving to the next scenario.
+
+### Scenario Quick Reference
+
+Trigger scripts live in `demo/scenarios/` and take `[TARGET_DIR] [--commit]` (see [Section 6](#6-scenario-tooling-design--invariants)). "Reproduce With" is the command, run inside the target app directory, that surfaces the same failure as the pipeline stage. Scenario 4's command performs a real Cloud Run deploy, so it needs `gcloud` credentials.
+
+| # | Stage | Trigger Script | File Touched | Commit Message (`--commit`) | Reproduce With | Diagnosed By | Expected Auto-Fix (`AUTOFIX_ENABLED=true`) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | `lint` | `trigger-lint-failure.sh` | `app/main.py` | `refactor(orders): add order export and currency formatting helper` | `ruff check app/` | `PipelineLogsSpecialist` | `deterministic_linter` PR; verification `PASSED` |
+| 2 | `test` | `trigger-test-failure.sh` | `tests/test_main.py` | `feat(pricing): update order discount tier calculation` | `pytest tests/ -v` | `PipelineLogsSpecialist` | `llm_patch` PR; verification `PASSED` |
+| 3 | `build` | `trigger-build-failure.sh` | `Dockerfile` | `chore(deps): configure cache warmup asset packaging` | `docker build -t sample-pipeline-app:test .` | `PipelineLogsSpecialist` | `llm_patch` PR; verification `PASSED`, or an `[Auto-Fix Hand-off]` note and no PR |
+| 4 | `deploy` | `trigger-deploy-failure.sh` | `scripts/deploy.sh` | `feat(cache): pre-warm order history cache on startup` | `./scripts/deploy.sh` (Cloud Run startup OOM, exit 137) | `RuntimeHealthSpecialist` | `config_tuning` PR; verification `INCONCLUSIVE` |
 
 ---
 
@@ -334,6 +361,7 @@ git pull origin main
 - **Causal Remediation**:
   - Revert memory limit reduction in `scripts/deploy.sh` (restore to `512Mi` or higher).
   - Remove or reduce `CACHE_PREWARM_BUFFER_MB` buffer allocation.
+  - The `RuntimeHealthSpecialist`'s recommended actions include a memory increase such as `gcloud run services update <service> --memory 1Gi --region <region>`.
 - **Unrelated Observations**: Any auxiliary deployment warnings placed in separate section.
 
 #### Expected Auto-Fix PR (`config_tuning`)
@@ -363,7 +391,7 @@ git revert HEAD --no-edit && git push origin main
 *Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 #### Note on Declarative Deployment Invariant
-`scripts/deploy.sh` enforces `--clear-env-vars` when `EXTRA_ENV_VARS` is empty. Reverting the scenario commit (or running the clean-slate reset) empties `EXTRA_ENV_VARS`, which clears `CACHE_PREWARM_BUFFER_MB=2048` from the Cloud Run service and returns it to baseline. The auto-fix PR only raises the memory limit and does not clear that variable, which is another reason to reset by revert rather than by merging the fix PR.
+`gcloud run deploy` keeps environment variables from the previous Cloud Run revision unless they are explicitly cleared or overwritten. Without a guard, a revert commit that omits `EXTRA_ENV_VARS` would leave the stale `CACHE_PREWARM_BUFFER_MB=2048` in the new revision. To keep deployments declarative, `scripts/deploy.sh` passes `--set-env-vars "${EXTRA_ENV_VARS}"` when `EXTRA_ENV_VARS` is non-empty and `--clear-env-vars` when it is empty, so the service environment always mirrors the repository state (details in the [demo README](README.md#declarative-deployment-invariant---clear-env-vars)). Reverting the scenario commit (or running the clean-slate reset) empties `EXTRA_ENV_VARS`, which clears `CACHE_PREWARM_BUFFER_MB=2048` from the Cloud Run service and returns it to baseline. The auto-fix PR only raises the memory limit and does not clear that variable, which is another reason to reset by revert rather than by merging the fix PR.
 
 ---
 
@@ -436,9 +464,11 @@ cd gdi-sample-pipeline-app
 ```
 
 The reset script idempotently:
-1. Reverts any scenario commits if HEAD matches a known scenario signature.
-2. Restores `app/main.py`, `tests/test_main.py`, `Dockerfile`, and `scripts/deploy.sh` to baseline.
+1. With `--commit`, reverts `HEAD` if the target is a git repository and `HEAD` is a scenario commit (matched when `refactor(orders)`, `feat(pricing)`, `chore(deps)`, or `feat(cache)` appears anywhere in the commit message). Because this is a substring match, an unrelated commit at `HEAD` containing one of these strings (for example a Dependabot `chore(deps)` bump) would also be reverted. The script also restores the four scenario files with `git checkout --`, discarding any uncommitted edits to them.
+2. Restores `app/main.py`, `tests/test_main.py`, `Dockerfile`, and `scripts/deploy.sh` to baseline, removing all injected defect lines.
 3. Cleans any `.bak` or `.orig` temporary files.
+
+Like the trigger scripts, `reset-scenarios.sh` defaults to `demo/sample-pipeline-app` when no target directory is given.
 
 ---
 
@@ -459,4 +489,11 @@ The reset script idempotently:
 
 ---
 
-*For scenario implementation details and tooling catalog, see [SCENARIOS.md](SCENARIOS.md).*
+## 6. Scenario Tooling Design & Invariants
+
+The scenario tooling is built so the agent is evaluated on realistic failures, not on hints planted in the demo repository.
+
+1. **Tooling lives outside the seeded app.** All trigger and reset scripts reside in `demo/scenarios/`, outside `demo/sample-pipeline-app/`. The seeded repository stays a realistic microservice with no fault injection scripts or demo triggers, so the agent cannot read leaked trigger scripts or commit messages that would cause evaluation overfitting.
+2. **Realistic defect markers.** Faults contain no artificial `DEMO_*` identifiers or synthetic keys. They use realistic configuration and code regressions: `CACHE_PREWARM_BUFFER_MB=2048`, unused imports, a discount calculation regression, and a missing container packaging asset.
+3. **Clean file operations.** Trigger scripts edit files directly without leaving `.bak` or `.orig` artifacts. `reset-scenarios.sh` removes any leftovers.
+4. **Standalone or committed use.** Each script takes an optional target directory (default: `demo/sample-pipeline-app`) and an optional `--commit` flag that creates a commit with a conventional commit message (listed in the [Scenario Quick Reference](#scenario-quick-reference)). If the target is not a git repository, `--commit` prints a warning and makes no commit.
