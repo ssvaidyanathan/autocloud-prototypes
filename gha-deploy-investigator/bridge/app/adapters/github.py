@@ -202,8 +202,13 @@ class GitHubAdapter(BaseAdapter):
         report: Report,
         ref: IncidentRef,
         pull_request: Optional[PullRequestRef] = None,
+        autofix_note: Optional[str] = None,
     ) -> None:
-        """Post a Check Run on commit SHA linking to the ServiceNow incident (and fix PR)."""
+        """Post a Check Run on commit SHA linking to the ServiceNow incident (and fix PR).
+
+        ``autofix_note`` (e.g. the repeat-fix guard note) is appended verbatim to the Check
+        Run text and the diagnostic comment.
+        """
         repo_str = incident.github_repo or incident.service_hint or ""
         if not incident.github_head_sha or not repo_str or "/" not in repo_str:
             logger.warning(
@@ -257,6 +262,8 @@ class GitHubAdapter(BaseAdapter):
         fix_pr_md = format_fix_pr_markdown(pull_request) if pull_request else None
         if fix_pr_md:
             output_data["text"] = f"{report.summary}\n\n{fix_pr_md}"
+        if autofix_note:
+            output_data["text"] = f"{output_data['text']}\n\n{autofix_note}"
         if report.annotations:
             output_data["annotations"] = [
                 {
@@ -296,9 +303,7 @@ class GitHubAdapter(BaseAdapter):
                     if report.causal_remediation
                     else report.recommended_actions
                 )
-                actions_md = (
-                    "\n".join(f"- {act}" for act in remediation_items) or "- Review logs"
-                )
+                actions_md = "\n".join(f"- {act}" for act in remediation_items) or "- Review logs"
                 evidence_lines = []
                 for area, items in report.evidence_by_area.items():
                     for item in items:
@@ -343,6 +348,8 @@ class GitHubAdapter(BaseAdapter):
                     )
                 if fix_pr_md:
                     comment_lines.extend([fix_pr_md, ""])
+                if autofix_note:
+                    comment_lines.extend([autofix_note, ""])
                 comment_lines.extend(
                     [
                         "---",

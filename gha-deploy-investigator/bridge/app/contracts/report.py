@@ -76,7 +76,7 @@ class FixProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["proposed", "no_safe_fix", "unsupported"]
-    strategy: Literal["deterministic_linter", "llm_patch", "config_tuning"]
+    strategy: Literal["deterministic_linter", "llm_patch", "config_tuning", "commit_hunk_revert"]
     rationale: str
     patches: list[FilePatch] = Field(default_factory=list)
     target_branch_base: str

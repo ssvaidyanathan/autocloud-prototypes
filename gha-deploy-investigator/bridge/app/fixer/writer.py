@@ -144,6 +144,31 @@ class FixPRWriter(FixPRWriterBase):
             return None
         return self._decode_content(data, clean_path)
 
+    def _get_json(self, owner: str, repo: str, path: str) -> Optional[Any]:
+        """GET a repository API path; None on 404, raises on other errors."""
+        resp = self._request("GET", owner, repo, path)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
+    def fetch_commit(self, owner: str, repo: str, sha: str) -> Optional[dict[str, Any]]:
+        data = self._get_json(owner, repo, f"/commits/{quote(sha, safe='')}")
+        return data if isinstance(data, dict) else None
+
+    def fetch_commit_pulls(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+        data = self._get_json(owner, repo, f"/commits/{quote(sha, safe='')}/pulls")
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
+    def fetch_default_branch(self, owner: str, repo: str) -> Optional[str]:
+        data = self._get_json(owner, repo, "")
+        if not isinstance(data, dict):
+            return None
+        branch = data.get("default_branch")
+        return branch if isinstance(branch, str) and branch else None
+
     def _resolve_patch(
         self, owner: str, repo: str, ref: str, patch: FilePatch
     ) -> tuple[str, str, Optional[str], str, int]:

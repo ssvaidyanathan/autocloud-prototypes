@@ -35,9 +35,7 @@ class _ReusableClientWrapper:
         return getattr(self._client, name)
 
 
-def build_servicenow_description(
-    incident: Incident, report: Optional[Report] = None
-) -> str:
+def build_servicenow_description(incident: Incident, report: Optional[Report] = None) -> str:
     """Build a facts-only summary description for ServiceNow incidents.
 
     Contains facts only: repository, branch, short commit SHA, GitHub actor,
@@ -100,9 +98,7 @@ class ServiceNowAdapter(BaseAdapter):
         self._http_client = http_client
         self._caller_cache: dict[str, str] = {}
 
-    def build_description(
-        self, incident: Incident, report: Optional[Report] = None
-    ) -> str:
+    def build_description(self, incident: Incident, report: Optional[Report] = None) -> str:
         """Build facts-only summary description for ServiceNow incidents."""
         return build_servicenow_description(incident, report)
 
@@ -191,7 +187,6 @@ class ServiceNowAdapter(BaseAdapter):
                     )
                     raise
 
-
     def verify(self, request: Request, payload: bytes) -> bool:
         """Verify inbound webhook Bearer token."""
         expected_token = self.config.servicenow_webhook_token
@@ -261,9 +256,7 @@ class ServiceNowAdapter(BaseAdapter):
         run_id = (
             incident.github_run_id if incident.github_run_id is not None else incident.external_id
         )
-        run_attempt = (
-            incident.github_run_attempt if incident.github_run_attempt is not None else 1
-        )
+        run_attempt = incident.github_run_attempt if incident.github_run_attempt is not None else 1
         correlation_id = f"gdi:{repo_full}:{run_id}:{run_attempt}"
         correlation_display = getattr(
             self.config, "servicenow_correlation_display", "gha-deploy-investigator"
@@ -402,13 +395,9 @@ class ServiceNowAdapter(BaseAdapter):
                 sys_id = res_json.get("sys_id")
                 number = res_json.get("number")
                 if not sys_id:
-                    raise ValueError(
-                        "ServiceNow incident creation response missing 'sys_id'"
-                    )
+                    raise ValueError("ServiceNow incident creation response missing 'sys_id'")
                 if not number:
-                    raise ValueError(
-                        "ServiceNow incident creation response missing 'number'"
-                    )
+                    raise ValueError("ServiceNow incident creation response missing 'number'")
                 patch_endpoint = f"{table_endpoint}/{sys_id}"
 
                 # 2. Post findings as work notes
@@ -451,7 +440,6 @@ class ServiceNowAdapter(BaseAdapter):
                 )
 
                 return ref
-
 
         return self._execute_with_retry(_do_create_or_patch)
 
@@ -513,6 +501,20 @@ class ServiceNowAdapter(BaseAdapter):
             return
         endpoint = f"{base_url}/api/now/table/incident/{ref.external_id}"
         note = format_fix_pr_handoff_work_note(rationale)
+
+        def _do_note() -> None:
+            with self._get_client() as client:
+                resp = client.patch(endpoint, json={"work_notes": note})
+                resp.raise_for_status()
+
+        self._execute_with_retry(_do_note)
+
+    def post_work_note(self, ref: IncidentRef, note: str) -> None:
+        """Post a pre-formatted work note verbatim (e.g. the repeat-fix guard note)."""
+        base_url = (self.config.servicenow_instance_url or "").rstrip("/")
+        if not base_url:
+            return
+        endpoint = f"{base_url}/api/now/table/incident/{ref.external_id}"
 
         def _do_note() -> None:
             with self._get_client() as client:

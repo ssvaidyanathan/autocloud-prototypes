@@ -5,7 +5,7 @@ ServiceNow work note -> Check Run carries the PR link.
 """
 
 import json
-from typing import Any, Generator
+from typing import Any, Generator, Optional
 from unittest.mock import MagicMock
 
 import httpx
@@ -20,7 +20,7 @@ from bridge.app.contracts.result import InvestigationResult
 from bridge.app.core.dedup import get_dedup_registry
 from bridge.app.core.tasks import DispatchResult
 from bridge.app.fixer.ci_listener import CIFeedbackListener
-from bridge.app.fixer.interface import FixPRWriterBase
+from bridge.app.fixer.interface import FixPRWriterBase, build_autofix_branch_name
 from bridge.app.fixer.writer import FixPRWriter
 from bridge.app.main import (
     app,
@@ -362,9 +362,7 @@ class TestAutofixRealProducers:
         assert fake_gh.files["app/main.py"] == FIXED
         assert fake_gh.refs == {f"refs/heads/autofix/run-{RUN_ID}": HEAD_SHA}
 
-    def test_agent_diff_that_does_not_apply_opens_no_branch(
-        self, harness: dict[str, Any]
-    ) -> None:
+    def test_agent_diff_that_does_not_apply_opens_no_branch(self, harness: dict[str, Any]) -> None:
         settings = _settings(autofix_enabled=True)
         client = harness["configure"](settings)
         fake_gh = FakeGitHub(files={"app/main.py": "import sys\nx = 1\n"})
@@ -461,3 +459,183 @@ class TestAutofixRealProducers:
         assert cb.status_code == 200
         assert "fix_pr_url" not in cb.json()
         assert fake_gh.refs == {}
+
+
+SCRIPT_GOOD = "#!/usr/bin/env bash\nSERVICE_MEMORY=384Mi\nRUN_MODE=normal\nlaunch svc\n"
+SCRIPT_BAD = "#!/usr/bin/env bash\nSERVICE_MEMORY=192Mi\nRUN_MODE=normal\nlaunch svc\n"
+SCRIPT_PATCH = (
+    "@@ -1,4 +1,4 @@ heading text\n #!/usr/bin/env bash\n-SERVICE_MEMORY=384Mi\n"
+    "+SERVICE_MEMORY=192Mi\n RUN_MODE=normal\n launch svc"
+)
+
+
+def _failing_commit(files: list[dict[str, Any]], message: str = "Tune runtime") -> dict[str, Any]:
+    return {
+        "sha": HEAD_SHA,
+        "parents": [{"sha": "parent1"}],
+        "commit": {"message": message},
+        "files": files,
+    }
+
+
+def _oom_report_for(path: str, agent: Optional[FixProposal] = None) -> Report:
+    return Report(
+        summary="Deploy failed: container terminated with exit code 137",
+        probable_root_cause=ProbableRootCause(
+            text=f"The failing commit lowered the memory setting in {path} (OOMKilled)",
+            confidence=0.9,
+        ),
+        metadata={"failing_stage": "deploy"},
+        fix_proposal=agent,
+    )
+
+
+class TestCommitHunkRevertFlow:
+    def test_revert_opens_pr_restoring_the_offending_hunk(self, harness: dict[str, Any]) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"deploy/run.sh": SCRIPT_BAD, "app/core.py": "a = 2\n"})
+        fake_gh.commits[HEAD_SHA] = _failing_commit(
+            [
+                {"filename": "deploy/run.sh", "status": "modified", "patch": SCRIPT_PATCH},
+                {
+                    "filename": "app/core.py",
+                    "status": "modified",
+                    "patch": "@@ -1 +1 @@\n-a = 1\n+a = 2",
+                },
+            ]
+        )
+        _writer_for(settings, fake_gh)
+
+        cb = _post_callback(client, harness, "main", _oom_report_for("deploy/run.sh"))
+
+        assert cb.status_code == 200
+        assert "fix_pr_url" in cb.json()
+        assert fake_gh.files["deploy/run.sh"] == SCRIPT_GOOD
+        assert fake_gh.files["app/core.py"] == "a = 2\n"
+        assert "commit_hunk_revert" in fake_gh.pulls[0]["body"]
+        assert "[Auto-Fix Initiated]" in _work_notes()
+
+    def test_apply_failure_hands_off_without_trying_another_candidate(
+        self, harness: dict[str, Any]
+    ) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        # The file at the fix base no longer matches the failing commit's hunk.
+        drifted = SCRIPT_BAD.replace("RUN_MODE=normal", "RUN_MODE=other")
+        fake_gh = FakeGitHub(files={"deploy/run.sh": drifted})
+        fake_gh.commits[HEAD_SHA] = _failing_commit(
+            [{"filename": "deploy/run.sh", "status": "modified", "patch": SCRIPT_PATCH}]
+        )
+        _writer_for(settings, fake_gh)
+
+        cb = _post_callback(
+            client, harness, "main", _oom_report_for("deploy/run.sh", agent=_proposal("main"))
+        )
+
+        assert cb.status_code == 200
+        assert "fix_pr_url" not in cb.json()
+        assert fake_gh.refs == {} and fake_gh.pulls == []
+        assert fake_gh.files["deploy/run.sh"] == drifted
+        assert not any(m == "PUT" for m, _ in fake_gh.calls)
+        notes = _work_notes()
+        assert "[Auto-Fix Hand-off]" in notes
+        assert "could not be applied" in notes and "Reverting the hunk(s)" in notes
+
+
+class TestRepeatFixGuardFlow:
+    def _merge_setup(self, fake_gh: FakeGitHub, default_branch: str = "main") -> str:
+        branch = build_autofix_branch_name(41)
+        fake_gh.repo_info = {"default_branch": default_branch}
+        fake_gh.commits[HEAD_SHA] = _failing_commit(
+            [{"filename": "deploy/run.sh", "status": "modified", "patch": SCRIPT_PATCH}],
+            message=f"Merge pull request #12 from {OWNER}/{branch}",
+        )
+        return branch
+
+    def test_repeat_failure_skips_fix_and_posts_guard_note(self, harness: dict[str, Any]) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"deploy/run.sh": SCRIPT_BAD})
+        branch = self._merge_setup(fake_gh)
+        _writer_for(settings, fake_gh)
+
+        cb = _post_callback(
+            client, harness, "main", _oom_report_for("deploy/run.sh", agent=_proposal("main"))
+        )
+
+        assert cb.status_code == 200
+        body = cb.json()
+        assert body["autofix_outcome"] == "repeat_autofix_detected"
+        assert "fix_pr_url" not in body
+        assert fake_gh.refs == {} and fake_gh.pulls == []
+        assert not any("/contents/" in p for _, p in fake_gh.calls)
+        expected = (
+            f"[Auto-Fix Repeat Failure Guard] Failing commit {HEAD_SHA[:7]} on 'main' is a "
+            f"merge of auto-fix PR #12 (branch {branch}). The previous automated remediation "
+            f"was ineffective and the workflow run {RUN_ID} failed. Halting automated fix "
+            "attempts to prevent retry loops. Requires human attention."
+        )
+        (incident,) = ticket_state.servicenow_incidents.values()
+        assert expected in incident["work_notes"]
+        assert "[Auto-Fix Hand-off]" not in _work_notes()
+        assert "[Auto-Fix Initiated]" not in _work_notes()
+        assert len(ticket_state.servicenow_attachments) == 1
+        assert expected in github_state.check_runs[0]["output"]["text"]
+        assert expected in github_state.comments[0]["body"]
+
+    def test_guard_not_applied_off_default_branch(self, harness: dict[str, Any]) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"deploy/run.sh": SCRIPT_BAD})
+        self._merge_setup(fake_gh, default_branch="trunk")
+        _writer_for(settings, fake_gh)
+
+        cb = _post_callback(client, harness, "main", Report(summary="s", fix_proposal=_proposal()))
+
+        assert cb.status_code == 200
+        assert "autofix_outcome" not in cb.json()
+        assert "Repeat Failure Guard" not in _work_notes()
+
+    def test_guard_lookup_errors_do_not_block_pipeline(self, harness: dict[str, Any]) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"app/main.py": SOURCE})
+        fake_gh.lookup_errors.update({"repo", "commit", "pulls"})
+        _writer_for(settings, fake_gh)
+
+        cb = _post_callback(client, harness, "main", Report(summary="s", fix_proposal=_proposal()))
+
+        assert cb.status_code == 200
+        assert "fix_pr_url" in cb.json()
+        assert "autofix_outcome" not in cb.json()
+
+    def test_guard_writer_exception_does_not_block_pipeline(
+        self, harness: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings(autofix_enabled=True)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"app/main.py": SOURCE})
+        _writer_for(settings, fake_gh)
+
+        def boom(*_: Any, **__: Any) -> None:
+            raise RuntimeError("guard exploded")
+
+        monkeypatch.setattr("bridge.app.main.check_repeat_autofix", boom)
+        cb = _post_callback(client, harness, "main", Report(summary="s", fix_proposal=_proposal()))
+
+        assert cb.status_code == 200
+        assert "fix_pr_url" in cb.json()
+
+    def test_guard_skipped_when_autofix_disabled(self, harness: dict[str, Any]) -> None:
+        settings = _settings(autofix_enabled=False)
+        client = harness["configure"](settings)
+        fake_gh = FakeGitHub(files={"deploy/run.sh": SCRIPT_BAD})
+        self._merge_setup(fake_gh)
+        _writer_for(settings, fake_gh)
+
+        cb = _post_callback(client, harness, "main", Report(summary="s"))
+
+        assert cb.status_code == 200
+        assert "autofix_outcome" not in cb.json()
+        assert fake_gh.calls == []

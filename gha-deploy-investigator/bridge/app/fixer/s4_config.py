@@ -37,6 +37,21 @@ STRATEGY = "config_tuning"
 DEFAULT_MAX_MEMORY_MIB: int = 2048
 MIN_MEMORY_MIB: int = 128
 DEPLOY_STAGES: frozenset[str] = frozenset({"deploy", "iac_config"})
+# File extensions treated as configuration (deploy scripts, manifests, settings files).
+CONFIG_FILE_EXTENSIONS: tuple[str, ...] = (
+    "sh",
+    "bash",
+    "yml",
+    "yaml",
+    "json",
+    "toml",
+    "tf",
+    "tfvars",
+    "conf",
+    "cfg",
+    "ini",
+    "properties",
+)
 
 OOM_SIGNAL_RE = re.compile(
     r"exit(?:ed)?\s*(?:with\s*)?(?:status\s*|code\s*)?[:=]?\s*137\b"
@@ -234,9 +249,7 @@ def generate_memory_config_fix(
             )
         )
 
-    changes = ", ".join(
-        f"{e.path}:{e.line_no} {e.old_mib}Mi -> {e.new_mib}Mi" for e in edits
-    )
+    changes = ", ".join(f"{e.path}:{e.line_no} {e.old_mib}Mi -> {e.new_mib}Mi" for e in edits)
     proposal = _result(
         "proposed",
         f"Deploy failed with memory exhaustion; raising memory allocation ({changes})",
@@ -250,6 +263,7 @@ def generate_memory_config_fix(
 
 
 __all__ = [
+    "CONFIG_FILE_EXTENSIONS",
     "DEFAULT_MAX_MEMORY_MIB",
     "MemoryEdit",
     "find_memory_edits",

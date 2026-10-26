@@ -13,6 +13,14 @@ from .core.dedup import CallbackDedupRegistry, get_dedup_registry
 from .core.tasks import TaskDispatcher
 from .fixer.ci_listener import CIFeedbackListener
 from .fixer.interface import FixPRWriterBase, is_autofix_branch
+from .fixer.repeat_guard import (
+    OUTCOME as REPEAT_AUTOFIX_OUTCOME,
+)
+from .fixer.repeat_guard import (
+    RepeatAutofixDetection,
+    check_repeat_autofix,
+    format_repeat_guard_work_note,
+)
 from .fixer.selection import select_fix_proposal
 from .fixer.writer import FixPRWriter
 
@@ -102,11 +110,49 @@ def _bind_fetch_file(
     return fetch_file
 
 
+def _bind_fetch_commit(
+    writer: FixPRWriterBase, result: InvestigationResult
+) -> Callable[[], Optional[dict[str, Any]]]:
+    """Bind a read-only fetcher for the failing commit object (per-file patches included)."""
+    incident = result.incident
+    repo_full = (incident.github_repo if incident else None) or ""
+    owner, _, repo = repo_full.partition("/")
+    sha = incident.github_head_sha if incident else None
+
+    def fetch_commit() -> Optional[dict[str, Any]]:
+        if not owner or not repo or not sha:
+            return None
+        return writer.fetch_commit(owner, repo, sha)
+
+    return fetch_commit
+
+
 # Deterministic fallback fixers, keyed by the strategy they emit (for decision logging).
 _DETERMINISTIC_SOURCES: dict[str, str] = {
     "deterministic_linter": "deterministic_s1_lint",
+    "commit_hunk_revert": "deterministic_commit_hunk_revert",
     "config_tuning": "deterministic_s4_config",
 }
+
+
+def _check_repeat_autofix(
+    result: InvestigationResult, settings: BridgeConfig
+) -> Optional[RepeatAutofixDetection]:
+    """Run the repeat-fix guard before fix selection. Never raises.
+
+    Returns the detection when the failing default-branch commit came from an auto-fix.
+    Lookup errors are logged and treated as "no detection" so the pipeline continues.
+    """
+    if settings.autofix_enabled is not True or result.incident is None:
+        return None
+    try:
+        writer = get_fix_pr_writer(settings)
+        return check_repeat_autofix(result.incident, writer, settings.autofix_bot_login)
+    except Exception as exc:
+        logger.error(
+            "autofix.repeat_guard incident=%s result=error error=%r", result.incident_id, exc
+        )
+        return None
 
 
 def _maybe_open_fix_pr(
@@ -114,9 +160,9 @@ def _maybe_open_fix_pr(
 ) -> Optional[PullRequestRef]:
     """Open an auto-fix PR for a completed GitHub investigation, if enabled and proposed.
 
-    The agent's proposal is preferred; otherwise the deterministic lint (S1) and memory
-    config (S4) fixers are tried. Never raises: auto-fix is best-effort and must not block
-    ticket creation.
+    Candidates are chosen by :func:`select_fix_proposal` (deterministic fixers first, then
+    the agent's proposal). Never raises: auto-fix is best-effort and must not block ticket
+    creation.
     """
     incident_id = result.incident_id
     enabled = settings.autofix_enabled is True
@@ -136,7 +182,10 @@ def _maybe_open_fix_pr(
     try:
         writer = get_fix_pr_writer(settings)
         proposal = select_fix_proposal(
-            result.incident, result.report, _bind_fetch_file(writer, result)
+            result.incident,
+            result.report,
+            _bind_fetch_file(writer, result),
+            _bind_fetch_commit(writer, result),
         )
         if proposal is None:
             logger.info("autofix.selection incident=%s source=none", incident_id)
@@ -369,10 +418,21 @@ async def handle_callback_report(
                 detail="Missing report or incident in completed result",
             )
 
-        # Auto-fix runs first so the PR link can be included in the ticket and Check Run.
-        pr_ref = _maybe_open_fix_pr(result, settings)
-        if pr_ref is not None:
-            result.pull_request = pr_ref
+        # The repeat-fix guard runs before fix selection: a failing default-branch commit
+        # produced by a merged auto-fix is handed to a human instead of fixed again.
+        repeat = _check_repeat_autofix(result, settings)
+        repeat_note: Optional[str] = None
+        pr_ref: Optional[PullRequestRef] = None
+        if repeat is not None:
+            repeat_note = format_repeat_guard_work_note(repeat)
+            logger.info(
+                "autofix.skipped incident=%s reason=%s", result.incident_id, REPEAT_AUTOFIX_OUTCOME
+            )
+        else:
+            # Auto-fix runs first so the PR link can be included in the ticket and Check Run.
+            pr_ref = _maybe_open_fix_pr(result, settings)
+            if pr_ref is not None:
+                result.pull_request = pr_ref
 
         servicenow_adapter = cast(ServiceNowAdapter, get_adapter("servicenow", settings))
         sn_ref = servicenow_adapter.create_incident_with_report(
@@ -382,7 +442,12 @@ async def handle_callback_report(
             "Successfully opened ServiceNow incident %s for GitHub failure", sn_ref.external_key
         )
 
-        if pr_ref is not None:
+        if repeat_note is not None:
+            try:
+                servicenow_adapter.post_work_note(sn_ref, repeat_note)
+            except Exception as exc:
+                logger.warning("Failed to post repeat-fix guard work note to ServiceNow: %s", exc)
+        elif pr_ref is not None:
             try:
                 servicenow_adapter.post_fix_pr_note(sn_ref, pr_ref)
             except Exception as exc:
@@ -407,7 +472,11 @@ async def handle_callback_report(
             try:
                 github_adapter = cast(GitHubAdapter, get_adapter("github", settings))
                 github_adapter.post_report_link(
-                    result.incident, result.report, sn_ref, pull_request=pr_ref
+                    result.incident,
+                    result.report,
+                    sn_ref,
+                    pull_request=pr_ref,
+                    autofix_note=repeat_note,
                 )
             except Exception as exc:
                 logger.warning("Failed to post report link to GitHub Check Run: %s", exc)
@@ -419,6 +488,8 @@ async def handle_callback_report(
         }
         if pr_ref is not None:
             response_body["fix_pr_url"] = pr_ref.pr_url
+        if repeat is not None:
+            response_body["autofix_outcome"] = REPEAT_AUTOFIX_OUTCOME
         return response_body
 
     # Standard forward flow for ServiceNow or other sources
