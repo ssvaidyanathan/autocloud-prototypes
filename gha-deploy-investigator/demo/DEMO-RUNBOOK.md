@@ -121,8 +121,8 @@ Trigger scripts live in `demo/scenarios/` and take `[TARGET_DIR] [--commit]` (se
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | 1 | `lint` | `trigger-lint-failure.sh` | `app/main.py` | `refactor(orders): add order export and currency formatting helper` | `ruff check app/` | `PipelineLogsSpecialist` | `deterministic_linter` PR; verification `PASSED` |
 | 2 | `test` | `trigger-test-failure.sh` | `tests/test_main.py` | `feat(pricing): update order discount tier calculation` | `pytest tests/ -v` | `PipelineLogsSpecialist` | `llm_patch` PR; verification `PASSED` |
-| 3 | `build` | `trigger-build-failure.sh` | `Dockerfile` | `chore(deps): configure cache warmup asset packaging` | `docker build -t sample-pipeline-app:test .` | `PipelineLogsSpecialist` | `llm_patch` PR; verification `PASSED`, or an `[Auto-Fix Hand-off]` note and no PR |
-| 4 | `deploy` | `trigger-deploy-failure.sh` | `scripts/deploy.sh` | `feat(cache): pre-warm order history cache on startup` | `./scripts/deploy.sh` (Cloud Run startup OOM, exit 137) | `RuntimeHealthSpecialist` | `config_tuning` PR; verification `INCONCLUSIVE` |
+| 3 | `build` | `trigger-build-failure.sh` | `Dockerfile` | `chore(deps): configure cache warmup asset packaging` | `docker build -t sample-pipeline-app:test .` | `PipelineLogsSpecialist` | `commit_hunk_revert` PR (reverts the added `COPY` hunk); verification `PASSED` expected, or an `[Auto-Fix Hand-off]` note and no PR |
+| 4 | `deploy` | `trigger-deploy-failure.sh` | `scripts/deploy.sh` | `feat(cache): pre-warm order history cache on startup` | `./scripts/deploy.sh` (Cloud Run startup OOM, exit 137) | `RuntimeHealthSpecialist` | `commit_hunk_revert` PR (reverts the `scripts/deploy.sh` hunk); verification `INCONCLUSIVE` |
 
 ---
 
@@ -298,12 +298,24 @@ git pull origin main
   - Add the missing `config/cache-warmup.json` asset to the repository build context, OR
   - Remove the invalid `COPY` instruction from `Dockerfile`.
 
-#### Expected Auto-Fix PR (`llm_patch`)
-- The agent's LLM patch opens one PR from `autofix/run-<run_id>` touching `Dockerfile` and/or
-  `config/`. The ideal fix removes the offending `COPY` line; the LLM may instead add a placeholder
-  `config/cache-warmup.json`. Either can happen, because LLM output varies.
-- `[Auto-Fix Initiated]` work note with the PR link, then the PR's CI goes green, then a PR comment
-  and an `[Auto-Fix Verification] ... PASSED` work note.
+#### Expected Auto-Fix PR (`commit_hunk_revert`)
+Deterministic fixers take precedence over the agent's LLM patch. When the diagnosis names
+`Dockerfile`, a container build definition that the failing commit modified, the bridge's
+hunk-revert fixer opens one PR from `autofix/run-<run_id>` that reverts **only the offending diff
+hunk** of `Dockerfile` in the scenario commit. Here that hunk is the appended
+`COPY config/cache-warmup.json ...` instruction, so the expected diff removes that line and nothing
+else. The fixer computes the patch by inverting the commit's own hunk, so no LLM output is involved.
+- If the diagnosis does not name `Dockerfile`, or the hunk is ambiguous (for example several
+  hunks with none quoted by the evidence), the revert fixer does not claim the failure and the
+  agent's `llm_patch` is used instead, as before. Its fix may remove the `COPY` line or add a
+  placeholder `config/cache-warmup.json`, because LLM output varies.
+- `[Auto-Fix Initiated]` work note with the PR link, then the PR's CI runs. The expected result is
+  green CI, then a PR comment and an `[Auto-Fix Verification] ... PASSED` work note.
+- If the revert patch does not apply to the current `main`, no PR is opened and no other fixer is
+  tried. The incident gets an `[Auto-Fix Hand-off]` work note that carries the revert rationale.
+- **Status:** expected behaviour, derived from the code.
+  Not yet verified live: this `commit_hunk_revert` outcome is covered by the bridge's unit and
+  integration tests (synthetic fixtures) but has not been observed in a live run of this scenario.
 - If the agent finds no safe fix, no PR is opened. The incident instead gets an
   `[Auto-Fix Hand-off] No automated fix PR opened: <reason>. Requires human attention.` work note.
   That is the designed no-fix path and counts as correct behaviour.
@@ -364,12 +376,25 @@ git pull origin main
   - The `RuntimeHealthSpecialist`'s recommended actions include a memory increase such as `gcloud run services update <service> --memory 1Gi --region <region>`.
 - **Unrelated Observations**: Any auxiliary deployment warnings placed in separate section.
 
-#### Expected Auto-Fix PR (`config_tuning`)
-Deterministic fixers take precedence over the agent's LLM patch, so the bridge's memory-config
-fixer opens one PR from `autofix/run-<run_id>` that **tunes the container memory limit allocation**
-in `scripts/deploy.sh`. It doubles the declared default, capped at 2048Mi. Here that is a one-line
-change: `MEMORY="${MEMORY:-256Mi}"` → `MEMORY="${MEMORY:-512Mi}"`. The fixer only changes the
-numeric memory value. It does **not** remove `CACHE_PREWARM_BUFFER_MB=2048` from `EXTRA_ENV_VARS`.
+#### Expected Auto-Fix PR (`commit_hunk_revert`)
+Deterministic fixers take precedence over the agent's LLM patch, and the hunk-revert fixer runs
+before the memory-config fixer. When the diagnosis names `scripts/deploy.sh`, which the failing
+commit modified, the bridge opens one PR from `autofix/run-<run_id>` that reverts **only the
+offending diff hunk** of `scripts/deploy.sh` in the scenario commit. Against the seeded
+`scripts/deploy.sh`, the two lines the trigger script edits are two lines apart, so the scenario
+commit has a single hunk containing both. Reverting it restores `MEMORY="${MEMORY:-512Mi}"`
+**and** `EXTRA_ENV_VARS="${EXTRA_ENV_VARS:-}"`, which removes `CACHE_PREWARM_BUFFER_MB=2048`.
+If the file has drifted so that the two edits land in separate hunks, only the hunk(s) quoted by
+the evidence (or flagged by a report annotation) are reverted.
+- If the diagnosis does not name `scripts/deploy.sh`, or the hunk is ambiguous, the revert fixer
+  does not claim the failure. The memory-config fixer (`config_tuning`) then handles the OOM as
+  before: it doubles the declared memory default, capped at 2048Mi (`256Mi` → `512Mi`), and does
+  **not** remove `CACHE_PREWARM_BUFFER_MB=2048`.
+- If the revert patch does not apply to the current `main`, no PR is opened and no other fixer is
+  tried. The incident gets an `[Auto-Fix Hand-off]` work note that carries the revert rationale.
+- **Status:** expected behaviour, derived from the code.
+  Not yet verified live: this `commit_hunk_revert` outcome is covered by the bridge's unit and
+  integration tests (synthetic fixtures) but has not been observed in a live run of this scenario.
 
 - `[Auto-Fix Initiated]` work note with the PR link.
 - The PR's CI runs lint, tests and build, which pass. `Deploy to Cloud Run` is **skipped**, because
@@ -391,7 +416,7 @@ git revert HEAD --no-edit && git push origin main
 *Wait for GitHub Actions to complete green across all stages before proceeding.*
 
 #### Note on Declarative Deployment Invariant
-`gcloud run deploy` keeps environment variables from the previous Cloud Run revision unless they are explicitly cleared or overwritten. Without a guard, a revert commit that omits `EXTRA_ENV_VARS` would leave the stale `CACHE_PREWARM_BUFFER_MB=2048` in the new revision. To keep deployments declarative, `scripts/deploy.sh` passes `--set-env-vars "${EXTRA_ENV_VARS}"` when `EXTRA_ENV_VARS` is non-empty and `--clear-env-vars` when it is empty, so the service environment always mirrors the repository state (details in the [demo README](README.md#declarative-deployment-invariant---clear-env-vars)). Reverting the scenario commit (or running the clean-slate reset) empties `EXTRA_ENV_VARS`, which clears `CACHE_PREWARM_BUFFER_MB=2048` from the Cloud Run service and returns it to baseline. The auto-fix PR only raises the memory limit and does not clear that variable, which is another reason to reset by revert rather than by merging the fix PR.
+`gcloud run deploy` keeps environment variables from the previous Cloud Run revision unless they are explicitly cleared or overwritten. Without a guard, a revert commit that omits `EXTRA_ENV_VARS` would leave the stale `CACHE_PREWARM_BUFFER_MB=2048` in the new revision. To keep deployments declarative, `scripts/deploy.sh` passes `--set-env-vars "${EXTRA_ENV_VARS}"` when `EXTRA_ENV_VARS` is non-empty and `--clear-env-vars` when it is empty, so the service environment always mirrors the repository state (details in the [demo README](README.md#declarative-deployment-invariant---clear-env-vars)). Reverting the scenario commit (or running the clean-slate reset) empties `EXTRA_ENV_VARS`, which clears `CACHE_PREWARM_BUFFER_MB=2048` from the Cloud Run service and returns it to baseline. A `commit_hunk_revert` fix PR removes the variable only when its line is in the reverted hunk, and a `config_tuning` fix PR only raises the memory limit. Either way, reset by revert rather than by merging the fix PR.
 
 ---
 
@@ -404,10 +429,20 @@ With auto-fix ON, every scenario follows the same flow:
 **Do not merge the fix PRs.** A merged fix stays on `main`, so the next run of that scenario no
 longer reproduces the failure. The fix PR exists to be reviewed, not to restore the demo baseline.
 
+If a fix PR is merged to `main` anyway and the next run on `main` fails, the bridge's
+**repeat-fix guard** stops automated remediation (see item 5 in 4A below).
+
 Prerequisite: the bridge must run with `AUTOFIX_ENABLED=true` and a GitHub App/token that can
 create branches and pull requests on the demo repository. With the kill switch off
 (`AUTOFIX_ENABLED=false`, the default) no fix PR or auto-fix notes are produced. Skip the
 close step and just revert (step 3 of 4B).
+
+Optional: set `AUTOFIX_BOT_LOGIN` on the bridge to the GitHub login that authors auto-fix
+commits, i.e. the GitHub App's `<app-slug>[bot]` login. The repeat-fix guard uses it to recognise
+a failing commit authored or committed by that account. If it is unset (the default), that check
+is skipped. The guard still detects merges of `autofix/` branches from the merge commit message
+and from the merged pull request associated with the commit, which covers merge, squash and
+rebase merges of fix PRs.
 
 ### A. What to Expect from Auto-Fix
 
@@ -427,7 +462,18 @@ close step and just revert (step 3 of 4B).
      automated fix is attempted.
 4. If no safe fix can be proposed, no PR is opened. Instead the incident gets an
    `[Auto-Fix Hand-off] ... Requires human attention.` work note. This is the designed no-fix path.
-5. Whatever the outcome, the incident stays **In Progress**. The bridge never resolves or closes it.
+5. **Repeat-fix guard.** With `AUTOFIX_ENABLED=true`, before choosing a fix the bridge checks a
+   failing run on the repository's default branch (here `main`). If the run's head commit came from
+   a merged auto-fix (a merge of an `autofix/` branch, or a commit by the `AUTOFIX_BOT_LOGIN`
+   account), the previous automated fix did not work. The bridge then opens **no** fix PR and makes
+   no fix attempt. The incident gets an `[Auto-Fix Repeat Failure Guard] Failing commit <sha> on
+   '<default-branch>' is a merge of auto-fix PR #<n> (branch autofix/run-<run_id>). The previous
+   automated remediation was ineffective and the workflow run <run_id> failed. Halting automated fix
+   attempts to prevent retry loops. Requires human attention.` work note, and the same text is
+   appended to the Check Run and the commit comment. If the guard cannot read the default branch
+   from GitHub, it does not apply and the normal auto-fix path runs. This guard is covered by tests
+   but has not yet been exercised in a live run.
+6. Whatever the outcome, the incident stays **In Progress**. The bridge never resolves or closes it.
 
 ### B. Reset: Close the Fix PR, then Revert
 
