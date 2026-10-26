@@ -471,18 +471,13 @@ async def handle_callback_report(
         if settings.enable_github_writeback:
             try:
                 github_adapter = cast(GitHubAdapter, get_adapter("github", settings))
-                if repeat_note is not None:
-                    github_adapter.post_report_link(
-                        result.incident,
-                        result.report,
-                        sn_ref,
-                        pull_request=pr_ref,
-                        autofix_note=repeat_note,
-                    )
-                else:
-                    github_adapter.post_report_link(
-                        result.incident, result.report, sn_ref, pull_request=pr_ref
-                    )
+                github_adapter.post_report_link(
+                    result.incident,
+                    result.report,
+                    sn_ref,
+                    pull_request=pr_ref,
+                    autofix_note=repeat_note,
+                )
             except Exception as exc:
                 logger.warning("Failed to post report link to GitHub Check Run: %s", exc)
 
