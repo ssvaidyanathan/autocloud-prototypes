@@ -8,7 +8,7 @@ This directory provides a customer-representative sample application, automated 
 - `scenarios/`: Deterministic defect injection and reset scripts for testing the investigator across all pipeline stages.
 - `infra/terraform/`: Terraform manifests for Workload Identity Federation (WIF) and Artifact Registry repository supporting keyless GitHub Actions authentication.
 - `seed-demo-repo.sh`: Automation script to seed a standalone git repository with the clean sample pipeline application.
-- `SCENARIOS.md`: Detailed catalog of all failure scenarios, runbooks, and evaluation guidelines.
+- `DEMO-RUNBOOK.md`: Step-by-step runbook for running the four failure scenarios, including the scenario reference table, expected diagnoses and auto-fix outcomes, reset procedure, and tooling invariants.
 
 ## Declarative Deployment Invariant (`--clear-env-vars`)
 
@@ -28,4 +28,4 @@ Google Cloud Run persists previously set environment variables across service re
 
 By passing `--clear-env-vars` whenever `EXTRA_ENV_VARS` is empty, `scripts/deploy.sh` guarantees strictly declarative deployments: the runtime configuration in Cloud Run is deterministic and strictly matches the repository commit.
 
-For detailed scenario runbooks and execution commands, see [SCENARIOS.md](SCENARIOS.md).
+For detailed scenario runbooks and execution commands, see [DEMO-RUNBOOK.md](DEMO-RUNBOOK.md).

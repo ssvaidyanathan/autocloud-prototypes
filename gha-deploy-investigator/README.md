@@ -115,6 +115,10 @@ Once deployed, configure the external integration touchpoints:
 - **GitHub App Setup**: Configure your personal or organizational GitHub App per [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Subscribe to `workflow_run`, `workflow_job`, and `check_run` events, setting the Webhook URL to `https://${BRIDGE_URL}/webhook/github` with secret matching `${NAME_PREFIX}-github-webhook-secret`.
 - **ServiceNow Setup**: Ensure the integration user has the `itil` role and attachment upload permissions. Configure a Business Rule exclusion filter (`correlation_display != "gha-deploy-investigator"`) per [docs/DEPLOY.md](docs/DEPLOY.md) to prevent ticket recursion.
 
+### Try the Demo
+
+Once the services are deployed and integrated, follow the [Interactive Demo Runbook (`demo/DEMO-RUNBOOK.md`)](demo/DEMO-RUNBOOK.md) to inject each of the four pipeline failures (lint, test, build, deploy), observe the ServiceNow and GitHub write-back and the auto-fix PR, and reset between scenarios.
+
 ---
 
 ## 3. System Architecture & Request Lifecycle
@@ -992,7 +996,7 @@ The project uses a 4-layer testing approach:
      ./demo/scenarios/reset-scenarios.sh demo/sample-pipeline-app --commit
      ```
 
-For detailed execution runbooks and observation checkpoints, see [demo/DEMO-RUNBOOK.md](demo/DEMO-RUNBOOK.md) and [demo/SCENARIOS.md](demo/SCENARIOS.md).
+For detailed execution runbooks and observation checkpoints, see [demo/DEMO-RUNBOOK.md](demo/DEMO-RUNBOOK.md).
 
 ---
 
@@ -1083,8 +1087,7 @@ gha-deploy-investigator/
 │   ├── sample-pipeline-app/       # Standalone customer FastAPI service with 4-stage CI/CD
 │   ├── scenarios/                 # Deterministic failure triggers (lint, test, build, deploy)
 │   ├── infra/terraform/           # Workload Identity Federation (WIF) & demo Artifact Registry
-│   ├── DEMO-RUNBOOK.md            # Interactive walkthrough for observing investigations
-│   ├── SCENARIOS.md               # Failure scenario specifications & invariants
+│   ├── DEMO-RUNBOOK.md            # Scenario walkthrough, specifications & invariants
 │   └── seed-demo-repo.sh          # Seeder script for standalone customer repository
 ├── docs/                          # In-depth architectural & operational documentation
 │   ├── ARCHITECTURE.md            # System architecture, contract models & isolation
@@ -1109,5 +1112,4 @@ gha-deploy-investigator/
 - [Configuration Reference (`docs/CONFIGURATION.md`)](docs/CONFIGURATION.md)
 - [Deployment Guide (`docs/DEPLOY.md`)](docs/DEPLOY.md)
 - [Interactive Demo Runbook (`demo/DEMO-RUNBOOK.md`)](demo/DEMO-RUNBOOK.md)
-- [Pipeline Failure Scenarios (`demo/SCENARIOS.md`)](demo/SCENARIOS.md)
 - [Sample Pipeline Application (`demo/sample-pipeline-app/README.md`)](demo/sample-pipeline-app/README.md)
