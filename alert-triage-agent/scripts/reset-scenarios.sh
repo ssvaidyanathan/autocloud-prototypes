@@ -343,9 +343,9 @@ wait_for_open_alerts() {
             ignored_count=$(echo "${open_alerts_json}" | python3 -c "import sys, json; data=json.load(sys.stdin); print(len(data.get('ignored', [])))" 2>/dev/null || echo "0")
             if [ "${ignored_count}" -gt 0 ]; then
                 log_info "    Ignored ${ignored_count} stale/non-serving open alert(s):"
-                echo "${open_alerts_json}" | python3 - << 'PYEOF'
+                python3 - "${open_alerts_json}" << 'PYEOF'
 import sys, json
-data = json.load(sys.stdin)
+data = json.loads(sys.argv[1])
 for a in data.get('ignored', []):
     reasons = "; ".join(a.get('ignore_reasons', []))
     rev_info = f" (rev: {a.get('revision')})" if a.get('revision') else ""
@@ -357,9 +357,9 @@ PYEOF
         if [ "${now}" -ge "${deadline}" ] && [ "${count}" -gt 0 ]; then
             log_error "Timed out waiting for open ATA alerts to close after ${WAIT_TIMEOUT_SECS}s (${elapsed}s elapsed)!"
             log_error "Still-open alerts (${count} total):"
-            echo "${open_alerts_json}" | python3 - << 'PYEOF' >&2
+            python3 - "${open_alerts_json}" << 'PYEOF' >&2
 import sys, json
-data = json.load(sys.stdin)
+data = json.loads(sys.argv[1])
 for a in data.get('active', []):
     print(f"  - [{a.get('id')}] Policy: {a.get('policy_display')} | Open time: {a.get('open_time')} | Resource: {a.get('name')}")
 PYEOF
@@ -369,9 +369,9 @@ PYEOF
         if [ "${count}" -gt 0 ]; then
             quiet_start=""
             local alert_summary
-            alert_summary=$(echo "${open_alerts_json}" | python3 - << 'PYEOF' 2>/dev/null || echo ""
+            alert_summary=$(python3 - "${open_alerts_json}" << 'PYEOF' 2>/dev/null || echo ""
 import sys, json
-data = json.load(sys.stdin)
+data = json.loads(sys.argv[1])
 alerts = data.get('active', [])
 items = [f"{a.get('policy_display')} ({a.get('id')})" for a in alerts[:5]]
 if len(alerts) > 5:
