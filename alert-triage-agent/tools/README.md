@@ -4,7 +4,7 @@ FastMCP read-only telemetry and topology service for Google Cloud Platform incid
 
 ## Endpoints
 - `GET /health`: Health probe endpoint.
-- `POST /mcp`: JSON-RPC protocol endpoint for MCP tools.
+- `POST /mcp`: JSON-RPC protocol endpoint for MCP tools (stateless, JSON responses). The agent calls `get_change_timeline` here with an ID token whose audience is the service URL (`TOOLS_URL` in the agent); see CONFIGURATION.md §1.3.1.
 
 ## Exposed Read-Only Tools
 1. `list_open_alerts`: Queries Cloud Monitoring API `GET /v3/projects/{project}/alerts?filter=state="OPEN"`.

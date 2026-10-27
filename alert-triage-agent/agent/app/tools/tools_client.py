@@ -66,7 +66,7 @@ def _short(text: Any) -> str:
     return text if len(text) <= MAX_REASON_DETAIL else text[: MAX_REASON_DETAIL - 3] + "..."
 
 
-def _parse_body(resp: httpx.Response) -> dict[str, Any]:
+def _parse_body(resp: httpx.Response, service: str) -> dict[str, Any]:
     """The JSON-RPC message of a JSON (or single-event SSE) response."""
     text = resp.text
     if resp.headers.get("content-type", "").startswith("text/event-stream"):
@@ -75,24 +75,24 @@ def _parse_body(resp: httpx.Response) -> dict[str, Any]:
     try:
         body = json.loads(text)
     except ValueError as exc:
-        raise ToolsCallError("ata-tools returned a malformed response (not JSON)") from exc
+        raise ToolsCallError(f"{service} returned a malformed response (not JSON)") from exc
     if not isinstance(body, dict):
-        raise ToolsCallError("ata-tools returned a malformed response (not a JSON-RPC object)")
+        raise ToolsCallError(f"{service} returned a malformed response (not a JSON-RPC object)")
     return body
 
 
-def _tool_result(body: dict[str, Any], name: str) -> dict[str, Any]:
+def _tool_result(body: dict[str, Any], name: str, service: str) -> dict[str, Any]:
     """The structured result of a JSON-RPC tools/call response, or ToolsCallError."""
     if body.get("error") is not None:
         err = body["error"] if isinstance(body["error"], dict) else {"message": body["error"]}
-        raise ToolsCallError(f"ata-tools MCP error {err.get('code')}: {_short(err.get('message', ''))}")
+        raise ToolsCallError(f"{service} MCP error {err.get('code')}: {_short(err.get('message', ''))}")
     result = body.get("result")
     if not isinstance(result, dict):
-        raise ToolsCallError("ata-tools returned a malformed response (no JSON-RPC result)")
+        raise ToolsCallError(f"{service} returned a malformed response (no JSON-RPC result)")
     content = result.get("content") if isinstance(result.get("content"), list) else []
     texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
     if result.get("isError"):
-        raise ToolsCallError(f"ata-tools tool {name} failed: {_short(' '.join(texts) or 'no detail')}")
+        raise ToolsCallError(f"{service} tool {name} failed: {_short(' '.join(texts) or 'no detail')}")
     structured = result.get("structuredContent")
     if isinstance(structured, dict):
         return structured
@@ -103,7 +103,7 @@ def _tool_result(body: dict[str, Any], name: str) -> dict[str, Any]:
             parsed = None
         if isinstance(parsed, dict):
             return parsed
-    raise ToolsCallError(f"ata-tools tool {name} returned a malformed result (no JSON object)")
+    raise ToolsCallError(f"{service} tool {name} returned a malformed result (no JSON object)")
 
 
 async def call_tool(
@@ -120,6 +120,7 @@ async def call_tool(
     if not config.tools_url:
         raise ToolsNotConfigured("TOOLS_URL is not set")
     audience = config.tools_url
+    service = f"{config.name_prefix}-tools"
     endpoint = f"{audience}{MCP_PATH}"
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
     fetch = token_fetcher or fetch_id_token
@@ -136,20 +137,20 @@ async def call_tool(
             try:
                 resp = await client.post(endpoint, json=payload, headers=headers)
             except httpx.TimeoutException as exc:
-                reason = f"ata-tools timed out after {config.tools_timeout_seconds:g}s ({type(exc).__name__})"
+                reason = f"{service} timed out after {config.tools_timeout_seconds:g}s ({type(exc).__name__})"
             except httpx.TransportError as exc:
-                reason = f"ata-tools unreachable ({type(exc).__name__}: {_short(exc)})"
+                reason = f"{service} unreachable ({type(exc).__name__}: {_short(exc)})"
             else:
                 if resp.status_code in TRANSIENT_STATUS:
-                    reason = f"ata-tools returned HTTP {resp.status_code}"
+                    reason = f"{service} returned HTTP {resp.status_code}"
                 elif not 200 <= resp.status_code < 300:
-                    raise ToolsCallError(f"ata-tools returned HTTP {resp.status_code}: {_short(resp.text) or 'no body'}")
+                    raise ToolsCallError(f"{service} returned HTTP {resp.status_code}: {_short(resp.text) or 'no body'}")
                 else:
-                    return _tool_result(_parse_body(resp), name)
+                    return _tool_result(_parse_body(resp, service), name, service)
             if attempt >= attempts:
                 raise ToolsCallError(f"{reason}; {attempts} attempt(s)")
             delay = min(MAX_BACKOFF_SECONDS, config.tools_retry_base_seconds * (2 ** (attempt - 1)))
-            logger.warning("ata-tools %s: %s (attempt %d of %d); retrying in %.1fs", name, reason, attempt, attempts, delay)
+            logger.warning("%s %s: %s (attempt %d of %d); retrying in %.1fs", service, name, reason, attempt, attempts, delay)
             await sleep(delay)
     raise AssertionError("unreachable")  # pragma: no cover
 
@@ -161,6 +162,7 @@ async def fetch_change_timeline(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """ata-tools get_change_timeline for this stack's project and region; validated shape."""
+    service = f"{config.name_prefix}-tools"
     result = await call_tool(
         config,
         "get_change_timeline",
@@ -168,5 +170,5 @@ async def fetch_change_timeline(
         **kwargs,
     )
     if not isinstance(result.get("changes"), list):
-        raise ToolsCallError("ata-tools get_change_timeline returned a malformed result (no changes list)")
+        raise ToolsCallError(f"{service} get_change_timeline returned a malformed result (no changes list)")
     return result

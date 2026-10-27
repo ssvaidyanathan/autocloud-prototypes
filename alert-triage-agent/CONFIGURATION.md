@@ -63,23 +63,37 @@ The agent owns all incident grouping, atomic Open Knowledge File (OKF) storage w
 | `LOW_TRAFFIC_RPM` | `5` | Latency reports: when the origin's Cloud Run `request_count` over the investigation window (alert start −15 min to +15 min or now) averages below this many requests/min (measured total ÷ window), the problem statement, root cause and an observation state the measured volume (e.g. for INC0010327, 32 requests in its window: "low traffic: 32 requests in 17.2 min (1.9 requests/min) on ata-inventory-api, so the latency may come from a few slow requests (such as a cold start) rather than a service-wide degradation") instead of calling it a service degradation. Applies to the origin's own dossier only, also when the alert is on a caller. Nothing is suppressed, and no statement is made without a measured total and window. Live 2026-10-27: INC0010327 at 1.9 requests/min, S2's origin about 35 requests/min (627 requests in about 18 min). Must be > 0. |
 | `INVESTIGATION_STALE_SECONDS` | `3600` | Stuck investigations: a group in `investigating` with no ServiceNow ticket whose last settle/max-wait wake attempt (`investigation_started_at` in the incident file) is more than this many seconds old is treated as stuck, because its wake exhausted the timer queue retries (see §4). Every retry of a failing wake re-stamps the attempt, so the value must exceed `timer_queue_max_backoff` plus the agent request timeout (Cloud Run default 300s); a test checks the default against the Terraform default. Detected by the next alert ingest (any alert) and by an `investigation_watchdog` wake scheduled when the group enters `investigating`. Recovery logs `STUCK_INVESTIGATION` at ERROR, appends a record to `investigation_recoveries`, re-enqueues a settle wake (fresh retry window) and a watchdog, and the eventual ticket carries an "Investigation recovery:" observation. Must be > 0. |
 | `INVESTIGATION_MAX_RECOVERIES` | `3` | Recoveries per stuck group. When one more would be needed, the group is marked `degraded` (ERROR, `degraded_reason` states the last wake attempt and the recoveries used) and is no longer attachable, so new alerts open a new group. Must be >= 1. |
+| `TOOLS_URL` | *none (required when not local)* | URL of the deployed `<prefix>-tools` service. The ChangeSpecialist calls its `get_change_timeline` tool at `<TOOLS_URL>/mcp` with an ID token whose audience is this URL (see §1.3.1). Must be `https://<host>` with no path. A non-local agent without it fails at startup. `deploy.sh` sets it from `gcloud run services describe <prefix>-tools --format='value(status.url)'`, else `https://<prefix>-tools-<PROJECT_NUMBER>.<REGION>.run.app`. |
+| `TOOLS_TIMEOUT_SECONDS` | `60` | Per-attempt HTTP timeout of an ata-tools call (0 < value <= 300). The timeline lists every Cloud Run service's revisions and the Apigee deployments. |
+| `TOOLS_RETRY_ATTEMPTS` | `3` | Total attempts for an ata-tools call on a connection error, timeout or HTTP 429/5xx (1-5). Other 4xx (e.g. 403 when `roles/run.invoker` is missing) are not retried. |
+| `TOOLS_RETRY_BASE_SECONDS` | `1.0` | Backoff before retry n: `BASE * 2^(n-1)` seconds, capped at 10 s. |
 
 ---
 
 ### 1.3 FastMCP Tools Server (`ata-tools`)
 
-The FastMCP server exposes read-only tools to the ADK agent for topology, Apigee metrics, proxy bundles, and logs.
+The FastMCP server exposes read-only tools for topology, Apigee metrics, proxy bundles, logs and change history. At runtime the agent calls one of them, `get_change_timeline`, over MCP (§1.3.1); the agent image does not contain the `tools` package.
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
 | `PORT` | `8080` | HTTP server listening port. |
 | `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
-| `APIGEE_ORG` | `cloud-assist-fde-2` | Apigee organization identifier. |
+| `APIGEE_ORG` | `cloud-assist-fde-2` | Apigee organization whose deployments `get_change_timeline` reads. |
+| `APIGEE_ENV` | *none* | Apigee environment whose deployments `get_change_timeline` reads. Without it the Apigee deployment history is returned as a failed source (the ticket says so); it is never guessed. |
+| `NAME_PREFIX` | `ata` | Stack prefix. `get_change_timeline` reports only `<NAME_PREFIX>-*` Apigee proxies; the default caller SA and audience derive from it. |
+| `PROJECT_NUMBER` | *none* | Builds the accepted audience `https://<prefix>-tools-<PROJECT_NUMBER>.<REGION>.run.app`. |
 | `REGION` | `us-west1` | Target GCP region. |
 | `ENFORCE_AUTH` | `false` | When `true`, enforces OIDC token verification on tool endpoints. |
 | `VERIFY_OIDC` | `false` | Validates Google OIDC ID token signature and audience. |
-| `EXPECTED_AUDIENCE` | `None` | Cloud Run audience URL for incoming OIDC tokens. |
-| `ALLOWED_SERVICE_ACCOUNTS` | `ata-agent-sa@...` | Comma-separated list of caller service accounts allowed. |
+| `EXPECTED_AUDIENCE` | `None` | Comma-separated accepted ID-token audiences; set it to the URL the agent calls (`TOOLS_URL`). The deterministic URL from `PROJECT_NUMBER` is always accepted too. With `ENFORCE_AUTH` and `VERIFY_OIDC` on and no audience, startup fails; a token that cannot be verified is rejected (fail closed). |
+| `ALLOWED_SERVICE_ACCOUNTS` | `<prefix>-agent-sa@<PROJECT_ID>.iam.gserviceaccount.com` | Comma-separated caller service accounts allowed (others get 403). |
+
+#### 1.3.1 Change timeline call path (ChangeSpecialist -> ata-tools)
+
+- **Call:** `POST <TOOLS_URL>/mcp`, one JSON-RPC `tools/call` of `get_change_timeline(window_hours=2, project_id, region)`. ata-tools runs stateless with JSON responses, so there is no `initialize` handshake or session. The client is plain httpx (`agent/app/tools/tools_client.py`).
+- **Auth:** an ID token of the agent SA from the metadata server, audience = `TOOLS_URL`. Cloud Run checks `roles/run.invoker` on `<prefix>-tools` for `<prefix>-agent-sa`; with `ENFORCE_AUTH=true VERIFY_OIDC=true`, the ata-tools middleware also checks the audience and the caller SA.
+- **Result:** Cloud Run revisions (new revisions, traffic shifts, service updates) and the Apigee deployment history of the stack's proxies: every deployed revision with its deploy time, and the deployments started in the window. Each source that fails is an `error` entry.
+- **Failure semantics (no fallback):** if ata-tools is unreachable, times out, returns a non-2xx status, an MCP or tool error, or a malformed result, the agent logs an ERROR, and the change dossier states `change timeline unavailable: <reason>. Apigee proxy deployment history and Cloud Run revision history were not assessed; change attribution not assessed.` Change-Induced becomes `Not assessed (change detection incomplete: change timeline unavailable: <reason>; ...)`, never `No`. An `error` entry for one source is stated the same way for that source (for example `change timeline unavailable: Apigee deployment history source failed (APIGEE_ENV not set in ata-tools)`), and the other source is still used. The agent makes no Cloud Run-only query that could present partial history as complete.
 
 ---
 

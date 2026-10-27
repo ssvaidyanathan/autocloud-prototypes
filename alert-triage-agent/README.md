@@ -233,7 +233,7 @@ This topology specification is ingested at runtime via the agent's `get_topology
     - `CloudRunSpecialist`: Queries container restarts, CPU/memory saturation, request latency percentiles, and application error logs (filtering `/admin/*`). Recursively traces upstream DAG dependencies using the topology graph.
     - `ApigeeSpecialist`: Queries proxy access logs (`ata-apigee-access`), extracts status codes and client IPs, and analyzes SpikeArrest policy limits.
     - `CloudSQLSpecialist`: Queries backend database connection counts (warning threshold 20 / max 25 on `db-f1-micro`), CPU utilization, and PostgreSQL deadlock/lock wait logs.
-    - `ChangeSpecialist`: Inspects Cloud Run revisions and Apigee deployment history within a 2-hour window prior to alert onset.
+    - `ChangeSpecialist`: Reads Cloud Run revisions and Apigee deployment history within a 2-hour window prior to alert onset from the deployed `ata-tools` service (`get_change_timeline` over MCP at `TOOLS_URL`, ID-token auth). If that read fails, the ticket says `change timeline unavailable: <reason>` and Change-Induced is `Not assessed`; there is no fallback. See CONFIGURATION.md §1.3.1.
   - **Topology-Guided Analysis**: Ingests system architecture and dependencies from [`topology/TOPOLOGY.md`](topology/TOPOLOGY.md) via the `get_topology` tool guided by the `topology` skill, computing shortest-path DAG distances and downstream blast radius.
   - **Evidence-Based Synthesizer**: Formulates structured 4-bullet executive summaries, calculates blast radius and formulaic confidence, and generates standalone HTML dossiers.
 
@@ -241,10 +241,11 @@ This topology specification is ingested at runtime via the agent's `get_topology
 - **Role**: FastMCP read-only telemetry and topology service.
 - **Technology**: FastMCP, Starlette/Uvicorn, Google Cloud SDKs.
 - **Responsibilities**:
-  - Exposes structured MCP tools: `list_open_alerts`, `list_time_series`, `list_log_entries`, `get_service`, `get_topology`, `get_topology_graph`, `get_blast_radius`.
+  - Exposes structured MCP tools at `POST /mcp`: `list_open_alerts`, `get_topology`, `get_topology_graph`, `get_blast_radius`, `get_apigee_metrics`, `get_apigee_logs`, `get_proxy_bundle`, `get_change_timeline`.
+  - Called at runtime by the agent's ChangeSpecialist (`get_change_timeline`); requires `roles/run.invoker` on `<prefix>-tools` for `<prefix>-agent-sa`.
   - Ingests and parses system architecture from `topology/TOPOLOGY.md` to construct in-memory DAG representations.
   - Strictly read-only IAM viewer boundary.
-  - Optional OIDC ID token validation on tool endpoints.
+  - Optional OIDC ID token validation on tool endpoints (`ENFORCE_AUTH`/`VERIFY_OIDC`; audience and allowed callers derived from config).
 
 ### 4. `demo/` Microservices Stack
 - **Role**: Realistic multi-tier e-commerce architecture for incident simulation and fault injection.

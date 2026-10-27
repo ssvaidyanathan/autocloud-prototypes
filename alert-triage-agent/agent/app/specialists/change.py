@@ -339,7 +339,7 @@ class ChangeSpecialist(BaseSpecialist):
         not_assessed: str,
     ) -> None:
         """State loudly that (part of) the change timeline could not be read."""
-        text = f"change timeline unavailable: {reason}"
+        text = f"change timeline unavailable: {reason.rstrip('. ')}"
         logger.error("%s (%s for %s)", text, source, target)
         record_unavailable(metrics, source=source, target=target, reason=text, affects_change_detection=True)
         metrics.setdefault("change_timeline_errors", []).append(text)
@@ -399,7 +399,7 @@ class ChangeSpecialist(BaseSpecialist):
         queries_executed: dict[str, list[str]] = {
             "ata_tools": [
                 f"MCP tools/call get_change_timeline(window_hours={CHANGE_WINDOW_HOURS}, "
-                f"project_id={config.project_id}, region={config.region}) on {config.tools_url or 'ata-tools (TOOLS_URL not set)'}"
+                f"project_id={config.project_id}, region={config.region}) on {config.tools_url or f'{config.name_prefix}-tools (TOOLS_URL not set)'}"
             ],
         }
 
@@ -421,7 +421,7 @@ class ChangeSpecialist(BaseSpecialist):
             metrics["apigee_deployments_current"] = apigee_deployments["current"]
             metrics["apigee_deployment_scope"] = apigee_deployments["scope"]
 
-        # 3. Direct Cloud Logging audit query for Services.ReplaceService / UpdateService events
+        # 2. Cloud Logging audit query for Services.ReplaceService / UpdateService events
         if not config.is_local:
             try:
                 import google.cloud.logging
