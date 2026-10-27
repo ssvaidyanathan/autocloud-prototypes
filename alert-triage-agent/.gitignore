@@ -36,6 +36,11 @@ backend.hcl
 *.tfvars
 !*.tfvars.example
 .ata-api-key
+# scripts/deploy-apigee-proxies.sh output: .${NAME_PREFIX}-api-key, .${NAME_PREFIX}-apigee.env
+.*-api-key
+.*-api-key.tmp
+.*-apigee.env
+.*-apigee.env.tmp
 
 # Build-time synced topology package (single source of truth lives in topology/)
 agent/topology/

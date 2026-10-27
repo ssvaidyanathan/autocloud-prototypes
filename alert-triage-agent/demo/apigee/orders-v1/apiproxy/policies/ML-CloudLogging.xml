@@ -2,7 +2,7 @@
 <MessageLogging continueOnError="true" enabled="true" name="ML-CloudLogging">
     <DisplayName>Message Logging to Cloud Logging</DisplayName>
     <CloudLogging>
-        <LogName>projects/{organization.name}/logs/ata-apigee-access</LogName>
+        <LogName>projects/{organization.name}/logs/@PREFIX@-apigee-access</LogName>
         <Message contentType="application/json">{
             "timestamp": "{system.timestamp}",
             "proxy": "{apiproxy.name}",

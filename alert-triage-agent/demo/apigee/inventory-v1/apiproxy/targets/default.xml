@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <TargetEndpoint name="default">
-    <Description>Target endpoint routing to ata-inventory-api Cloud Run</Description>
+    <Description>Target endpoint routing to @PREFIX@-inventory-api Cloud Run</Description>
     <FaultRules/>
     <PreFlow name="PreFlow">
         <Request/>
@@ -19,7 +19,7 @@
             </GoogleIDToken>
         </Authentication>
         <LoadBalancer>
-            <Server name="ata-inventory-target"/>
+            <Server name="@PREFIX@-inventory-target"/>
         </LoadBalancer>
         <Path>/</Path>
         <Properties>
