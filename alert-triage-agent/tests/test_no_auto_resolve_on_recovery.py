@@ -261,3 +261,53 @@ def test_flag_true_keeps_auto_resolve(base_cfg, monkeypatch, clock):
     doc = store.read(group_id)
     assert doc.status == IncidentGroupStatus.RESOLVED.value
     assert doc.recovered_at is None
+
+
+def test_concurrent_cooling_wakes_post_exactly_one_note(base_cfg, monkeypatch, clock):
+    """Two wakes that both passed the cooling_down pre-check with the same stale doc."""
+    bridge = FakeBridge()
+    client, store = _setup(base_cfg, monkeypatch, bridge)
+    group_id, _ = _drive_to_cooling(client, store, clock)
+    clock["now"] = store.read(group_id).cooling_deadline_epoch()
+    stale_doc = store.read(group_id)
+    notes_before = len(bridge.work_notes)
+
+    first = agent_main._mark_recovered_without_resolving(store, stale_doc, clock["now"], base_cfg)
+    second = agent_main._mark_recovered_without_resolving(store, stale_doc, clock["now"], base_cfg)
+
+    assert (first.status, first.reason) == ("executed", "recovered_not_resolved")
+    assert (second.status, second.reason) == ("ignored", "group_status_recovered")
+    assert len(bridge.work_notes) == notes_before + 1
+    assert bridge.resolves == []
+    assert store.read(group_id).status == IncidentGroupStatus.RECOVERED.value
+
+
+def test_failed_note_and_failed_release_logs_stuck_group(base_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(base_cfg, monkeypatch, bridge)
+    group_id, _ = _drive_to_cooling(client, store, clock)
+    clock["now"] = store.read(group_id).cooling_deadline_epoch()
+    doc = store.read(group_id)
+    bridge.fail_work_notes = bridge.work_note_attempts + 1
+
+    real_update = OKFStore.update_atomically
+    calls = {"n": 0}
+
+    def flaky_update(self, gid, fn):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the release after the failed note
+            raise RuntimeError("precondition retries exhausted")
+        return real_update(self, gid, fn)
+
+    monkeypatch.setattr(OKFStore, "update_atomically", flaky_update)
+    with caplog.at_level("ERROR", logger="agent.app.main"):
+        with pytest.raises(RuntimeError, match="bridge unavailable"):
+            agent_main._mark_recovered_without_resolving(store, doc, clock["now"], base_cfg)
+
+    stuck = [r for r in caplog.records if "claim NOT released" in r.getMessage()]
+    assert len(stuck) == 1
+    assert stuck[0].levelname == "ERROR"
+    assert group_id in stuck[0].getMessage()
+    assert "precondition retries exhausted" in stuck[0].getMessage()
+    assert store.read(group_id).status == IncidentGroupStatus.RECOVERED.value
+    assert store.read(group_id).recovery_note_posted_at is None

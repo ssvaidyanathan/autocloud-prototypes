@@ -642,7 +642,7 @@ def _mark_recovered_without_resolving(
                 group_id=doc.group_id,
             ),
         )
-    except Exception:
+    except Exception as note_exc:
         logger.exception(
             "Failed posting recovery work note for group %s; releasing claim so the cooling wake is retried",
             doc.group_id,
@@ -655,7 +655,21 @@ def _mark_recovered_without_resolving(
                 d.updated_at = now_iso
             return d
 
-        store.update_atomically(doc.group_id, _release)
+        try:
+            store.update_atomically(doc.group_id, _release)
+        except Exception as release_exc:
+            # Both storage steps failed: the group stays 'recovered' with no note, and every
+            # retried wake will be ignored. Make that visible rather than silent.
+            logger.error(
+                "Recovery note NOT posted and claim NOT released for group %s (servicenow_sys_id=%s): "
+                "%s: %s; group is stuck in 'recovered' without a note, manual work note required",
+                doc.group_id,
+                claimed_doc.servicenow_sys_id,
+                type(release_exc).__name__,
+                release_exc,
+                exc_info=True,
+            )
+            raise note_exc from release_exc
         raise
 
     def _mark_note_posted(d: OKFDocument) -> OKFDocument:
