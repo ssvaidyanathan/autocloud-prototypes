@@ -121,6 +121,19 @@ TEST_STACK_DIR = tempfile.mkdtemp(prefix="ata-tests-stack-")
 atexit.register(shutil.rmtree, TEST_STACK_DIR, True)
 os.environ["ATA_STACK_DIR"] = TEST_STACK_DIR
 
+# The inventory pin (scripts/scenarios/inventory-pin.<prefix>.env) is committed stack data: it
+# changes with every live re-pin of that stack, so tests must not use it as a fixture. Every
+# script the suite starts reads this per-session test pin instead (ATA_INVENTORY_PIN_FILE).
+# Helpers that scrub ATA_* set their own pin file; tests of the default (committed) location
+# drop the variable and parse the committed file rather than hard-coding its values.
+TEST_PIN_REVISION = "ata-inventory-api-00073-9vb"
+TEST_PIN_DIGEST = "sha256:24b07eaa50db6d226889607116f0dd43693df5e1f597867a79e0f86e3d7767ce"
+TEST_PIN_FILE = os.path.join(TEST_STACK_DIR, "inventory-pin.test.env")
+with open(TEST_PIN_FILE, "w") as _f:
+    _f.write(f"# test pin (tests/conftest.py)\nPIN_INVENTORY_REVISION={TEST_PIN_REVISION}\n"
+             f"PIN_INVENTORY_DIGEST={TEST_PIN_DIGEST}\nPIN_INVENTORY_PREVIOUS_REVISION=\nPIN_INVENTORY_PREVIOUS_DIGEST=\n")
+os.environ["ATA_INVENTORY_PIN_FILE"] = TEST_PIN_FILE
+
 
 class _LiveGeminiBlocked:
     def __init__(self, *args, **kwargs):
