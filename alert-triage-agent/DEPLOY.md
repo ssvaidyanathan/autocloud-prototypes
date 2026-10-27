@@ -123,7 +123,7 @@ The agent calls the tools service (`<prefix>-tools`) over MCP with an ID token t
 | Docker | **Not needed.** Every image is built with Cloud Build. | n/a |
 | jq | **Not needed.** | n/a |
 | Credentials | `gcloud auth login` **and** `gcloud auth application-default login` (the schema proxy, the reset and the preflight use ADC). | [Step 0](#step-0-project-checks-and-authentication) |
-| Deployer IAM | `roles/owner` on the project. Without Owner: `roles/editor`, `roles/resourcemanager.projectIamAdmin`, `roles/run.admin`, `roles/secretmanager.admin`, `roles/cloudsql.admin`, and `roles/iam.serviceAccountUser` on the build and Apigee SAs (list yourself in the foundation variable `deployer_members`, [Step 4](#step-4-foundation)). | [Step 0](#step-0-project-checks-and-authentication) |
+| Deployer IAM | `roles/owner` on the project. Without Owner: `roles/editor`, `roles/resourcemanager.projectIamAdmin`, `roles/run.admin`, `roles/secretmanager.admin`, `roles/cloudsql.admin`, `roles/iam.serviceAccountAdmin`, `roles/cloudtasks.admin` and `roles/artifactregistry.admin`. Editor cannot set IAM policies on service accounts, queues, secrets or repositories, and the foundation grants resource-level roles on all four. Also list yourself in the foundation variable `deployer_members` ([Step 4](#step-4-foundation)) for `roles/iam.serviceAccountUser` on the build and Apigee SAs. | [Step 0](#step-0-project-checks-and-authentication) |
 | Apigee IAM | `roles/apigee.admin` on the Apigee organization's project (`APIGEE_ORG`): it creates TargetServers, proxies, the API product, developer and app. Provisioning a new organization needs Owner on that project. | [Step 1](#step-1-apigee-organization-environment-and-hostname) |
 | ServiceNow | An instance URL (`https://...`) and an integration user with the `itil` role (incident and attachment tables). A free Personal Developer Instance works. | Log in to the instance. |
 | macOS only | If Python reports `CERTIFICATE_VERIFY_FAILED`: `export SSL_CERT_FILE=/etc/ssl/cert.pem` | n/a |
@@ -197,6 +197,17 @@ Rules:
 - **Never share a checkout's `.terraform/` between prefixes.** Do not copy `.terraform/` or `backend.hcl` from another clone. Every Terraform phase runs `terraform init -reconfigure -backend-config=backend.hcl` and refuses a `backend.hcl` that belongs to another prefix or bucket.
 - **Use a separate shell with its own inputs file.**
 - Each stack has its own pin file, `scripts/scenarios/inventory-pin.<prefix>.env` ([Step 10](#step-10-inventory-pin)). Commit a stack's pin file only if that stack is meant to be tracked in the repository.
+- **Review each Terraform phase's plan first.** The phases apply with `-auto-approve`. In a shared project, plan the root yourself and check that every named resource starts with `<prefix>-` (buckets: `<project>-<prefix>-`) and that every IAM member is a `<prefix>-*-sa` (or you, from `deployer_members`). The `google_project_service` entries only adopt APIs that are already enabled (`disable_on_destroy = false`). Run the phase only when the plan is clean:
+
+  ```bash
+  R=foundation   # or database, applications, triage-iam, observability
+  (cd "infra/terraform/${R}" && terraform init -input=false -reconfigure -backend-config=backend.hcl >/dev/null && \
+    terraform plan -input=false -var project_id="${PROJECT_ID}" -var region="${REGION}" -var name_prefix="${NAME_PREFIX}" \
+      $(case "${R}" in foundation|database|applications) echo "-var environment=${ENVIRONMENT} -var owner=${OWNER}";; esac) \
+    | grep -E '^  # |^Plan:')
+  ```
+
+  `applications` also needs the image variables that the phase passes. Use the phase's own output for that root.
 - Both stacks may use the same ServiceNow instance. Their tickets then share a queue and differ only in the group IDs and the `<prefix>-*` names in the text.
 
 ---
@@ -423,6 +434,7 @@ gcloud secrets list --project="${PROJECT_ID}" --filter="name~/secrets/${NAME_PRE
 
 **If it fails:**
 - `API ... has not been used in project ... or it is disabled`: the APIs enabled by this same apply take a minute or two to propagate. Wait, then run the phase again.
+- `Permission 'iam.serviceAccounts.setIamPolicy' denied`, or `lacks IAM permission "cloudtasks.queues.getIamPolicy"` (or the same for secrets or the repository): you are not Owner and lack one of the admin roles in [§2.1](#21-operator-prerequisites). The resources are created, only their IAM bindings are missing. Get the roles, then run the phase again.
 - `Error acquiring the state lock`: another run holds the lock. Wait for it. Use `terraform force-unlock <id>` only if you are sure no other run is active.
 - `backend.hcl ... is not for NAME_PREFIX`: you are in another stack's clone or shell, or bootstrap ran with other inputs. Check the inputs and rerun `--only bootstrap`.
 - A `409 already exists` on a `<prefix>-*` resource: the prefix is in use, or an earlier stack was not fully removed. Run the checks in [§6](#6-verify-that-nothing-is-left).
