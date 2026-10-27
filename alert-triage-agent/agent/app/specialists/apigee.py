@@ -6,6 +6,7 @@ All telemetry is anchored to the alert start time using real read-only GCP queri
 """
 
 from collections import Counter
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, Optional
@@ -36,19 +37,31 @@ def _iso(ts: datetime) -> str:
     return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def summarize_revision_change(revisions: dict[str, dict[str, Any]]) -> Optional[dict[str, Any]]:
+def summarize_revision_change(
+    revisions: dict[str, dict[str, Any]], latest_revision: Optional[str] = None
+) -> Optional[dict[str, Any]]:
     """Describe the switch to the newest proxy revision seen in the access log, or None.
 
-    ``revisions`` maps revision -> {first, last, requests, spike_arrest_faults}. Only facts
-    from the log are returned: which revision served before and after, when each was first
-    and last seen, and the per-revision request and SpikeArrest fault counts. A request rate
-    is given only for a revision that served for at least a minute.
+    ``revisions`` maps revision -> {first, last, requests, spike_arrest_faults} for one
+    environment; ``latest_revision`` is the revision of the newest entry read. Only facts from
+    the log are returned: which revision served before and after, when each was first and
+    last seen, and the per-revision request and SpikeArrest fault counts. A request rate is
+    given only for a revision that served for at least a minute. None when the newest entry
+    is not on the most recently introduced revision (e.g. A -> B -> A): the switch is not the
+    current state, so it is not reported as one.
     """
     timed = [(r, v) for r, v in revisions.items() if v.get("first") and v.get("last")]
     if len(timed) < 2:
         return None
     timed.sort(key=lambda rv: rv[1]["first"])
     (prev_rev, prev), (new_rev, new) = timed[-2], timed[-1]
+    if latest_revision is not None and latest_revision != new_rev:
+        logger.info(
+            "Access log: newest entry is on revision %s, not on the last introduced revision %s; no revision switch reported",
+            latest_revision,
+            new_rev,
+        )
+        return None
 
     def rate(v: dict[str, Any]) -> Optional[float]:
         minutes = (v["last"] - v["first"]).total_seconds() / 60.0
@@ -160,10 +173,14 @@ class ApigeeSpecialist(BaseSpecialist):
         # SpikeArrest evidence and per-revision access-log facts; org/env as Apigee reports them.
         sa_metric_count = 0
         sa_fault_code: Optional[str] = None
+        sa_response_code: Optional[str] = None
         sa_log_count = 0
         revision_stats: dict[str, dict[str, Any]] = {}
-        apigee_org: Optional[str] = None
-        apigee_env: Optional[str] = None
+        latest_entry: Optional[tuple[datetime, str]] = None
+        metric_orgs: set[str] = set()
+        metric_envs: set[str] = set()
+        log_envs: set[str] = set()
+        access_log_truncated = False
 
         # 1. Query Cloud Monitoring: proxy/response_count
         try:
@@ -193,13 +210,17 @@ class ApigeeSpecialist(BaseSpecialist):
                 )
                 if code and pts_sum > 0:
                     status_counts[code] = status_counts.get(code, 0) + pts_sum
+                # Real responses carry a protobuf map (a Mapping, not a dict).
                 res_labels = getattr(getattr(ts, "resource", None), "labels", None)
-                if isinstance(res_labels, dict):
-                    apigee_org = res_labels.get("org") or apigee_org
-                    apigee_env = res_labels.get("env") or apigee_env
+                if isinstance(res_labels, Mapping):
+                    if res_labels.get("org"):
+                        metric_orgs.add(str(res_labels["org"]))
+                    if res_labels.get("env"):
+                        metric_envs.add(str(res_labels["env"]))
                 if fc and str(fc).endswith(SPIKE_ARREST_FAULT) and pts_sum > 0:
                     sa_metric_count += pts_sum
                     sa_fault_code = str(fc)
+                    sa_response_code = code or sa_response_code
                 if fc and str(fc).endswith(GATEWAY_TIMEOUT_FAULT) and pts_sum > 0:
                     gt_metric_count += pts_sum
                     gt_fault_code = str(fc)
@@ -259,6 +280,15 @@ class ApigeeSpecialist(BaseSpecialist):
                     filter_=alt_filter, max_results=ACCESS_LOG_MAX_ENTRIES, order_by=google.cloud.logging.ASCENDING
                 ))
 
+            if len(entries) >= ACCESS_LOG_MAX_ENTRIES:
+                # Oldest-first and capped: the newest entries were not read, so per-revision
+                # counts are partial and the current revision is unknown.
+                access_log_truncated = True
+                logger.warning(
+                    "Access log for %s hit the %d-entry cap in [%s, %s]; revision switch not evaluated, "
+                    "log-derived counts are lower bounds",
+                    target_proxy, ACCESS_LOG_MAX_ENTRIES, start_ts, end_ts,
+                )
             client_counter: Counter[str] = Counter()
             for entry in entries:
                 payload = entry.payload if isinstance(entry.payload, dict) else {}
@@ -272,10 +302,12 @@ class ApigeeSpecialist(BaseSpecialist):
                 if fault_name == SPIKE_ARREST_FAULT:
                     sa_log_count += 1
                 if payload.get("environment"):
-                    apigee_env = apigee_env or str(payload["environment"])
+                    log_envs.add(str(payload["environment"]))
                 entry_rev = str(payload.get("revision") or "").strip()
                 entry_ts = _entry_time(entry)
                 if entry_rev and entry_ts:
+                    if latest_entry is None or entry_ts >= latest_entry[0]:
+                        latest_entry = (entry_ts, entry_rev)
                     st = revision_stats.setdefault(
                         entry_rev, {"first": entry_ts, "last": entry_ts, "requests": 0, "spike_arrest_faults": 0}
                     )
@@ -333,10 +365,20 @@ class ApigeeSpecialist(BaseSpecialist):
 
         metrics["top_client_ip"] = top_client_ip if top_client_ip else "<CLIENT_IP>/32"
 
-        if apigee_org:
-            metrics["apigee_org"] = apigee_org
-        if apigee_env:
-            metrics["apigee_environment"] = apigee_env
+        # Org and environment only when Apigee reported exactly one; never assumed.
+        if len(metric_orgs) == 1:
+            metrics["apigee_org"] = next(iter(metric_orgs))
+        elif metric_orgs:
+            logger.warning("Apigee proxy %s reported in several orgs %s; org not recorded", target_proxy, sorted(metric_orgs))
+        envs = metric_envs | log_envs
+        if len(envs) == 1:
+            metrics["apigee_environment"] = next(iter(envs))
+        elif envs:
+            logger.warning(
+                "Apigee proxy %s seen in several environments %s; environment and revision switch not recorded",
+                target_proxy, sorted(envs),
+            )
+        lower_bound = access_log_truncated
         if sa_metric_count or sa_log_count:
             metrics["spike_arrest"] = {
                 "count": sa_metric_count or sa_log_count,
@@ -344,9 +386,15 @@ class ApigeeSpecialist(BaseSpecialist):
                     "apigee.googleapis.com/proxy/response_count" if sa_metric_count
                     else "ata-apigee-access log entries"
                 ),
+                "count_is_lower_bound": bool(not sa_metric_count and lower_bound),
+                "response_code": sa_response_code,
                 "fault_code": sa_fault_code or SPIKE_ARREST_FAULT,
             }
-        revision_change = summarize_revision_change(revision_stats)
+        revision_change = None
+        if not access_log_truncated and len(envs) <= 1:
+            revision_change = summarize_revision_change(
+                revision_stats, latest_entry[1] if latest_entry else None
+            )
         if revision_change:
             metrics["proxy_revision_change"] = revision_change
             findings.append(
@@ -367,7 +415,11 @@ class ApigeeSpecialist(BaseSpecialist):
                 "response_code": gt_response_code,
                 "fault_code": gt_fault_code or GATEWAY_TIMEOUT_FAULT,
                 "fault_source": gt_fault_source,
-                "revision": log_revisions.most_common(1)[0][0] if log_revisions else None,
+                "count_is_lower_bound": bool(not gt_metric_count and lower_bound),
+                # With a truncated log the revision may not be the one serving now.
+                "revision": (
+                    log_revisions.most_common(1)[0][0] if log_revisions and not access_log_truncated else None
+                ),
             }
             findings.append(
                 f"Apigee proxy `{target_proxy}` returned {metrics['gateway_timeout']['count']} "

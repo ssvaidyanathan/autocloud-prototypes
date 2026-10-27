@@ -901,8 +901,8 @@ class SynthesizerAgent:
         err_5xx_rate: Optional[str] = None
         err_5xx_pct: Optional[float] = None
         lat_p95_ms: Optional[float] = None
-        # Highest measured 5xx rate on a service other than the origin: (service, rate).
-        caller_5xx: Optional[tuple[str, str, float]] = None
+        # Measured 5xx rate (text, percent) per topology dependent of the origin.
+        dependent_5xx: dict[str, tuple[str, float]] = {}
 
         for d in dossiers:
             if d.specialist_name == "CloudSQLSpecialist" and d.anomaly_detected:
@@ -920,17 +920,15 @@ class SynthesizerAgent:
                 raw_err = d.metrics.get("error_rate_5xx")
                 if raw_err and raw_err != "0.1%" and raw_err != "N/A (not captured)":
                     err_5xx_rate = raw_err
+                    this_pct: Optional[float] = None
                     try:
-                        err_5xx_pct = float(str(raw_err).replace("%", ""))
+                        this_pct = float(str(raw_err).replace("%", ""))
                     except ValueError:
-                        pass
-                    if (
-                        d.target_resource != origin
-                        and err_5xx_pct is not None
-                        and err_5xx_pct >= 5.0
-                        and (caller_5xx is None or err_5xx_pct > caller_5xx[2])
-                    ):
-                        caller_5xx = (d.target_resource, raw_err, err_5xx_pct)
+                        logger.warning("Unparseable 5xx rate %r on %s", raw_err, d.target_resource)
+                    if this_pct is not None:
+                        err_5xx_pct = this_pct
+                        if d.target_resource in upstream:
+                            dependent_5xx[d.target_resource] = (str(raw_err), this_pct)
                 raw_lat = d.metrics.get("latency_p95_ms")
                 if raw_lat and raw_lat != "N/A (not captured)":
                     try:
@@ -977,17 +975,19 @@ class SynthesizerAgent:
 
         if is_sql and ("db" in origin or "sql" in origin):
             metric_str = f" ({', '.join(metric_details)})" if metric_details else ""
-            if caller_5xx:
-                # A cascade is stated only when a dependent service shows measured 5xx errors.
-                return (
-                    f"Database connection pool saturation{metric_str} on {origin} "
-                    f"with HTTP 5xx errors on dependent {caller_5xx[0]} ({caller_5xx[1]}) since {started_at}"
-                )
-            dependents = f"; dependent services per topology: {', '.join(upstream)}" if upstream else ""
-            return (
-                f"Database connection pool saturation{metric_str} on {origin} since {started_at}"
-                f" (no HTTP 5xx errors measured on dependent services){dependents}"
-            )
+            head = f"Database connection pool saturation{metric_str} on {origin} since {started_at}"
+            erroring = {svc: v for svc, v in dependent_5xx.items() if v[1] > 0}
+            if erroring:
+                # Only measured rates on topology dependents are stated, each with its value.
+                rates = ", ".join(f"{svc} {txt}" for svc, (txt, _) in sorted(erroring.items()))
+                return f"{head}; HTTP 5xx rate on dependent services: {rates}"
+            unmeasured = [svc for svc in upstream if svc not in dependent_5xx]
+            parts = []
+            if dependent_5xx:
+                parts.append(f"no HTTP 5xx errors measured on {', '.join(sorted(dependent_5xx))}")
+            if unmeasured:
+                parts.append(f"HTTP 5xx rate not measured on {', '.join(unmeasured)}")
+            return f"{head} ({'; '.join(parts)})" if parts else head
         elif is_apigee:
             metric_str = f" ({', '.join(metric_details)})" if metric_details else ""
             return (
@@ -1169,6 +1169,7 @@ class SynthesizerAgent:
             "org": apigee.metrics.get("apigee_org"),
             "environment": apigee.metrics.get("apigee_environment"),
             "spike_arrest_count": sa.get("count"),
+            "spike_arrest_response_code": sa.get("response_code"),
             "spike_arrest_fault_code": sa.get("fault_code"),
         }
 
@@ -1176,7 +1177,8 @@ class SynthesizerAgent:
     def _proxy_change_root_cause(ev: dict[str, Any], policy_name: str) -> str:
         """Root cause sentence for a proxy revision change that brought SpikeArrest faults."""
         fault = f" with fault `{ev['spike_arrest_fault_code']}`" if ev.get("spike_arrest_fault_code") else ""
-        total = f"{ev['spike_arrest_count']} HTTP 429 responses{fault} in total; " if ev.get("spike_arrest_count") else ""
+        code = f"HTTP {ev['spike_arrest_response_code']} " if ev.get("spike_arrest_response_code") else ""
+        total = f"{ev['spike_arrest_count']} {code}responses{fault} in total; " if ev.get("spike_arrest_count") else ""
         text = (
             f"Configuration change on Apigee proxy `{ev['proxy']}`: revision {ev['new_revision']} "
             f"(first served {ev['new_first_served_at']}, replacing revision {ev['previous_revision']}) "
@@ -1259,17 +1261,21 @@ class SynthesizerAgent:
             ),
         ]
 
-    def _db_caller_actions(self, origin: str) -> list[ActionItem]:
+    def _db_caller_actions(self, origin: str, project_id: str) -> list[ActionItem]:
         """Connection-release review on the Cloud Run services that call the database directly.
 
         The callers come from TOPOLOGY.md; the pool and its release logic live in them, not in
         the database. Without a known caller, no action is given.
         """
-        loader = get_loader()
-        callers = [
-            e.from_node for e in loader.edges
-            if e.to_node == loader.canonicalize(origin) and self._is_cloud_run(e.from_node)
-        ]
+        try:
+            loader = get_loader()
+            callers = [
+                e.from_node for e in loader.edges
+                if e.to_node == loader.canonicalize(origin) and self._is_cloud_run(e.from_node)
+            ]
+        except Exception as exc:
+            logger.error("Topology caller lookup failed for %s: %s", origin, type(exc).__name__)
+            return []
         if not callers:
             logger.warning("No Cloud Run caller of %s in TOPOLOGY.md; no connection-release review suggested", origin)
         return [
@@ -1277,7 +1283,8 @@ class SynthesizerAgent:
                 title=f"Inspect connection pool release logic and pool size in {caller}, which calls {origin}",
                 command=(
                     f"gcloud logging read 'resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"{caller}\" "
-                    f"AND textPayload=~\"connection leak|pool exhausted|get_db_connection\"' --limit=30"
+                    f"AND textPayload=~\"connection leak|pool exhausted|get_db_connection\"' "
+                    f"--project={project_id} --limit=30"
                 ),
                 verification=f"Confirm {caller} releases database connections (no leak in its logs)",
             )
@@ -1297,7 +1304,12 @@ class SynthesizerAgent:
         if not isinstance(gt, dict) or not gt.get("count"):
             return None
         proxy = gt.get("proxy") or apigee.target_resource
-        path = next((p for p in get_loader().dependency_paths(origin) if proxy in p), None)
+        try:
+            paths = get_loader().dependency_paths(origin)
+        except Exception as exc:
+            logger.error("Topology dependency path lookup failed for %s: %s", origin, type(exc).__name__)
+            return None
+        path = next((p for p in paths if proxy in p), None)
         if path is None:
             logger.info(
                 "Apigee GatewayTimeout evidence on %s not stated for origin %s: no topology path between them",
@@ -1308,9 +1320,10 @@ class SynthesizerAgent:
         route = " -> ".join(path[path.index(proxy):])
         rev = f" (revision {gt['revision']})" if gt.get("revision") else ""
         what = f"HTTP {gt['response_code']} responses" if gt.get("response_code") else "responses"
+        count = f"at least {gt['count']}" if gt.get("count_is_lower_bound") else str(gt["count"])
         src = f" (fault source: {gt['fault_source']})" if gt.get("fault_source") else ""
         fact = (
-            f"Apigee proxy `{proxy}`{rev} returned {gt['count']} {what} with fault "
+            f"Apigee proxy `{proxy}`{rev} returned {count} {what} with fault "
             f"`{gt.get('fault_code')}`{src}. Requests on {route} did not complete within the "
             f"proxy's target timeout"
         )
@@ -1424,10 +1437,11 @@ class SynthesizerAgent:
                 return self._proxy_change_root_cause(proxy_change, alert.policy_name), confidence
             apigee = next((d for d in dossiers if d.specialist_name == "ApigeeSpecialist"), None)
             sa = apigee.metrics.get("spike_arrest") if apigee else None
-            count_str = (
-                f" ({sa['count']} HTTP 429 responses with fault `{sa['fault_code']}`)"
-                if isinstance(sa, dict) and sa.get("count") else ""
-            )
+            count_str = ""
+            if isinstance(sa, dict) and sa.get("count"):
+                least = "at least " if sa.get("count_is_lower_bound") else ""
+                code = f"HTTP {sa['response_code']} " if sa.get("response_code") else ""
+                count_str = f" ({least}{sa['count']} {code}responses with fault `{sa['fault_code']}`)"
             root_cause_text = (
                 f"SpikeArrest rate-limit violations at Apigee ingress proxy `{origin}`{count_str} "
                 f"under policy `{alert.policy_name}`."
@@ -1800,7 +1814,7 @@ class SynthesizerAgent:
                     command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
                     verification="Confirm active connections drop below 80% capacity via Cloud Monitoring",
                 ),
-                *self._db_caller_actions(origin),
+                *self._db_caller_actions(origin, project_id),
                 ActionItem(
                     title=(
                         f"Review the tier and database flags of {origin} before any max_connections change "

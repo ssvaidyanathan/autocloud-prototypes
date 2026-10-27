@@ -403,6 +403,7 @@ async def test_apigee_specialist_records_gateway_timeout_evidence():
         "response_code": "504",
         "fault_code": S2_GT_FAULT,
         "fault_source": "target",
+        "count_is_lower_bound": False,
         "revision": "132",
     }
 
@@ -540,7 +541,8 @@ async def test_s3_apigee_specialist_records_revision_change_and_spike_arrest():
     assert dossier.metrics["apigee_org"] == "cloud-assist-fde-2"
     assert dossier.metrics["apigee_environment"] == "prod"
     assert dossier.metrics["spike_arrest"] == {
-        "count": 572, "count_source": "apigee.googleapis.com/proxy/response_count", "fault_code": S3_SA_FAULT,
+        "count": 572, "count_source": "apigee.googleapis.com/proxy/response_count",
+        "count_is_lower_bound": False, "response_code": "429", "fault_code": S3_SA_FAULT,
     }
     change = dossier.metrics["proxy_revision_change"]
     assert change["previous_revision"] == "161" and change["new_revision"] == "162"
@@ -717,12 +719,37 @@ def test_s4_problem_does_not_claim_unobserved_5xx_cascade():
     text = SynthesizerAgent()._synthesize_problem(S4_ALERT, _s4_dossiers(), "ata-inventory-db", S4_BLAST)
     assert "5xx failures" not in text and "cascading" not in text
     assert text.startswith("Database connection pool saturation (connections at 24/25) on ata-inventory-db")
-    assert "no HTTP 5xx errors measured on dependent services" in text
+    assert "no HTTP 5xx errors measured on ata-inventory-api" in text
+    assert "HTTP 5xx rate not measured on ata-inventory-v1, ata-orders-api, ata-orders-v1" in text
 
 
 def test_s4_problem_states_cascade_only_with_measured_caller_5xx():
     text = SynthesizerAgent()._synthesize_problem(S4_ALERT, _s4_dossiers("42.0%"), "ata-inventory-db", S4_BLAST)
-    assert "with HTTP 5xx errors on dependent ata-inventory-api (42.0%)" in text
+    assert text.endswith("; HTTP 5xx rate on dependent services: ata-inventory-api 42.0%")
+
+
+def test_s4_problem_states_low_measured_5xx_and_never_claims_none():
+    # Review finding: a 3% rate must not become "no HTTP 5xx errors".
+    text = SynthesizerAgent()._synthesize_problem(S4_ALERT, _s4_dossiers("3.0%"), "ata-inventory-db", S4_BLAST)
+    assert "ata-inventory-api 3.0%" in text
+    assert "no HTTP 5xx" not in text
+    # Nothing measured on any dependent: say so, claim nothing.
+    text = SynthesizerAgent()._synthesize_problem(
+        S4_ALERT, _s4_dossiers("N/A (not captured)"), "ata-inventory-db", S4_BLAST
+    )
+    assert "no HTTP 5xx" not in text
+    assert "HTTP 5xx rate not measured on ata-inventory-api" in text
+
+
+def test_s4_problem_ignores_5xx_on_services_that_are_not_dependents():
+    dossiers = _s4_dossiers()
+    dossiers.append(EvidenceDossier(
+        specialist_name="CloudRunSpecialist", target_resource="unrelated-svc", findings=[],
+        metrics={"error_rate_5xx": "50.0%"}, evidence_items=[], queries_executed={},
+        anomaly_detected=True, confidence=0.9,
+    ))
+    text = SynthesizerAgent()._synthesize_problem(S4_ALERT, dossiers, "ata-inventory-db", S4_BLAST)
+    assert "unrelated-svc" not in text
 
 
 def test_s4_observations_skip_unmeasured_values_and_never_fill_in_numbers():
@@ -744,3 +771,101 @@ def test_s4_actions_never_patch_database_flags():
     leak = next(a for a in actions if a.title.startswith("Inspect connection pool release logic"))
     assert "in ata-inventory-api, which calls ata-inventory-db" in leak.title
     assert 'resource.labels.service_name="ata-inventory-api"' in leak.command
+    assert "--project=cloud-assist-fde-2" in leak.command
+
+
+
+# ---------------------------------------------------------------------------------------
+# Review findings on the Apigee evidence
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_org_and_env_read_from_real_monitoring_time_series_labels():
+    from google.cloud import monitoring_v3
+
+    from agent.app.config import AgentConfig
+    from agent.app.specialists.apigee import ApigeeSpecialist
+
+    ts = monitoring_v3.TimeSeries()
+    ts.metric.labels["response_code"] = "429"
+    ts.metric.labels["fault_code"] = S3_SA_FAULT
+    ts.resource.labels["org"] = "cloud-assist-fde-2"
+    ts.resource.labels["env"] = "prod"
+    pt = monitoring_v3.Point()
+    pt.value.int64_value = 5
+    ts.points.append(pt)
+    alert = AlertEvent(incident_id="0.x", policy_name="ata-apigee-orders-429",
+                       resource_name="ata-orders-v1", started_at="2026-10-27T08:35:28Z")
+    config = AgentConfig(project_id="cloud-assist-fde-2", region="us-west1", is_local=True)
+    with _patch("google.cloud.monitoring_v3.MetricServiceClient") as mon_cls, \
+         _patch("google.cloud.logging.Client") as log_cls:
+        mon_cls.return_value.list_time_series.side_effect = (
+            lambda request: [ts] if "response_count" in request.filter else []
+        )
+        log_cls.return_value.list_entries.return_value = []
+        dossier = await ApigeeSpecialist().investigate(alert, config)
+    assert dossier.metrics["apigee_org"] == "cloud-assist-fde-2"
+    assert dossier.metrics["apigee_environment"] == "prod"
+    assert dossier.metrics["spike_arrest"]["count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_truncated_access_log_reports_no_revision_switch(caplog):
+    from agent.app.specialists import apigee as apigee_mod
+
+    with _patch.object(apigee_mod, "ACCESS_LOG_MAX_ENTRIES", 100), caplog.at_level("WARNING"):
+        dossier, alert = await _s3_apigee_dossier()
+    assert "proxy_revision_change" not in dossier.metrics
+    assert "hit the 100-entry cap" in caplog.text
+    text, _ = SynthesizerAgent()._determine_root_cause([dossier], "ata-orders-v1", alert)
+    assert "Configuration change" not in text
+
+
+def test_summarize_revision_change_rejects_switch_back():
+    from agent.app.specialists.apigee import summarize_revision_change
+
+    t0 = S3_DEPLOY
+    stats = {
+        "161": {"first": t0, "last": t0 + timedelta(minutes=9), "requests": 50, "spike_arrest_faults": 0},
+        "162": {"first": t0 + timedelta(minutes=2), "last": t0 + timedelta(minutes=5), "requests": 40, "spike_arrest_faults": 30},
+    }
+    # A -> B -> A: the newest entry is back on 161.
+    assert summarize_revision_change(stats, latest_revision="161") is None
+    assert summarize_revision_change(stats, latest_revision="162")["new_revision"] == "162"
+
+
+@pytest.mark.asyncio
+async def test_two_environments_record_no_environment_or_switch():
+    from agent.app.config import AgentConfig
+    from agent.app.specialists.apigee import ApigeeSpecialist
+
+    entries = _s3_log_entries()
+    for e in entries[:10]:
+        e.payload = dict(e.payload, environment="test")
+    alert = AlertEvent(incident_id="0.x", policy_name="ata-apigee-orders-429",
+                       resource_name="ata-orders-v1", started_at="2026-10-27T08:35:28Z")
+    config = AgentConfig(project_id="cloud-assist-fde-2", region="us-west1", is_local=True)
+    with _patch("google.cloud.monitoring_v3.MetricServiceClient") as mon_cls, \
+         _patch("google.cloud.logging.Client") as log_cls:
+        mon_cls.return_value.list_time_series.return_value = []
+        log_cls.return_value.list_entries.return_value = entries
+        dossier = await ApigeeSpecialist().investigate(alert, config)
+    assert "apigee_environment" not in dossier.metrics
+    assert "proxy_revision_change" not in dossier.metrics
+
+
+def test_log_only_gateway_timeout_count_is_stated_as_lower_bound():
+    gt = dict(S2_GT, count_source="ata-apigee-access log entries", count_is_lower_bound=True, revision=None)
+    fact = SynthesizerAgent()._gateway_timeout_fact(_s2_dossiers(gt), "ata-inventory-api")
+    assert "returned at least 200 HTTP 504 responses" in fact
+
+
+def test_topology_failure_in_new_helpers_is_logged_not_raised(caplog):
+    synth = SynthesizerAgent()
+    with _patch("agent.app.specialists.synthesizer.get_loader", side_effect=RuntimeError("boom")), \
+         caplog.at_level("ERROR"):
+        assert synth._db_caller_actions("ata-inventory-db", "p") == []
+        assert synth._gateway_timeout_fact(_s2_dossiers(S2_GT), "ata-inventory-api") is None
+    assert "Topology caller lookup failed" in caplog.text
+    assert "Topology dependency path lookup failed" in caplog.text

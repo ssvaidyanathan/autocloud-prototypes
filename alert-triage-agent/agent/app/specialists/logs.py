@@ -140,7 +140,9 @@ def format_single_line_log_excerpt(entry: Any) -> Optional[str]:
         status_num = None
 
     if status_num is not None:
-        # A request line is an error only when it failed on the server side.
+        # A request line is an error only when it failed on the server side. This also drops
+        # request entries with severity ERROR but a 2xx/4xx status (deliberate: client errors
+        # and successes are not error evidence).
         if status_num < 500:
             return None
         sev_upper = "ERROR"

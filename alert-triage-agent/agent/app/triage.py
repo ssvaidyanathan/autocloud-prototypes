@@ -279,7 +279,7 @@ def generate_investigation_report(
                 command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
                 verification="Confirm active connections drop below 80% capacity via Cloud Monitoring",
             ),
-            *SynthesizerAgent()._db_caller_actions(canonical_res),
+            *SynthesizerAgent()._db_caller_actions(canonical_res, config.project_id),
             ActionItem(
                 title=(
                     f"Review the tier and database flags of {canonical_res} before any max_connections change "
