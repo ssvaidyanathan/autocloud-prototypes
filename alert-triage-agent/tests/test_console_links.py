@@ -292,7 +292,7 @@ def test_structured_description_canonical_links():
         ],
     )
 
-    desc = report.build_structured_description(project_id="cloud-assist-fde-2")
+    desc = report.build_structured_description(project_id="cloud-assist-fde-2", incidents_bucket="test-project-ata-incidents")
 
     # Verify canonical incident URL is present in alert line
     assert "https://console.cloud.google.com/monitoring/alerting/incidents/0.m987654?project=cloud-assist-fde-2" in desc

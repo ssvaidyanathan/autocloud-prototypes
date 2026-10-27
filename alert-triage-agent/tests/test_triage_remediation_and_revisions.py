@@ -96,7 +96,8 @@ def test_triage_remediation_cloud_run_commands(agent_config):
 
 def test_dynamic_revisions_and_duration_defaults_to_unspecified(agent_config):
     """Assert revisions and metadata default to 'Unspecified' when env vars are unset (R3)."""
-    with patch.dict(os.environ, {}, clear=True):
+    # NAME_PREFIX stays set: the topology is {prefix}-relative and has no default prefix.
+    with patch.dict(os.environ, {"NAME_PREFIX": "ata"}, clear=True):
         alert = AlertEvent(
             incident_id="0.meta_test_001",
             policy_name="ata-inventory-5xx",
@@ -136,6 +137,7 @@ def test_dynamic_revisions_from_env_variables(agent_config):
     env_vars = {
         "K_REVISION": "ata-agent-custom-rev",
         "BRIDGE_REVISION": "ata-bridge-custom-rev",
+        "NAME_PREFIX": "ata",
     }
     with patch.dict(os.environ, env_vars, clear=True):
         alert = AlertEvent(

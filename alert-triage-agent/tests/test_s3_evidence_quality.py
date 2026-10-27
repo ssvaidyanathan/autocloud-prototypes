@@ -318,7 +318,7 @@ async def test_access_log_429_exhausted_reports_change_not_assessed(cfg):
     assert gcp.access_log_calls == cfg.gcp_read_retry_attempts
 
     assert report.change_induced == f"Not assessed ({NOT_ASSESSED})"
-    desc = report.build_structured_description(project_id=cfg.project_id)
+    desc = report.build_structured_description(project_id=cfg.project_id, incidents_bucket="test-project-ata-incidents")
     assert f"Change-Induced: Not assessed ({NOT_ASSESSED})" in desc
     assert "Change-Induced: No\n" not in desc
     # Visible in the ticket observations (work note, description) and in the HTML evidence.

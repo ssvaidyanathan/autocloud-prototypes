@@ -6,17 +6,21 @@ and work out the blast radius (everything that depends on the origin).
 
 To adapt it to another application, edit the two tables below. No code changes are needed.
 
+`{prefix}` stands for the stack's `NAME_PREFIX` (for example `ata`). The loader substitutes it
+when the agent or tools start, so one file serves every stack. Startup fails if `NAME_PREFIX` is
+unset or invalid, or if any `{...}` placeholder is left after substitution.
+
 ## Components
 
 Every component that can raise an alert or be affected by one.
 
 | Component | Type | Also known as (alert labels) | Notes |
 |---|---|---|---|
-| ata-orders-v1 | Apigee proxy | ata-apigee-orders-v1, orders-v1 | Public orders API (`/ata/orders/v1`) |
-| ata-inventory-v1 | Apigee proxy | ata-apigee-inventory-v1, inventory-v1 | Public inventory API (`/ata/inventory/v1`) |
-| ata-orders-api | Cloud Run | orders-api | Places orders and reserves stock |
-| ata-inventory-api | Cloud Run | inventory-api | Stock levels and reservations |
-| ata-inventory-db | Cloud SQL | inventory-db | PostgreSQL inventory database |
+| {prefix}-orders-v1 | Apigee proxy | {prefix}-apigee-orders-v1, orders-v1 | Public orders API (`/{prefix}/orders/v1`) |
+| {prefix}-inventory-v1 | Apigee proxy | {prefix}-apigee-inventory-v1, inventory-v1 | Public inventory API (`/{prefix}/inventory/v1`) |
+| {prefix}-orders-api | Cloud Run | orders-api | Places orders and reserves stock |
+| {prefix}-inventory-api | Cloud Run | inventory-api | Stock levels and reservations |
+| {prefix}-inventory-db | Cloud SQL | inventory-db | PostgreSQL inventory database |
 
 Types: `Apigee proxy`, `Cloud Run`, `Cloud SQL`.
 
@@ -26,20 +30,20 @@ Read each row as "**From** depends on **To**". If **To** fails, **From** is affe
 
 | From | To | How |
 |---|---|---|
-| ata-orders-v1 | ata-orders-api | routes traffic to |
-| ata-inventory-v1 | ata-inventory-api | routes traffic to |
-| ata-orders-api | ata-inventory-api | calls |
-| ata-inventory-api | ata-inventory-db | reads and writes |
+| {prefix}-orders-v1 | {prefix}-orders-api | routes traffic to |
+| {prefix}-inventory-v1 | {prefix}-inventory-api | routes traffic to |
+| {prefix}-orders-api | {prefix}-inventory-api | calls |
+| {prefix}-inventory-api | {prefix}-inventory-db | reads and writes |
 
 ## What the agent derives from this
 
 Shown here for reference only. The agent computes this; you don't maintain it.
 
 ```
-ata-orders-v1 ──► ata-orders-api ──┐
-                                   ├──► ata-inventory-api ──► ata-inventory-db
-ata-inventory-v1 ─────────────────┘
+{prefix}-orders-v1 ──► {prefix}-orders-api ──┐
+                                   ├──► {prefix}-inventory-api ──► {prefix}-inventory-db
+{prefix}-inventory-v1 ─────────────────┘
 ```
 
-- If **ata-inventory-db** fails, the blast radius is ata-inventory-api, ata-orders-api, ata-orders-v1 and ata-inventory-v1.
-- If **ata-orders-v1** returns 429s while ata-orders-api is healthy, the origin stays **ata-orders-v1**.
+- If **{prefix}-inventory-db** fails, the blast radius is {prefix}-inventory-api, {prefix}-orders-api, {prefix}-orders-v1 and {prefix}-inventory-v1.
+- If **{prefix}-orders-v1** returns 429s while {prefix}-orders-api is healthy, the origin stays **{prefix}-orders-v1**.

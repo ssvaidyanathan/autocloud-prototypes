@@ -20,6 +20,8 @@ dependencies = [
     "google-cloud-logging>=3.10.0",
     "google-cloud-monitoring>=2.19.0",
     "google-cloud-tasks>=2.16.0",
+    # Gemini gray-zone correlation (Vertex AI): genai.Client(vertexai=True, ...).models.generate_content
+    "google-genai>=1.20.0,<3",
 ]
 
 [tool.setuptools.packages.find]

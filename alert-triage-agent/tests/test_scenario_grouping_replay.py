@@ -16,6 +16,7 @@ Asserts DEMO.md and design-thin-bridge.md expectations:
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -132,12 +133,19 @@ class VirtualClock:
 @pytest.fixture
 def replay_env(tmp_path: Path):
     """Fixture providing authentic thin bridge, agent, virtual clock, and mock ServiceNow."""
+    with replay_environment(tmp_path, name_prefix="ata") as env:
+        yield env
+
+
+@contextmanager
+def replay_environment(tmp_path: Path, name_prefix: str):
+    """Thin bridge + agent + virtual clock + mock ServiceNow for one stack prefix."""
     store_dir = tmp_path / "knowledge/incident-manager"
     store_dir.mkdir(parents=True, exist_ok=True)
 
     bridge_cfg = BridgeConfig(
         project_id="cloud-assist-fde-2",
-        name_prefix="ata",
+        name_prefix=name_prefix,
         servicenow_instance_url="https://instance.service-now.com",
         servicenow_username="admin",
         servicenow_password="secretpassword",
@@ -148,7 +156,7 @@ def replay_env(tmp_path: Path):
 
     agent_cfg = AgentConfig(
         project_id="cloud-assist-fde-2",
-        name_prefix="ata",
+        name_prefix=name_prefix,
         incident_store_path=str(store_dir),
         fallback_store_path=str(store_dir),
         bridge_url="http://testbridge",

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""List OPEN Cloud Monitoring alerts on ata-* policies (read-only), for reset-scenarios.sh.
+"""List OPEN Cloud Monitoring alerts on this stack's {NAME_PREFIX}-* policies (read-only), for reset-scenarios.sh.
+
+NAME_PREFIX must be set in the environment (scenarios/common.sh exports it).
 
 Usage: open_alerts.py PROJECT_ID TOKEN [RESET_START_EPOCH] [MAX_ALERT_AGE_SECS] [SERVING_REVISIONS]
 
@@ -179,15 +181,49 @@ def extract_revision(alert):
     return None
 
 
-def is_ata_alert(alert) -> bool:
-    """Scoping: ata-* policies (label app=alert-triage-agent)."""
-    policy = alert.get("policy", {})
-    disp = str(policy.get("displayName") or "").strip().lower()
-    pol_name = str(policy.get("name") or "").strip().lower()
+# Same rule as the Terraform name_prefix validation and the services' contracts/stack_scope.py.
+NAME_PREFIX_PATTERN = r"[a-z][a-z0-9]{1,9}"
+COMPONENT_RESOURCE_LABELS = ("service_name", "configuration_name", "proxy_name", "database_id")
+
+
+def name_prefix_from_env() -> str:
+    """NAME_PREFIX from the environment (exported by scenarios/common.sh), validated."""
+    value = os.environ.get("NAME_PREFIX", "")
+    if not re.fullmatch(NAME_PREFIX_PATTERN, value):
+        raise ValueError(f"NAME_PREFIX {value!r} is unset or invalid: it must match ^{NAME_PREFIX_PATTERN}$")
+    return value
+
+
+def _has_prefix(name, prefix: str) -> bool:
+    text = str(name or "").strip().lower()
+    want = f"{prefix}-"
+    return bool(text) and (text.startswith(want) or re.split(r"[/:]", text)[-1].startswith(want))
+
+
+def is_ata_alert(alert, name_prefix: str) -> bool:
+    """Stack scope (same rule as the services' contracts/stack_scope.py).
+
+    In scope iff the policy display name / name or a resource-derived component starts with
+    f"{name_prefix}-", and a `stack` policy user label, when present, equals name_prefix.
+    The shared app=alert-triage-agent label does not put an alert in scope.
+    """
+    policy = alert.get("policy", {}) or {}
     user_labels = policy.get("userLabels") or alert.get("userLabels") or {}
-    if isinstance(user_labels, dict) and "alert-triage-agent" in (user_labels.get("app"), user_labels.get("managed_by")):
-        return True
-    return disp.startswith("ata-") or "ata-" in pol_name or "alert-triage-agent" in disp or "alert-triage-agent" in pol_name
+    if not isinstance(user_labels, dict):
+        user_labels = {}
+    stack = user_labels.get("stack")
+    if stack is not None and str(stack).strip().lower() != name_prefix:
+        sys.stderr.write(
+            f"WARNING: skipping alert {alert.get('name', '')}: policy label stack={stack!r} "
+            f"does not match NAME_PREFIX={name_prefix!r}\n"
+        )
+        return False
+    resource = alert.get("resource") or {}
+    res_labels = resource.get("labels") if isinstance(resource, dict) else None
+    names = [policy.get("displayName"), policy.get("name"), user_labels.get("component")]
+    if isinstance(res_labels, dict):
+        names.extend(res_labels.get(k) for k in COMPONENT_RESOURCE_LABELS)
+    return any(_has_prefix(n, name_prefix) for n in names)
 
 
 def fetch_open_alerts(project_id: str, token: str, urlopen: Callable = urllib.request.urlopen) -> list:
@@ -221,12 +257,13 @@ def fetch_open_alerts(project_id: str, token: str, urlopen: Callable = urllib.re
             return alerts
 
 
-def classify(alerts, reset_start_time: float, max_alert_age_secs: float, serving_revs_set) -> dict:
-    """Split ata-* alerts into active ones and ones ignored as stale or non-serving."""
+def classify(alerts, reset_start_time: float, max_alert_age_secs: float, serving_revs_set, name_prefix: str = None) -> dict:
+    """Split this stack's alerts into active ones and ones ignored as stale or non-serving."""
+    prefix = name_prefix if name_prefix is not None else name_prefix_from_env()
     active_alerts = []
     ignored_alerts = []
     for alert in alerts:
-        if not is_ata_alert(alert):
+        if not is_ata_alert(alert, prefix):
             continue
         policy = alert.get("policy", {})
         disp = str(policy.get("displayName") or "").strip()
@@ -271,6 +308,11 @@ def main(argv, urlopen: Callable = urllib.request.urlopen) -> int:
     serving_raw = argv[4] if len(argv) > 4 else ""
     serving_revs_set = {r for r in serving_raw.replace(",", " ").split() if r}
 
+    try:
+        name_prefix = name_prefix_from_env()
+    except ValueError as exc:
+        sys.stderr.write(f"open_alerts.py: {exc}\n")
+        return QUERY_REJECTED_EXIT
     if not token:
         login = TOKEN_LOGIN.get(os.environ.get("ATA_MONITORING_TOKEN_SOURCE", "adc"), "gcloud auth login")
         sys.stderr.write(f"Cloud Monitoring query failed: empty access token. Run: {login}\n")
@@ -282,7 +324,7 @@ def main(argv, urlopen: Callable = urllib.request.urlopen) -> int:
         if exc.tls:
             sys.stderr.write(f"Hint: if this is a CA certificate problem, {CA_BUNDLE_HINT}\n")
         return QUERY_FAILED_EXIT if exc.retryable else QUERY_REJECTED_EXIT
-    print(json.dumps(classify(alerts, reset_start_time, max_alert_age_secs, serving_revs_set)))
+    print(json.dumps(classify(alerts, reset_start_time, max_alert_age_secs, serving_revs_set, name_prefix)))
     return 0
 
 

@@ -38,17 +38,18 @@ The agent owns all incident grouping, atomic Open Knowledge File (OKF) storage w
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
-| `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
-| `NAME_PREFIX` | `ata` | Resource namespace prefix. |
-| `REGION` | `us-west1` | GCP deployment region. |
-| `INCIDENTS_BUCKET` | `cloud-assist-fde-2-ata-incidents` | Primary GCS incident storage bucket. |
+| `PROJECT_ID` | *None (required unless `IS_LOCAL=true`)* | Google Cloud project ID. No default: startup fails without it. |
+| `NAME_PREFIX` | *None (required)* | Stack prefix; must match `^[a-z][a-z0-9]{1,9}$` (the Terraform `name_prefix` rule). Derives every stack resource name the agent uses (timer queue, SA, incidents bucket, Apigee access log `<NAME_PREFIX>-apigee-access`, Cloud Tasks task ids, the `{prefix}` names in `topology/TOPOLOGY.md`) and the alert scope (see below). |
+| `REGION` | *None (required unless `IS_LOCAL=true`)* | GCP deployment region (Cloud Run console links, `gcloud` commands in tickets). |
+| `INCIDENTS_BUCKET` | `<PROJECT_ID>-<NAME_PREFIX>-incidents` | Primary GCS incident storage bucket. |
 | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` | Local or mounted filesystem path for incident files. |
 | `FALLBACK_STORE_PATH` | `/tmp/knowledge/incident-manager` | Fallback path when primary mount is read-only or absent. |
 | `BRIDGE_URL` | `http://localhost:8080` | URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`). |
-| `MODEL_NAME` | `gemini-3.8-flash` | Gemini model used for investigation synthesis and gray-zone correlation. |
-| `TIMER_QUEUE` | `ata-timer-queue` | Dedicated Cloud Tasks queue for delayed timer wakes. |
-| `TIMER_QUEUE_LOCATION` | `us-west1` | GCP region where the timer queue is hosted. |
-| `SERVICE_ACCOUNT_EMAIL`| `ata-agent-sa@...` | Service account used by the agent to schedule delayed tasks with OIDC tokens. |
+| `MODEL_NAME` | `gemini-3.8-flash` | Vertex AI Gemini model id for gray-zone correlation (scores 35-65), called with `google-genai` (`genai.Client(vertexai=True, project=PROJECT_ID, location=GEMINI_LOCATION)`). Validated as a model id. The agent SA needs `roles/aiplatform.user` and the project needs `aiplatform.googleapis.com`. When the call fails (package missing, permission denied, model not found, empty or invalid answer) the agent logs a WARNING, a deterministic heuristic decides, and the decision log, the group's `correlation.gray_zone_source` / `gray_zone_fallback_reason` and the ticket say "deterministic fallback (Gemini unavailable: <reason>)". |
+| `GEMINI_LOCATION` | `global` | Vertex AI location for `MODEL_NAME`: `global` or a region such as `us-central1`. |
+| `LOCATION` | `<REGION>` | GCP region where the timer queue is hosted. |
+| `TIMER_QUEUE_NAME` | `<NAME_PREFIX>-timer-queue` | Dedicated Cloud Tasks queue for delayed timer wakes. |
+| `SERVICE_ACCOUNT_EMAIL`| `<NAME_PREFIX>-agent-sa@<PROJECT_ID>.iam.gserviceaccount.com` | Service account used by the agent to schedule delayed tasks with OIDC tokens. |
 | `IS_LOCAL` | `false` | Enables local offline mock mode. |
 | `ORIGIN_ONSET_TOLERANCE_SECONDS` | `300` | Origin selection: an upstream service explains a downstream service only when its onset is at most this many seconds after the downstream onset. A downstream service that degraded earlier than that is not attributed to the upstream service, and a recent deploy on it stays implicated. |
 | `AUTO_RESOLVE_ON_RECOVERY` | `false` | Sets what happens when every alert in a ticketed group has closed and the 180s cool-down passes with no recurrence. `false`: the ticket is not resolved. The agent posts one work note saying the alerts closed (with the measured traffic around the close) and that a human must verify the remediation, the ServiceNow state stays In Progress, and the group moves to the terminal `recovered` state. `true`: the agent calls `POST /instructions/ticket/resolve` and the group becomes `resolved`. `agent/scripts/deploy.sh` passes `${AUTO_RESOLVE_ON_RECOVERY:-false}` to Cloud Run. See §5.1. |
@@ -68,6 +69,10 @@ The agent owns all incident grouping, atomic Open Knowledge File (OKF) storage w
 | `TOOLS_RETRY_ATTEMPTS` | `3` | Total attempts for an ata-tools call on a connection error, timeout or HTTP 429/5xx (1-5). Other 4xx (e.g. 403 when `roles/run.invoker` is missing) are not retried. |
 | `TOOLS_RETRY_BASE_SECONDS` | `1.0` | Backoff before retry n: `BASE * 2^(n-1)` seconds, capped at 10 s. |
 
+**Alert scope (stack isolation).** The bridge, agent and tools accept an alert only when its policy display name (or a resource-derived component: `service_name`, `proxy_name`, `database_id`, the `component` label) starts with `<NAME_PREFIX>-`, **and**, when the policy has a `stack` user label, that label equals `NAME_PREFIX`. A mismatching `stack` label is rejected and logged at WARNING with both values. The shared `app=alert-triage-agent` label does not put an alert in scope, because every stack sets it. Policies without a `stack` label are accepted on the name check alone; that is the transition until Terraform adds `stack=<prefix>` to every policy.
+
+**Topology.** `topology/TOPOLOGY.md` writes stack names as `{prefix}-<name>`. The agent and tools substitute `NAME_PREFIX` when they load it, and fail at startup if `NAME_PREFIX` is unset or invalid, or if a `{...}` placeholder remains.
+
 ---
 
 ### 1.3 FastMCP Tools Server (`ata-tools`)
@@ -77,12 +82,12 @@ The FastMCP server exposes read-only tools for topology, Apigee metrics, proxy b
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
 | `PORT` | `8080` | HTTP server listening port. |
-| `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
-| `APIGEE_ORG` | `cloud-assist-fde-2` | Apigee organization whose deployments `get_change_timeline` reads. |
-| `APIGEE_ENV` | *none* | Apigee environment whose deployments `get_change_timeline` reads. Without it the Apigee deployment history is returned as a failed source (the ticket says so); it is never guessed. |
-| `NAME_PREFIX` | `ata` | Stack prefix. `get_change_timeline` reports only `<NAME_PREFIX>-*` Apigee proxies; the default caller SA and audience derive from it. |
+| `PROJECT_ID` | *None (required unless `IS_LOCAL=true`)* | Google Cloud project ID. |
+| `NAME_PREFIX` | *None (required)* | Stack prefix (`^[a-z][a-z0-9]{1,9}$`): alert scope, Apigee access log `<NAME_PREFIX>-apigee-access`, topology `{prefix}` names. `get_change_timeline` reports only `<NAME_PREFIX>-*` Apigee proxies; the default caller SA and audience derive from it. |
+| `APIGEE_ORG` | *None (required for Apigee reads)* | Apigee organization whose deployments `get_change_timeline` reads. No fallback to `PROJECT_ID`: `deploy.sh` sets it explicitly. Unset: the Apigee deployment history is returned as a failed source ("APIGEE_ORG not set in ata-tools"). |
+| `APIGEE_ENV` | *None (required for Apigee reads)* | Apigee environment the proxies are deployed to (e.g. `prod`). Unset: the Apigee deployment history is returned as a failed source ("APIGEE_ENV not set in ata-tools"; the ticket says so); it is never guessed. |
 | `PROJECT_NUMBER` | *none* | Builds the accepted audience `https://<prefix>-tools-<PROJECT_NUMBER>.<REGION>.run.app`. |
-| `REGION` | `us-west1` | Target GCP region. |
+| `REGION` | *None (required unless `IS_LOCAL=true`)* | Target GCP region. |
 | `ENFORCE_AUTH` | `false` | When `true`, enforces OIDC token verification on tool endpoints. |
 | `VERIFY_OIDC` | `false` | Validates Google OIDC ID token signature and audience. |
 | `EXPECTED_AUDIENCE` | `None` | Comma-separated accepted ID-token audiences; set it to the URL the agent calls (`TOOLS_URL`). The deterministic URL from `PROJECT_NUMBER` is always accepted too. With `ENFORCE_AUTH` and `VERIFY_OIDC` on and no audience, startup fails; a token that cannot be verified is rejected (fail closed). |

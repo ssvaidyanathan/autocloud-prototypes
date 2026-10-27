@@ -99,6 +99,7 @@ class GroupingManager:
             incident_store_path=str(self.config.get_effective_store_path()),
             model_name=self.config.model_name,
             project_id=self.config.project_id,
+            gemini_location=self.config.gemini_location,
         )
 
     def _emit_decision_log(
@@ -360,6 +361,10 @@ class GroupingManager:
                 "threshold_auto_new": THRESHOLD_AUTO_NEW,
                 "threshold_auto_attach": THRESHOLD_AUTO_ATTACH,
             }
+            if decision.is_gray_zone:
+                correlation_info["gray_zone_source"] = decision.gray_zone_source
+                if decision.gray_zone_fallback_reason:
+                    correlation_info["gray_zone_fallback_reason"] = decision.gray_zone_fallback_reason
             if excluded_groups:
                 correlation_info["excluded_groups"] = excluded_groups
             if decision.decision == "attach" and decision.target_group_id:

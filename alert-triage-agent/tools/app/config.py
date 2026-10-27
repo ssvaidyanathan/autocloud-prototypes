@@ -1,6 +1,11 @@
+import re
 from typing import Optional
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Same rule as the Terraform name_prefix validation.
+NAME_PREFIX_PATTERN = r"[a-z][a-z0-9]{1,9}"
 
 
 class ToolsConfig(BaseSettings):
@@ -11,11 +16,17 @@ class ToolsConfig(BaseSettings):
         extra="ignore",
     )
 
-    project_id: str = Field(default="cloud-assist-fde-2", alias="PROJECT_ID")
-    name_prefix: str = Field(default="ata", alias="NAME_PREFIX")
-    region: str = Field(default="us-west1", alias="REGION")
+    # Deployment identity. No defaults: PROJECT_ID and REGION are required unless IS_LOCAL;
+    # NAME_PREFIX is always required and follows the Terraform rule ^[a-z][a-z0-9]{1,9}$.
+    project_id: Optional[str] = Field(default=None, alias="PROJECT_ID")
+    name_prefix: str = Field(alias="NAME_PREFIX")
+    region: Optional[str] = Field(default=None, alias="REGION")
     environment: str = Field(default="prod", alias="ENVIRONMENT")
-    apigee_org: str = Field(default="cloud-assist-fde-2", alias="APIGEE_ORG")
+    # Apigee organization and environment whose deployments get_change_timeline reads. No
+    # defaults and no fallback to PROJECT_ID: without them the Apigee deployment history is
+    # reported as a failed source naming the missing setting, never guessed.
+    apigee_org: Optional[str] = Field(default=None, alias="APIGEE_ORG")
+    apigee_env: Optional[str] = Field(default=None, alias="APIGEE_ENV")
 
     # Server settings
     port: int = Field(default=8080, alias="PORT")
@@ -29,9 +40,6 @@ class ToolsConfig(BaseSettings):
     # Numeric GCP project number: builds the deterministic Cloud Run URL
     # https://<prefix>-tools-<PROJECT_NUMBER>.<REGION>.run.app, an accepted ID-token audience.
     project_number: Optional[str] = Field(default=None, alias="PROJECT_NUMBER")
-    # Apigee environment whose deployments get_change_timeline reads. No default: without it
-    # the Apigee deployment history is reported as failed, never guessed.
-    apigee_env: Optional[str] = Field(default=None, alias="APIGEE_ENV")
 
     @property
     def effective_expected_audiences(self) -> list[str]:
@@ -51,6 +59,30 @@ class ToolsConfig(BaseSettings):
         return explicit or [f"{self.name_prefix}-agent-sa@{self.project_id}.iam.gserviceaccount.com"]
 
 
+    @field_validator("name_prefix")
+    @classmethod
+    def _validate_name_prefix(cls, value: str) -> str:
+        if not re.fullmatch(NAME_PREFIX_PATTERN, value or ""):
+            raise ValueError(f"NAME_PREFIX {value!r} must match ^{NAME_PREFIX_PATTERN}$ (the Terraform name_prefix rule)")
+        return value
+
+    @model_validator(mode="after")
+    def _require_and_derive(self) -> "ToolsConfig":
+        for field_name in ("project_id", "region", "apigee_org", "apigee_env"):
+            value = getattr(self, field_name)
+            if isinstance(value, str) and not value.strip():
+                setattr(self, field_name, None)
+        missing = [env for env, value in (("PROJECT_ID", self.project_id), ("REGION", self.region)) if not value]
+        if missing and not self.is_local:
+            raise ValueError(f"required setting(s) not set: {', '.join(missing)} (only IS_LOCAL=true may omit them)")
+        return self
+
+    @property
+    def apigee_access_log_id(self) -> str:
+        """Cloud Logging log id written by the Apigee proxies' MessageLogging policy."""
+        return f"{self.name_prefix}-apigee-access"
+
+
 _tools_config: Optional[ToolsConfig] = None
 
 
@@ -64,3 +96,7 @@ def get_tools_config() -> ToolsConfig:
 def reset_tools_config(config: Optional[ToolsConfig] = None) -> None:
     global _tools_config
     _tools_config = config
+
+
+# Same accessor name as the agent and bridge configs (used by app/contracts/alert.py).
+get_settings = get_tools_config

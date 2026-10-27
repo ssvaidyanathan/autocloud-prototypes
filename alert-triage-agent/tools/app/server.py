@@ -295,13 +295,13 @@ def get_apigee_logs(
     max_entries: int = 50,
     project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Queries Cloud Logging for access log entries in projects/{project}/logs/ata-apigee-access."""
+    """Queries Cloud Logging for access log entries in projects/{project}/logs/{NAME_PREFIX}-apigee-access."""
     import google.cloud.logging
 
     cfg = get_tools_config()
     proj = project_id or cfg.project_id
 
-    log_name = f"projects/{proj}/logs/ata-apigee-access"
+    log_name = f"projects/{proj}/logs/{cfg.apigee_access_log_id}"
     filter_clauses = [f'logName="{log_name}"']
     if proxy_name:
         filter_clauses.append(f'(jsonPayload.proxy_name="{proxy_name}" OR textPayload:"{proxy_name}")')
@@ -350,9 +350,11 @@ def get_proxy_bundle(
     Strictly in-memory parsing with zero local disk writes.
     """
     cfg = get_tools_config()
-    effective_org = org or cfg.apigee_org or cfg.project_id
+    effective_org = org or cfg.apigee_org
 
     try:
+        if bundle_bytes is None and not effective_org:
+            raise ValueError("APIGEE_ORG not set in ata-tools (and no org argument given)")
         if bundle_bytes is None:
             url = f"https://apigee.googleapis.com/v1/organizations/{effective_org}/apis/{api_name}/revisions/{revision}?format=bundle"
             headers = _get_auth_headers()

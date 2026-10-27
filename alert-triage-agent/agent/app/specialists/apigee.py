@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, Optional
 
-from ..config import AgentConfig
+from ..config import AgentConfig, get_agent_settings
 from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
 from .base import BaseSpecialist, EvidenceDossier
@@ -30,8 +30,11 @@ logger = logging.getLogger(__name__)
 GATEWAY_TIMEOUT_FAULT = "GatewayTimeout"
 # Apigee fault raised by a SpikeArrest policy (metric fault_code ends with it, access-log fault_source equals it).
 SPIKE_ARREST_FAULT = "SpikeArrestViolation"
-# Access log written by the Apigee proxies' MessageLogging policy.
-ACCESS_LOG_NAME = "ata-apigee-access"
+
+
+def access_log_id() -> str:
+    """Log id written by the Apigee proxies' MessageLogging policy: {NAME_PREFIX}-apigee-access."""
+    return get_agent_settings().apigee_access_log_id
 
 
 TARGET_LATENCIES_METRIC = "apigee.googleapis.com/target/latencies"
@@ -49,7 +52,7 @@ def target_latency_summary(logged_ms: list[float], minute_means_ms: list[float])
     means, not of requests. The two are never mixed. None when neither was captured.
     """
     if logged_ms:
-        vals, noun, source = logged_ms, "logged request", ACCESS_LOG_NAME
+        vals, noun, source = logged_ms, "logged request", access_log_id()
     elif minute_means_ms:
         vals, noun, source = minute_means_ms, "per-minute mean", TARGET_LATENCIES_METRIC
     else:
@@ -67,7 +70,7 @@ def target_latency_summary(logged_ms: list[float], minute_means_ms: list[float])
 
 def access_log_name(project_id: str) -> str:
     """Full Cloud Logging log name of the Apigee access log in `project_id`."""
-    return f"projects/{project_id}/logs/{ACCESS_LOG_NAME}"
+    return f"projects/{project_id}/logs/{access_log_id()}"
 
 
 def _entry_time(entry: Any) -> Optional[datetime]:
@@ -167,8 +170,9 @@ class ApigeeSpecialist(BaseSpecialist):
                 target_proxy = proxy_caller
             elif canon:
                 target_proxy = canon
-            elif target_proxy.startswith("ata-apigee-"):
-                target_proxy = "ata-" + target_proxy[len("ata-apigee-"):]
+            elif target_proxy.startswith(f"{config.name_prefix}-apigee-"):
+                # Legacy alias form {prefix}-apigee-<proxy> -> {prefix}-<proxy>.
+                target_proxy = f"{config.name_prefix}-" + target_proxy[len(f"{config.name_prefix}-apigee-"):]
 
         findings: list[str] = []
         evidence_items: list[EvidenceItem] = []
@@ -329,7 +333,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 max_results=log_cap,
                 order_by=google.cloud.logging.ASCENDING,
                 config=config,
-                what=f"Cloud Logging {ACCESS_LOG_NAME} read for {target_proxy}",
+                what=f"Cloud Logging {access_log_id()} read for {target_proxy}",
             )
 
             if len(entries) >= log_cap:
@@ -391,19 +395,19 @@ class ApigeeSpecialist(BaseSpecialist):
                 top_client_ip = client_counter.most_common(1)[0][0]
             if not access_log_truncated:
                 # The whole window was read, so proxy revision switches were evaluated.
-                record_change_source(metrics, f"Apigee access log {ACCESS_LOG_NAME} (proxy revisions of {target_proxy})")
+                record_change_source(metrics, f"Apigee access log {access_log_id()} (proxy revisions of {target_proxy})")
         except Exception as exc:
-            logger.warning("Cloud Logging ata-apigee-access query error: %s", exc)
+            logger.warning("Cloud Logging %s query error: %s", access_log_id(), exc)
             access_log_unavailable = True
             reason = failure_reason(exc, "Cloud Logging")
             # Proxy revision switches come only from this log: without it change detection is
             # incomplete and the report must not say the incident is not change-induced.
             record_unavailable(
-                metrics, source=f"Apigee access log {ACCESS_LOG_NAME}", target=target_proxy,
+                metrics, source=f"Apigee access log {access_log_id()}", target=target_proxy,
                 reason=reason, affects_change_detection=True,
             )
             gap_msg = (
-                f"Apigee access log {ACCESS_LOG_NAME} for `{target_proxy}` could not be read ({reason}) in "
+                f"Apigee access log {access_log_id()} for `{target_proxy}` could not be read ({reason}) in "
                 f"[{window_start.strftime('%Y-%m-%dT%H:%M:%SZ')}, {window_end.strftime('%Y-%m-%dT%H:%M:%SZ')}]: "
                 "proxy revision switch, client and per-request counts not assessed."
             )
@@ -460,7 +464,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 "count": sa_metric_count or sa_log_count,
                 "count_source": (
                     "apigee.googleapis.com/proxy/response_count" if sa_metric_count
-                    else f"{ACCESS_LOG_NAME} log entries"
+                    else f"{access_log_id()} log entries"
                 ),
                 "count_is_lower_bound": bool(not sa_metric_count and lower_bound),
                 "response_code": sa_response_code,
@@ -486,7 +490,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 "count": gt_metric_count or gt_log_count,
                 "count_source": (
                     "apigee.googleapis.com/proxy/response_count" if gt_metric_count
-                    else f"{ACCESS_LOG_NAME} log entries"
+                    else f"{access_log_id()} log entries"
                 ),
                 "response_code": gt_response_code,
                 "fault_code": gt_fault_code or GATEWAY_TIMEOUT_FAULT,

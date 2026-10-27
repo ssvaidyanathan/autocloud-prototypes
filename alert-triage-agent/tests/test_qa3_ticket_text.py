@@ -138,7 +138,7 @@ async def test_s1_ticket_end_to_end(tmp_path):
              _entry("0.oebegz5hdxwe", "ata-inventory-5xx", INV, "5xx", "p1")]
 
     report = await synth.execute_investigation(S1_ALERT, "g-s1", "incident-g-s1.md", _cfg(tmp_path), group_alerts=group)
-    desc = report.build_structured_description(project_id=PROJECT)
+    desc = report.build_structured_description(project_id=PROJECT, incidents_bucket="test-project-ata-incidents")
 
     assert report.origin == INV
     assert f"(86.1%) on {INV}" in report.summary and f"{ORD} 84.5%" in report.summary
@@ -168,7 +168,7 @@ def _report(cls=InvestigationReport, **kw):
 @pytest.mark.parametrize("cls", [InvestigationReport, BridgeInvestigationReport])
 def test_description_has_no_boilerplate_rollback(cls):
     actions = [{"title": f"Describe traffic on {INV} (read-only)", "command": f"gcloud run services describe {INV}"}]
-    desc = _report(cls, recommended_actions=actions).build_structured_description(project_id=PROJECT)
+    desc = _report(cls, recommended_actions=actions).build_structured_description(project_id=PROJECT, incidents_bucket="test-project-ata-incidents")
     assert "Rollback:" not in desc
     assert "Revert latest" not in desc
 
@@ -177,7 +177,7 @@ def test_description_has_no_boilerplate_rollback(cls):
 def test_description_keeps_an_evidenced_rollback(cls):
     actions = [{"title": "Roll back", "command": "gcloud run services update-traffic ...",
                 "rollback": "route back explicitly with --to-revisions=X=100"}]
-    desc = _report(cls, recommended_actions=actions).build_structured_description(project_id=PROJECT)
+    desc = _report(cls, recommended_actions=actions).build_structured_description(project_id=PROJECT, incidents_bucket="test-project-ata-incidents")
     assert "  - Rollback: route back explicitly with --to-revisions=X=100" in desc
 
 
@@ -186,7 +186,7 @@ def test_fallback_report_has_no_generic_rollback(tmp_path):
 
     report = generate_investigation_report(S1_ALERT, "g", "incident-g.md", _cfg(tmp_path))
     assert not any("Revert latest" in (a.rollback or "") for a in report.get_normalized_actions())
-    assert "Revert latest" not in report.build_structured_description(project_id=PROJECT)
+    assert "Revert latest" not in report.build_structured_description(project_id=PROJECT, incidents_bucket="test-project-ata-incidents")
 
 
 # ---------------------------------------------------------------------------------------
@@ -201,7 +201,7 @@ S3_YES = ("Yes (Apigee proxy ata-orders-v1 revision 177 first served 2026-10-27T
 def test_s3_issue_type_follows_change_induced_yes(cls):
     report = _report(cls, origin=ORD_PROXY, summary="SpikeArrest rate-limit violation (HTTP 429 rate at 74%) on ata-orders-v1",
                      change_induced=S3_YES)
-    desc = report.build_structured_description(project_id=PROJECT)
+    desc = report.build_structured_description(project_id=PROJECT, incidents_bucket="test-project-ata-incidents")
     assert "Issue Type: change_induced" in desc
     assert "Change-Induced: Yes (" in desc
 

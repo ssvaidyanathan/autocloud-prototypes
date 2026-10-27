@@ -177,6 +177,17 @@ def test_get_proxy_bundle_corrupted_bytes_returns_structured_error():
     assert result["proxy_endpoints"] == []
 
 
+def test_get_proxy_bundle_without_apigee_org_returns_error_and_makes_no_call(monkeypatch):
+    """No APIGEE_ORG and no org argument: a structured error naming APIGEE_ORG, never PROJECT_ID."""
+    from tools.app.config import get_tools_config
+    monkeypatch.setattr(get_tools_config(), "apigee_org", None)
+    with patch("requests.get") as mock_get:
+        result = get_proxy_bundle(api_name="ata-orders-v1", revision="1", bundle_bytes=None)
+    mock_get.assert_not_called()
+    assert "APIGEE_ORG not set" in result["error"]
+    assert result["target_endpoints"] == []
+
+
 def test_get_proxy_bundle_download_http_error_returns_structured_error():
     """Assert get_proxy_bundle handles HTTP failure when downloading bundle from Apigee API."""
     with patch("requests.get") as mock_get:
@@ -186,6 +197,7 @@ def test_get_proxy_bundle_download_http_error_returns_structured_error():
         result = get_proxy_bundle(
             api_name="ata-nonexistent-api",
             revision="1",
+            org="test-org",
             bundle_bytes=None,
         )
 

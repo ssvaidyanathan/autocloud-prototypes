@@ -42,9 +42,10 @@ async def lifespan(app: FastAPI):
     Fails startup when a required setting is missing, so a misconfigured revision never
     takes traffic (Cloud Run keeps serving the previous one).
     """
-    missing = get_settings().missing_required_settings()
+    settings = get_settings()
+    missing = settings.missing_required_settings()
     if missing:
-        message = f"ata-bridge cannot start: required setting(s) not set: {', '.join(missing)}"
+        message = f"{settings.name_prefix}-bridge cannot start: required setting(s) not set: {', '.join(missing)}"
         logger.error(message)
         raise RuntimeError(message)
     yield

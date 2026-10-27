@@ -38,19 +38,21 @@ class TaskDispatcher:
     def get_task_id(
         self,
         current_time: Optional[float] = None,
-        prefix: str = "ata-alert",
+        prefix: Optional[str] = None,
         group_id: Optional[str] = None,
         incident_id: Optional[str] = None,
         attempt: int = 1,
     ) -> str:
-        """Calculate unique task ID per alert or group attempt."""
+        """Calculate unique task ID per alert or group attempt (default prefix {NAME_PREFIX}-alert)."""
+        alert_prefix = f"{self.config.name_prefix}-alert"
+        prefix = prefix or alert_prefix
         if group_id and incident_id:
             safe_inc = slugify(incident_id)
             return f"{prefix}-{group_id}-{safe_inc}-{attempt}"
         if incident_id:
             safe_inc = slugify(incident_id)
             attempt_ts = int((current_time if current_time is not None else time.time()) * 1000)
-            return f"ata-alert-{safe_inc}-{attempt_ts}"
+            return f"{alert_prefix}-{safe_inc}-{attempt_ts}"
         if group_id:
             return f"{prefix}-{group_id}-{attempt}"
         ts = current_time if current_time is not None else time.time()
@@ -76,7 +78,7 @@ class TaskDispatcher:
         filename = getattr(group, "filename", None) if group else None
         task_id = self.get_task_id(
             current_time=current_time,
-            prefix="ata-alert" if not group_id else "triage",
+            prefix=None if not group_id else "triage",
             group_id=group_id,
             incident_id=alert.incident_id,
             attempt=attempt,

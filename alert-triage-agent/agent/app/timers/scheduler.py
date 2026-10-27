@@ -50,7 +50,7 @@ def schedule_delayed_timer(
 ) -> str:
     """Schedule a delayed HTTP POST to {target_url}/timer/wake via Cloud Tasks.
     
-    Generates deterministic task id: ata-timer-{safe_group}-{deadline_type}-{epoch_target}.
+    Generates deterministic task id: {NAME_PREFIX}-timer-{safe_group}-{deadline_type}-{epoch_target}.
     Catches google.api_core.exceptions.AlreadyExists and returns existing task name.
     """
     if _timer_scheduler_hook is not None:
@@ -70,7 +70,9 @@ def schedule_delayed_timer(
     epoch_target = int(deadline_dt.timestamp())
 
     safe_group = re.sub(r"[^a-zA-Z0-9_-]", "", group_id)[:30]
-    task_id = f"ata-timer-{safe_group}-{deadline_type}-{epoch_target}"
+    from ..config import get_agent_settings
+
+    task_id = f"{get_agent_settings().name_prefix}-timer-{safe_group}-{deadline_type}-{epoch_target}"
     parent = f"projects/{project_id}/locations/{location}/queues/{queue_name}"
     task_name = f"{parent}/tasks/{task_id}"
 

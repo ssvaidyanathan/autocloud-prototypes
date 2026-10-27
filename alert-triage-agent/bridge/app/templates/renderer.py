@@ -1,3 +1,5 @@
+from typing import Optional
+
 from jinja2 import Environment, select_autoescape
 from ..contracts.report import InvestigationReport
 from ..contracts.links import ConsoleLinkBuilder
@@ -675,7 +677,15 @@ _env = Environment(autoescape=select_autoescape(["html", "xml"]))
 _template = _env.from_string(HTML_TEMPLATE)
 
 
-def render_standalone_html(report: InvestigationReport) -> str:
-    """Render standalone HTML diagnostic report with canonical console links."""
-    builder = ConsoleLinkBuilder(project_id=report.project_id, region=getattr(report, "region", "us-west1"))
+def render_standalone_html(
+    report: InvestigationReport,
+    project_id: Optional[str] = None,
+    region: Optional[str] = None,
+) -> str:
+    """Render standalone HTML diagnostic report with canonical console links.
+
+    Links use the report's project/region (set by the agent); project_id/region are the
+    bridge's own settings, used for reports that do not carry them (same deployment).
+    """
+    builder = ConsoleLinkBuilder(project_id=report.project_id or project_id, region=report.region or region)
     return _template.render(report=report, builder=builder)

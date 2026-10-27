@@ -92,7 +92,7 @@ class ServiceNowAdapter:
     ) -> None:
         """Append a work note for a late-arriving correlated alert with updated blast radius and clickable links."""
         proj = (project_id or self.config.project_id or "").strip() or None
-        builder = ConsoleLinkBuilder(project_id=proj) if proj else None
+        builder = ConsoleLinkBuilder(project_id=proj, region=self.config.region) if proj else None
 
         policy_name = getattr(alert, "policy_name", "Alert")
         policy_id = getattr(alert, "policy_id", None)
@@ -472,7 +472,9 @@ class ServiceNowAdapter:
     ) -> ServiceNowIncidentRef:
         """Update an existing ServiceNow incident with refreshed diagnostic report and work note."""
         base_url = (self.config.servicenow_instance_url or "").rstrip("/")
-        standalone_html = render_standalone_html(report)
+        standalone_html = render_standalone_html(
+            report, project_id=self.config.project_id, region=self.config.region
+        )
         bucket_name = self.config.effective_incidents_bucket
         ticket_number = number or getattr(report, "servicenow_number", None) or "INC0010482"
         ticket_url = (
@@ -579,7 +581,9 @@ class ServiceNowAdapter:
                 return self.update_incident(existing.sys_id, report, number=existing.number)
 
         base_url = (self.config.servicenow_instance_url or "").rstrip("/")
-        standalone_html = render_standalone_html(report)
+        standalone_html = render_standalone_html(
+            report, project_id=self.config.project_id, region=self.config.region
+        )
         bucket_name = self.config.effective_incidents_bucket
 
         # Fallback to mock / GCS-only if ServiceNow credentials are not provided

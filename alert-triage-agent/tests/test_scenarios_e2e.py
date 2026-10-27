@@ -278,7 +278,12 @@ def test_scenario_s3_concurrent_disjoint_splitting(isolated_env: AgentConfig):
     resulting in 2 distinct incident groups and 2 ServiceNow tickets.
     """
     now = datetime(2026, 10, 22, 22, 0, 0, tzinfo=timezone.utc)
-    engine = CorrelationEngine()
+    engine = CorrelationEngine(
+        incident_store_path=str(isolated_env.get_effective_store_path()),
+        model_name=isolated_env.model_name,
+        project_id=isolated_env.project_id,
+        gemini_location=isolated_env.gemini_location,
+    )
 
     # Alert 1: Inventory 5xx
     alert1 = AlertEvent(

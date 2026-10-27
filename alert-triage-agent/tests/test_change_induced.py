@@ -53,7 +53,7 @@ def _investigate(alert, agent_cfg, group_alerts=None):
 
 
 def _desc(report) -> str:
-    return report.build_structured_description(project_id="cloud-assist-fde-2")
+    return report.build_structured_description(project_id="cloud-assist-fde-2", incidents_bucket="test-project-ata-incidents")
 
 
 # ---------------------------------------------------------------------------------------
@@ -255,8 +255,8 @@ def test_contract_default_is_not_assessed_and_set_values_are_kept(report_cls):
             probable_root_cause={"text": "x", "confidence": 0.9}, origin="ata-inventory-api", **kw,
         )
 
-    assert "Change-Induced: Not assessed\n" in make().build_structured_description()
-    assert "Change-Induced: No\n" not in make().build_structured_description()
-    assert "Change-Induced: No (checked)\n" in make(change_induced="No (checked)").build_structured_description()
+    assert "Change-Induced: Not assessed\n" in make().build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")
+    assert "Change-Induced: No\n" not in make().build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")
+    assert "Change-Induced: No (checked)\n" in make(change_induced="No (checked)").build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")
     old = make(raw_metadata={"change_induced": "Yes (rev 2)"})
-    assert "Change-Induced: Yes (rev 2)\n" in old.build_structured_description()
+    assert "Change-Induced: Yes (rev 2)\n" in old.build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")

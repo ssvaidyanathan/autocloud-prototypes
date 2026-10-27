@@ -68,7 +68,7 @@ def test_executive_summary_html_work_notes_formatting(sample_report):
 
 def test_structured_description_plain_text_zero_markdown(sample_report):
     """Assert ServiceNow description uses clean plain text with ZERO * and ZERO #."""
-    desc = sample_report.build_structured_description(project_id="cloud-assist-fde-2")
+    desc = sample_report.build_structured_description(project_id="cloud-assist-fde-2", incidents_bucket="test-project-ata-incidents")
     assert "*" not in desc
     assert "#" not in desc
     assert "Incident Group ID: grp_20261022_inv_db" in desc
@@ -399,6 +399,7 @@ def test_action_item_code_highlighting_and_plain_text():
 
     report = InvestigationReport(
         group_id="grp_action_test",
+        project_id="test-project",
         summary="Elevated 5xx error rate",
         observations="Error rate at 12%",
         recommended_actions=[
@@ -431,7 +432,7 @@ def test_action_item_code_highlighting_and_plain_text():
     assert '<pre><code style="background:#f4f4f4;border:1px solid #ddd;padding:6px;font-family:monospace;display:block">gcloud run services update-traffic ata-inventory-api' in html_report
 
     # 3. Plain Text Description
-    desc = report.build_structured_description()
+    desc = report.build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")
     assert "*" not in desc
     assert "#" not in desc
     assert "  1. Roll back Cloud Run traffic to previous stable revision (Verification: Confirm HTTP 5xx error rate drops below 1% via Cloud Monitoring)" in desc

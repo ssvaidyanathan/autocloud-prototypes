@@ -8,9 +8,12 @@ import urllib.parse
 class ConsoleLinkBuilder:
     """Builds canonical Google Cloud Console URLs with proper URL encoding and project/region context."""
 
-    def __init__(self, project_id: str = "cloud-assist-fde-2", region: str = "us-west1"):
-        self.project_id = str(project_id or "cloud-assist-fde-2").strip()
-        self.region = str(region or "us-west1").strip()
+    def __init__(self, project_id: str, region: Optional[str] = None):
+        self.project_id = str(project_id or "").strip()
+        if not self.project_id:
+            raise ValueError("ConsoleLinkBuilder needs a project_id")
+        # Without a region a Cloud Run link opens the project's service list (never a guessed region).
+        self.region = str(region or "").strip() or None
 
     def build_dashboard_url(self) -> str:
         """GCP Project Console dashboard: https://console.cloud.google.com/home/dashboard?project=<project>"""
@@ -57,7 +60,7 @@ class ConsoleLinkBuilder:
     def build_cloud_run_service_url(self, service_name: Optional[str], tab: str = "metrics") -> str:
         """Cloud Run service: https://console.cloud.google.com/run/detail/<region>/<service>/metrics?project=<project> (revisions: .../run/detail/<region>/<service>/revisions?project=)"""
         clean_svc = str(service_name or "").strip()
-        if not clean_svc or clean_svc.lower() in ["none", "n/a", "unknown"]:
+        if not clean_svc or clean_svc.lower() in ["none", "n/a", "unknown"] or not self.region:
             return f"https://console.cloud.google.com/run?project={self.project_id}"
         if "/" in clean_svc:
             clean_svc = clean_svc.split("/")[-1]

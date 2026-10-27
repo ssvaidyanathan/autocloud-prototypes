@@ -209,7 +209,7 @@ def test_apply_group_alerts_adds_correlated_alert_to_report():
     # Directly after the primary alert's trigger line.
     assert report.observations.split(" | ")[1].startswith("Correlated alert: Cloud Monitoring policy 'ata-orders-5xx'")
     assert report.build_short_description() == S1_EXPECTED_TITLE
-    assert "ata-orders-5xx | ata-orders-api | 0.oeb1u1lfyho7" in report.build_structured_description()
+    assert "ata-orders-5xx | ata-orders-api | 0.oeb1u1lfyho7" in report.build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")
 
 
 def test_apply_group_alerts_is_idempotent():

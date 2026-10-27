@@ -5,7 +5,9 @@ Implements:
 2. Decision thresholds:
    - Score >= 65: Auto-attach to existing group.
    - Score < 35: Auto-new group (distinct independent incident).
-   - 35 <= Score < 65: Gray zone invoking Gemini (gemini-3.8-flash) with structured schema.
+   - 35 <= Score < 65: Gray zone invoking Gemini (MODEL_NAME at GEMINI_LOCATION, Vertex AI) with a
+     structured schema. When Gemini cannot answer, a deterministic heuristic decides; the failure is
+     logged at WARNING and the decision carries source="deterministic_fallback" plus the reason.
 """
 
 from dataclasses import dataclass, field
@@ -14,7 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 import yaml
 from pydantic import BaseModel, Field
 
@@ -30,12 +32,45 @@ from .scoring import (
 logger = logging.getLogger(__name__)
 
 
-class GrayZoneResolution(BaseModel):
-    """Structured decision output schema for Gemini gray-zone resolution."""
-    decision: str = Field(description="'attach' to existing group or 'new_group' for independent incident")
+GRAY_ZONE_SOURCE_GEMINI = "gemini"
+GRAY_ZONE_SOURCE_FALLBACK = "deterministic_fallback"
+_MAX_REASON_CHARS = 200
+
+
+class GeminiGrayZoneDecision(BaseModel):
+    """Response schema sent to Gemini (response_schema) for gray-zone resolution."""
+    decision: Literal["attach", "new_group"] = Field(description="'attach' to existing group or 'new_group' for independent incident")
     target_group_id: Optional[str] = Field(default=None, description="Group ID to attach to if decision is attach")
     confidence: float = Field(default=0.85, ge=0.0, le=1.0, description="Confidence score 0.0 to 1.0")
     rationale: str = Field(description="Detailed engineering rationale for decision")
+
+
+class GrayZoneResolution(GeminiGrayZoneDecision):
+    """Gray-zone decision plus who made it: Gemini, or the deterministic fallback (and why)."""
+    source: Literal["gemini", "deterministic_fallback"] = GRAY_ZONE_SOURCE_FALLBACK
+    fallback_reason: Optional[str] = None
+
+
+def _short_reason(text: str) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= _MAX_REASON_CHARS else text[: _MAX_REASON_CHARS - 3] + "..."
+
+
+def _call_gemini(prompt: str, model_name: str, project_id: str, location: str) -> Optional[str]:
+    """One Vertex AI generate_content call (google-genai SDK); returns response.text."""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(vertexai=True, project=project_id, location=location)
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=GeminiGrayZoneDecision,
+        ),
+    )
+    return getattr(response, "text", None) if response is not None else None
 
 
 @dataclass
@@ -61,6 +96,9 @@ class CorrelationDecision:
     is_gray_zone: bool = False
     confidence: float = 0.95
     rationale: str = ""
+    # Gray zone only: "gemini" or "deterministic_fallback", and why Gemini did not decide.
+    gray_zone_source: Optional[str] = None
+    gray_zone_fallback_reason: Optional[str] = None
 
 
 def _parse_group_from_file(file_path: Path) -> Optional[CandidateGroup]:
@@ -169,10 +207,16 @@ def resolve_gray_zone_with_gemini(
     alert: AlertEvent,
     candidate: CandidateGroup,
     breakdown: ScoreBreakdown,
-    model_name: str = "gemini-3.8-flash",
-    project_id: str = "cloud-assist-fde-2",
+    model_name: str,
+    project_id: Optional[str],
+    location: str,
 ) -> GrayZoneResolution:
-    """Invoke Gemini (gemini-3.8-flash) via Vertex AI for gray-zone resolution."""
+    """Ask Gemini (model_name at location, Vertex AI) to resolve a gray-zone alert.
+
+    Any failure (SDK missing, permission denied, model not found, empty or invalid answer) is
+    logged at WARNING and the deterministic heuristic decides, with source="deterministic_fallback"
+    and the reason in fallback_reason. The result never claims Gemini decided when it did not.
+    """
     prompt = f"""You are the senior SRE lead triaging GCP production alerts.
 A candidate alert falls in the correlation gray zone (Score: {breakdown.total_score} / 100).
 Evaluate whether Alert A should be attached to existing incident Group G, or split into a new independent incident.
@@ -205,22 +249,35 @@ Respond with JSON adhering to:
   "rationale": "<engineering justification>"
 }}
 """
-    # Attempt live Vertex AI call if libraries and credentials exist
-    try:
-        from google import genai
-        client = genai.Client(vertexai=True, project=project_id, location="global")
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config={"response_mime_type": "application/json", "response_schema": GrayZoneResolution},
-        )
-        if response and response.text:
-            parsed = json.loads(response.text)
-            return GrayZoneResolution(**parsed)
-    except Exception as exc:
-        logger.info("Vertex AI live invocation unavailable or offline (%s); using deterministic resolver", exc)
+    reason: str
+    if not project_id:
+        reason = "PROJECT_ID is not set"
+        logger.warning("Gemini gray-zone resolution for alert %s not attempted: %s; using deterministic fallback", alert.incident_id, reason)
+    else:
+        try:
+            text = _call_gemini(prompt, model_name=model_name, project_id=project_id, location=location)
+            if text and text.strip():
+                parsed = GeminiGrayZoneDecision(**json.loads(text))
+                return GrayZoneResolution(**parsed.model_dump(), source=GRAY_ZONE_SOURCE_GEMINI)
+            reason = f"empty response from {model_name}"
+            logger.warning(
+                "Gemini %s at %s returned an empty response for alert %s; using deterministic fallback",
+                model_name, location, alert.incident_id,
+            )
+        except Exception as exc:
+            reason = _short_reason(f"{type(exc).__name__}: {exc}")
+            logger.warning(
+                "Gemini %s at %s failed for alert %s (%s: %s); using deterministic fallback",
+                model_name, location, alert.incident_id, type(exc).__name__, exc,
+            )
+    return _deterministic_resolution(alert, candidate, breakdown, reason)
 
-    # Deterministic heuristics for unit testing & offline environments
+
+def _deterministic_resolution(
+    alert: AlertEvent, candidate: CandidateGroup, breakdown: ScoreBreakdown, reason: str
+) -> GrayZoneResolution:
+    """Heuristic gray-zone decision, used only when Gemini could not answer."""
+    fallback = {"source": GRAY_ZONE_SOURCE_FALLBACK, "fallback_reason": reason}
     # In gray zone (35 <= score < 65):
     # If topology is 1 hop and causal is plausible/direct, attach
     if breakdown.hop_distance in (0, 1) and breakdown.causal_score >= 15.0:
@@ -232,6 +289,7 @@ Respond with JSON adhering to:
                 f"Alert on {alert.resource_name} is topologically adjacent ({breakdown.hop_distance} hop) "
                 f"and temporally aligned ({round(breakdown.delta_minutes, 1)}m) with {candidate.origin}."
             ),
+            **fallback,
         )
 
     # If topology is 2 hops in direct cascade and within 10 minutes, attach
@@ -244,6 +302,7 @@ Respond with JSON adhering to:
                 f"Alert on {alert.resource_name} is causally coupled in direct cascade ({breakdown.causal_category}) "
                 f"within 2 hops and {round(breakdown.delta_minutes, 1)}m of {candidate.origin}."
             ),
+            **fallback,
         )
 
     # Otherwise if distance is 2+ hops and delta > 5 min, split
@@ -255,6 +314,7 @@ Respond with JSON adhering to:
             f"Alert on {alert.resource_name} has weak topological coupling ({breakdown.hop_distance} hops) "
             f"and timing delta {round(breakdown.delta_minutes, 1)}m from {candidate.origin}; triaged independently."
         ),
+        **fallback,
     )
 
 
@@ -263,13 +323,15 @@ class CorrelationEngine:
 
     def __init__(
         self,
-        incident_store_path: str = "/knowledge/incident-manager",
-        model_name: str = "gemini-3.8-flash",
-        project_id: str = "cloud-assist-fde-2",
+        incident_store_path: str,
+        model_name: str,
+        project_id: Optional[str],
+        gemini_location: str,
     ):
         self.incident_store_path = Path(incident_store_path)
         self.model_name = model_name
         self.project_id = project_id
+        self.gemini_location = gemini_location
 
     def list_candidate_groups(self) -> list[CandidateGroup]:
         """Discover candidate open incident groups in the store path."""
@@ -288,8 +350,8 @@ class CorrelationEngine:
         factors = {}
         if decision.breakdown:
             factors = {
-                "topology_score": getattr(decision.breakdown, "topology_score", 0.0),
-                "temporal_score": getattr(decision.breakdown, "temporal_score", 0.0),
+                "topology_score": getattr(decision.breakdown, "topo_score", 0.0),
+                "temporal_score": getattr(decision.breakdown, "time_score", 0.0),
                 "causal_score": getattr(decision.breakdown, "causal_score", 0.0),
             }
         entry = {
@@ -304,6 +366,9 @@ class CorrelationEngine:
             "candidate_groups_evaluated": candidate_count,
             "rationale": decision.rationale,
         }
+        if decision.is_gray_zone:
+            entry["gray_zone_source"] = decision.gray_zone_source
+            entry["gray_zone_fallback_reason"] = decision.gray_zone_fallback_reason
         logger.info("JSON_DECISION: %s", json.dumps(entry))
 
     def evaluate_alert(
@@ -328,7 +393,7 @@ class CorrelationEngine:
                 breakdown=None,
                 is_gray_zone=False,
                 confidence=1.0,
-                rationale="Defensively filtered: alert does not have an ata prefix or ata label.",
+                rationale="Defensively filtered: alert is outside this stack's NAME_PREFIX scope.",
             )
             self._emit_decision_log(alert, decision, 0)
             return decision
@@ -419,7 +484,12 @@ class CorrelationEngine:
                 breakdown=best_breakdown,
                 model_name=self.model_name,
                 project_id=self.project_id,
+                location=self.gemini_location,
             )
+            if res.source == GRAY_ZONE_SOURCE_GEMINI:
+                rationale = f"Gray-zone Gemini resolution: {res.rationale}"
+            else:
+                rationale = f"Gray-zone deterministic fallback (Gemini unavailable: {res.fallback_reason}): {res.rationale}"
 
             decision = CorrelationDecision(
                 decision=res.decision,
@@ -429,7 +499,9 @@ class CorrelationEngine:
                 breakdown=best_breakdown,
                 is_gray_zone=True,
                 confidence=res.confidence,
-                rationale=f"Gray-zone Gemini resolution: {res.rationale}",
+                rationale=rationale,
+                gray_zone_source=res.source,
+                gray_zone_fallback_reason=res.fallback_reason,
             )
 
         self._emit_decision_log(alert, decision, len(candidate_groups))

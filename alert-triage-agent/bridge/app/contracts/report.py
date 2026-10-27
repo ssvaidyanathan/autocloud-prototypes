@@ -265,8 +265,8 @@ class InvestigationReport(BaseModel):
     first_seen: Optional[str] = None
     last_alert: Optional[str] = None
     report_generated_at: Optional[str] = None
-    project_id: str = "cloud-assist-fde-2"
-    region: str = "us-west1"
+    project_id: Optional[str] = None
+    region: Optional[str] = None
     alerts: list[dict[str, Any]] = Field(default_factory=list)
     triage_decision: dict[str, Any] = Field(default_factory=dict)
     dependency_path: Optional[str] = None
@@ -594,11 +594,13 @@ class InvestigationReport(BaseModel):
 
     def build_structured_description(
         self,
-        project_id: str = "cloud-assist-fde-2",
-        incidents_bucket: Optional[str] = None,
+        project_id: str,
+        incidents_bucket: str,
     ) -> str:
         """Format ServiceNow plain-text description: labels on own lines, - or numbered sub-items, ZERO * and ZERO #."""
-        bucket = incidents_bucket or f"{project_id}-ata-incidents"
+        if not incidents_bucket:
+            raise ValueError("build_structured_description needs the incidents bucket name")
+        bucket = incidents_bucket
         filename = self.filename or f"incident-{self.group_id}.md"
 
         rationale = self.priority_rationale or self.raw_metadata.get("priority_rationale")
@@ -627,7 +629,7 @@ class InvestigationReport(BaseModel):
         first_seen = min(all_ts) if all_ts else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         last_alert = max(all_ts) if all_ts else first_seen
 
-        builder = ConsoleLinkBuilder(project_id=project_id, region=getattr(self, "region", "us-west1"))
+        builder = ConsoleLinkBuilder(project_id=project_id, region=self.region)
 
         alert_lines = []
         if isinstance(alerts_list, list) and alerts_list:
@@ -727,8 +729,8 @@ class InvestigationReport(BaseModel):
 
     def build_description(
         self,
-        project_id: str = "cloud-assist-fde-2",
-        incidents_bucket: Optional[str] = None,
+        project_id: str,
+        incidents_bucket: str,
     ) -> str:
         """Format the ticket long description using clean plain-text standard."""
         return self.build_structured_description(project_id=project_id, incidents_bucket=incidents_bucket)
