@@ -35,13 +35,113 @@ log_error() {
     printf '\033[1;31m[ERROR]\033[0m %s\n' "$*"
 }
 
-# Deterministic Pinned Demo Images and Revisions
-export PINNED_INVENTORY_DIGEST="${PINNED_INVENTORY_DIGEST:-sha256:24b07eaa50db6d226889607116f0dd43693df5e1f597867a79e0f86e3d7767ce}"
-export PINNED_INVENTORY_IMAGE="${PINNED_INVENTORY_IMAGE:-us-west1-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${NAME_PREFIX}-inventory-api@${PINNED_INVENTORY_DIGEST}}"
+# --- ata-inventory-api baseline pin ----------------------------------------------------
+# The pinned revision and image digest live in ONE file, inventory-pin.env (next to this
+# script; ATA_INVENTORY_PIN_FILE overrides the path). Re-pinning is one documented step:
+# scripts/repin-inventory.sh (DEPLOY.md, "Re-pinning ata-inventory-api"). The env vars
+# PINNED_INVENTORY_DIGEST / PINNED_INVENTORY_REVISION still override the file for one run.
+COMMON_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export INVENTORY_PIN_FILE="${ATA_INVENTORY_PIN_FILE:-${COMMON_SH_DIR}/inventory-pin.env}"
+
+# True if $1 is sha256:<64 lowercase hex>.
+is_valid_image_digest() {
+    local hex="${1#sha256:}"
+    [ "${hex}" != "$1" ] && [ "${#hex}" -eq 64 ] || return 1
+    case "${hex}" in
+        *[!0-9a-f]*) return 1 ;;
+    esac
+}
+
+# True if $1 is a revision name of ${NAME_PREFIX}-inventory-api (lowercase, digits, '-').
+is_valid_inventory_revision() {
+    case "$1" in
+        "${NAME_PREFIX}-inventory-api-"?*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *[!a-z0-9-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 63 ]
+}
+
+# Read pin file $1 into PIN_INVENTORY_REVISION, PIN_INVENTORY_DIGEST,
+# PIN_INVENTORY_PREVIOUS_REVISION and PIN_INVENTORY_PREVIOUS_DIGEST. Strict: only those
+# KEY=VALUE lines, comments and blank lines; the current pin is required and valid; the
+# previous pin is both empty or both valid. Not sourced, so the file cannot run code.
+read_inventory_pin_file() {
+    local file="$1" line key value n=0
+    PIN_INVENTORY_REVISION="" PIN_INVENTORY_DIGEST=""
+    PIN_INVENTORY_PREVIOUS_REVISION="" PIN_INVENTORY_PREVIOUS_DIGEST=""
+    if [ ! -r "${file}" ]; then
+        log_error "Inventory pin file ${file} is missing or unreadable." >&2
+        return 1
+    fi
+    while IFS= read -r line || [ -n "${line}" ]; do
+        n=$((n + 1))
+        case "${line}" in
+            ""|"#"*) continue ;;
+        esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "${key}" in
+            PIN_INVENTORY_REVISION|PIN_INVENTORY_DIGEST|PIN_INVENTORY_PREVIOUS_REVISION|PIN_INVENTORY_PREVIOUS_DIGEST)
+                printf -v "${key}" '%s' "${value}"
+                ;;
+            *)
+                log_error "${file}:${n}: unexpected line '${line}' (only PIN_INVENTORY_* KEY=VALUE lines)." >&2
+                return 1
+                ;;
+        esac
+    done < "${file}"
+    if ! is_valid_inventory_revision "${PIN_INVENTORY_REVISION}"; then
+        log_error "${file}: PIN_INVENTORY_REVISION '${PIN_INVENTORY_REVISION}' is not a ${NAME_PREFIX}-inventory-api revision name." >&2
+        return 1
+    fi
+    if ! is_valid_image_digest "${PIN_INVENTORY_DIGEST}"; then
+        log_error "${file}: PIN_INVENTORY_DIGEST '${PIN_INVENTORY_DIGEST}' is not sha256:<64 hex>." >&2
+        return 1
+    fi
+    if [ -n "${PIN_INVENTORY_PREVIOUS_REVISION}${PIN_INVENTORY_PREVIOUS_DIGEST}" ]; then
+        if ! is_valid_inventory_revision "${PIN_INVENTORY_PREVIOUS_REVISION}" \
+            || ! is_valid_image_digest "${PIN_INVENTORY_PREVIOUS_DIGEST}"; then
+            log_error "${file}: PIN_INVENTORY_PREVIOUS_REVISION/DIGEST must both be empty or both valid (got '${PIN_INVENTORY_PREVIOUS_REVISION}' / '${PIN_INVENTORY_PREVIOUS_DIGEST}')." >&2
+            return 1
+        fi
+    fi
+}
+
+if ! read_inventory_pin_file "${INVENTORY_PIN_FILE}"; then
+    log_error "FATAL: cannot load the ata-inventory-api pin; fix ${INVENTORY_PIN_FILE} (see DEPLOY.md, 'Re-pinning ata-inventory-api')." >&2
+    exit 1
+fi
+
+# Deterministic pinned demo image and revision.
+export PINNED_INVENTORY_DIGEST="${PINNED_INVENTORY_DIGEST:-${PIN_INVENTORY_DIGEST}}"
+export PINNED_INVENTORY_IMAGE_BASE="us-west1-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${NAME_PREFIX}-inventory-api"
+export PINNED_INVENTORY_IMAGE="${PINNED_INVENTORY_IMAGE:-${PINNED_INVENTORY_IMAGE_BASE}@${PINNED_INVENTORY_DIGEST}}"
 # PINNED_INVENTORY_REVISION must be a revision whose image is PINNED_INVENTORY_DIGEST
 # and whose config is the healthy baseline (correct DB user, no DEPLOY_TAG).
 # Older revisions run code where GET on /admin/* performs the fault action.
-export PINNED_INVENTORY_REVISION="${PINNED_INVENTORY_REVISION:-ata-inventory-api-00073-9vb}"
+export PINNED_INVENTORY_REVISION="${PINNED_INVENTORY_REVISION:-${PIN_INVENTORY_REVISION}}"
+# The rollback target (prune-revisions.sh keeps it); empty if none.
+export PREVIOUS_PINNED_INVENTORY_REVISION="${PIN_INVENTORY_PREVIOUS_REVISION}"
+if ! is_valid_image_digest "${PINNED_INVENTORY_DIGEST}"; then
+    log_error "FATAL: PINNED_INVENTORY_DIGEST '${PINNED_INVENTORY_DIGEST}' is not sha256:<64 hex>." >&2
+    exit 1
+fi
+
+# Max Cloud Run instances of the demo workloads (ata-inventory-api, ata-orders-api), at
+# service level and per revision. 1: fault state and leaked DB connections live in one
+# instance's memory, and /admin/fault/reset clears only the instance it reaches. Keep it
+# equal to Terraform's demo_max_instance_count (infra/terraform/applications). Min
+# instances stay 0 (scale to zero; min-instances=1 is not approved).
+export DEMO_MAX_INSTANCES="${ATA_DEMO_MAX_INSTANCES:-1}"
+case "${DEMO_MAX_INSTANCES}" in
+    ""|*[!0-9]*|0*)
+        log_error "FATAL: ATA_DEMO_MAX_INSTANCES '${DEMO_MAX_INSTANCES}' must be a whole number >= 1 (no leading zeros)." >&2
+        exit 1
+        ;;
+esac
 
 # Fail loudly unless PINNED_INVENTORY_REVISION runs PINNED_INVENTORY_DIGEST.
 verify_pinned_inventory_revision() {
@@ -56,7 +156,7 @@ verify_pinned_inventory_revision() {
     actual="${actual##*@}"
     if [ "${actual}" != "${PINNED_INVENTORY_DIGEST}" ]; then
         log_error "Pinned revision ${PINNED_INVENTORY_REVISION} runs '${actual:-<not found>}', expected ${PINNED_INVENTORY_DIGEST}." >&2
-        log_error "Fix PINNED_INVENTORY_REVISION/PINNED_INVENTORY_DIGEST in scripts/scenarios/common.sh before running scenarios." >&2
+        log_error "Fix the pin in ${INVENTORY_PIN_FILE} (scripts/repin-inventory.sh; DEPLOY.md, 'Re-pinning ata-inventory-api') or unset PINNED_INVENTORY_REVISION/PINNED_INVENTORY_DIGEST overrides before running scenarios." >&2
         return 1
     fi
 }
@@ -91,11 +191,16 @@ verify_inventory_serving_pinned() {
     fi
 }
 
-# Baseline env that S5 overwrites on the inventory service template.
-INVENTORY_BASELINE_ENV_VARS="ATA_INVENTORY_DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false,MOCK_DB=false"
+# Baseline env of the inventory revision template (S5 overwrites the DB user). Only the
+# ATA_INVENTORY_* names: the app reads nothing else (demo/ata-inventory-api/app/config.py).
+INVENTORY_BASELINE_ENV_VARS="ATA_INVENTORY_INSTANCE_CONNECTION_NAME=${PROJECT_ID}:${REGION}:${NAME_PREFIX}-inventory-db,ATA_INVENTORY_DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,ATA_INVENTORY_DB_NAME=inventory,ATA_INVENTORY_DB_IAM_AUTH=true,ATA_INVENTORY_MOCK_DB=false"
+# Legacy aliases the app no longer reads; the baseline template and pinned revision must not
+# carry them (a stale DB_USER would look like configuration that matters).
+INVENTORY_LEGACY_ENV_NAMES="DB_USER,MOCK_DB"
 
-# Exit 0 if the inventory service template already has PINNED_INVENTORY_IMAGE and
-# INVENTORY_BASELINE_ENV_VARS, 1 if it differs, 2 (with an error) if it cannot be read.
+# Exit 0 if the inventory service template already has PINNED_INVENTORY_IMAGE,
+# INVENTORY_BASELINE_ENV_VARS, none of INVENTORY_LEGACY_ENV_NAMES, maxScale
+# DEMO_MAX_INSTANCES and minScale 0; 1 if it differs, 2 (with an error) if it cannot be read.
 inventory_template_matches_baseline() {
     local svc_json
     if ! svc_json="$(gcloud run services describe "${NAME_PREFIX}-inventory-api" \
@@ -105,22 +210,44 @@ inventory_template_matches_baseline() {
         log_error "Could not read the ${NAME_PREFIX}-inventory-api service template." >&2
         return 2
     fi
-    python3 -c '
-import json, sys
-image, wanted = sys.argv[1], dict(kv.split("=", 1) for kv in sys.argv[2].split(","))
-try:
-    container = json.loads(sys.stdin.read())["spec"]["template"]["spec"]["containers"][0]
-except (ValueError, KeyError, IndexError, TypeError) as exc:
-    print(f"unreadable service template: {exc!r}", file=sys.stderr)
-    sys.exit(2)
-env = {e.get("name"): e.get("value") for e in container.get("env", [])}
-live_image = container.get("image")
-diffs = [f"image={live_image}"] if live_image != image else []
-diffs += [f"{k}={env.get(k)}" for k, v in wanted.items() if env.get(k) != v]
-if diffs:
-    print("template differs from baseline: " + ", ".join(diffs), file=sys.stderr)
-    sys.exit(1)
-' "${PINNED_INVENTORY_IMAGE}" "${INVENTORY_BASELINE_ENV_VARS}" <<<"${svc_json}"
+    python3 "${COMMON_SH_DIR}/inventory_baseline.py" template \
+        --image="${PINNED_INVENTORY_IMAGE}" \
+        --env="${INVENTORY_BASELINE_ENV_VARS}" \
+        --absent="${INVENTORY_LEGACY_ENV_NAMES}" \
+        --max="${DEMO_MAX_INSTANCES}" <<<"${svc_json}"
+}
+
+# Exit 0 if revision $1 is a valid baseline: runs digest $2, has the baseline env, none of
+# the legacy aliases, maxScale DEMO_MAX_INSTANCES, minScale 0 and is Ready. 1 (differences
+# on stderr) if not, 2 if it cannot be read. Used by preflight and repin-inventory.sh.
+inventory_revision_matches_baseline() {
+    local revision="$1" digest="$2" rev_json
+    if ! rev_json="$(gcloud run revisions describe "${revision}" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --format=json)"; then
+        log_error "Could not read revision ${revision}." >&2
+        return 2
+    fi
+    python3 "${COMMON_SH_DIR}/inventory_baseline.py" revision \
+        --digest="${digest}" \
+        --env="${INVENTORY_BASELINE_ENV_VARS}" \
+        --absent="${INVENTORY_LEGACY_ENV_NAMES}" \
+        --max="${DEMO_MAX_INSTANCES}" <<<"${rev_json}"
+}
+
+# Exit 0 if service $1 has the service-level instance limit DEMO_MAX_INSTANCES (gcloud run
+# services update --max), 1 if not, 2 if it cannot be read.
+service_max_matches_baseline() {
+    local svc="$1" svc_json
+    if ! svc_json="$(gcloud run services describe "${svc}" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --format=json)"; then
+        log_error "Could not read service ${svc}." >&2
+        return 2
+    fi
+    python3 "${COMMON_SH_DIR}/inventory_baseline.py" service-max --max="${DEMO_MAX_INSTANCES}" <<<"${svc_json}"
 }
 
 # Restore ata-inventory-api to the pinned baseline: 100% traffic on
@@ -146,21 +273,25 @@ restore_inventory_pinned_baseline() {
         return 1
     fi
 
-    # 2. Service template back to the baseline image and DB credentials. This does
-    # not serve traffic (traffic stays pinned), but it must not keep S5's invalid
-    # DB user: `update-traffic --to-latest` or a later deploy would put it live.
+    # 2. Service template back to the baseline image, ATA_INVENTORY_* env (no legacy
+    # aliases) and instance limits. This does not serve traffic (traffic stays pinned), but
+    # it must not keep S5's invalid DB user: `update-traffic --to-latest` or a later deploy
+    # would put it live.
     local rc=0
     inventory_template_matches_baseline || rc=$?
     case "${rc}" in
         0)
-            log_info "    Service template already on the baseline image and DB env; skipping services update."
+            log_info "    Service template already on the baseline image, env and instance limits; skipping services update."
             ;;
         1)
             if ! gcloud run services update "${NAME_PREFIX}-inventory-api" \
                 --project="${PROJECT_ID}" \
                 --region="${REGION}" \
                 --image="${PINNED_INVENTORY_IMAGE}" \
+                --remove-env-vars="${INVENTORY_LEGACY_ENV_NAMES}" \
                 --update-env-vars="${INVENTORY_BASELINE_ENV_VARS}" \
+                --max-instances="${DEMO_MAX_INSTANCES}" \
+                --min-instances=0 \
                 --quiet; then
                 log_error "Failed to restore the ${NAME_PREFIX}-inventory-api service template." >&2
                 return 1

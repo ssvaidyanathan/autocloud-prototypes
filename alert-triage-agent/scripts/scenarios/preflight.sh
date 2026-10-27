@@ -4,6 +4,8 @@
 #
 # Validates system health and operational readiness before executing scenarios:
 # 1. Cloud Run Demo Microservice Admin Endpoints:
+#    - Pinned inventory revision serving; service-level max instances (ATA_DEMO_MAX_INSTANCES)
+#      on ata-inventory-api and ata-orders-api
 #    - ata-inventory-api: /health, /admin/leak-connections,
 #      /admin/fault/inject, /admin/fault/reset
 #    - ata-orders-api: /health, /admin/reset, /admin/fault/latency, /admin/fault/5xx
@@ -77,6 +79,16 @@ else
         exit 1
     fi
     log_success "      Serving pinned revision ${PINNED_INVENTORY_REVISION} (${PINNED_INVENTORY_DIGEST})"
+    # One instance per demo service: fault state and leaked connections are per instance, and
+    # /admin/fault/reset clears only the instance it reaches. The service-level limit covers
+    # every revision, including a pinned revision created before the cap.
+    for svc in "${NAME_PREFIX}-inventory-api" "${NAME_PREFIX}-orders-api"; do
+        if service_max_matches_baseline "${svc}"; then
+            log_success "      ${svc}: service-level max instances ${DEMO_MAX_INSTANCES}"
+        else
+            record_failure "${svc} service-level max instances is not ${DEMO_MAX_INSTANCES} (see above); a fault or reset can miss an instance. Fix: scripts/set-demo-instance-caps.sh --apply"
+        fi
+    done
     log_info "    Probing ata-inventory-api (${INV_URL})..."
     INV_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
         ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/health" || echo "000")

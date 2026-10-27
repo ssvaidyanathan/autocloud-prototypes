@@ -57,15 +57,57 @@ def test_inventory_terraform_declares_every_env_var_the_script_updates(script):
     assert not missing, f"{script} sets {sorted(missing)} on ata-inventory-api but main.tf does not declare them"
 
 
-@pytest.mark.parametrize(
-    "alias, primary",
-    [("DB_USER", "ATA_INVENTORY_DB_USER"), ("MOCK_DB", "ATA_INVENTORY_MOCK_DB")],
-)
-def test_inventory_legacy_env_alias_renders_same_expression_as_primary(alias, primary):
-    env = _inventory_env()
+LEGACY_ALIASES = ("DB_USER", "MOCK_DB")
 
-    assert alias in env and primary in env
-    assert env[alias] == env[primary]
+# Every file that writes ata-inventory-api's env (and the app that reads it).
+ALIAS_FREE_FILES = [
+    "infra/terraform/applications/main.tf",
+    "scripts/scenarios/common.sh",
+    "scripts/scenarios/s5_bad_deploy.sh",
+    "scripts/reset-scenarios.sh",
+    "scripts/repin-inventory.sh",
+    "demo/ata-inventory-api/scripts/deploy.sh",
+    "demo/ata-inventory-api/app/config.py",
+]
+
+
+def _baseline_env_names() -> set:
+    text = (REPO_ROOT / "scripts/scenarios/common.sh").read_text()
+    value = re.search(r'^INVENTORY_BASELINE_ENV_VARS="([^"]+)"', text, re.M).group(1)
+    return {item.split("=", 1)[0] for item in value.split(",")}
+
+
+def test_inventory_terraform_declares_no_legacy_env_alias():
+    assert not set(LEGACY_ALIASES) & set(_inventory_env())
+
+
+@pytest.mark.parametrize("path", ALIAS_FREE_FILES)
+def test_no_legacy_alias_is_set_or_read(path):
+    """Only ATA_INVENTORY_* names; the legacy aliases appear only where they are removed."""
+    text = (REPO_ROOT / path).read_text()
+    for alias in LEGACY_ALIASES:
+        for m in re.finditer(rf"(?<![A-Z_]){alias}(?![A-Z_])", text):
+            line = text[text.rfind("\n", 0, m.start()) + 1:text.find("\n", m.end())]
+            allowed = (
+                'INVENTORY_LEGACY_ENV_NAMES="DB_USER,MOCK_DB"' in line  # the removal list
+                or line.lstrip().startswith("#")  # comments explaining the removal
+                # inside a Python module docstring (config.py says the aliases are not read)
+                or (path.endswith(".py") and text.startswith('"""') and m.start() < text.index('"""', 3))
+            )
+            assert allowed, f"{path}: legacy alias {alias} in: {line.strip()}"
+
+
+def test_inventory_terraform_env_matches_the_scripts_baseline_exactly():
+    """Terraform, deploy.sh, repin and the reset restore render the same env names."""
+    assert set(_inventory_env()) == _baseline_env_names()
+
+
+@pytest.mark.parametrize("rname", ["inventory_api", "orders_api"])
+def test_demo_services_cap_instances_and_scale_to_zero(rname):
+    block = _resource_block(APPS_MAIN_TF.read_text(), "google_cloud_run_v2_service", rname)
+    scaling = re.search(r"scaling\s*\{([^}]*)\}", block).group(1)
+    assert re.search(r"max_instance_count\s*=\s*var\.demo_max_instance_count", scaling)
+    assert re.search(r"min_instance_count\s*=\s*0\b", scaling)
 
 
 def test_applications_ignore_changes_cover_only_client_bookkeeping():

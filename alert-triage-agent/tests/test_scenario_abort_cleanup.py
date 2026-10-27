@@ -274,7 +274,7 @@ def test_s5_error_after_the_faulty_deploy_reverts_to_the_pinned_baseline(tmp_pat
     assert res.returncode == 3, res.stdout + res.stderr
     assert "S5 aborted (exit 3) after deploying the faulty revision ata-inventory-api-s5-" in res.stderr
     assert s5.state["traffic"] == [[PINNED_REVISION, 100]]
-    assert s5.state["env"]["DB_USER"] == GOOD_USER
+    assert s5.state["env"]["ATA_INVENTORY_DB_USER"] == GOOD_USER
     assert "S5 abort cleanup complete" in res.stderr
 
 
@@ -283,7 +283,7 @@ def test_s5_failed_routing_reverts_the_faulty_template(tmp_path, monkeypatch):
     res = _s5_run(s5, tmp_path, monkeypatch, "--hold", "0s")
     assert res.returncode == 1
     assert "could not route traffic to ata-inventory-api-s5-" in res.stderr
-    assert s5.state["env"]["DB_USER"] == GOOD_USER
+    assert s5.state["env"]["ATA_INVENTORY_DB_USER"] == GOOD_USER
     assert s5.state["traffic"] == [[PINNED_REVISION, 100]]
 
 
@@ -291,7 +291,7 @@ def test_s5_failed_revert_says_what_is_still_left(tmp_path, monkeypatch):
     s5 = _s5_env(tmp_path, baseline_state(fail=["describe"]))
     res = _s5_run(s5, tmp_path, monkeypatch, "--hold", "0s")
     assert res.returncode == 1
-    assert s5.state["env"]["DB_USER"] == BAD_USER
+    assert s5.state["env"]["ATA_INVENTORY_DB_USER"] == BAD_USER
     assert "STILL LEFT after the S5 abort: ata-inventory-api is NOT on the pinned baseline" in res.stderr
 
 
@@ -392,5 +392,5 @@ def test_s5_ctrl_c_during_the_hold_finishes_and_keeps_the_bad_deploy(tmp_path, a
     # `date +%s` call 0 names the revision, 1 is START_EPOCH, 2 is the first loop iteration.
     res = run_with_ctrl_c(argv, e, tmp_path, at, after=2)
     assert_finished_gracefully(res)
-    assert s5.state["env"]["DB_USER"] == BAD_USER
+    assert s5.state["env"]["ATA_INVENTORY_DB_USER"] == BAD_USER
     assert s5.state["traffic"] != [[PINNED_REVISION, 100]]

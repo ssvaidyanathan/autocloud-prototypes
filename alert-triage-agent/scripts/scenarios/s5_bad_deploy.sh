@@ -105,7 +105,7 @@ trap revert_s5_on_error EXIT
 
 log_info "--> Updating ata-inventory-api with invalid DB credentials on pinned image..."
 if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
-    log_info "[MOCK/DRY-RUN] Simulating Cloud Run deployment with DB_USER=invalid_user on ${PINNED_INVENTORY_IMAGE}..."
+    log_info "[MOCK/DRY-RUN] Simulating Cloud Run deployment with ATA_INVENTORY_DB_USER=invalid-iam-user on ${PINNED_INVENTORY_IMAGE}..."
 else
     # Name the revision ourselves: reading latestCreatedRevisionName races with any
     # concurrent `services update`, which would make S5 route to someone else's revision.
@@ -115,7 +115,7 @@ else
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --image="${PINNED_INVENTORY_IMAGE}" \
-        --update-env-vars="ATA_INVENTORY_DB_USER=invalid-iam-user@${PROJECT_ID}.iam,DB_USER=invalid-iam-user@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false,MOCK_DB=false" \
+        --update-env-vars="ATA_INVENTORY_DB_USER=invalid-iam-user@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false" \
         --revision-suffix="${S5_REVISION_SUFFIX}" \
         --quiet; then
         log_error "FATAL: Cloud Run update of ${NAME_PREFIX}-inventory-api failed; S5 not injected." >&2
