@@ -20,3 +20,11 @@ def test_terraform_job_validates_every_root():
     roots = {p.parent.name for p in TF_DIR.glob("*/versions.tf")} | {p.parent.name for p in TF_DIR.glob("*/main.tf")}
     assert "triage-iam" in roots
     assert roots <= validated, f"not validated in CI: {sorted(roots - validated)}"
+
+
+def test_macos_job_runs_the_deploy_script_suites():
+    text = _text()
+    job = text[text.index("scripts-macos:"):text.index("shellcheck:")]
+    for suite in ("test_bash32_compat.py", "test_macos_userland.py", "test_fresh_deploy_scripts.py",
+                  "test_apigee_prefix.py", "test_deploy_scripts_env_vars.py"):
+        assert f"tests/{suite}" in job, suite

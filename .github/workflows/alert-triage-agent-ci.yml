@@ -85,7 +85,9 @@ jobs:
             tests/test_macos_userland.py \
             tests/test_run_all_ctrl_c.py \
             tests/test_run_all_halt_on_reset_failure.py \
-            tests/test_deploy_scripts_env_vars.py
+            tests/test_deploy_scripts_env_vars.py \
+            tests/test_fresh_deploy_scripts.py \
+            tests/test_apigee_prefix.py
 
   shellcheck:
     name: ShellCheck (errors)
