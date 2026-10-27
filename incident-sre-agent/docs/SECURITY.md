@@ -109,10 +109,16 @@ Under no circumstances are any of the following roles or permissions granted to 
 Every tool registered in `agent/app/tools/registry.py` is guaranteed read-only through programmatic constraints:
 1. **Tool Registry Whitelist**: Specialists can only execute tools explicitly decorated and registered in the internal tool catalogue.
 2. **Read-Only API Clients**:
-   - `LoggingTool`: Uses `google.cloud.logging.Client.list_entries()` only; no sink or metric creation.
-   - `MonitoringTool`: Uses `google.cloud.monitoring_v3.MetricServiceClient.list_time_series()` only; no custom metric mutation.
-   - `ChangesTool`: Filters `cloudaudit.googleapis.com` via read-only log filters.
-   - `ResourcesTool`: Uses `google.cloud.run_v2.ServicesClient.get_service()`, `google.cloud.compute_v1.InstancesClient`, and resource viewer clients.
+   - `LoggingTool`: Uses `google.cloud.logging.Client.list_entries()` only (for request logs, error logs, and `get_gke_workload_events`); no sink or metric creation.
+   - `MonitoringTool`: Uses `google.cloud.monitoring_v3.MetricServiceClient.list_time_series()` only (for Cloud Run and `query_gke_metrics`); no custom metric mutation.
+   - `ChangesTool`: Filters `cloudaudit.googleapis.com` via read-only log filters (including `k8s.io` administrative activity).
+   - `ResourcesTool`: Uses read-only viewer clients (`google.cloud.run_v2.ServicesClient.get_service()`, `google.cloud.compute_v1.InstancesClient`, `ForwardingRulesClient`, `TargetPoolsClient`, `BackendServicesClient`, `ClusterManagerClient.list_clusters`) and read-only Kubernetes master REST endpoints (`query_gke_workload_status`).
+
+### Kubernetes Control-Plane Security & TLS Enforcement
+When inspecting GKE workloads via `query_gke_workload_status` (see [GKE Investigation Guide](GKE_INVESTIGATION.md)):
+1. **Strict TLS CA Verification**: Retrieves the cluster CA certificate (`master_auth.cluster_ca_certificate`), decodes it into a temporary trusted file, and passes it to `AuthorizedSession(verify=temp_ca_path)`. Insecure TLS (`verify=False`) is explicitly rejected. Temporary certificate files are securely deleted in a `finally:` block.
+2. **Identifier Input Sanitization**: All cluster, namespace, workload, pod, container, and metric inputs are validated via `validate_k8s_identifier` against strict regex patterns (`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`), preventing filter injection in Cloud Logging and Monitoring query strings.
+3. **Bounded Result Sizes**: All GKE query tools enforce clamped caps (`max_pods=50`, `max_events=50`, `max_series=50`, capped at 200) with `truncated: bool` flags to prevent memory exhaustion and context window blowup.
 
 ### Automatic Secret Redaction in Resources Tool
 When the `ResourcesTool` inspects Cloud Run services or container environments, all sensitive values are automatically sanitized before passing to LLM context:

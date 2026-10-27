@@ -15,6 +15,7 @@ An autonomous, read-only Site Reliability Engineering (SRE) investigation platfo
 - [2. Quick Start](#2-quick-start)
 - [3. System Architecture & Request Lifecycle](#3-system-architecture--request-lifecycle)
 - [4. Component Breakdown](#4-component-breakdown)
+  - [GKE Workload Investigation](#gke-workload-investigation)
 - [5. Configuration](#5-configuration)
 - [6. Customizing the Agent with Skills](#6-customizing-the-agent-with-skills)
 - [7. Security Model & Production Guardrails](#7-security-model--production-guardrails)
@@ -195,6 +196,9 @@ sequenceDiagram
   - Agent instructions & configuration: System instructions, prompt templates, and agent hierarchies are externalized in [`agent/app/agent.yaml`](agent/app/agent.yaml) and loaded via [`agent/app/agent_config.py`](agent/app/agent_config.py). AI assistant conventions and developer guardrails are defined in [`AGENTS.md`](AGENTS.md).
   - Zero-trust callback delivery with Google ID token authentication.
 
+#### GKE Workload Investigation
+The SRE Agent autonomously investigates Google Kubernetes Engine (GKE) standard and Autopilot workloads alongside Cloud Run. During triage, external IP addresses and Uptime Check URLs are dynamically resolved through Google Cloud Forwarding Rules, Target Pools, Backend Services, and NEGs to the backing Kubernetes service and cluster. Domain specialists concurrently inspect structured pod lifecycle events (`logs/events`), container and autoscaler metrics, live control-plane workload health, and `k8s.io` Cloud Audit Logs using dedicated operational skills (`gke-troubleshooting` and `k8s-change-correlation`). For complete architecture details, tool reference, and troubleshooting runbooks, see the [GKE Investigation Guide](docs/GKE_INVESTIGATION.md).
+
 ### 3. `demo/` Microservices Stack
 - **Role**: Realistic e-commerce storefront for incident simulation and fault injection.
 - **Components**:
@@ -250,14 +254,22 @@ Skills are mapped to agent roles in [`agent/skills/skills.yaml`](agent/skills/sk
 dispatcher:
   - triage-playbook
   - cloud-run-troubleshooting
+  - gke-troubleshooting
+  - k8s-change-correlation
+  - cloud-sql-troubleshooting
 logs:
   - cloud-logging-queries
+  - gke-troubleshooting
 metrics:
   - cloud-monitoring-metrics
+  - gke-troubleshooting
 changes:
   - change-correlation
+  - k8s-change-correlation
 resources:
   - cloud-run-troubleshooting
+  - gke-troubleshooting
+  - cloud-sql-troubleshooting
 synthesizer:
   - report-style
 all:
