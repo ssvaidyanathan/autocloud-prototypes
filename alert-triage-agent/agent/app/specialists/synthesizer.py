@@ -21,7 +21,9 @@ from ..contracts.report import (
     EvidenceItem,
     InvestigationReport,
     ProbableRootCause,
+    SIGNAL_TITLE_PROBLEMS,
     TimelineItem,
+    title_problem_for_signal,
 )
 from ..contracts.links import ConsoleLinkBuilder
 from ..grouping.models import OKFDocument, format_okf_alert_entry
@@ -53,6 +55,79 @@ REPORT_SECTION_END = "<!-- ata:synthesizer-report:end -->"
 # Leads the report's observations when the investigation completed but the incident OKF file
 # could not be updated; observations are rendered into the ServiceNow work note and description.
 OKF_DEGRADED_NOTE = "DEGRADED MODE: incident OKF file update failed"
+
+# Leads the observation added for each further alert of the incident group.
+CORRELATED_ALERT_PREFIX = "Correlated alert:"
+
+
+def _alert_field(a: dict[str, Any], *keys: str) -> Optional[str]:
+    for k in keys:
+        v = a.get(k)
+        if v:
+            return str(v)
+    return None
+
+
+def apply_group_alerts(report: InvestigationReport, group_alerts: list[Any]) -> InvestigationReport:
+    """Make the report reflect every alert of the incident group, not just the triggering one.
+
+    The investigation runs on the group's primary alert, so the synthesized report starts with
+    that alert only. This merges the group's alerts (OKF ``alerts``) into ``report.alerts``,
+    which drives the ServiceNow title count and the description's alert list, adds one
+    observation per further alert, and widens first_seen/last_alert to cover them.
+
+    Idempotent: entries are keyed by incident_id, observation lines are added only when
+    absent, so it can run inside an OKF precondition-retry mutation and again before ticketing.
+    """
+    merged: list[dict[str, Any]] = []
+    index: dict[str, int] = {}
+    for a in [*report.alerts, *(group_alerts or [])]:
+        if not isinstance(a, dict):
+            continue
+        inc_id = a.get("incident_id")
+        if inc_id and inc_id in index:
+            # Keep the report's (richer) entry; fill fields it lacks from the group entry.
+            existing = merged[index[inc_id]]
+            for k, v in a.items():
+                if v and not existing.get(k):
+                    existing[k] = v
+            continue
+        if inc_id:
+            index[inc_id] = len(merged)
+        merged.append(dict(a))
+    if not merged:
+        return report
+    report.alerts = merged
+
+    primary_id = merged[0].get("incident_id")
+    obs = report.observations or ""
+    new_lines: list[str] = []
+    for a in merged[1:]:
+        if primary_id and a.get("incident_id") == primary_id:
+            continue
+        policy = _alert_field(a, "policy_name", "policy") or "unknown"
+        resource = _alert_field(a, "component", "resource_name", "resource") or "unknown"
+        line = (
+            f"{CORRELATED_ALERT_PREFIX} Cloud Monitoring policy '{policy}' triggered on '{resource}'"
+            f" at {_alert_field(a, 'started_at') or 'unknown'} (state: {_alert_field(a, 'state') or 'open'})"
+        )
+        marker = f"{CORRELATED_ALERT_PREFIX} Cloud Monitoring policy '{policy}' triggered on '{resource}'"
+        if marker not in obs and line not in new_lines:
+            new_lines.append(line)
+    if new_lines:
+        items = [o for o in obs.split(" | ") if o] if obs else []
+        # Directly after the primary alert's trigger line (the first item) when present.
+        insert_at = 1 if items else 0
+        items[insert_at:insert_at] = new_lines
+        report.observations = " | ".join(items)
+
+    starts = sorted(str(a["started_at"]) for a in merged if a.get("started_at"))
+    if starts:
+        if not report.first_seen or starts[0] < report.first_seen:
+            report.first_seen = starts[0]
+        if not report.last_alert or starts[-1] > report.last_alert:
+            report.last_alert = starts[-1]
+    return report
 
 
 def _merge_report_section(body: str, report_markdown: str) -> str:
@@ -147,6 +222,7 @@ class SynthesizerAgent:
 
         dep_path = self._determine_dependency_path(origin, blast_radius)
         summary = self._synthesize_problem(alert, dossiers, origin, blast_radius)
+        title_problem = self._synthesize_title_problem(alert, dossiers, origin)
         observations = self._synthesize_observations(dossiers, alert)
         recommendations = self._synthesize_recommendations(dossiers, origin, alert)
         root_cause_text, confidence = self._determine_root_cause(dossiers, origin, alert, blast_radius=blast_radius)
@@ -179,6 +255,7 @@ class SynthesizerAgent:
             group_id=group_id,
             filename=filename,
             summary=summary,
+            title_problem=title_problem,
             observations=observations,
             recommended_actions=recommendations,
             probable_root_cause=ProbableRootCause(
@@ -917,7 +994,10 @@ class SynthesizerAgent:
                             clean_line = ln_str.lstrip("- ").strip()
                             if clean_line and "audit" not in clean_line.lower() and "@" not in clean_line:
                                 if len(clean_line) > 200:
-                                    clean_line = clean_line[:197] + "..."
+                                    # Cut on a word boundary, never mid-word.
+                                    head = clean_line[:198]
+                                    cut = head.rfind(" ")
+                                    clean_line = (head[:cut] if cut > 0 else head[:197]).rstrip() + "..."
                                 obs_items.append(f"Log excerpt ({d.target_resource}): {clean_line}")
                                 break
                     if any(item.startswith(f"Log excerpt ({d.target_resource})") for item in obs_items):
@@ -1472,6 +1552,35 @@ class SynthesizerAgent:
             "bridge_revision": os.environ.get("BRIDGE_REVISION") or "Unspecified",
         }
 
+    def _synthesize_title_problem(
+        self,
+        alert: AlertEvent,
+        dossiers: list[EvidenceDossier],
+        origin: str,
+    ) -> Optional[str]:
+        """Short, fixed problem phrase for the ServiceNow title (no metrics, names or timestamps).
+
+        Mirrors the failure-mode branches of _synthesize_problem but returns a short label
+        from a closed set, so the title never depends on the length of the synthesized
+        sentence. None lets the report contract derive the phrase from the alert signal.
+        """
+        chg_d = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist" and d.anomaly_detected), None)
+        if chg_d:
+            rev = chg_d.metrics.get("recent_revision")
+            if rev and (chg_d.metrics.get("change_service") == origin or chg_d.target_resource == origin):
+                return "Deployment regression"
+        signal = (alert.policy_user_labels or {}).get("signal") or (alert.labels or {}).get("signal")
+        if not signal:
+            pol = (alert.policy_name or "").lower()
+            signal = next((k for k in SIGNAL_TITLE_PROBLEMS if pol.endswith(f"-{k}")), None)
+        if origin != alert.resource_name and signal in ("5xx", "latency"):
+            return {"5xx": "Upstream HTTP 5xx errors", "latency": "Upstream dependency latency"}[signal]
+        if any(d.specialist_name == "CloudSQLSpecialist" and d.anomaly_detected for d in dossiers) and (
+            "db" in origin or "sql" in origin
+        ):
+            return "Database connection pool saturation"
+        return title_problem_for_signal(signal)
+
     def _reconcile_report_origin(self, report: InvestigationReport, alert: AlertEvent, origin: str) -> None:
         """Align the report's origin, root cause and summary with the reconciled ``origin``."""
         logger.info("Reconciling report origin from %s to %s", report.origin, origin)
@@ -1491,6 +1600,11 @@ class SynthesizerAgent:
                 dossiers=active_dossiers,
                 origin=origin,
                 blast_radius=report.blast_radius,
+            )
+            report.title_problem = self._synthesize_title_problem(
+                alert=alert,
+                dossiers=active_dossiers,
+                origin=origin,
             )
 
     @staticmethod
@@ -1682,6 +1796,8 @@ class SynthesizerAgent:
             else:
                 alerts_list.append(new_alert_entry)
             doc.alerts = [format_okf_alert_entry(a, valid_ts=doc.timestamp) for a in alerts_list]
+            # The report section and the ticket must cover every alert of the group.
+            apply_group_alerts(report, doc.alerts)
 
             report_markdown = self._build_report_markdown(report, doc.policy_name, origin, merged_blast, topology)
             doc.body = _merge_report_section(doc.body, report_markdown)

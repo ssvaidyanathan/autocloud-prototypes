@@ -30,6 +30,7 @@ from .duplicate_checker import (
 from .grouping.manager import GroupingManager
 from .grouping.models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument
 from .grouping.store import OKFStore, read_okf, update_okf_atomically
+from .specialists.synthesizer import apply_group_alerts
 from .timers.scheduler import schedule_delayed_timer
 from .triage import (
     execute_multi_agent_investigation,
@@ -330,6 +331,7 @@ async def timer_wake(
 
         report.group_id = doc.group_id
         report.filename = filename
+        _apply_current_group_alerts(report, store, doc)
 
         bridge_client = BridgeClient(config=settings)
         ticket_resp = bridge_client.create_ticket(
@@ -421,6 +423,7 @@ async def timer_wake(
 
         report.group_id = doc.group_id
         report.filename = filename
+        _apply_current_group_alerts(report, store, doc)
 
         bridge_client = BridgeClient(config=settings)
         ticket_resp = bridge_client.create_ticket(
@@ -551,6 +554,25 @@ async def timer_wake(
         group_id=doc.group_id,
         reason=f"unsupported_deadline_type_{payload.deadline_type}",
     )
+
+
+def _apply_current_group_alerts(report: InvestigationReport, store: OKFStore, doc: OKFDocument) -> None:
+    """Merge the incident group's alerts, as stored now, into the report before ticketing.
+
+    The investigation (and the fallback report) is built from the primary alert only. The
+    group is re-read here, at ticket time, so alerts attached while the investigation ran
+    are counted too; the read-at-wake ``doc`` is the fallback if the re-read fails.
+    """
+    current = doc
+    try:
+        current = store.read(doc.group_id) or doc
+    except Exception as exc:
+        logger.warning(
+            "Could not re-read group %s before ticketing (%s); using the alerts read at wake",
+            doc.group_id,
+            type(exc).__name__,
+        )
+    apply_group_alerts(report, list(current.alerts or []))
 
 
 def _extract_primary_alert(doc: OKFDocument) -> AlertEvent:

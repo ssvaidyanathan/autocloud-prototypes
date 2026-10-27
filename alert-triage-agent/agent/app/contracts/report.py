@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import re
 from typing import Any, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .links import ConsoleLinkBuilder
 
@@ -116,11 +116,95 @@ def clean_problem_text(problem: str) -> str:
     return problem
 
 
+# ServiceNow short_description: '[<P>] <origin>: <title problem> (<N> alerts)'.
+TITLE_MAX_LENGTH = 160
+# Strict cap on the title problem phrase. The full problem sentence goes in the description.
+TITLE_PROBLEM_MAX_LENGTH = 60
+
+# Alert signal label (policy user label 'signal') -> short title problem phrase.
+SIGNAL_TITLE_PROBLEMS: dict[str, str] = {
+    "5xx": "Elevated HTTP 5xx error rate",
+    "latency": "Elevated latency",
+    "rate-limit": "Rate limit exceeded (HTTP 429)",
+    "connections": "Database connection saturation",
+    "cpu": "High CPU utilization",
+}
+
+# Report issue_type -> short title problem phrase (used when no signal is known).
+ISSUE_TYPE_TITLE_PROBLEMS: dict[str, str] = {
+    "runtime_exhaustion": "Resource exhaustion",
+    "change_induced": "Deployment regression",
+    "latency_spike": "Elevated latency",
+    "runtime_anomaly": "Telemetry breach",
+}
+
+DEFAULT_TITLE_PROBLEM = "Anomalous telemetry breach detected"
+
+# Work note: at most this many observation sub-bullets, then '...and N more (see attached report)'.
+WORK_NOTE_MAX_OBSERVATIONS = 6
+
+
+def split_observations(observations: Optional[str]) -> list[str]:
+    """Split the ' | '-joined observations string into individual, non-empty items."""
+    if not observations:
+        return []
+    return [o.strip() for o in re.split(r"\s+\|\s+", observations) if o.strip()]
+
+
+def _html_text(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def normalize_title_problem(value: Optional[str]) -> Optional[str]:
+    """Return a clean single-line title problem, or None when unusable.
+
+    None is returned for empty text and for text longer than TITLE_PROBLEM_MAX_LENGTH, so
+    the title falls back to the signal-derived phrase instead of truncating a sentence.
+    """
+    if value is None:
+        return None
+    text = clean_problem_text(str(value)).replace("*", "").replace("`", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or text.lower() in ("none", "n/a", "unknown", "under investigation"):
+        return None
+    if len(text) > TITLE_PROBLEM_MAX_LENGTH:
+        return None
+    return text
+
+
+def title_problem_for_signal(signal: Optional[str]) -> Optional[str]:
+    """Map an alert signal label (e.g. '5xx') to its short title problem phrase."""
+    if not signal:
+        return None
+    return SIGNAL_TITLE_PROBLEMS.get(str(signal).strip().lower())
+
+
+def format_alert_count(n_alerts: int) -> str:
+    """Return '(1 alert)' or '(<N> alerts)'."""
+    return f"({n_alerts} alert{'' if n_alerts == 1 else 's'})"
+
+
+def _truncate_at_word(text: str, limit: int) -> str:
+    """Cut text to at most ``limit`` characters on a word boundary (never mid-word, no '...')."""
+    if len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    cut = text[: limit + 1]
+    space = cut.rfind(" ")
+    if space <= 0:
+        return ""
+    return clean_problem_text(cut[:space])
+
+
 class InvestigationReport(BaseModel):
     """Investigation Report data contract."""
     group_id: str
     filename: str = ""
     summary: str
+    # Short problem phrase for the ServiceNow title, at most TITLE_PROBLEM_MAX_LENGTH chars.
+    # Over-long or empty values are dropped (None) and the title falls back to the alert signal.
+    title_problem: Optional[str] = None
     observations: str
     recommended_actions: list[Union[ActionItem, dict[str, Any], str]] = Field(default_factory=list)
     probable_root_cause: ProbableRootCause = Field(
@@ -157,6 +241,11 @@ class InvestigationReport(BaseModel):
     servicenow_sys_id: Optional[str] = None
     servicenow_number: Optional[str] = None
     raw_metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("title_problem", mode="before")
+    @classmethod
+    def _validate_title_problem(cls, value: Any) -> Optional[str]:
+        return normalize_title_problem(value)
 
     def get_normalized_actions(self) -> list[ActionItem]:
         """Normalize recommended actions into structured ActionItem instances."""
@@ -253,15 +342,30 @@ class InvestigationReport(BaseModel):
             comp_sig_parts.append(f"Component: <code>{comp}</code>")
         if sig:
             comp_sig_parts.append(f"Signal: <code>{sig}</code>")
-        comp_sig_str = f" | {' | '.join(comp_sig_parts)}" if comp_sig_parts else ""
 
-        sys_text = f"Origin: <code>{self.origin}</code> ({conf_pct}% confidence){comp_sig_str} | Blast Radius: {blast_str}"
-        obs_text = self.observations
+        # Systems and Observations are rendered as sub-bullets, one item per line.
+        sys_items = [f"Origin: <code>{self.origin}</code> ({conf_pct}% confidence)"]
+        if comp_sig_parts:
+            sys_items.append(", ".join(comp_sig_parts))
+        sys_items.append(f"Blast Radius: {blast_str}")
+        sys_items = [i.replace("**", "").replace("*", "") for i in sys_items]
+
+        obs_items = [
+            _html_text(o.replace("**", "").replace("*", "")) for o in split_observations(self.observations)
+        ]
+        hidden = len(obs_items) - WORK_NOTE_MAX_OBSERVATIONS
+        if hidden > 0:
+            obs_items = obs_items[:WORK_NOTE_MAX_OBSERVATIONS]
+            obs_items.append(f"...and {hidden} more (see attached report)")
+
+        def _sub_list(items: list[str]) -> str:
+            if not items:
+                return " None recorded"
+            lis = "\n".join(f"      <li>{i}</li>" for i in items)
+            return f"\n    <ul>\n{lis}\n    </ul>"
 
         # Clean any raw asterisks or markdown formatting
         prob_text = prob_text.replace("**", "").replace("*", "")
-        sys_text = sys_text.replace("**", "").replace("*", "")
-        obs_text = obs_text.replace("**", "").replace("*", "")
 
         actions = self.get_normalized_actions()
         action_items_html: list[str] = []
@@ -299,55 +403,100 @@ class InvestigationReport(BaseModel):
             "<p><b>Executive Summary:</b></p>\n"
             "<ul>\n"
             f"  <li><b>Problem:</b> {prob_text}</li>\n"
-            f"  <li><b>Systems:</b> {sys_text}</li>\n"
-            f"  <li><b>Observations:</b> {obs_text}</li>\n"
+            f"  <li><b>Systems:</b>{_sub_list(sys_items)}</li>\n"
+            f"  <li><b>Observations:</b>{_sub_list(obs_items)}</li>\n"
             f"  <li><b>Recommended Actions:</b>{recs_inner}</li>\n"
             "</ul>\n"
             "[/code]"
         )
 
-    def build_short_description(self, max_length: int = 160) -> str:
-        """Format clean short_description: '[<Priority>] <canonical-origin>: <problem in plain words> (<N> alerts)'."""
-        n_alerts = len(self.alerts) if self.alerts else len(self.raw_metadata.get("alerts", []))
-        if n_alerts == 0:
-            n_alerts = max(1, len([t for t in self.timeline if "alert" in t.description.lower()]) or 1)
+    def alert_count(self) -> int:
+        """Number of alerts in the incident group carried by this report (at least 1)."""
+        alerts_list = self.alerts or self.raw_metadata.get("alerts") or []
+        ids: list[str] = []
+        anonymous = 0
+        for a in alerts_list if isinstance(alerts_list, list) else []:
+            inc_id = a.get("incident_id") if isinstance(a, dict) else getattr(a, "incident_id", None)
+            if inc_id:
+                if inc_id not in ids:
+                    ids.append(inc_id)
+            else:
+                anonymous += 1
+        return max(1, len(ids) + anonymous)
 
-        raw_problem = self.summary or ""
-        problem = clean_problem_text(raw_problem)
-        if not problem or problem.lower() in ["none", "n/a", "unknown"]:
-            signal = None
-            if self.issue_type:
-                issue_map = {
-                    "runtime_exhaustion": "Resource exhaustion",
-                    "change_induced": "Deployment regression",
-                    "latency_spike": "Elevated latency",
-                    "runtime_anomaly": "Telemetry breach",
-                }
-                signal = issue_map.get(self.issue_type)
-            if not signal and self.probable_root_cause and self.probable_root_cause.text:
-                rc_text = clean_problem_text(self.probable_root_cause.text)
-                if rc_text and rc_text.lower() not in ["under investigation", "unknown"]:
-                    signal = rc_text
-            if not signal:
-                signal = "Anomalous telemetry breach detected"
-            problem = signal
+    def _alert_signal(self) -> Optional[str]:
+        """Signal label of the origin's alert (else the first alert, else raw_metadata)."""
+        alerts_list = self.alerts or self.raw_metadata.get("alerts") or []
+        dict_alerts = [a for a in alerts_list if isinstance(a, dict)] if isinstance(alerts_list, list) else []
+        ordered = [a for a in dict_alerts if (a.get("component") or a.get("resource_name") or a.get("resource")) == self.origin]
+        ordered += [a for a in dict_alerts if a not in ordered]
+        for a in ordered:
+            labels = a.get("labels") or {}
+            pul = a.get("policy_user_labels") or {}
+            sig = a.get("signal") or labels.get("signal") or pul.get("signal")
+            if sig:
+                return str(sig)
+        for a in ordered:
+            policy = str(a.get("policy_name") or a.get("policy") or "").lower()
+            for key in SIGNAL_TITLE_PROBLEMS:
+                if policy.endswith(f"-{key}"):
+                    return key
+        rm = self.raw_metadata
+        return rm.get("signal") or (rm.get("labels") or {}).get("signal") or (rm.get("policy_user_labels") or {}).get("signal")
 
-        prefix = f"[{self.priority}] {self.origin}: "
-        suffix = f" ({n_alerts} alert{'s' if n_alerts != 1 else ''})"
+    def infer_issue_type(self) -> str:
+        """issue_type of the report, else inferred from summary keywords."""
+        issue_type = self.issue_type or self.raw_metadata.get("issue_type")
+        if issue_type:
+            return issue_type
+        s_lower = (self.summary or "").lower()
+        if any(k in s_lower for k in ["conn", "pool", "exhaust", "saturation"]):
+            return "runtime_exhaustion"
+        if any(k in s_lower for k in ["deploy", "revision", "release"]):
+            return "change_induced"
+        if "timeout" in s_lower or "latency" in s_lower:
+            return "latency_spike"
+        return "runtime_anomaly"
 
-        allowed_len = max_length - len(prefix) - len(suffix)
-        if allowed_len <= 3:
-            problem = problem[:max(0, allowed_len)]
-        elif len(problem) > allowed_len:
-            truncated = problem[: allowed_len - 3]
-            truncated = clean_problem_text(truncated)
-            problem = truncated + "..."
-            while len(problem) > allowed_len and len(truncated) > 0:
-                truncated = truncated[:-1]
-                truncated = clean_problem_text(truncated)
-                problem = truncated + "..."
+    def resolve_title_problem(self) -> str:
+        """Short problem phrase for the title: title_problem, else alert signal, else issue_type."""
+        if self.title_problem:
+            return self.title_problem
+        from_signal = title_problem_for_signal(self._alert_signal())
+        if from_signal:
+            return from_signal
+        explicit = self.issue_type or self.raw_metadata.get("issue_type")
+        if explicit in ISSUE_TYPE_TITLE_PROBLEMS:
+            return ISSUE_TYPE_TITLE_PROBLEMS[explicit]
+        # A summary that is already short is used as is; a sentence is never truncated.
+        from_summary = normalize_title_problem(self.summary)
+        if from_summary:
+            return from_summary
+        inferred = self.infer_issue_type()
+        if inferred != "runtime_anomaly":
+            return ISSUE_TYPE_TITLE_PROBLEMS[inferred]
+        return DEFAULT_TITLE_PROBLEM
 
-        return f"{prefix}{problem}{suffix}"
+    def build_short_description(self, max_length: int = TITLE_MAX_LENGTH) -> str:
+        """Format the ServiceNow title: '[<Priority>] <origin>: <short problem> (<N> alerts)'.
+
+        Example: '[P1] <origin>: Elevated HTTP 5xx error rate (2 alerts)'.
+        The problem is a short phrase (see resolve_title_problem), never the synthesized
+        sentence; the full problem is in the description. The alert count suffix is always
+        kept, and anything shortened is cut on a word boundary.
+        """
+        prefix = f"[{self.priority}] {self.origin}"
+        suffix = " " + format_alert_count(self.alert_count())
+        problem = self.resolve_title_problem()
+
+        allowed = max_length - len(prefix) - len(": ") - len(suffix)
+        problem = _truncate_at_word(problem, allowed)
+        if problem:
+            return f"{prefix}: {problem}{suffix}"
+        # No room for the problem: keep priority, origin and count.
+        if len(prefix) + len(suffix) > max_length:
+            prefix = prefix[: max(0, max_length - len(suffix))].rstrip()
+        return f"{prefix}{suffix}"
 
     def build_structured_description(
         self,
@@ -367,17 +516,7 @@ class InvestigationReport(BaseModel):
 
         blast_str = ", ".join(self.blast_radius) if self.blast_radius else self.origin
 
-        issue_type = self.issue_type or self.raw_metadata.get("issue_type")
-        if not issue_type:
-            s_lower = (self.summary or "").lower()
-            if any(k in s_lower for k in ["conn", "pool", "exhaust", "saturation"]):
-                issue_type = "runtime_exhaustion"
-            elif any(k in s_lower for k in ["deploy", "revision", "release"]):
-                issue_type = "change_induced"
-            elif "timeout" in s_lower or "latency" in s_lower:
-                issue_type = "latency_spike"
-            else:
-                issue_type = "runtime_anomaly"
+        issue_type = self.infer_issue_type()
 
         change_ind = self.change_induced or self.raw_metadata.get("change_induced") or "No"
 
