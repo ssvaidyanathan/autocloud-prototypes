@@ -136,8 +136,14 @@ def test_main_prints_only_ata_alerts(no_ca_env, monkeypatch, capsys):
     assert [a["id"] for a in out["active"]] == ["0.a"]
 
 
-def http_error(code, reason):
-    return urllib.error.HTTPError("u", code, reason, {}, None)
+def http_error(code, reason, body=None):
+    fp = io.BytesIO(body.encode()) if body is not None else None
+    return urllib.error.HTTPError("u", code, reason, {}, fp)
+
+
+# OAuth-style error bodies carry "error" as a string, not a Google API error object.
+OAUTH_401_BODY = json.dumps({"error": "invalid_token", "error_description": "Invalid Credentials"})
+STRING_503_BODY = json.dumps({"error": "backend"})
 
 
 @pytest.mark.parametrize(
@@ -154,6 +160,11 @@ def http_error(code, reason):
         (http_error(404, "Not Found"), "HTTP 404 Not Found", open_alerts.QUERY_REJECTED_EXIT, False),
         (http_error(429, "Too Many Requests"), "HTTP 429", open_alerts.QUERY_FAILED_EXIT, False),
         (http_error(503, "Service Unavailable"), "HTTP 503", open_alerts.QUERY_FAILED_EXIT, False),
+        (http_error(401, "Unauthorized", OAUTH_401_BODY),
+         "Cloud Monitoring rejected your access token from token source 'adc' (401)."
+         " Run: gcloud auth application-default login",
+         open_alerts.QUERY_REJECTED_EXIT, False),
+        (http_error(503, "Service Unavailable", STRING_503_BODY), "HTTP 503", open_alerts.QUERY_FAILED_EXIT, False),
         (urllib.error.URLError("timed out"), "Alerts API query failed", open_alerts.QUERY_FAILED_EXIT, True),
         (TimeoutError("The read operation timed out"), "Alerts API query failed", open_alerts.QUERY_FAILED_EXIT, True),
     ],

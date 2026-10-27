@@ -55,6 +55,9 @@ def google_error_details(body: str):
         err = json.loads(body).get("error") or {}
     except (ValueError, AttributeError):
         return ("ACCESS_TOKEN_TYPE_UNSUPPORTED" if "ACCESS_TOKEN_TYPE_UNSUPPORTED" in body else ""), ""
+    if not isinstance(err, dict):  # OAuth-style {"error": "invalid_token", ...}
+        reason = "ACCESS_TOKEN_TYPE_UNSUPPORTED" if "ACCESS_TOKEN_TYPE_UNSUPPORTED" in body else ""
+        return reason, str(err)
     reasons = [d.get("reason", "") for d in err.get("details") or [] if isinstance(d, dict)]
     return next((r for r in reasons if r), ""), str(err.get("message") or "")
 
