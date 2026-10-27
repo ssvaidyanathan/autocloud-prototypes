@@ -34,6 +34,7 @@ from .grouping.models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDoc
 from .grouping.store import OKFStore, read_okf, update_okf_atomically
 from .grouping.suppression import format_late_alert_work_note
 from .grouping.stuck_investigation import (
+    OUTCOME_THROTTLED,
     WATCHDOG_DEADLINE_TYPE,
     apply_degraded_predecessor_note,
     apply_recovery_note,
@@ -690,6 +691,13 @@ def _investigation_watchdog(
     result = recover_stuck_investigation(store, doc.group_id, now, settings, trigger="investigation watchdog")
     if result.doc is None:
         return _group_file_gone(doc.group_id, "investigation_watchdog wake")
+    if result.outcome == OUTCOME_THROTTLED:
+        # Too soon after the last attempt (e.g. a Cloud Tasks retry seconds after a failed one):
+        # re-arm one watchdog for when the next attempt is allowed instead of raising, so the
+        # retry is not spent inside the interval and does not depend on the queue's retry window.
+        # A re-arm failure propagates (5xx) and Cloud Tasks retries this wake.
+        schedule_watchdog(settings, doc.group_id, max(result.retry_after_epoch, float(scheduled_epoch) + 1.0))
+        return TimerWakeResponse(status="ignored", group_id=doc.group_id, reason="recovery_throttled")
     return TimerWakeResponse(status="executed", group_id=doc.group_id, reason=f"stuck_investigation_{result.outcome}")
 
 

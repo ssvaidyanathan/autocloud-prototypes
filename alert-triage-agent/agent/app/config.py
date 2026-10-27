@@ -110,6 +110,12 @@ class AgentConfig(BaseSettings):
     # Recoveries (re-enqueued settle wakes) per stuck group. When one more would be needed the
     # group is marked degraded (ERROR) and new alerts open a new group instead of joining it.
     investigation_max_recoveries: int = Field(default=3, alias="INVESTIGATION_MAX_RECOVERIES", ge=1)
+    # Minimum spacing between two recovery attempts on one group. A trigger (alert ingest or
+    # watchdog) sooner than this after the last recorded attempt starts no attempt and does not
+    # degrade, so a burst of triggers during an outage uses one attempt, not all of them.
+    investigation_recovery_min_interval_seconds: float = Field(
+        default=300.0, alias="INVESTIGATION_RECOVERY_MIN_INTERVAL_SECONDS", gt=0
+    )
 
     # ata-tools (FastMCP) service URL, e.g. https://<prefix>-tools-<PROJECT_NUMBER>.<REGION>.run.app.
     # The change specialist calls its get_change_timeline tool over MCP streamable HTTP with an

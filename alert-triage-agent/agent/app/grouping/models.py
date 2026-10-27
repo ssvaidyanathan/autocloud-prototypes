@@ -161,6 +161,7 @@ class OKFDocument(BaseModel):
     investigation_recoveries: list[dict[str, Any]] = Field(default_factory=list)
     # A group degraded after INVESTIGATION_MAX_RECOVERIES ('stuck_investigation') records the
     # new group that lists its alerts in its ticket; that new group records them here.
+    investigation_recovery_throttle_warned_at: Optional[str] = None
     degraded_cause: Optional[str] = None
     carried_to_group_id: Optional[str] = None
     degraded_predecessors: list[dict[str, Any]] = Field(default_factory=list)

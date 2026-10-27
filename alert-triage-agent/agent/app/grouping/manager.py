@@ -161,6 +161,7 @@ class GroupingManager:
                 self.config,
                 trigger=f"alert {alert.incident_id} ingested",
                 reraise_schedule_failure=False,
+                throttle_warning_once_per_interval=True,
             )
             if result.doc is None:
                 continue
