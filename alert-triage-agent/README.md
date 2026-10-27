@@ -84,29 +84,25 @@ The system integrates with ServiceNow via the Table and Attachment APIs:
 
 ## 3. System Architecture & Request Lifecycle
 
-```
-[Cloud Monitoring Alerts]
-            │ Webhook (HTTP Basic Auth)
-            ▼
-┌───────────────────────────┐             ┌───────────────────────────┐
-│   Cloud Run: ata-bridge   │ ──────────> │     Cloud Tasks Queue     │
-└─────────────┬─────────────┘             │     ata-triage-queue      │
-              ▲       │                   └─────────────┬─────────────┘
-              │       │ Instructions                    │
-              │       │ (POST /instructions/ticket/*)   ▼
-              │       │                   ┌───────────────────────────┐
-              │       +────────────────── │   Cloud Run: ata-agent    │ <───┐
-              │                           │   - Grouping & OKF Store  │     │
-              │                           │   - Telemetry Specialists │     │
-              │                           └─────────────┬─────────────┘     │
-              ▼                                         │                   │
-┌───────────────────────────┐                           │ Timers            │ Wake
-│   External ServiceNow     │                           ▼                   │
-│   Table & Attachment API  │             ┌───────────────────────────┐     │
-└───────────────────────────┘             │     Cloud Tasks Queue     │ ────┘
-                                          │     ata-timer-queue       │
-                                          │     (delayed settle/cool) │
-                                          └───────────────────────────┘
+Resource names use the stack's `NAME_PREFIX` (shown as `<prefix>`; the live stack uses `ata`). The agent reads service dependencies from the bundled [`topology/TOPOLOGY.md`](topology/TOPOLOGY.md). It calls GCP APIs directly through client libraries and REST, except for the change timeline, which it gets from `<prefix>-tools` over MCP. The bridge creates and updates ServiceNow incidents and adds work notes; it does not resolve them by default (`AUTO_RESOLVE_ON_RECOVERY=false`).
+
+```mermaid
+flowchart LR
+    Stack["Monitored stack<br/>Apigee proxies + Cloud Run services"] -- "metrics and logs" --> Mon["Cloud Monitoring<br/>alert policies"]
+    Mon -- "webhook (HTTP Basic Auth)" --> Bridge["Cloud Run<br/>#lt;prefix#gt;-bridge"]
+    Bridge -- "enqueue alert" --> TriageQ[["Cloud Tasks<br/>#lt;prefix#gt;-triage-queue"]]
+    TriageQ -- "POST /triage (OIDC)" --> Agent["Cloud Run<br/>#lt;prefix#gt;-agent"]
+    Agent -- "schedule wake" --> TimerQ[["Cloud Tasks<br/>#lt;prefix#gt;-timer-queue<br/>settle / max-wait / cool-down"]]
+    TimerQ -- "POST /timer/wake (OIDC)" --> Agent
+    Topo["topology/TOPOLOGY.md<br/>(bundled in the agent image)"] -. "origin selection" .-> Agent
+    Agent -- "incident groups" --> Bucket[("GCS<br/>#lt;project#gt;-#lt;prefix#gt;-incidents")]
+    Agent -- "gray-zone correlation<br/>(deterministic fallback, flagged in the ticket)" --> Gemini["Vertex AI Gemini"]
+    Agent -- "telemetry reads (client libraries / REST)" --> APIs["GCP APIs<br/>Monitoring, Logging,<br/>Cloud Run Admin, Cloud SQL Admin"]
+    Agent -- "MCP get_change_timeline (ID token)" --> Tools["Cloud Run<br/>#lt;prefix#gt;-tools (FastMCP)"]
+    Tools -- "Cloud Run revisions +<br/>Apigee deployments" --> ChangeAPIs["Cloud Run Admin API<br/>Apigee API"]
+    Agent -- "POST /instructions/ticket/* (ID token)" --> Bridge
+    Bridge -- "HTML report" --> Bucket
+    Bridge -- "create / update / work notes" --> SN["ServiceNow"]
 ```
 
 ### Sequence Flow (Mermaid)
