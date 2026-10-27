@@ -272,7 +272,7 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 | **Incidents Bucket** | `INCIDENTS_BUCKET` | `${PROJECT_ID}-${NAME_PREFIX}-incidents` | GCS bucket for persistent Open Knowledge File (OKF) storage. |
 | **Incident Store Path** | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` | Local or mounted directory path for active OKF incident files. |
 | **Fallback Store Path**| `FALLBACK_STORE_PATH` | `/tmp/knowledge/incident-manager` | Fallback path when primary mount is unavailable. |
-| **Bridge Service URL** | `BRIDGE_URL` | `http://localhost:8080` | URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`). |
+| **Bridge Service URL** | `BRIDGE_URL` | `http://localhost:8080` | On `ata-agent`: URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`). On `ata-bridge`: its own `status.url`, an accepted ID-token audience (required unless `IS_LOCAL=true`; see [CONFIGURATION.md §1.1](CONFIGURATION.md#11-bridge-service-ata-bridge)). |
 | **Agent Service URL**  | `AGENT_URL` | `http://localhost:8080` | URL of `ata-agent` called by Cloud Tasks at `POST /triage`. |
 | **Triage Queue Name**  | `TASKS_QUEUE` | `ata-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |
 | **Timer Queue Name**   | `TIMER_QUEUE` | `ata-timer-queue` | Dedicated Cloud Tasks queue for delayed settle/cool-down timers. |

@@ -252,18 +252,49 @@ cd alert-triage-agent/bridge
 > - `ENVIRONMENT`: Deployment environment label (`demo`, `staging`, `prod`; default: `demo`).
 > - `OWNER`: Owning engineering team or contact (`sre-prototypes`, `devops`; default: `sre-prototypes`).
 > - `NAME_PREFIX`: Resource name prefix (default: `ata`).
-> - `VERIFIER_SA`: Optional service account email authorized to invoke the read-only ticket verification endpoint.
-> - `PROJECT_NUMBER` (bridge only): Numeric GCP project number. If unset, `bridge/scripts/deploy.sh` looks it up with `gcloud projects describe` and exits if that fails. The bridge refuses to start without it.
+> - `VERIFIER_SA` (bridge only): Optional comma-separated emails allowed to call the bridge's `/instructions/*` endpoints, e.g. the read-only ticket verification endpoint. Passed only when exported; a redeploy without it keeps the value on the service.
+> - `PROJECT_NUMBER`: Numeric GCP project number. If unset, it is looked up with `gcloud projects describe`. The bridge deploy exits if that fails (the bridge refuses to start without it). The agent deploy needs it only to build a deterministic URL for a service that is not deployed yet.
+> - `AUTO_RESOLVE_ON_RECOVERY` (agent only): `true` or `false`. Passed only when exported; a redeploy without it keeps the value on the service.
+> - `BRIDGE_URL`, `AGENT_URL`: Override the URLs the scripts look up (see below).
 >
 > Example: `ENVIRONMENT=staging OWNER=infra-team ./scripts/deploy.sh`
+
+#### Environment variables set by the deploy scripts
+
+The deploy scripts use `gcloud run deploy --update-env-vars`: they set the variables listed below and keep every other variable already on the service. `--set-env-vars` would replace the whole list and drop, for example, `VERIFIER_SA` on a redeploy without it exported. The bridge's secrets use `--update-secrets` for the same reason. Each image is pushed to the `${NAME_PREFIX}-docker` Artifact Registry repository in `${REGION}`.
+
+URLs are never hardcoded. An exported `AGENT_URL` or `BRIDGE_URL` wins. Otherwise the script reads the service's `status.url`, and for a service that is not deployed yet it uses the deterministic URL `https://<service>-<project number>.<REGION>.run.app` and says so. If the services cannot be listed, the deploy stops.
+
+| Service | Variable | Value |
+| :--- | :--- | :--- |
+| `ata-agent` | `PROJECT_ID`, `NAME_PREFIX`, `REGION` | From the environment. |
+| | `INCIDENTS_BUCKET` | `${PROJECT_ID}-${NAME_PREFIX}-incidents` |
+| | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` (the GCS volume mount) |
+| | `BRIDGE_URL` | `ata-bridge` URL, the agent's ID-token audience for the bridge. |
+| | `AGENT_URL` | The agent's own URL (timer task target). |
+| | `AUTO_RESOLVE_ON_RECOVERY` | Only when exported. |
+| `ata-bridge` | `PROJECT_ID`, `NAME_PREFIX`, `REGION` | From the environment. |
+| | `PROJECT_NUMBER` | Environment, else `gcloud projects describe`. Required. |
+| | `INCIDENTS_BUCKET` | `${PROJECT_ID}-${NAME_PREFIX}-incidents` |
+| | `TASKS_QUEUE` | `${NAME_PREFIX}-triage-queue` |
+| | `AGENT_URL` | `ata-agent` URL (the `/triage` target of the dispatched tasks). |
+| | `BRIDGE_URL` | The bridge's own `status.url`. Required. On a first deploy the script deploys with the deterministic URL, then sets `status.url` with `gcloud run services update` if it differs. |
+| | `SERVICENOW_INSTANCE_URL` | Environment, else `servicenow_instance_url` in `infra/terraform/foundation/terraform.tfvars`, else the value on the service. Required. |
+| | `VERIFIER_SA` | Only when exported. The list is passed with gcloud's `^\|^` delimiter, so commas in it are kept. |
+| | `WEBHOOK_TOKEN`, `SERVICENOW_USERNAME`, `SERVICENOW_PASSWORD` | Secret Manager `${NAME_PREFIX}-webhook-token`, `${NAME_PREFIX}-servicenow-username`, `${NAME_PREFIX}-servicenow-password` (`:latest`). |
+| `ata-tools` | `PROJECT_ID`, `NAME_PREFIX`, `REGION` | From the environment. |
+| | `APIGEE_ORG` | `${PROJECT_ID}` |
+
+`ata-inventory-api` and `ata-orders-api` are declared in the `infra/terraform/applications` stack, which lists their variables.
 
 ### Read-Only Ticket Verification Endpoint
 
 The bridge exposes a read-only endpoint for verifying incident tickets without distributing or handling ServiceNow credentials:
 ```bash
-# Verify ticket status via the bridge (requires Google OIDC Bearer token from ata-agent-sa or VERIFIER_SA)
+# Verify ticket status via the bridge (requires a Google OIDC Bearer token from ata-agent-sa, ata-bridge-sa or an email in VERIFIER_SA)
+BRIDGE_URL="$(gcloud run services describe "${NAME_PREFIX}-bridge" --region="${REGION}" --format="value(status.url)")"
 curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
-     "https://${NAME_PREFIX}-bridge-4klvlqnmpa-uw.a.run.app/instructions/ticket/view/${GROUP_ID_OR_SYS_ID}"
+     "${BRIDGE_URL}/instructions/ticket/view/${GROUP_ID_OR_SYS_ID}"
 ```
 
 **Returned Fields (Credentials NEVER Returned):**

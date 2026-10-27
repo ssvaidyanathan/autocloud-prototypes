@@ -14,6 +14,7 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 | :--- | :--- | :--- |
 | `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
 | `PROJECT_NUMBER` | *None (required unless `IS_LOCAL=true`)* | Numeric GCP project number. The bridge accepts `https://<NAME_PREFIX>-bridge-<PROJECT_NUMBER>.<REGION>.run.app` as an ID-token audience on `/instructions/*`. Without it a non-local bridge fails at startup, and auth returns HTTP 500. `bridge/scripts/deploy.sh` sets it from `gcloud projects describe` unless it is already in the environment. |
+| `BRIDGE_URL` | *None (required unless `IS_LOCAL=true`)* | The bridge's own Cloud Run URL, i.e. the service's `status.url` (e.g. `https://<NAME_PREFIX>-bridge-<hash>-<region code>.a.run.app`), as an https URL without a path. `ata-agent` mints its ID tokens for the bridge URL it calls (the agent's `BRIDGE_URL`), so the bridge accepts this value as an ID-token audience on `/instructions/*`, next to the `PROJECT_NUMBER` URL and the request's base URL. Without it a non-local bridge fails at startup, and auth returns HTTP 500. `bridge/scripts/deploy.sh` sets it from the service's `status.url`; on a first deploy it starts with the deterministic URL and sets `status.url` right after the deploy. |
 | `NAME_PREFIX` | `ata` | Resource namespace prefix. |
 | `REGION` | `us-west1` | GCP region for Cloud Tasks and Cloud Run. |
 | `ENVIRONMENT` | `prod` | Runtime environment name read by the service. The deploy scripts do not set it, so the default applies. Not the `env` resource label (see [§7.1](#71-label-scheme--value-requirements)). |
@@ -28,6 +29,7 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 | `SERVICENOW_CALLER` | `ATA Integration` | Caller ID / name populated on incident records. |
 | `SERVICENOW_ASSIGNMENT_GROUP` | `Cloud SRE Tier-2` | Assignment group for triage routing. |
 | `IS_LOCAL` | `false` | When `true`, enables mock storage and local adapters. |
+| `VERIFIER_SA` | *None* | Comma-separated emails allowed to call `/instructions/*` besides `<NAME_PREFIX>-agent-sa` and `<NAME_PREFIX>-bridge-sa` (e.g. operators using the read-only view endpoint, §3.1). No other caller is built in. `bridge/scripts/deploy.sh` passes it only when it is exported, so a redeploy without it keeps the value on the service. |
 | `ADAPTER_TIMEOUT_SECONDS` | `30.0` | HTTP timeout for outbound ServiceNow API calls. |
 
 ---
@@ -44,14 +46,14 @@ The agent owns all incident grouping, atomic Open Knowledge File (OKF) storage w
 | `INCIDENTS_BUCKET` | `cloud-assist-fde-2-ata-incidents` | Primary GCS incident storage bucket. |
 | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` | Local or mounted filesystem path for incident files. |
 | `FALLBACK_STORE_PATH` | `/tmp/knowledge/incident-manager` | Fallback path when primary mount is read-only or absent. |
-| `BRIDGE_URL` | `http://localhost:8080` | URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`). |
+| `BRIDGE_URL` | `http://localhost:8080` | URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`), and the audience of the agent's ID tokens. `agent/scripts/deploy.sh` sets it to the bridge's `status.url`, or to the bridge's deterministic URL `https://<NAME_PREFIX>-bridge-<project number>.<REGION>.run.app` when the bridge is not deployed yet. |
 | `MODEL_NAME` | `gemini-3.8-flash` | Gemini model used for investigation synthesis and gray-zone correlation. |
 | `TIMER_QUEUE` | `ata-timer-queue` | Dedicated Cloud Tasks queue for delayed timer wakes. |
 | `TIMER_QUEUE_LOCATION` | `us-west1` | GCP region where the timer queue is hosted. |
 | `SERVICE_ACCOUNT_EMAIL`| `ata-agent-sa@...` | Service account used by the agent to schedule delayed tasks with OIDC tokens. |
 | `IS_LOCAL` | `false` | Enables local offline mock mode. |
 | `ORIGIN_ONSET_TOLERANCE_SECONDS` | `300` | Origin selection: an upstream service explains a downstream service only when its onset is at most this many seconds after the downstream onset. A downstream service that degraded earlier than that is not attributed to the upstream service, and a recent deploy on it stays implicated. |
-| `AUTO_RESOLVE_ON_RECOVERY` | `false` | Sets what happens when every alert in a ticketed group has closed and the 180s cool-down passes with no recurrence. `false`: the ticket is not resolved. The agent posts one work note saying the alerts closed (with the measured traffic around the close) and that a human must verify the remediation, the ServiceNow state stays In Progress, and the group moves to the terminal `recovered` state. `true`: the agent calls `POST /instructions/ticket/resolve` and the group becomes `resolved`. `agent/scripts/deploy.sh` passes `${AUTO_RESOLVE_ON_RECOVERY:-false}` to Cloud Run. See §5.1. |
+| `AUTO_RESOLVE_ON_RECOVERY` | `false` | Sets what happens when every alert in a ticketed group has closed and the 180s cool-down passes with no recurrence. `false`: the ticket is not resolved. The agent posts one work note saying the alerts closed (with the measured traffic around the close) and that a human must verify the remediation, the ServiceNow state stays In Progress, and the group moves to the terminal `recovered` state. `true`: the agent calls `POST /instructions/ticket/resolve` and the group becomes `resolved`. `agent/scripts/deploy.sh` passes it only when it is exported (`true` or `false`, anything else stops the deploy), so a redeploy without it keeps the value on the service. See §5.1. |
 | `RECOVERY_TRAFFIC_LOOKBACK_SECONDS` | `300` | Recovery note: request_count of the group's Cloud Run services is read from this many seconds before the last alert closed until the note is written, to state whether the close coincided with traffic stopping. |
 | `ROLLBACK_TRAFFIC_LOOKBACK_MINUTES` | `30` | Change-induced rollback: the previous serving revision is the single revision that received requests (Cloud Monitoring request_count by revision) in this many minutes before the new revision was created. With split or no traffic no rollback target is named, and the reason is stated. |
 | `LATE_NEW_SIGNAL_MAX_ONSET_GAP_SECONDS` | `600` | An alert of a signal type a ticketed group does not have yet (e.g. 5xx joining a latency group) opens a new group when its onset is more than this many seconds after the group's first alert. Same-service latency/5xx reach the 65-pt attach threshold on topology + causal score alone, so the temporal score never separates them. Live S5 (one incident) had latency -> 5xx 413 s apart; keep the value above that. Alerts that do join a ticketed group update its title (count, problem), raise its priority if more severe (never lowered) and post a work note. |
@@ -156,8 +158,8 @@ The system assigns least-privilege IAM roles to 6 dedicated service accounts:
 To verify ServiceNow ticket lifecycle state without distributing or exposing ServiceNow credentials:
 - **Endpoint:** `GET /instructions/ticket/view/{group_id or sys_id}`
 - **Authentication:** Google-signed OIDC ID token (`Bearer <id_token>`) from an allowlisted caller identity:
-  - `ata-agent-sa@{project_id}.iam.gserviceaccount.com`
-  - Configurable verifier SA specified by the `VERIFIER_SA` environment variable on `ata-bridge`.
+  - `ata-agent-sa@{project_id}.iam.gserviceaccount.com` and `ata-bridge-sa@{project_id}.iam.gserviceaccount.com`
+  - The comma-separated emails in the `VERIFIER_SA` environment variable on `ata-bridge` (§1.1). No operator account is built in.
 - **Response Fields:** Ticket metadata only:
   - `number`: ServiceNow incident number (e.g. `INC0010482`)
   - `state`: Current lifecycle state (`1` New, `2` In Progress, `6` Resolved, `7` Closed)

@@ -133,6 +133,8 @@ All configuration in `alert-triage-agent` is managed through typed Pydantic mode
   - `SERVICENOW_INSTANCE_URL`: Target ServiceNow instance base URL (CONFIG, not a secret; configured via Terraform variable `servicenow_instance_url` or environment variable `SERVICENOW_INSTANCE_URL`).
   - `SERVICENOW_USERNAME` / `SERVICENOW_PASSWORD`: ServiceNow API credentials.
   - `AGENT_URL`: URL of the `ata-agent` service.
+  - `PROJECT_NUMBER` and `BRIDGE_URL`: required unless `IS_LOCAL=true`. They give the accepted ID-token audiences on `/instructions/*` (the deterministic Cloud Run URL and the service's own `status.url`).
+  - `VERIFIER_SA`: comma-separated extra callers allowed on `/instructions/*` (no operator account is built in).
   - `WEBHOOK_TOKEN`: Shared secret password for webhook HTTP Basic Auth verification.
   - `TASKS_QUEUE`: GCP Cloud Tasks queue name for alert dispatch.
 

@@ -18,8 +18,9 @@ async def verify_agent_caller(
     Enforces:
     1. Authorization header present and formatted as 'Bearer <token>'.
     2. Google-signed ID token signature and validity.
-    3. Audience matches bridge service URLs / base host.
-    4. Service account email matches ata-agent-sa or authorized operator SA.
+    3. Audience matches the bridge's URLs: BRIDGE_URL, the PROJECT_NUMBER-based Cloud Run URL,
+       or the request's base URL.
+    4. Caller email is ata-agent-sa, ata-bridge-sa, or listed in VERIFIER_SA.
     """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -73,21 +74,22 @@ async def verify_agent_caller(
 
     # Validate audience
     token_aud = str(claims.get("aud", "")).rstrip("/")
-    expected_audiences = {
-        str(request.base_url).rstrip("/"),
-        f"https://{settings.name_prefix}-bridge-4klvlqnmpa-uw.a.run.app",
-    }
-    if settings.project_number:
-        expected_audiences.add(f"https://{settings.name_prefix}-bridge-{settings.project_number}.{settings.region}.run.app")
-    elif not settings.is_local:
+    missing = settings.missing_required_settings()
+    if missing:
         logger.error(
-            "ata-bridge misconfigured: PROJECT_NUMBER is not set, so the bridge Cloud Run URL audience "
-            "cannot be built; rejecting the request. Set PROJECT_NUMBER (bridge/scripts/deploy.sh sets it)."
+            "ata-bridge misconfigured: %s not set, so the bridge Cloud Run URL audiences cannot be "
+            "built; rejecting the request. bridge/scripts/deploy.sh sets them.",
+            ", ".join(missing),
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Bridge misconfigured: PROJECT_NUMBER is not set",
+            detail=f"Bridge misconfigured: {', '.join(missing)} not set",
         )
+    expected_audiences = {str(request.base_url).rstrip("/")}
+    if settings.bridge_url:
+        expected_audiences.add(settings.bridge_url)
+    if settings.project_number:
+        expected_audiences.add(f"https://{settings.name_prefix}-bridge-{settings.project_number}.{settings.region}.run.app")
     if settings.is_local:
         expected_audiences.add("mock-bridge-aud")
 
@@ -100,10 +102,10 @@ async def verify_agent_caller(
 
     # Validate caller identity
     caller_email = claims.get("email", "")
+    # Operators and other callers are listed in VERIFIER_SA (comma-separated); none is built in.
     allowed_callers = {
         expected_agent_sa,
         f"{settings.name_prefix}-bridge-sa@{settings.project_id}.iam.gserviceaccount.com",
-        "scion-fde-ops@deploy-demo-test.iam.gserviceaccount.com",
     }
     if settings.verifier_sa:
         for sa in settings.verifier_sa.split(","):
