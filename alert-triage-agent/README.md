@@ -56,26 +56,22 @@ The **Alert Triage Agent (ATA)** automates early-stage alert ingestion, intellig
 The complete procedure, from an empty project to a verified stack and back to nothing, is **[DEPLOY.md](DEPLOY.md)**. It is the only deployment guide: this README does not repeat its commands.
 
 ### Prerequisites
-- Operator tools: bash 3.2 or later (the macOS `/bin/bash` works), a recent Google Cloud SDK, **Terraform >= 1.9.0**, python3, curl and the `psql` client. Docker is **not** needed: every image is built with Cloud Build. The full table, with the deployer IAM roles and the organization-policy checks, is in [DEPLOY.md §2.1](DEPLOY.md#21-operator-prerequisites).
+- Operator tools: bash 3.2 or later (the macOS `/bin/bash` works), a recent Google Cloud SDK, **Terraform >= 1.9.0**, python3, curl, the `psql` client and `cloud-sql-proxy` v2. Docker is **not** needed: every image is built with Cloud Build. The full table, with the deployer IAM roles and the organization-policy checks, is in [DEPLOY.md §2.1](DEPLOY.md#21-operator-prerequisites).
 - A Google Cloud project with billing enabled, and Owner on it.
 - An Apigee X organization with an environment attached to an instance and to an environment group hostname (`APIGEE_ORG`, `APIGEE_ENV`, `APIGEE_HOST`). A second stack can reuse an existing organization with a new `NAME_PREFIX` ([DEPLOY.md §2.3](DEPLOY.md#23-second-stack-in-an-existing-project-and-apigee-organization)).
 - A ServiceNow instance and an integration user.
 
 ### Deployment Overview
 
-[DEPLOY.md §3](DEPLOY.md#3-deployment-steps) runs these steps, in this order:
+The deployment is one script, `scripts/deploy-stage1.sh`, with 14 phases. Run them all at once, or one at a time with `--only <phase>` and check each phase as [DEPLOY.md §3](DEPLOY.md#3-deployment) describes:
 
-| Step | What |
-| :--- | :--- |
-| 0-1 | Project checks; Apigee organization, environment and hostname |
-| 2-3 | Terraform state bucket and `backend.hcl` for the five roots; foundation (APIs, SAs, IAM, queues, registry, secrets, webhook channel) |
-| 4 | ServiceNow credentials into Secret Manager, before the bridge starts |
-| 5-7 | Demo images; Cloud SQL with the schema and GRANT; demo applications and the first inventory pin |
-| 8 | Triage tier: `<prefix>-tools`, `<prefix>-agent`, `<prefix>-bridge`, then the `triage-iam` root |
-| 9-10 | Apigee proxies; alert policies |
-| 11-12 | Verification (infrastructure, bridge, preflight, S1 and S2 with their ServiceNow tickets); reset |
+```bash
+./scripts/deploy-stage1.sh --list-phases   # preflight bootstrap foundation secrets images database schema
+                                           # applications inventory-pin triage triage-iam apigee observability verify
+./scripts/deploy-stage1.sh                 # all phases; resume after a failure with --from <phase>
+```
 
-Teardown and the "nothing is left" checks are [DEPLOY.md §5](DEPLOY.md#5-teardown) and [§6](DEPLOY.md#6-verify-that-nothing-is-left).
+Before the first run, load the inputs ([DEPLOY.md §2.2](DEPLOY.md#22-inputs)) and do the project and Apigee checks (DEPLOY.md Steps 0-1). After it, run scenarios S1 and S2 and check their ServiceNow tickets (Step 16). `scripts/teardown-stack.sh` removes a stack ([DEPLOY.md §5](DEPLOY.md#5-teardown)), and [§6](DEPLOY.md#6-verify-that-nothing-is-left) confirms that nothing is left.
 
 ### ServiceNow Integration Guide Pointer
 The system integrates with ServiceNow via the Table and Attachment APIs:
@@ -359,26 +355,46 @@ The Alert Triage Agent has been evaluated against live GCP infrastructure across
 
 ## 9. Full Step-by-Step GCP Deployment Walkthrough
 
-The step-by-step walkthrough is [DEPLOY.md](DEPLOY.md): inputs, operator prerequisites, Steps 0-12 with the expected output, verification and failure handling of each, teardown and the final checks. It also covers a second stack in an existing project and Apigee organization.
+The step-by-step walkthrough is [DEPLOY.md](DEPLOY.md): inputs, operator prerequisites, one step per `deploy-stage1.sh` phase with the expected output, verification and failure handling of each, the scenario check, teardown and the final checks. It also covers a second stack in an existing project and Apigee organization.
 
 ---
 
 ## 10. Master Automated Deployment Script
 
-The deployment is organized into tier scripts and Terraform roots, which [DEPLOY.md](DEPLOY.md) runs in order. The scripts it uses:
+`scripts/deploy-stage1.sh` is the single deploy entrypoint, for any project, region and prefix:
+
+```
+scripts/deploy-stage1.sh [--yes] [--from <phase>] [--to <phase>] [--only <phase>]
+scripts/deploy-stage1.sh --list-phases
+```
+
+| Phase | Runs |
+| :--- | :--- |
+| `preflight` | Tool, credential and project checks (read-only) |
+| `bootstrap` | `scripts/bootstrap-tfstate.sh`: bootstrap APIs, state bucket `${PROJECT_ID}-${NAME_PREFIX}-tfstate`, `backend.hcl` for the five roots |
+| `foundation` | Terraform foundation |
+| `secrets` | `scripts/set-secrets.sh --yes --skip-if-set` (before the bridge) |
+| `images` | `scripts/build-image.sh` for inventory, orders, agent, bridge and tools (as `<prefix>-build-sa`); refs by digest in `.deploy-state/` |
+| `database` | Terraform database |
+| `schema` | `demo/db/schema.sql` with the GRANT, via `cloud-sql-proxy` and `psql` |
+| `applications` | Terraform applications |
+| `inventory-pin` | `scripts/repin-inventory.sh prepare --initial`, `write-pin --initial`, `switch` |
+| `triage` | `tools/`, `bridge/`, `agent/scripts/deploy.sh` |
+| `triage-iam` | Terraform triage-iam |
+| `apigee` | `scripts/deploy-apigee-proxies.sh` |
+| `observability` | Terraform observability |
+| `verify` | `scripts/verify-stage1.sh`, then `scripts/verify-demo-infra.sh` |
+
+Other operator scripts:
 
 | Script | Purpose |
 | :--- | :--- |
-| `scripts/bootstrap-tfstate.sh` | Bootstrap APIs, state bucket `${PROJECT_ID}-${NAME_PREFIX}-tfstate`, `backend.hcl` for the five roots |
-| `scripts/set-secrets.sh` | ServiceNow credentials into Secret Manager |
-| `scripts/repin-inventory.sh` | Inventory pin: first pin (`--initial`), re-pin, switch, rollback, status |
-| `scripts/set-demo-instance-caps.sh` | Service-level instance caps of the demo services |
-| `tools/`, `agent/`, `bridge/` `scripts/deploy.sh` | Build and deploy the triage tier |
-| `scripts/deploy-apigee-proxies.sh`, `scripts/teardown-apigee.sh` | The stack's Apigee resources, and their removal |
-| `scripts/verify-demo-infra.sh`, `scripts/verify-stage1.sh`, `scripts/scenarios/preflight.sh`, `scripts/run-all-scenarios.sh` | Verification |
-| `scripts/deploy-demo-infra.sh` | Applies the database, applications and observability roots and deploys the Apigee proxies in one run (needs `INVENTORY_IMAGE` and `ORDERS_IMAGE`). It does not apply the schema or the pin, so DEPLOY.md runs the roots one by one instead. |
-
-TODO(scripts-lane): `scripts/deploy-stage1.sh` and the demo image build script are being reworked; list them here once they match the DEPLOY.md order.
+| `scripts/teardown-stack.sh` | Removes one stack (dry run unless `--apply`; `--delete-state` also deletes the state bucket) |
+| `scripts/teardown-apigee.sh` | Removes one stack's `<prefix>-*` Apigee resources (part of the teardown) |
+| `scripts/build-image.sh` | Builds one image and prints `IMAGE=<repo>/<name>@sha256:<hex>` |
+| `scripts/repin-inventory.sh`, `scripts/prune-revisions.sh`, `scripts/set-demo-instance-caps.sh` | Inventory re-pin, revision pruning and instance caps ([DEPLOY.md §4](DEPLOY.md#4-operations-reference)) |
+| `scripts/deploy-demo-infra.sh` | Kept for compatibility: runs `deploy-stage1.sh --from database` |
+| `scripts/scenarios/preflight.sh`, `scripts/run-all-scenarios.sh`, `scripts/reset-scenarios.sh` | Scenarios and reset ([DEMO.md](DEMO.md)) |
 
 ---
 
@@ -609,18 +625,20 @@ alert-triage-agent/
 │   │   └── s5_bad_deploy.sh       # Scenario 5: Bad deploy / config failure
 │   ├── bootstrap-tfstate.sh       # Bootstraps GCS remote state bucket
 │   ├── deploy-apigee-proxies.sh   # Deploys Apigee X proxies, products, and developer app
-│   ├── deploy-demo-infra.sh       # Staged deployer for database, apps, observability, Apigee
-│   ├── deploy-stage1.sh           # Core vertical slice deployment (tfstate, foundation, apps); TODO(scripts-lane)
+│   ├── deploy-demo-infra.sh       # Compatibility wrapper: deploy-stage1.sh --from database
+│   ├── build-image.sh             # Builds one image with the build SA; prints IMAGE=<repo>@sha256:...
+│   ├── deploy-stage1.sh           # The deploy entrypoint: 14 phases (--only/--from/--to/--list-phases)
 │   ├── prune-revisions.sh         # Deletes unpinned, untagged demo revisions (dry run unless --apply)
 │   ├── repin-inventory.sh         # Inventory pin: prepare/write-pin (--initial), switch, rollback, status
 │   ├── set-demo-instance-caps.sh  # Service-level instance caps of the demo services
 │   ├── teardown-apigee.sh         # Removes one stack's <prefix>-* Apigee resources
+│   ├── teardown-stack.sh          # Removes one stack (dry run unless --apply)
 │   ├── reset-scenarios.sh         # Clears faults, waits for alerts/quiet period, archives incident files
 │   ├── run-all-scenarios.sh       # Master scenario driver (--all, --priority, --scenario)
 │   ├── set-secrets.sh             # Interactive Secret Manager configuration for ServiceNow
 │   ├── verify-demo-infra.sh       # Verifies demo microservices and Apigee routing
 │   ├── verify-scenarios.sh        # Automated scenario verification test harness
-│   └── verify-stage1.sh           # Verifies webhook ingestion, agent triage, and OKF generation
+│   └── verify-stage1.sh           # Read-only triage-tier check (health, webhook auth, agent config, OKF schema); --with-ticket for end to end
 ├── skills/                        # SRE diagnostic runbooks and architectural specifications
 │   ├── alert-triage/              # Incident grouping, settle deadlines, and stale-wake rules
 │   ├── apigee-troubleshooting/    # Apigee X proxy diagnostics and SpikeArrest patterns

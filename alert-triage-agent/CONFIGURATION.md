@@ -2,7 +2,7 @@
 
 Resource names are shown with their prefix as `<prefix>` or `${NAME_PREFIX}`; with the default prefix they read `ata-*`. Where a table names `ata-bridge`, `ata-agent` or `ata-tools`, read `<prefix>-bridge`, `<prefix>-agent`, `<prefix>-tools`.
 
-**Defaults.** The "Default Value" column gives what a deployed service runs with. Where it says *Set by `deploy.sh`*, the deploy script always passes the value, and the code's own fallback (which may still name the original demo project) never applies. TODO(rt-lane): replace these entries with the code defaults once the config defaults no longer name a project or region.
+**Defaults.** The agent and tools have no project, region or prefix defaults: `PROJECT_ID`, `REGION` and `NAME_PREFIX` are required unless `IS_LOCAL=true`, and the stack's resource names derive from them. The bridge's code still has fallbacks for these three; where the bridge table says *Set by `deploy.sh`*, `bridge/scripts/deploy.sh` always passes the value, so the fallback never applies to a deployed bridge.
 
 This document provides a comprehensive reference for all environment variables, Secret Manager secrets, IAM permissions, Cloud Tasks queue configurations, agent-owned grouping and timer parameters, and Apigee credentials used across the **Alert Triage Agent (ATA)** system.
 
@@ -27,7 +27,7 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 | `TASKS_LOCATION` | `${REGION}` | GCP region where the Cloud Tasks queue is hosted. |
 | `TASKS_INVOKER_SA` | `${NAME_PREFIX}-bridge-sa@${PROJECT_ID}.iam.gserviceaccount.com` | Service account in the OIDC token of the triage tasks. |
 | `WEBHOOK_TOKEN` | *Loaded from Secret Manager* | Webhook authentication password for Cloud Monitoring HTTP Basic Auth notification channel (`webhook_basicauth`). |
-| `SERVICENOW_INSTANCE_URL` | *Set by `deploy.sh`* (required) | Target ServiceNow instance base URL (e.g. `https://<instance>.service-now.com`). Configuration, not a secret. `bridge/scripts/deploy.sh` takes it from the environment, else from `servicenow_instance_url` in a local `infra/terraform/foundation/terraform.tfvars` if one exists, else from the running service. |
+| `SERVICENOW_INSTANCE_URL` | *Set by `deploy.sh`* (required) | Target ServiceNow instance base URL (e.g. `https://<instance>.service-now.com`). Configuration, not a secret. `bridge/scripts/deploy.sh` takes it from the environment, else keeps the value already on the service (both logged); it fails if neither exists. `deploy-stage1.sh` requires it and checks that it starts with `https://`. |
 | `SERVICENOW_USERNAME` | *Loaded from Secret Manager* | API integration user for ServiceNow Table API. |
 | `SERVICENOW_PASSWORD` | *Loaded from Secret Manager* | Password for ServiceNow integration user. |
 | `SERVICENOW_CALLER` | `ATA Integration` | Caller ID / name populated on incident records. |
@@ -44,18 +44,18 @@ The agent owns all incident grouping, atomic Open Knowledge File (OKF) storage w
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
-| `PROJECT_ID` | *Set by `deploy.sh`* (`${PROJECT_ID}`) | Google Cloud project ID. |
-| `NAME_PREFIX` | `ata` | Resource namespace prefix. Set by `deploy.sh`. |
-| `REGION` | *Set by `deploy.sh`* (`${REGION}`) | GCP deployment region. |
-| `INCIDENTS_BUCKET` | `${PROJECT_ID}-${NAME_PREFIX}-incidents` | Primary GCS incident storage bucket. Set by `deploy.sh`. |
+| `PROJECT_ID` | *None (required unless `IS_LOCAL=true`)* | Google Cloud project ID. No default: startup fails without it. |
+| `NAME_PREFIX` | *None (required)* | Stack prefix; must match `^[a-z][a-z0-9]{1,9}$` (the Terraform `name_prefix` rule). Derives every stack resource name the agent uses (timer queue, SA, incidents bucket, Apigee access log `<NAME_PREFIX>-apigee-access`, Cloud Tasks task ids, the `{prefix}` names in `topology/TOPOLOGY.md`) and the alert scope (see below). |
+| `REGION` | *None (required unless `IS_LOCAL=true`)* | GCP deployment region (Cloud Run console links, `gcloud` commands in tickets). |
+| `INCIDENTS_BUCKET` | `<PROJECT_ID>-<NAME_PREFIX>-incidents` | Primary GCS incident storage bucket. |
 | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` | Local or mounted filesystem path for incident files. |
 | `FALLBACK_STORE_PATH` | `/tmp/knowledge/incident-manager` | Fallback path when primary mount is read-only or absent. |
 | `BRIDGE_URL` | `http://localhost:8080` | URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`), and the audience of the agent's ID tokens. `agent/scripts/deploy.sh` sets it to the bridge's `status.url`, or to the bridge's deterministic URL `https://<NAME_PREFIX>-bridge-<project number>.<REGION>.run.app` when the bridge is not deployed yet. |
-| `MODEL_NAME` | `gemini-3.8-flash` | Gemini model used for gray-zone correlation scoring (Vertex AI; needs `roles/aiplatform.user` on `<prefix>-agent-sa`, granted by the foundation root). |
-| `GEMINI_LOCATION` | `global` | Vertex AI location of the Gemini calls. TODO(rt-lane): confirm the name, the default and the failure behaviour when the rt lane lands. |
-| `TIMER_QUEUE_NAME` | *Set by `deploy.sh`* | Dedicated Cloud Tasks queue for delayed timer wakes. `agent/scripts/deploy.sh` sets `${NAME_PREFIX}-timer-queue` (the foundation Terraform queue). |
-| `LOCATION` | *Set by `deploy.sh`* | GCP region where the timer queue is hosted. `agent/scripts/deploy.sh` sets `${REGION}`. |
-| `SERVICE_ACCOUNT_EMAIL`| *Set by `deploy.sh`* | Service account in the OIDC token of the agent's delayed timer tasks. `agent/scripts/deploy.sh` sets `${NAME_PREFIX}-agent-sa@${PROJECT_ID}.iam.gserviceaccount.com`. |
+| `MODEL_NAME` | `gemini-3.8-flash` | Vertex AI Gemini model id for gray-zone correlation (scores 35-65), called with `google-genai` (`genai.Client(vertexai=True, project=PROJECT_ID, location=GEMINI_LOCATION)`). Validated as a model id. The agent SA needs `roles/aiplatform.user` and the project needs `aiplatform.googleapis.com`. When the call fails (package missing, permission denied, model not found, empty or invalid answer) the agent logs a WARNING, a deterministic heuristic decides, and the decision log, the group's `correlation.gray_zone_source` / `gray_zone_fallback_reason` and the ticket say "deterministic fallback (Gemini unavailable: <reason>)". |
+| `GEMINI_LOCATION` | `global` | Vertex AI location for `MODEL_NAME`: `global` or a region such as `us-central1`. |
+| `TIMER_QUEUE_NAME` | `<NAME_PREFIX>-timer-queue` | Dedicated Cloud Tasks queue for delayed timer wakes. |
+| `LOCATION` | `<REGION>` | GCP region where the timer queue is hosted. |
+| `SERVICE_ACCOUNT_EMAIL`| `<NAME_PREFIX>-agent-sa@<PROJECT_ID>.iam.gserviceaccount.com` | Service account used by the agent to schedule delayed tasks with OIDC tokens. |
 | `IS_LOCAL` | `false` | Enables local offline mock mode. |
 | `ORIGIN_ONSET_TOLERANCE_SECONDS` | `300` | Origin selection: an upstream service explains a downstream service only when its onset is at most this many seconds after the downstream onset. A downstream service that degraded earlier than that is not attributed to the upstream service, and a recent deploy on it stays implicated. |
 | `AUTO_RESOLVE_ON_RECOVERY` | `false` | Sets what happens when every alert in a ticketed group has closed and the 180s cool-down passes with no recurrence. `false`: the ticket is not resolved. The agent posts one work note saying the alerts closed (with the measured traffic around the close) and that a human must verify the remediation, the ServiceNow state stays In Progress, and the group moves to the terminal `recovered` state. `true`: the agent calls `POST /instructions/ticket/resolve` and the group becomes `resolved`. `agent/scripts/deploy.sh` passes it only when it is exported (`true` or `false`, anything else stops the deploy), so a redeploy without it keeps the value on the service. See §5.1. |
@@ -73,23 +73,27 @@ The agent owns all incident grouping, atomic Open Knowledge File (OKF) storage w
 | `TOOLS_RETRY_ATTEMPTS` | `3` | Total attempts for an ata-tools call on a connection error, timeout or HTTP 429/5xx (1-5). Other 4xx (e.g. 403 when `roles/run.invoker` is missing) are not retried. |
 | `TOOLS_RETRY_BASE_SECONDS` | `1.0` | Backoff before retry n: `BASE * 2^(n-1)` seconds, capped at 10 s. |
 
+**Alert scope (stack isolation).** The bridge, agent and tools accept an alert only when its policy display name (or a resource-derived component: `service_name`, `proxy_name`, `database_id`, the `component` label) starts with `<NAME_PREFIX>-`, **and**, when the policy has a `stack` user label, that label equals `NAME_PREFIX`. A mismatching `stack` label is rejected and logged at WARNING with both values. The shared `app=alert-triage-agent` label does not put an alert in scope, because every stack sets it. Policies without a `stack` label are accepted on the name check alone; that is the transition until Terraform adds `stack=<prefix>` to every policy.
+
+**Topology.** `topology/TOPOLOGY.md` writes stack names as `{prefix}-<name>`. The agent and tools substitute `NAME_PREFIX` when they load it, and fail at startup if `NAME_PREFIX` is unset or invalid, or if a `{...}` placeholder remains.
+
 ---
 
 ### 1.3 FastMCP Tools Server (`ata-tools`)
 
 The FastMCP server exposes read-only tools for topology, Apigee metrics, proxy bundles, logs and change history. At runtime the agent calls one of them, `get_change_timeline`, over MCP (§1.3.1); the agent image does not contain the `tools` package.
 
-`tools/scripts/deploy.sh` sets `APIGEE_ENV`, `ENFORCE_AUTH=true`, `VERIFY_OIDC=true`, `PROJECT_NUMBER` and `EXPECTED_AUDIENCE` (the agent's `TOOLS_URL`) ([DEPLOY.md §4.5](DEPLOY.md#45-environment-variables-set-by-the-deploy-scripts)). TODO(scripts-lane): confirm when the deploy wiring lands.
+`tools/scripts/deploy.sh` sets `APIGEE_ENV`, `ENFORCE_AUTH=true`, `VERIFY_OIDC=true`, `PROJECT_NUMBER` and `EXPECTED_AUDIENCE` (the agent's `TOOLS_URL`) ([DEPLOY.md §4.5](DEPLOY.md#45-environment-variables-set-by-the-deploy-scripts)).
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
 | `PORT` | `8080` | HTTP server listening port. |
-| `PROJECT_ID` | *Set by `deploy.sh`* (`${PROJECT_ID}`) | Google Cloud project ID. |
-| `APIGEE_ORG` | *Set by `deploy.sh`* (`${APIGEE_ORG}`, default `${PROJECT_ID}`) | Apigee organization whose deployments `get_change_timeline` reads. |
-| `APIGEE_ENV` | *none* | Apigee environment whose deployments `get_change_timeline` reads. Without it the Apigee deployment history is returned as a failed source (the ticket says so); it is never guessed. |
-| `NAME_PREFIX` | `ata` | Stack prefix. `get_change_timeline` reports only `<NAME_PREFIX>-*` Apigee proxies; the default caller SA and audience derive from it. |
+| `PROJECT_ID` | *None (required unless `IS_LOCAL=true`)* | Google Cloud project ID. |
+| `APIGEE_ORG` | `<PROJECT_ID>` | Apigee organization (an Apigee X org is named after its host project). Set it when the org lives in another project. |
+| `APIGEE_ENV` | *None* | Apigee environment the proxies are deployed to (e.g. `prod`). Unset: the change timeline reports Apigee deployments as unavailable ("APIGEE_ENV is not set"). |
+| `NAME_PREFIX` | *None (required)* | Stack prefix (`^[a-z][a-z0-9]{1,9}$`): alert scope, Apigee access log `<NAME_PREFIX>-apigee-access`, topology `{prefix}` names. |
 | `PROJECT_NUMBER` | *none* | Builds the accepted audience `https://<prefix>-tools-<PROJECT_NUMBER>.<REGION>.run.app`. |
-| `REGION` | *Set by `deploy.sh`* (`${REGION}`) | Target GCP region. |
+| `REGION` | *None (required unless `IS_LOCAL=true`)* | Target GCP region. |
 | `ENFORCE_AUTH` | `false` | When `true`, enforces OIDC token verification on tool endpoints. |
 | `VERIFY_OIDC` | `false` | Validates Google OIDC ID token signature and audience. |
 | `EXPECTED_AUDIENCE` | `None` | Comma-separated accepted ID-token audiences; set it to the URL the agent calls (`TOOLS_URL`). The deterministic URL from `PROJECT_NUMBER` is always accepted too. With `ENFORCE_AUTH` and `VERIFY_OIDC` on and no audience, startup fails; a token that cannot be verified is rejected (fail closed). |
@@ -127,7 +131,7 @@ Demo script settings (scripts/scenarios/common.sh):
 | :--- | :--- | :--- |
 | `ATA_DEMO_MAX_INSTANCES` | `1` | Max Cloud Run instances of the demo services (service and revision level). Keep equal to Terraform `demo_max_instance_count`. |
 | `ATA_INVENTORY_RESTOCK_BASELINE` | `item-101=1000,...,item-105=1000` | Stock that `reset-scenarios.sh` sets via `POST /admin/restock` before each scenario (`<id>=<stock>`, stock >= 1). |
-| `ATA_INVENTORY_PIN_FILE` | `scripts/scenarios/inventory-pin.<prefix>.env` (TODO(scripts-lane): per-prefix name from the scenario lane) | The inventory pin (revision, digest, previous pin). Change it with `scripts/repin-inventory.sh`. |
+| `ATA_INVENTORY_PIN_FILE` | `scripts/scenarios/inventory-pin.<prefix>.env` (TODO(scen-lane): per-prefix name) | The inventory pin (revision, digest, previous pin). Change it with `scripts/repin-inventory.sh`. |
 | `ATA_ARTIFACT_REGISTRY_HOST` | `<REGION>-docker.pkg.dev` | Artifact Registry host of the `<prefix>-docker` repository. |
 | `INVENTORY_SERVICE_URL` | *Cloud Run URL* | Internal Cloud Run URL of inventory service called by orders API. |
 
@@ -135,7 +139,7 @@ Demo script settings (scripts/scenarios/common.sh):
 
 ## 2. Secret Manager Secrets Reference
 
-Sensitive credentials are stored in Google Secret Manager under the stack's prefix (`ata-` by default). All three are created by the foundation Terraform root; the ServiceNow ones with a `placeholder` version that `scripts/set-secrets.sh` replaces before the bridge is deployed ([DEPLOY.md Step 4](DEPLOY.md#step-4-servicenow-secrets)). Each is readable only by the stack's own bridge SA (secret-level `roles/secretmanager.secretAccessor`):
+Sensitive credentials are stored in Google Secret Manager under the stack's prefix (`ata-` by default). All three are created by the foundation Terraform root; the ServiceNow ones with a `placeholder` version that `scripts/set-secrets.sh` replaces before the bridge is deployed ([DEPLOY.md Step 4](DEPLOY.md#step-5-secrets)). Each is readable only by the stack's own bridge SA (secret-level `roles/secretmanager.secretAccessor`):
 
 | Secret Name | Purpose | Authorized Accessors | Management Script |
 | :--- | :--- | :--- | :--- |
@@ -173,7 +177,7 @@ Each stack has **six** service accounts, all created by the foundation Terraform
 | | `roles/run.invoker` on `<prefix>-inventory-api` | applications | |
 | `<prefix>-apigee-sa` | `roles/logging.logWriter` (project): the `ML-CloudLogging` access log | foundation | Identity of the Apigee proxies. |
 | | `roles/run.invoker` on `<prefix>-orders-api` and `<prefix>-inventory-api` | applications | |
-| `<prefix>-build-sa` | `roles/storage.objectAdmin` on `gs://<project>-<prefix>-build`, `roles/artifactregistry.writer` on `<prefix>-docker`, `roles/logging.logWriter` (project) | foundation | Cloud Build identity. TODO(scripts-lane): the build commands do not pass it yet (they use the project's default Cloud Build SA). |
+| `<prefix>-build-sa` | `roles/storage.objectAdmin` on `gs://<project>-<prefix>-build`, `roles/artifactregistry.writer` on `<prefix>-docker`, `roles/logging.logWriter` (project) | foundation | Cloud Build identity: every build (`scripts/build-image.sh`, the deploy scripts) runs as this SA, with source and logs in `gs://<project>-<prefix>-build`. |
 
 The bridge's public invoker (`allUsers`, for the Cloud Monitoring webhook) is set by `bridge/scripts/deploy.sh` (`--allow-unauthenticated`), not by Terraform. Principals in the foundation variable `deployer_members` get `roles/iam.serviceAccountUser` on `<prefix>-apigee-sa` and `<prefix>-build-sa`, so that they can deploy without being project Owner.
 
@@ -316,7 +320,7 @@ $$\text{Total Score} = \text{Topology (35)} + \text{Causal (30)} + \text{Tempora
 
 ## 6. Apigee Product & Developer App Credentials
 
-Client traffic reaching the demo microservices routes through the Apigee X environment `APIGEE_ENV` of organization `APIGEE_ORG`. `scripts/deploy-apigee-proxies.sh` creates every name below from `NAME_PREFIX` ([DEPLOY.md Step 9](DEPLOY.md#step-9-apigee-proxies)), and `scripts/teardown-apigee.sh` removes them:
+Client traffic reaching the demo microservices routes through the Apigee X environment `APIGEE_ENV` of organization `APIGEE_ORG`. `scripts/deploy-apigee-proxies.sh` creates every name below from `NAME_PREFIX` ([DEPLOY.md Step 9](DEPLOY.md#step-13-apigee)), and `scripts/teardown-apigee.sh` removes them:
 
 | Property | Value | Description |
 | :--- | :--- | :--- |
