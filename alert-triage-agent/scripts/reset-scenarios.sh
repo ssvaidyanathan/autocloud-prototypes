@@ -39,10 +39,12 @@ parse_duration() {
 
 # Configuration options & defaults
 NO_WAIT="${ATA_RESET_NO_WAIT:-${NO_WAIT:-false}}"
-QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-300}}")"
+QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-180}}")"
 WAIT_TIMEOUT_SECS="$(parse_duration "${ATA_RESET_TIMEOUT:-${WAIT_TIMEOUT:-900}}")"
 POLL_INTERVAL_SECS="$(parse_duration "${ATA_RESET_POLL_INTERVAL:-${POLL_INTERVAL:-15}}")"
 MAX_ALERT_AGE_SECS="$(parse_duration "${ATA_RESET_MAX_ALERT_AGE:-${MAX_ALERT_AGE:-3600}}")"
+# Consecutive failed Cloud Monitoring queries tolerated before the reset fails.
+MAX_QUERY_ATTEMPTS="${ATA_RESET_MAX_QUERY_ATTEMPTS:-3}"
 RESET_START_TIME="$(date +%s)"
 
 # Parse CLI arguments
@@ -92,6 +94,14 @@ while [[ $# -gt 0 ]]; do
             ATA_SERVING_REVISIONS="${1#*=}"
             shift
             ;;
+        --monitoring-token-source)
+            ATA_MONITORING_TOKEN_SOURCE="$2"
+            shift 2
+            ;;
+        --monitoring-token-source=*)
+            ATA_MONITORING_TOKEN_SOURCE="${1#*=}"
+            shift
+            ;;
         --dry-run)
             export DRY_RUN="true"
             shift
@@ -105,11 +115,15 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --no-wait                  Skip waiting for open alerts to close and quiet period"
-            echo "  --quiet-period <duration>  Quiet period after alerts close (default: 300s / 5m)"
+            echo "  --quiet-period <duration>  Quiet period after alerts close (default: 180s / 3m)"
             echo "  --timeout <duration>       Max timeout waiting for alerts to close (default: 900s / 15m)"
             echo "  --poll-interval <duration> Polling interval for alert queries (default: 15s)"
             echo "  --max-alert-age <duration> Max age of open alerts before reset start (default: 60m / 3600s)"
             echo "  --serving-revisions <list> Comma or space separated list of active Cloud Run revisions"
+            echo "  --monitoring-token-source <adc|gcloud>"
+            echo "                             Token for the alert check: adc = 'gcloud auth application-default print-access-token',"
+            echo "                             gcloud = 'gcloud auth print-access-token'"
+            echo "                             (default: adc; env ATA_MONITORING_TOKEN_SOURCE). No fallback between them."
             echo "  --dry-run                  Simulate reset without network modifications"
             echo "  --mock                     Run in mock mode without GCP cloud dependencies"
             echo "  -h, --help                 Display this help message"
@@ -121,6 +135,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Fail before any reset step if the token source is misconfigured.
+monitoring_token_command "${ATA_MONITORING_TOKEN_SOURCE}" >/dev/null || exit 1
+# open_alerts.py names the source in its 401 messages.
+export ATA_MONITORING_TOKEN_SOURCE
 
 get_serving_revisions() {
     local revs=()
@@ -158,6 +177,11 @@ get_serving_revisions() {
     echo "${revs[@]:-}"
 }
 
+# Cloud Monitoring query helper (CA bundle resolution, scoping, fail-loud errors).
+OPEN_ALERTS_PY="${SCRIPT_DIR}/scenarios/open_alerts.py"
+
+# Print {"active": [...], "ignored": [...]} for OPEN ata-* alerts. Exits non-zero, with
+# the cause on stderr, when the Alerts API cannot be queried.
 query_open_ata_alerts() {
     local proj="$1"
     local tok="$2"
@@ -165,131 +189,7 @@ query_open_ata_alerts() {
     local max_age_secs="${4:-3600}"
     local serving_revs="${5:-}"
 
-    python3 -c '
-import sys, json, urllib.request, urllib.error, re
-from datetime import datetime, timezone
-
-def parse_time_to_epoch(ts_str):
-    if not ts_str:
-        return None
-    try:
-        return float(ts_str)
-    except (ValueError, TypeError):
-        pass
-    try:
-        s = str(ts_str).rstrip("Z")
-        if "." in s:
-            parts = s.split(".")
-            frac = (parts[1] + "000000")[:6]
-            s = f"{parts[0]}.{frac}"
-            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
-        else:
-            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-        return dt.timestamp()
-    except Exception:
-        return None
-
-def extract_revision(alert):
-    res = alert.get("resource") or {}
-    labels = res.get("labels") or {}
-    if "revision_name" in labels:
-        return labels["revision_name"]
-    metric = alert.get("metric") or {}
-    m_labels = metric.get("labels") or {}
-    if "revision_name" in m_labels:
-        return m_labels["revision_name"]
-    top_labels = alert.get("labels") or {}
-    for k, v in top_labels.items():
-        if "revision_name" in k:
-            return v
-    res_str = str(alert.get("resourceName") or alert.get("resource_name") or "")
-    m = re.search(r"revision_name[=\s:]+([a-zA-Z0-9_-]+)", res_str)
-    if m:
-        return m.group(1)
-    return None
-
-project_id = sys.argv[1]
-token = sys.argv[2]
-reset_start_time = float(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else 0.0
-max_alert_age_secs = float(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else 3600.0
-serving_revisions_raw = sys.argv[5] if len(sys.argv) > 5 else ""
-serving_revs_set = set(r.strip() for r in serving_revisions_raw.replace(",", " ").split() if r.strip())
-
-if not token:
-    print(json.dumps({"active": [], "ignored": []}))
-    sys.exit(0)
-
-active_alerts = []
-ignored_alerts = []
-page_token = None
-
-while True:
-    url = f"https://monitoring.googleapis.com/v3/projects/{project_id}/alerts?filter=state%3D%22OPEN%22&pageSize=100"
-    if page_token:
-        url += f"&pageToken={page_token}"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception as e:
-        sys.stderr.write(f"Warning: Cloud Monitoring API query failed: {e}\n")
-        break
-
-    for alert in data.get("alerts", []):
-        policy = alert.get("policy", {})
-        disp = str(policy.get("displayName") or "").strip()
-        pol_name = str(policy.get("name") or "").strip()
-        user_labels = policy.get("userLabels") or alert.get("userLabels") or {}
-
-        # Scoping criteria matching ata-* policies (label app=alert-triage-agent)
-        is_ata = False
-        if isinstance(user_labels, dict):
-            if user_labels.get("app") == "alert-triage-agent" or user_labels.get("managed_by") == "alert-triage-agent":
-                is_ata = True
-        if disp.lower().startswith("ata-") or "ata-" in pol_name.lower() or "alert-triage-agent" in disp.lower() or "alert-triage-agent" in pol_name.lower():
-            is_ata = True
-
-        if is_ata:
-            alert_id = alert.get("name", "").split("/")[-1]
-            open_time_str = alert.get("openTime") or alert.get("started_at") or ""
-            open_epoch = parse_time_to_epoch(open_time_str)
-            rev = extract_revision(alert)
-
-            ignore_reasons = []
-
-            # 1. Non-serving revision check
-            if rev and serving_revs_set and (rev not in serving_revs_set):
-                ignore_reasons.append(f"Non-serving revision ({rev})")
-
-            # 2. Stale age check
-            if open_epoch is not None and reset_start_time > 0:
-                cutoff_time = reset_start_time - max_alert_age_secs
-                if open_epoch < cutoff_time:
-                    age_min = int((reset_start_time - open_epoch) / 60)
-                    max_min = int(max_alert_age_secs / 60)
-                    ignore_reasons.append(f"Opened > {max_min}m before reset started ({age_min}m ago)")
-
-            alert_entry = {
-                "id": alert_id,
-                "name": alert.get("name", ""),
-                "policy_display": disp or pol_name,
-                "policy_name": pol_name,
-                "open_time": open_time_str,
-                "revision": rev or "",
-            }
-
-            if ignore_reasons:
-                alert_entry["ignore_reasons"] = ignore_reasons
-                ignored_alerts.append(alert_entry)
-            else:
-                active_alerts.append(alert_entry)
-
-    page_token = data.get("nextPageToken")
-    if not page_token:
-        break
-
-print(json.dumps({"active": active_alerts, "ignored": ignored_alerts}))
-' "${proj}" "${tok}" "${reset_start}" "${max_age_secs}" "${serving_revs}"
+    python3 "${OPEN_ALERTS_PY}" "${proj}" "${tok}" "${reset_start}" "${max_age_secs}" "${serving_revs}"
 }
 
 wait_for_open_alerts() {
@@ -310,12 +210,17 @@ wait_for_open_alerts() {
     local deadline=$((start_time + WAIT_TIMEOUT_SECS))
     local quiet_start=""
     local first_poll="true"
+    local query_failures=0
+    local query_err_file
+    query_err_file="$(mktemp)"
+    # shellcheck disable=SC2064  # expand the path now; the local is gone at EXIT.
+    trap "rm -f '${query_err_file}'" EXIT
 
     local serving_revs
     serving_revs="$(get_serving_revisions)"
 
     log_info "    Polling Cloud Monitoring API (read-only) for OPEN alerts on ata-* policies (label app=alert-triage-agent)..."
-    log_info "    Max timeout: ${WAIT_TIMEOUT_SECS}s | Quiet period: ${QUIET_PERIOD_SECS}s | Polling interval: ${POLL_INTERVAL_SECS}s | Max alert age: ${MAX_ALERT_AGE_SECS}s"
+    log_info "    Max timeout: ${WAIT_TIMEOUT_SECS}s | Quiet period: ${QUIET_PERIOD_SECS}s | Polling interval: ${POLL_INTERVAL_SECS}s | Max alert age: ${MAX_ALERT_AGE_SECS}s | Token source: ${ATA_MONITORING_TOKEN_SOURCE}"
     if [ -n "${serving_revs}" ]; then
         log_info "    Serving revisions scoped: ${serving_revs}"
     fi
@@ -325,17 +230,47 @@ wait_for_open_alerts() {
         now=$(date +%s)
         local elapsed=$((now - start_time))
 
-        local token
-        token="$(resolve_monitoring_token)"
-        if [ -z "${token}" ]; then
-            log_warn "    Unable to retrieve auth token for Cloud Monitoring; skipping live alert wait."
-            return 0
+        # A failed query is never treated as zero open alerts. open_alerts.py exits 3 for
+        # transient failures (timeout, 429, 5xx), which are retried; anything else
+        # (401/403, TLS/CA bundle, no token, crash) cannot self-heal and fails at once.
+        local token="" open_alerts_json="" count query_err="" query_hint="" query_rc=0 retryable="false"
+        if ! token="$(resolve_monitoring_token 2>"${query_err_file}")" || [ -z "${token}" ]; then
+            query_err="could not get an access token from token source '${ATA_MONITORING_TOKEN_SOURCE}'"
+            query_err+=" ('$(monitoring_token_command "${ATA_MONITORING_TOKEN_SOURCE}" 2>/dev/null)' failed: $(tail -n 1 "${query_err_file}"))."
+            query_err+=" Run: $(monitoring_token_login_hint "${ATA_MONITORING_TOKEN_SOURCE}")"
+        else
+            open_alerts_json="$(query_open_ata_alerts "${PROJECT_ID}" "${token}" "${RESET_START_TIME}" "${MAX_ALERT_AGE_SECS}" "${serving_revs}" 2>"${query_err_file}")" || query_rc=$?
+            if [ "${query_rc}" -ne 0 ]; then
+                query_err="$(grep -m 1 'query failed' "${query_err_file}" || tail -n 1 "${query_err_file}")"
+                query_err="${query_err:-open_alerts.py exited ${query_rc} with no output}"
+                query_hint="$(grep -m 1 '^Hint:' "${query_err_file}" || true)"
+                if [ "${query_rc}" -eq 3 ]; then
+                    retryable="true"
+                fi
+            elif ! count=$(echo "${open_alerts_json}" | python3 -c "import sys, json; data=json.load(sys.stdin); print(len(data['active']))"); then
+                query_err="unparseable alert query output: ${open_alerts_json:0:200}"
+            fi
         fi
-
-        local open_alerts_json
-        open_alerts_json="$(query_open_ata_alerts "${PROJECT_ID}" "${token}" "${RESET_START_TIME}" "${MAX_ALERT_AGE_SECS}" "${serving_revs}")"
-        local count
-        count=$(echo "${open_alerts_json}" | python3 -c "import sys, json; data=json.load(sys.stdin); print(len(data.get('active', [])))" 2>/dev/null || echo "0")
+        if [ -n "${query_err}" ]; then
+            query_failures=$((query_failures + 1))
+            if [ "${retryable}" != "true" ] || [ "${query_failures}" -ge "${MAX_QUERY_ATTEMPTS}" ]; then
+                if [ "${retryable}" = "true" ]; then
+                    log_error "FATAL: Cloud Monitoring alert query failed ${query_failures} time(s) in a row; cannot confirm ATA alerts have closed." >&2
+                else
+                    log_error "FATAL: Cloud Monitoring alert query failed (not retryable); cannot confirm ATA alerts have closed." >&2
+                fi
+                log_error "Cause: ${query_err}" >&2
+                if [ -n "${query_hint}" ]; then
+                    log_error "${query_hint}" >&2
+                fi
+                log_error "To skip the alert check deliberately, re-run with --no-wait." >&2
+                exit 1
+            fi
+            log_warn "    Cloud Monitoring alert query failed (attempt ${query_failures}/${MAX_QUERY_ATTEMPTS}): ${query_err}. Retrying in ${POLL_INTERVAL_SECS}s..."
+            sleep "${POLL_INTERVAL_SECS}"
+            continue
+        fi
+        query_failures=0
 
         if [ "${first_poll}" = "true" ]; then
             first_poll="false"
@@ -405,6 +340,11 @@ PYEOF
         fi
     done
 }
+
+# Sourced (tests): define the functions above without running the reset.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    return 0
+fi
 
 log_info "=== Starting Scenario Fault Cleanup & Baseline Restoration ==="
 

@@ -287,11 +287,43 @@ resolve_apigee_token() {
     gcloud auth print-access-token 2>/dev/null || echo ""
 }
 
-# Resolve Cloud Monitoring Access Token
+# Cloud Monitoring token source for the reset alert check (ATA_MONITORING_TOKEN_SOURCE):
+#   adc     gcloud auth application-default print-access-token (default)
+#   gcloud  gcloud auth print-access-token (the active gcloud account)
+# ADC is the default because federated/workforce gcloud user tokens are rejected by the
+# Monitoring Alerts API with 401 ACCESS_TOKEN_TYPE_UNSUPPORTED, while ADC tokens work.
+# Only the configured source is tried; there is no fallback to the other one.
+ATA_MONITORING_TOKEN_SOURCE="${ATA_MONITORING_TOKEN_SOURCE:-adc}"
+
+# Print the gcloud command that mints a token for the given source, or fail if unknown.
+monitoring_token_command() {
+    case "$1" in
+        gcloud) echo "gcloud auth print-access-token" ;;
+        adc) echo "gcloud auth application-default print-access-token" ;;
+        *)
+            log_error "Invalid ATA_MONITORING_TOKEN_SOURCE '$1' (expected 'gcloud' or 'adc')." >&2
+            return 1
+            ;;
+    esac
+}
+
+# Print the login command that fixes a failed token fetch for the given source.
+monitoring_token_login_hint() {
+    case "$1" in
+        adc) echo "gcloud auth application-default login" ;;
+        *) echo "gcloud auth login" ;;
+    esac
+}
+
+# Resolve Cloud Monitoring Access Token from ATA_MONITORING_TOKEN_SOURCE. On failure,
+# prints nothing on stdout, leaves gcloud's error on stderr, and returns non-zero.
 resolve_monitoring_token() {
     if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
         echo "mock-monitoring-token"
         return 0
     fi
-    gcloud auth print-access-token 2>/dev/null || echo ""
+    local cmd
+    cmd="$(monitoring_token_command "${ATA_MONITORING_TOKEN_SOURCE}")" || return 1
+    # shellcheck disable=SC2086  # cmd is a fixed gcloud command line from monitoring_token_command.
+    ${cmd}
 }

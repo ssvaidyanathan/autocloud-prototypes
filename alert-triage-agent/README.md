@@ -781,9 +781,12 @@ Execute scenarios with logging and automated assertions:
 ```
 
 ### 4. Resetting Between Scenarios
-Reset injected faults, clear database sleep connections, restore Apigee proxies, wait for open alerts to close plus metric ingestion quiet period (5 min), and move active incidents to `archive/`:
+Reset injected faults, clear database sleep connections, restore Apigee proxies, wait for open alerts to close plus metric ingestion quiet period (3 min, covering Apigee's 1-3 min metric lag), and move active incidents to `archive/`:
 ```bash
-# Standard reset (waits for open ata-* alerts to close + 5m quiet period)
+# Standard reset (waits for open ata-* alerts to close + 3m quiet period).
+# Fails if Cloud Monitoring cannot be queried. The alert check uses an ADC token by default
+# (run: gcloud auth application-default login; or --monitoring-token-source gcloud).
+# On macOS CERTIFICATE_VERIFY_FAILED: export SSL_CERT_FILE=/etc/ssl/cert.pem
 ./scripts/reset-scenarios.sh
 
 # Quick dev reset (bypasses alert clearance wait and quiet period)
@@ -874,6 +877,7 @@ alert-triage-agent/
 ├── scripts/                       # Deployment, verification, and scenario scripts
 │   ├── scenarios/                 # Realistic failure scenario scripts (S1 through S5)
 │   │   ├── common.sh              # Shared logging, token resolution, and utility functions
+│   │   ├── open_alerts.py         # Read-only Cloud Monitoring OPEN-alert query used by reset (CA bundle resolution)
 │   │   ├── preflight.sh           # Pre-scenario health & endpoint verification
 │   │   ├── s1_backend_5xx.sh      # Scenario 1: Backend 500 error spike
 │   │   ├── s2_backend_latency.sh  # Scenario 2: Backend latency degradation

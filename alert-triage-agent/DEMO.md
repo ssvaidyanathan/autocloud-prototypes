@@ -13,8 +13,10 @@ Follow this section to execute scenarios directly from your laptop.
 1. **Authenticate with Google Cloud:**
    ```bash
    gcloud auth login
+   gcloud auth application-default login
    gcloud config set project cloud-assist-fde-2
    ```
+   `gcloud auth application-default login` is needed because `reset-scenarios.sh` queries the Cloud Monitoring Alerts API with an Application Default Credentials token: federated gcloud user tokens are rejected there with `401 ACCESS_TOKEN_TYPE_UNSUPPORTED`.
    > [!IMPORTANT]
    > Authenticate using your individual user credentials. Do NOT mint tokens for service accounts or use `--impersonate-service-account`. Scenario scripts automatically detect user accounts and fall back to audience-free identity tokens for Cloud Run invocation.
 
@@ -276,8 +278,8 @@ This script:
 2. Terminates background PostgreSQL sleep connections and releases leaks.
 3. Restores healthy Apigee proxy revisions (`demo/apigee/`).
 4. Reverts any modified Cloud Run environment variables (pinned revisions).
-5. **Waits for open alerts to close & observes quiet period:** Polls the Cloud Monitoring Alerts API (read-only) for active `OPEN` alerts on `ata-*` policies (labeled `app=alert-triage-agent`) and waits until none are open, followed by a configurable quiet period (default 5 minutes / 300s).
-   - **Why resets wait for alerts to clear (Metric Lag Rationale):** Telemetry ingestion pipelines—specifically Apigee proxy metrics published to Cloud Monitoring—experience an ingestion lag of 1 to 3 minutes. If incident files and group state are archived immediately upon proxy restoration, lagging Apigee metric data can trigger a delayed alert (such as `ata-apigee-orders-429`) minutes after the reset has completed. Because prior incident files are already archived, the agent treats the late-arriving alert as a brand new incident and creates a stray ServiceNow ticket (e.g., finding `INC0010294`). Waiting until all open alerts have cleared plus the 5-minute quiet period guarantees that the metric ingestion window has fully stabilized before incident state is archived.
+5. **Waits for open alerts to close & observes quiet period:** Polls the Cloud Monitoring Alerts API (read-only) for active `OPEN` alerts on `ata-*` policies (labeled `app=alert-triage-agent`) and waits until none are open, followed by a configurable quiet period (default 3 minutes / 180s). If the Alerts API cannot be queried, the script exits non-zero with the cause; it never treats a failed query as zero open alerts. Transient errors (timeouts, HTTP 429/5xx) are retried for up to 3 polls first. Errors that cannot clear on their own fail at once: HTTP 401 (`gcloud auth application-default login` for the default ADC token source; `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` means the token type is not accepted, so switch source or use `--no-wait`), HTTP 403 (grant `roles/monitoring.viewer` on the project), and TLS `CERTIFICATE_VERIFY_FAILED`. On macOS, `export SSL_CERT_FILE=/etc/ssl/cert.pem` fixes the certificate error (the script also honours `REQUESTS_CA_BUNDLE`, then `certifi`, then `/etc/ssl/cert.pem` on macOS).
+   - **Why resets wait for alerts to clear (Metric Lag Rationale):** Telemetry ingestion pipelines—specifically Apigee proxy metrics published to Cloud Monitoring—experience an ingestion lag of 1 to 3 minutes. If incident files and group state are archived immediately upon proxy restoration, lagging Apigee metric data can trigger a delayed alert (such as `ata-apigee-orders-429`) minutes after the reset has completed. Because prior incident files are already archived, the agent treats the late-arriving alert as a brand new incident and creates a stray ServiceNow ticket (e.g., finding `INC0010294`). Waiting until all open alerts have cleared plus the 3-minute quiet period covers Apigee's documented 1-3 minute metric lag, so the ingestion window has stabilized before incident state is archived. Raise it with `--quiet-period` if you still see late alerts.
 6. **Archives active OKF files:** Only after all alerts have closed and the quiet period has elapsed does the script move active incident files from `gs://<bucket>/knowledge/incident-manager/*.md` to `archive/` and remove leftover root copies.
 7. **Verifies healthy baseline:** Confirms HTTP 200 health responses across all services and verifies 0 active incident groups on the bridge.
 8. **Preflights admin endpoints:** Verifies required fault injection endpoints (`/admin/fault/inject` and `/admin/leak-connections`) are active on deployed microservices.
@@ -286,10 +288,11 @@ This script:
 
 | Flag | Description | Default |
 | :--- | :--- | :--- |
-| `--no-wait` | Skips polling Cloud Monitoring and bypasses the quiet period for quick developer resets | `false` |
-| `--quiet-period <duration>` | Quiet period window to maintain after all open alerts close (e.g. `300s`, `5m`) | `300s` (`5m`) |
+| `--no-wait` | Skips polling Cloud Monitoring and bypasses the quiet period for quick developer resets (also skips the alert query, so Monitoring/TLS errors cannot fail the reset) | `false` |
+| `--quiet-period <duration>` | Quiet period window to maintain after all open alerts close (e.g. `180s`, `3m`); covers Apigee's 1-3 min metric lag | `180s` (`3m`) |
 | `--timeout <duration>` | Maximum timeout to wait for open alerts to clear before failing with still-open alerts listed | `900s` (`15m`) |
 | `--poll-interval <duration>`| Interval between Cloud Monitoring alert queries | `15s` |
+| `--monitoring-token-source <adc\|gcloud>` | Token for the alert check: `adc` = `gcloud auth application-default print-access-token`, `gcloud` = `gcloud auth print-access-token`. Only the chosen source is tried; if it fails the reset fails (run `gcloud auth application-default login`, or use `--no-wait`). Env: `ATA_MONITORING_TOKEN_SOURCE` | `adc` |
 | `--dry-run` | Simulates reset steps without issuing network mutations | `false` |
 | `--mock` | Executes in mock mode without GCP cloud dependencies | `false` |
 
