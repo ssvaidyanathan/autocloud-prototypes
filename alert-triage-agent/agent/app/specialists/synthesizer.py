@@ -248,6 +248,38 @@ def _as_number(value: Any) -> Optional[float]:
         return None
 
 
+def _is_latency_alert(alert: AlertEvent) -> bool:
+    return any(k in (alert.policy_name or "").lower() for k in ("latency", "timeout", "slow"))
+
+
+def low_traffic_facts(dossier: Optional[EvidenceDossier], threshold_rpm: float) -> Optional[dict[str, Any]]:
+    """Measured request volume of a Cloud Run dossier when it is below `threshold_rpm`, else None.
+
+    Only measured values: no total, window or rate means no statement (never assumed low).
+    """
+    if not dossier or dossier.specialist_name != "CloudRunSpecialist" or not dossier.metrics:
+        return None
+    rpm = _as_number(dossier.metrics.get("request_count_rpm"))
+    total = _as_number(dossier.metrics.get("request_count_total"))
+    minutes = _as_number(dossier.metrics.get("request_window_minutes"))
+    if rpm is None or total is None or minutes is None or rpm >= threshold_rpm:
+        return None
+    rpm_txt = f"{int(rpm)} request/min" if int(rpm) == 1 else f"{int(rpm)} requests/min"
+    req_txt = "1 request" if int(total) == 1 else f"{int(total)} requests"
+    return {
+        "service": dossier.target_resource,
+        "volume": f"{req_txt} in {minutes:g} min ({rpm_txt})",
+    }
+
+
+def low_traffic_sentence(facts: dict[str, Any]) -> str:
+    """'low traffic: ...' clause for latency text (no ';': descriptions split on it)."""
+    return (
+        f"low traffic: {facts['volume']} on {facts['service']}, so the latency may come from a few "
+        "slow requests (such as a cold start) rather than a service-wide degradation"
+    )
+
+
 CORRELATION_PREFIX = "Correlation:"
 
 
@@ -1011,6 +1043,12 @@ class SynthesizerAgent:
         lat_p95_ms: Optional[float] = None
         # Measured 5xx rate (text, percent) per topology dependent of the origin.
         dependent_5xx: dict[str, tuple[str, float]] = {}
+        low_traffic: Optional[dict[str, Any]] = None
+        if _is_latency_alert(alert):
+            low_traffic = low_traffic_facts(
+                next((d for d in dossiers if d.specialist_name == "CloudRunSpecialist" and d.target_resource == origin), None),
+                get_agent_settings().low_traffic_rpm,
+            )
 
         for d in dossiers:
             if d.specialist_name == "CloudSQLSpecialist" and d.anomaly_detected:
@@ -1071,6 +1109,8 @@ class SynthesizerAgent:
                 )
             elif "latency" in alert.policy_name.lower() or "timeout" in alert.policy_name.lower() or (lat_p95_ms is not None and lat_p95_ms >= 2000.0):
                 lat_disp = f" ({int(lat_p95_ms)}ms)" if lat_p95_ms is not None else ""
+                if low_traffic:
+                    return f"Elevated latency{lat_disp} on {origin} since {started_at} under {low_traffic_sentence(low_traffic)}"
                 return (
                     f"Elevated upstream dependency latency{lat_disp} on {origin} causing cascading request timeouts "
                     f"and degradation for {upstream_str} since {started_at}"
@@ -1111,6 +1151,8 @@ class SynthesizerAgent:
             )
         elif "latency" in alert.policy_name.lower() or "timeout" in alert.policy_name.lower() or (lat_p95_ms is not None and lat_p95_ms >= 2000.0):
             lat_disp = f" ({int(lat_p95_ms)}ms)" if lat_p95_ms is not None else ""
+            if low_traffic:
+                return f"Elevated latency{lat_disp} on {origin} since {started_at} under {low_traffic_sentence(low_traffic)}"
             return (
                 f"Elevated service latency and request timeouts{lat_disp} on {origin} "
                 f"impacting {upstream_str} since {started_at}"
@@ -1643,8 +1685,16 @@ class SynthesizerAgent:
             cr_target = next((d for d in dossiers if d.specialist_name == "CloudRunSpecialist"), None)
 
         signal_facts = self._format_dominant_signal_facts(alert, cr_target)
+        low_traffic = (
+            low_traffic_facts(cr_target, get_agent_settings().low_traffic_rpm) if _is_latency_alert(alert) else None
+        )
 
-        if is_upstream:
+        if low_traffic and not is_upstream:
+            root_cause_text = (
+                f"Elevated latency on `{origin}`{signal_facts} under {low_traffic_sentence(low_traffic)}. "
+                f"It triggered policy `{alert.policy_name}`."
+            )
+        elif is_upstream:
             root_cause_text = (
                 f"Upstream dependency degradation on `{origin}`{signal_facts} triggered cascading failures "
                 f"on caller `{alert.resource_name}` under policy `{alert.policy_name}`."
@@ -1734,6 +1784,10 @@ class SynthesizerAgent:
                         # an orphan "container restarts" bullet without the service name.
                         line += f", with {restarts} container restarts"
                     obs_items.append(line)
+                if _is_latency_alert(alert):
+                    low = low_traffic_facts(d, get_agent_settings().low_traffic_rpm)
+                    if low:
+                        obs_items.append(f"Low traffic on {low['service']}: {low['volume']} in the investigation window")
                 has_db_auth = _dossier_has_db_auth_error(d)
                 if has_db_auth:
                     obs_items.append(f"Database authentication failure observed in application logs on {d.target_resource}")

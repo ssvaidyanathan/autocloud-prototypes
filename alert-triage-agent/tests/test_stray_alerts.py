@@ -381,3 +381,147 @@ def test_verify_rejects_an_invalid_threshold(tmp_path):
     res = _verify(tmp_path, VERIFY_OK, ATA_VERIFY_SLOW_REQUEST_MS="2s")
     assert res.returncode == 1
     assert "Invalid ATA_VERIFY_SLOW_REQUEST_MS '2s'" in res.stderr
+
+
+# =======================================================================================
+# Agent: a latency report on trivial traffic says so (INC0010327: 1 rpm, cold start)
+# =======================================================================================
+
+from agent.app.config import reset_agent_settings  # noqa: E402
+from agent.app.contracts.alert import AlertEvent  # noqa: E402
+from agent.app.specialists.base import EvidenceDossier  # noqa: E402
+from agent.app.specialists.synthesizer import SynthesizerAgent, low_traffic_facts  # noqa: E402
+
+STRAY_BLAST = ["ata-inventory-api", "ata-inventory-v1", "ata-orders-api", "ata-orders-v1"]
+
+
+def _cr(rpm, total, minutes=17.2, latency=4957.0, service="ata-inventory-api"):
+    return EvidenceDossier(
+        specialist_name="CloudRunSpecialist", target_resource=service, findings=[],
+        metrics={"latency_p95_ms": latency, "error_rate_5xx": "0.0%", "request_count_rpm": rpm,
+                 "request_count_total": total, "request_window_minutes": minutes},
+        evidence_items=[], queries_executed={}, anomaly_detected=True, confidence=0.9,
+    )
+
+
+def _alert(policy="ata-inventory-latency"):
+    return AlertEvent(incident_id="0.oeb7xdv4q346", policy_name=policy, resource_name="ata-inventory-api",
+                      started_at="2026-10-27T10:10:58Z")
+
+
+@pytest.fixture(autouse=False)
+def default_settings(monkeypatch):
+    monkeypatch.delenv("LOW_TRAFFIC_RPM", raising=False)
+    reset_agent_settings()
+    yield
+    reset_agent_settings()
+
+
+def test_low_traffic_facts_only_from_measured_values_below_the_threshold():
+    assert low_traffic_facts(_cr(1, 21), 5.0) == {
+        "service": "ata-inventory-api", "volume": "21 requests in 17.2 min (1 request/min)"}
+    assert low_traffic_facts(_cr(1, 1, minutes=1.0), 5.0)["volume"] == "1 request in 1 min (1 request/min)"
+    assert low_traffic_facts(_cr(33, 629), 5.0) is None  # S2's origin
+    assert low_traffic_facts(_cr(5, 90), 5.0) is None  # at the threshold: not low
+    for missing in ({"request_count_rpm": "N/A (not captured)"}, {"request_count_total": "N/A (not captured)"},
+                    {"request_window_minutes": None}):
+        d = _cr(1, 21)
+        d.metrics.update(missing)
+        assert low_traffic_facts(d, 5.0) is None, missing
+
+
+def test_stray_latency_problem_states_low_traffic_not_service_wide_degradation(default_settings):
+    problem = SynthesizerAgent()._synthesize_problem(_alert(), [_cr(1, 21)], "ata-inventory-api", STRAY_BLAST)
+    assert problem == (
+        "Elevated latency (4957ms) on ata-inventory-api since 2026-10-27T10:10:58Z under low traffic: "
+        "21 requests in 17.2 min (1 request/min) on ata-inventory-api, so the latency may come from a few slow "
+        "requests (such as a cold start) rather than a service-wide degradation"
+    )
+    assert ";" not in problem
+
+
+def test_stray_latency_root_cause_and_observation_state_low_traffic(default_settings):
+    synth = SynthesizerAgent()
+    text, _ = synth._determine_root_cause([_cr(1, 21)], "ata-inventory-api", _alert(), blast_radius=STRAY_BLAST)
+    assert text.startswith("Elevated latency on `ata-inventory-api` (peak observed latency: 4957ms) under low traffic: "
+                           "21 requests in 17.2 min (1 request/min)")
+    assert "Service degradation" not in text
+    obs = synth._synthesize_observations([_cr(1, 21)], _alert())
+    assert "Low traffic on ata-inventory-api: 21 requests in 17.2 min (1 request/min) in the investigation window" in obs
+
+
+def test_s2_traffic_keeps_the_degradation_wording(default_settings):
+    synth = SynthesizerAgent()
+    problem = synth._synthesize_problem(_alert(), [_cr(33, 629, latency=6546.0)], "ata-inventory-api", STRAY_BLAST)
+    assert problem.startswith("Elevated service latency and request timeouts (6546ms) on ata-inventory-api impacting")
+    text, _ = synth._determine_root_cause([_cr(33, 629, latency=6546.0)], "ata-inventory-api", _alert(),
+                                          blast_radius=STRAY_BLAST)
+    assert text.startswith("Service degradation on `ata-inventory-api`")
+    assert "low traffic" not in problem.lower() + text.lower()
+    assert "Low traffic" not in synth._synthesize_observations([_cr(33, 629)], _alert())
+
+
+def test_low_traffic_is_not_stated_for_5xx_alerts(default_settings):
+    synth = SynthesizerAgent()
+    obs = synth._synthesize_observations([_cr(1, 21)], _alert("ata-inventory-5xx"))
+    assert "Low traffic" not in obs
+
+
+def test_low_traffic_threshold_is_configurable(monkeypatch):
+    monkeypatch.setenv("LOW_TRAFFIC_RPM", "40")
+    reset_agent_settings()
+    try:
+        problem = SynthesizerAgent()._synthesize_problem(_alert(), [_cr(33, 629, latency=6546.0)],
+                                                         "ata-inventory-api", STRAY_BLAST)
+        assert "under low traffic: 629 requests in 17.2 min (33 requests/min)" in problem
+    finally:
+        monkeypatch.delenv("LOW_TRAFFIC_RPM")
+        reset_agent_settings()
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_low_traffic_threshold_is_validated(monkeypatch, value):
+    from pydantic import ValidationError
+
+    from agent.app.config import AgentConfig
+
+    monkeypatch.setenv("LOW_TRAFFIC_RPM", value)
+    with pytest.raises(ValidationError):
+        AgentConfig()
+
+
+@pytest.mark.asyncio
+async def test_cloud_run_specialist_records_the_request_total_and_window():
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock, patch
+
+    from agent.app.config import AgentConfig
+    from agent.app.specialists.cloud_run import CloudRunSpecialist
+
+    def series(code, counts):
+        ts = MagicMock()
+        ts.metric.labels = {"response_code": code, "response_code_class": code[0] + "xx"}
+        pts = []
+        for c in counts:
+            pt = MagicMock()
+            pt.value.int64_value = c
+            pts.append(pt)
+        ts.points = pts
+        return ts
+
+    alert = AlertEvent(incident_id="0.oeb7xdv4q346", policy_name="ata-inventory-latency",
+                       resource_name="ata-inventory-api", started_at="2026-10-27T10:10:58Z")
+    config = AgentConfig(project_id="test-proj", region="test-region", is_local=True)
+    fixed_now = datetime(2026, 10, 27, 10, 13, 10, tzinfo=timezone.utc)
+    with patch("google.cloud.logging.Client") as log_cls, \
+         patch("google.cloud.monitoring_v3.MetricServiceClient") as metric_cls, \
+         patch("agent.app.specialists.cloud_run.datetime") as dt:
+        dt.now.return_value = fixed_now
+        dt.fromisoformat.side_effect = datetime.fromisoformat
+        log_cls.return_value.list_entries.return_value = []
+        metric_cls.return_value.list_time_series.side_effect = [[series("200", [12, 1, 8])], []]
+        dossier = await CloudRunSpecialist().investigate(alert, config)
+    # Window: alert start -15 min .. now (10:13:10) = 17.2 min; 21 requests -> 1 rpm.
+    assert dossier.metrics["request_count_total"] == 21
+    assert dossier.metrics["request_window_minutes"] == 17.2
+    assert dossier.metrics["request_count_rpm"] == 1

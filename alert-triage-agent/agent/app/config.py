@@ -65,6 +65,11 @@ class AgentConfig(BaseSettings):
     # entries in the -15/+5 min window. When the cap is hit, the report says so, no revision
     # switch is evaluated and log-derived counts are stated as lower bounds.
     apigee_access_log_max_entries: int = Field(default=5000, alias="APIGEE_ACCESS_LOG_MAX_ENTRIES", ge=1)
+    # Latency reports: below this many requests/min on the origin over the investigation window
+    # the report says the latency rests on little traffic (it may be a cold start) instead of
+    # calling it a service-wide degradation. Live 2026-10-27: the stray cold-start ticket
+    # INC0010327 had 1 rpm; S2's origin ata-inventory-api ~35 rpm (627 requests in ~18 min).
+    low_traffic_rpm: float = Field(default=5.0, alias="LOW_TRAFFIC_RPM", gt=0)
 
     @property
     def effective_incidents_bucket(self) -> str:
