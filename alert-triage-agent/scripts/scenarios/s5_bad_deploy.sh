@@ -195,7 +195,10 @@ else
             break
         fi
 
-        CURRENT_EPOCH=$(date +%s)
+        # A Ctrl-C (SIGINT to the whole process group) also kills the foreground child, which
+        # exits 130. Under set -e that would abort the run and the EXIT trap would revert the
+        # bad deploy. So when STOP_TRAFFIC is set, end the loop and finish normally (DEMO.md).
+        CURRENT_EPOCH=$(date +%s) || { rc=$?; [ "${STOP_TRAFFIC}" = "true" ] && break; exit "${rc}"; }
         ELAPSED=$((CURRENT_EPOCH - START_EPOCH))
         if [ ${ELAPSED} -ge ${HOLD_SECS} ]; then
             break
@@ -224,7 +227,7 @@ else
             LAST_REPORT=${CURRENT_EPOCH}
         fi
 
-        sleep 1
+        sleep 1 || true  # interrupted by Ctrl-C: the loop ends via STOP_TRAFFIC
     done
     trap - INT TERM
     log_info "    Traffic generation completed: ${TOTAL_REQUESTS} requests sent (${ERRORS_SEEN} errors observed)."

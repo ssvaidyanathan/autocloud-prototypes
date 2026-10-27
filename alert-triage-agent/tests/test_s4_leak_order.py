@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_scenario_abort_cleanup import assert_finished_gracefully, install_ctrl_c_stubs, run_with_ctrl_c
+
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
 REAL_PYTHON = shutil.which("python3")
@@ -140,3 +142,16 @@ def test_mock_and_dry_run_still_complete(tmp_path, env, mode):
     assert res.returncode == 0, res.stdout + res.stderr
     assert "NEXT STEPS" in res.stdout
     assert _index(_calls(tmp_path), "/admin/fault/reset") is None
+
+
+@pytest.mark.parametrize("at", ["sleep", "date"])
+def test_ctrl_c_during_the_hold_finishes_and_keeps_the_leak(tmp_path, env, at):
+    """DEMO.md: Ctrl-C stops traffic early and shows next steps (see test_scenario_abort_cleanup)."""
+    install_ctrl_c_stubs(tmp_path / "bin")
+    argv = [TEST_BASH, str(SCRIPTS_DIR / "scenarios" / "s4_db_connection_pool.sh"), "--hold", "5m"]
+    # `date +%s` call 0 is START_EPOCH; call 1 is the first loop iteration.
+    res = run_with_ctrl_c(argv, env, tmp_path, at, after=1)
+    assert_finished_gracefully(res)
+    calls = _calls(tmp_path)
+    assert _index(calls, "/admin/leak-connections") is not None
+    assert _index(calls, "/admin/fault/reset") is None

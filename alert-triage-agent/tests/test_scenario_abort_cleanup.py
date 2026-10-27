@@ -20,7 +20,9 @@ binary to check macOS compatibility).
 import json
 import os
 import shutil
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -300,3 +302,95 @@ def test_s5_update_failure_is_not_reverted_automatically(tmp_path, monkeypatch):
     assert res.returncode == 1
     assert "S5 aborted" not in res.stderr
     assert "run '" in res.stderr and "--revert' to restore the baseline" in res.stderr
+
+
+# --- Ctrl-C during the traffic hold (S1-S5) -----------------------------------------------
+# DEMO.md: "Press Ctrl-C at any time to safely stop traffic early and view next steps".
+# SIGINT goes to the whole foreground process group, so the loop's foreground child (the
+# `sleep`, or the `date +%s` at the top of the loop) dies with 130 as well. Under set -e that
+# used to abort the run and the EXIT trap undid the fault. Now the run finishes normally (rc 0),
+# prints NEXT STEPS and keeps the fault. The stubs below hang in the chosen child and record a
+# marker so the SIGINT deterministically lands there.
+
+REAL_SLEEP = shutil.which("sleep")
+CTRL_C_SLEEP = f"""#!/bin/sh
+if [ "${{ATA_CTRL_C_AT:-}}" = "sleep" ]; then echo "sleep $*" >> "$ATA_CTRL_C_MARK"; exec {REAL_SLEEP} 30; fi
+exec {REAL_SLEEP} "$@"
+"""
+# Hangs in the `date +%s` call number $ATA_CTRL_C_AFTER (0-based) when ATA_CTRL_C_AT=date.
+CTRL_C_DATE = f"""#!/bin/sh
+if [ "$1" = "+%s" ] && [ "${{ATA_CTRL_C_AT:-}}" = "date" ]; then
+  n=$(cat "$ATA_CTRL_C_MARK.n" 2>/dev/null || echo 0)
+  echo $((n + 1)) > "$ATA_CTRL_C_MARK.n"
+  if [ "$n" -ge "$ATA_CTRL_C_AFTER" ]; then echo "date $*" >> "$ATA_CTRL_C_MARK"; exec {REAL_SLEEP} 30; fi
+fi
+exec {REAL_DATE} "$@"
+"""
+
+
+def install_ctrl_c_stubs(bin_dir):
+    for name, body in [("sleep", CTRL_C_SLEEP), ("date", CTRL_C_DATE)]:
+        stub = Path(bin_dir) / name
+        stub.write_text(body)
+        stub.chmod(0o755)
+
+
+def run_with_ctrl_c(argv, env, cwd, at, after=0):
+    """Run argv in its own process group and send SIGINT to the group (as a terminal Ctrl-C
+    does) once the stubbed `at` child ("sleep" or "date") is hanging in the traffic loop."""
+    mark = Path(cwd) / "ctrl-c-mark"
+    e = dict(env, ATA_CTRL_C_MARK=str(mark), ATA_CTRL_C_AT=at, ATA_CTRL_C_AFTER=str(after))
+    proc = subprocess.Popen(argv, cwd=str(cwd), env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 30
+        while not mark.exists() and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert mark.exists(), f"the loop never reached the stubbed {at}"
+        time.sleep(0.3)  # let the stub exec the real sleep
+        os.killpg(proc.pid, signal.SIGINT)
+        out, err = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def assert_finished_gracefully(res):
+    output = res.stdout + res.stderr
+    assert res.returncode == 0, output
+    assert "interrupted by user (Ctrl-C). Finishing scenario..." in output
+    assert "NEXT STEPS" in res.stdout
+    assert "aborted (exit" not in output
+
+
+@pytest.mark.parametrize("at", ["sleep", "date"])
+@pytest.mark.parametrize("script", ["s1_backend_5xx.sh", "s2_backend_latency.sh", "s3_concurrent_disjoint.sh"])
+def test_ctrl_c_during_the_hold_finishes_and_keeps_the_fault(tmp_path, env, script, at):
+    install_ctrl_c_stubs(tmp_path / "bin")
+    argv = [TEST_BASH, str(SCRIPTS_DIR / "scenarios" / script), "--hold", "5m"]
+    # `date +%s` call 0 is START_EPOCH; call 1 is the first loop iteration.
+    res = run_with_ctrl_c(argv, env, tmp_path, at, after=1)
+    assert_finished_gracefully(res)
+    calls = _calls(tmp_path)
+    assert _index(calls, "/admin/fault/inject") is not None
+    assert _index(calls, "/admin/fault/reset") is None
+    assert _index(calls, REDEPLOY_168) is None
+
+
+@pytest.mark.parametrize("at", ["sleep", "date"])
+def test_s5_ctrl_c_during_the_hold_finishes_and_keeps_the_bad_deploy(tmp_path, at):
+    s5 = Env(tmp_path, baseline_state())
+    install_ctrl_c_stubs(s5.dir)
+    e = os.environ.copy()
+    for var in ("PINNED_INVENTORY_DIGEST", "PINNED_INVENTORY_REVISION", "PINNED_INVENTORY_IMAGE",
+                "PROJECT_ID", "GCP_PROJECT", "REGION", "GCP_REGION", "NAME_PREFIX"):
+        e.pop(var, None)
+    e.update(PATH=f"{s5.dir}{os.pathsep}{e['PATH']}", MOCK_MODE="false", DRY_RUN="false", ATA_API_KEY="test-key")
+    argv = [TEST_BASH, str(SCRIPTS_DIR / "scenarios" / "s5_bad_deploy.sh"), "--hold", "5m"]
+    # `date +%s` call 0 names the revision, 1 is START_EPOCH, 2 is the first loop iteration.
+    res = run_with_ctrl_c(argv, e, tmp_path, at, after=2)
+    assert_finished_gracefully(res)
+    assert s5.state["env"]["DB_USER"] == BAD_USER
+    assert s5.state["traffic"] != [[PINNED_REVISION, 100]]
