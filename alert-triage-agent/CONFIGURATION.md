@@ -194,7 +194,7 @@ resource "google_cloud_tasks_queue" "timer_queue" {
 }
 ```
 
-The triage queue retry values come from variables in `infra/terraform/foundation/variables.tf`. The defaults below are copied from that file, which is the source of truth. The rest of the documentation refers to the retry window as `triage_queue_max_retry_duration` and does not repeat its value. Terraform validation rejects `max_attempts` below 1, malformed or zero durations, and a `max_backoff` smaller than `min_backoff`.
+The triage queue retry values come from variables in `infra/terraform/foundation/variables.tf`. The defaults below are copied from that file, which is the source of truth. The rest of the documentation refers to the retry window as `triage_queue_max_retry_duration` and does not repeat its value. Terraform validation rejects `max_attempts` below 1, malformed or zero durations, and a `max_backoff` smaller than `min_backoff`. Validation does not enforce a lower bound on `min_backoff` (`"0s"` is accepted) or an upper bound on either backoff; range checking is left to the Cloud Tasks API. A `max_backoff` in the wrong format (for example `"5m"`) reports two errors: the format error and the `max_backoff >= min_backoff` check, which cannot compare a value it cannot parse. Fix the format and both errors clear.
 
 | Variable | Default | Effect |
 | :--- | :--- | :--- |

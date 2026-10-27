@@ -131,6 +131,7 @@ When you change only the triage queue (for example its `retry_config` or the `tr
 
 ```bash
 cd alert-triage-agent/infra/terraform/foundation
+terraform init -backend-config=backend.hcl
 terraform plan -target=google_cloud_tasks_queue.triage_queue -out=tfplan
 terraform apply tfplan
 ```
@@ -138,7 +139,7 @@ terraform apply tfplan
 > [!WARNING]
 > Do not assume an untargeted `terraform apply` of the foundation module will change only the queue. The module may have other pending in-place changes that were never applied, such as label or service account description updates. Before any untargeted apply, run a full `terraform plan` and review every change it lists. In particular, check that `random_password.webhook_token` is not replaced, because a replacement rotates the webhook token.
 
-After the apply, confirm the live settings with `gcloud tasks queues describe ata-triage-queue --location=<region>`.
+After the apply, confirm the live settings with `gcloud tasks queues describe ata-triage-queue --location=<region> --project=<project_id>`.
 
 ---
 
