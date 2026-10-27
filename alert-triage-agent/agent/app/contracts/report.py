@@ -364,6 +364,10 @@ class InvestigationReport(BaseModel):
             comp = self.raw_metadata.get("component") or (self.raw_metadata.get("labels") or {}).get("component") or (self.raw_metadata.get("policy_user_labels") or {}).get("component")
         if not sig:
             sig = self.raw_metadata.get("signal") or (self.raw_metadata.get("labels") or {}).get("signal") or (self.raw_metadata.get("policy_user_labels") or {}).get("signal")
+        # Every signal alerting on the component, not only the first alert's (S5: latency and 5xx).
+        comp_signals = self._component_signals(comp) if comp else []
+        if comp_signals:
+            sig = ", ".join(comp_signals)
 
         comp_sig_parts = []
         def _val(value: Any) -> str:
@@ -454,6 +458,19 @@ class InvestigationReport(BaseModel):
             else:
                 anonymous += 1
         return max(1, len(ids) + anonymous)
+
+    def _component_signals(self, component: str) -> list[str]:
+        """Distinct signal labels of the alerts on ``component``, in alert order."""
+        signals: list[str] = []
+        for a in self.alerts or []:
+            if not isinstance(a, dict):
+                continue
+            if (a.get("component") or a.get("resource_name") or a.get("resource")) != component:
+                continue
+            sig = a.get("signal") or (a.get("labels") or {}).get("signal") or (a.get("policy_user_labels") or {}).get("signal")
+            if sig and str(sig) not in signals:
+                signals.append(str(sig))
+        return signals
 
     def _alert_signal(self) -> Optional[str]:
         """Signal label of the origin's alert (else the first alert, else raw_metadata)."""

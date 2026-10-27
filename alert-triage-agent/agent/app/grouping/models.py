@@ -158,6 +158,10 @@ class OKFDocument(BaseModel):
     suppressed: bool = False
     suppression_reason: Optional[str] = None
 
+    # Correlation decision that opened this group (decision, best_score, thresholds, open
+    # groups compared), stated in the ticket so single-alert groups also show why they are new.
+    correlation: Optional[dict[str, Any]] = None
+
     # Correlated Member Alerts
     alerts: list[dict[str, Any]] = Field(default_factory=list)
 

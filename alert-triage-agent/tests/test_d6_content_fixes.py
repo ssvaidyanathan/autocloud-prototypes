@@ -164,7 +164,7 @@ def test_normal_database_connections_described_as_normal():
 
 
 def test_high_database_connections_described_as_threshold_reached():
-    """Assert that connection count >= 20 is described as reaching threshold."""
+    """Assert that connection count >= 80% of the measured limit is described as reaching it."""
     synth = SynthesizerAgent()
     alert = AlertEvent(
         incident_id="test-sql-breach",
@@ -186,7 +186,7 @@ def test_high_database_connections_described_as_threshold_reached():
     ]
 
     obs = synth._synthesize_observations(dossiers, alert)
-    assert "Database active connections reached 24 threshold on ata-inventory-db" in obs
+    assert "Database active connections reached 24 of 25 on ata-inventory-db" in obs
 
 
 def test_problem_bullet_wording_matches_5xx_dominant_evidence():

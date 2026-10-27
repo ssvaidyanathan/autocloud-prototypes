@@ -30,6 +30,7 @@ from ..correlation.engine import (
     CorrelationEngine,
     candidate_from_okf,
 )
+from ..correlation.scoring import THRESHOLD_AUTO_ATTACH, THRESHOLD_AUTO_NEW
 from ..timers.scheduler import TimerScheduleError, schedule_delayed_timer
 from .models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument, format_okf_alert_entry
 from .store import OKFStore
@@ -299,6 +300,9 @@ class GroupingManager:
                 "confidence": decision.confidence,
                 "rationale": decision.rationale,
                 "is_gray_zone": decision.is_gray_zone,
+                "open_groups_compared": len(candidates),
+                "threshold_auto_new": THRESHOLD_AUTO_NEW,
+                "threshold_auto_attach": THRESHOLD_AUTO_ATTACH,
             }
             if decision.decision == "attach" and decision.target_group_id:
                 matched_group_id = decision.target_group_id
@@ -451,6 +455,7 @@ class GroupingManager:
             settle_deadline=settle_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
             max_wait_deadline=max_wait_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
             alerts=[format_okf_alert_entry(alert, valid_ts=alert.started_at, received_at=now_iso)],
+            correlation={k: v for k, v in correlation_info.items() if k != "confidence"} or None,
         )
 
         saved_doc = self.store.write(group_id, new_doc)

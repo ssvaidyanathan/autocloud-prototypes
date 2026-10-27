@@ -109,7 +109,7 @@ def test_s2_backend_latency_consistency(synthesizer):
     assert cause_comp == origin, f"Named cause component '{cause_comp}' must equal origin '{origin}'"
     assert "upstream dependency" in text.lower() and "ata-inventory-api" in text
     # Dominant signal must match latency policy, not 5xx
-    assert "P95 latency: 6500ms" in text
+    assert "peak observed latency: 6500ms" in text
     assert "5xx error rate" not in text
 
 

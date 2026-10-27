@@ -446,7 +446,7 @@ def test_s2_root_cause_states_gateway_timeout_fact_without_timeout_value():
     assert (
         "Apigee proxy `ata-inventory-v1` (revision 132) returned 200 HTTP 504 responses with fault "
         f"`{S2_GT_FAULT}` (fault source: target). Requests on ata-inventory-v1 -> ata-inventory-api "
-        "did not complete within the proxy's target timeout; `ata-inventory-api` P95 latency was 6546ms."
+        "did not complete within the proxy's target timeout; `ata-inventory-api` peak observed latency was 6546ms."
     ) in text
     # The timeout value is not in the gathered data, so none is stated.
     assert "5000" not in text and "5 s" not in text and "5s" not in text

@@ -33,7 +33,7 @@ from .grouping.store import OKFStore, read_okf, update_okf_atomically
 from .grouping.suppression import format_late_alert_work_note
 from .recovery import recovery_note_for_group
 from .specialists.origin_selection import alert_event_from_entry
-from .specialists.synthesizer import SynthesizerAgent, apply_group_alerts
+from .specialists.synthesizer import SynthesizerAgent, apply_correlation_note, apply_group_alerts
 from .timers.scheduler import schedule_delayed_timer
 from .triage import (
     execute_multi_agent_investigation,
@@ -708,6 +708,7 @@ def _apply_current_group_alerts(report: InvestigationReport, store: OKFStore, do
             type(exc).__name__,
         )
     apply_group_alerts(report, list(current.alerts or []))
+    apply_correlation_note(report, current.correlation)
 
 
 def _note_alerts_missed_by_ticket(

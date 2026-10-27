@@ -225,7 +225,86 @@ def apply_group_alerts(report: InvestigationReport, group_alerts: list[Any]) -> 
             report.first_seen = starts[0]
         if not report.last_alert or starts[-1] > report.last_alert:
             report.last_alert = starts[-1]
+
+    # Priority reflects the most severe alert of the group, not only the investigated one
+    # (S5: the first alert was latency/p2 while the group held 5xx/p1 alerts). Only raised.
+    group_priority = highest_severity_priority(merged)
+    if group_priority and _priority_rank(group_priority) < _priority_rank(report.priority):
+        logger.info(
+            "Group %s: priority raised from %s to %s (highest alert severity label in the group)",
+            report.group_id, report.priority, group_priority,
+        )
+        report.priority = group_priority
     return report
+
+
+def _as_number(value: Any) -> Optional[float]:
+    """Float of a measured value, or None for missing / 'N/A (not captured)' / unparseable."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+CORRELATION_PREFIX = "Correlation:"
+
+
+def correlation_observation(correlation: Optional[dict[str, Any]]) -> Optional[str]:
+    """Observation stating the correlation decision that opened the group, or None."""
+    if not isinstance(correlation, dict) or correlation.get("decision") != "new_group":
+        return None
+    compared = correlation.get("open_groups_compared")
+    score = _as_number(correlation.get("best_score"))
+    low = _as_number(correlation.get("threshold_auto_new"))
+    high = _as_number(correlation.get("threshold_auto_attach"))
+    if compared == 0:
+        return f"{CORRELATION_PREFIX} opened a new incident group (no other open incident group to compare with)"
+    if score is None or not compared:
+        return None
+    groups = "group" if compared == 1 else "groups"
+    text = f"{CORRELATION_PREFIX} opened a new incident group; best correlation score {score:g} pts against {compared} open {groups}"
+    if correlation.get("is_gray_zone") and low is not None and high is not None:
+        return text + f" (between {low:g} and {high:g} pts; the gray-zone review decided a new group)"
+    if low is not None and score < low:
+        return text + f", below the {low:g} pts new-group threshold"
+    return text
+
+
+def apply_correlation_note(report: InvestigationReport, correlation: Optional[dict[str, Any]]) -> None:
+    """Add the correlation observation after the alert lines (idempotent)."""
+    line = correlation_observation(correlation)
+    if not line:
+        return
+    items = split_observations(report.observations or "")
+    if any(i.startswith(CORRELATION_PREFIX) for i in items):
+        return
+    pos = 0
+    while pos < len(items) and (
+        pos == 0 or items[pos].startswith(CORRELATED_ALERT_PREFIX)
+    ):
+        pos += 1
+    items[pos:pos] = [line]
+    report.observations = " | ".join(items)
+
+
+def _priority_rank(priority: Optional[str]) -> int:
+    m = re.fullmatch(r"[Pp](\d+)", str(priority or "").strip())
+    return int(m.group(1)) if m else 99
+
+
+def highest_severity_priority(alerts: list[Any]) -> Optional[str]:
+    """'P<n>' for the most severe policy 'severity' label (p1, p2, ...) among ``alerts``, or None."""
+    best: Optional[int] = None
+    for a in alerts or []:
+        if not isinstance(a, dict):
+            continue
+        sev = a.get("severity") or (a.get("labels") or {}).get("severity") or (a.get("policy_user_labels") or {}).get("severity")
+        rank = _priority_rank(sev)
+        if rank != 99 and (best is None or rank < best):
+            best = rank
+    return f"P{best}" if best is not None else None
 
 
 def _merge_report_section(body: str, report_markdown: str) -> str:
@@ -936,15 +1015,13 @@ class SynthesizerAgent:
         for d in dossiers:
             if d.specialist_name == "CloudSQLSpecialist" and d.anomaly_detected:
                 is_sql = True
-                conns = d.metrics.get("active_connections")
-                max_conns = d.metrics.get("max_connections", 25)
-                try:
-                    c_num = float(conns) if conns and conns != "N/A (not captured)" else None
-                    m_num = float(max_conns) if max_conns and max_conns != "N/A (not captured)" else 25.0
-                    if c_num is not None and (c_num >= 20 or (m_num and c_num / m_num >= 0.8)):
-                        metric_details.append(f"connections at {int(c_num)}/{int(m_num)}")
-                except Exception:
-                    pass
+                c_num = _as_number(d.metrics.get("active_connections"))
+                m_num = _as_number(d.metrics.get("max_connections"))
+                # Only measured values: no assumed connection limit.
+                if c_num is not None and m_num and c_num / m_num >= 0.8:
+                    metric_details.append(f"connections at {int(c_num)}/{int(m_num)}")
+                elif c_num is not None and not m_num:
+                    metric_details.append(f"{int(c_num)} active connections (max_connections not captured)")
             elif d.specialist_name == "CloudRunSpecialist":
                 raw_err = d.metrics.get("error_rate_5xx")
                 if raw_err and raw_err != "0.1%" and raw_err != "N/A (not captured)":
@@ -958,7 +1035,9 @@ class SynthesizerAgent:
                         err_5xx_pct = this_pct
                         if d.target_resource in upstream:
                             dependent_5xx[d.target_resource] = (str(raw_err), this_pct)
-                raw_lat = d.metrics.get("latency_p95_ms")
+                # Latency of the origin only: the root cause states the origin's value, and a
+                # dependent's (S2: orders-api 6638ms vs inventory-api 6546ms) must not replace it.
+                raw_lat = d.metrics.get("latency_p95_ms") if d.target_resource == origin else None
                 if raw_lat and raw_lat != "N/A (not captured)":
                     try:
                         lat_p95_ms = float(raw_lat)
@@ -1297,7 +1376,7 @@ class SynthesizerAgent:
 
         Built only from gathered data: the 504/GatewayTimeout count, fault code and fault source
         from Apigee telemetry, the proxy revision from its access log, the topology path from
-        the proxy to the origin, and the origin's P95 latency from the Cloud Run dossier. The
+        the proxy to the origin, and the origin's peak observed latency from the Cloud Run dossier. The
         proxy's timeout value is not gathered, so no value is stated.
         """
         apigee = next((d for d in dossiers if d.specialist_name == "ApigeeSpecialist"), None)
@@ -1334,7 +1413,7 @@ class SynthesizerAgent:
         )
         lat = cr.metrics.get("latency_p95_ms") if cr else None
         if isinstance(lat, (int, float)):
-            fact += f"; `{origin}` P95 latency was {int(lat)}ms"
+            fact += f"; `{origin}` peak observed latency was {int(lat)}ms"
         return fact + "."
 
     def _format_dominant_signal_facts(self, alert: AlertEvent, dossier: Optional[EvidenceDossier]) -> str:
@@ -1347,6 +1426,10 @@ class SynthesizerAgent:
             err_rate = dossier.metrics.get("error_rate_5xx")
             err_str = f" (HTTP 5xx error rate: {err_rate})" if err_rate and err_rate != "0.1%" and err_rate != "N/A (not captured)" else ""
             return f" (database authentication failures in application logs{err_str})"
+        if dossier.metrics.get("has_db_connect_error"):
+            err_rate = dossier.metrics.get("error_rate_5xx")
+            err_str = f" (HTTP 5xx error rate: {err_rate})" if err_rate and err_rate != "0.1%" and err_rate != "N/A (not captured)" else ""
+            return f" (database connection failures in application logs{err_str})"
 
         is_latency_policy = any(k in (alert.policy_name or "").lower() for k in ("latency", "timeout", "slow"))
         is_5xx_policy = any(k in (alert.policy_name or "").lower() for k in ("5xx", "500", "error"))
@@ -1370,7 +1453,7 @@ class SynthesizerAgent:
         # If policy is latency or latency breach without 5xx policy:
         if is_latency_policy or (lat_val is not None and lat_val >= 2000.0 and not is_5xx_policy):
             if lat_val is not None:
-                return f" (P95 latency: {int(lat_val)}ms)"
+                return f" (peak observed latency: {int(lat_val)}ms)"
             return " (elevated request latency)"
 
         # If policy is 5xx or 5xx error breach:
@@ -1380,7 +1463,7 @@ class SynthesizerAgent:
             return " (elevated HTTP 5xx errors)"
 
         if lat_val is not None and lat_val >= 2000.0:
-            return f" (P95 latency: {int(lat_val)}ms)"
+            return f" (peak observed latency: {int(lat_val)}ms)"
         if err and err != "0.1%":
             return f" (HTTP 5xx error rate: {err})"
 
@@ -1469,7 +1552,7 @@ class SynthesizerAgent:
                 symptom_text = f"database authentication failures in application logs{err_str}"
             elif any(k in (alert.policy_name or "").lower() for k in ("latency", "timeout", "slow")):
                 lat = cr_spec.metrics.get("latency_p95_ms") if cr_spec else None
-                lat_str = f" (P95 latency: {lat}ms)" if lat and lat != "N/A (not captured)" else ""
+                lat_str = f" (peak observed latency: {lat}ms)" if lat and lat != "N/A (not captured)" else ""
                 symptom_text = f"elevated request latency{lat_str}"
             elif cr_spec and cr_spec.metrics.get("error_rate_5xx") and cr_spec.metrics["error_rate_5xx"] != "0.1%":
                 symptom_text = f"elevated HTTP 5xx error rate ({cr_spec.metrics['error_rate_5xx']})"
@@ -1587,6 +1670,10 @@ class SynthesizerAgent:
     ) -> str:
         """Synthesize 3-5 concrete evidence observations with metric numbers, log excerpts, and timestamps."""
         obs_items: list[str] = []
+        policy_lower = (alert.policy_name or "").lower()
+        is_rate_limit_alert = "429" in policy_lower or "spikearrest" in policy_lower or (
+            str((alert.policy_user_labels or {}).get("signal") or "").lower() == "rate-limit"
+        )
 
         # 1. Alert trigger item
         started_at = alert.started_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1599,32 +1686,29 @@ class SynthesizerAgent:
         # 2. Metric evidence items
         for d in dossiers:
             if d.specialist_name == "CloudSQLSpecialist" and d.metrics:
+                if is_rate_limit_alert:
+                    # A SpikeArrest rejection happens in the proxy before any backend call, so
+                    # database state is not evidence for it (S3: "connections normal" on a 429).
+                    continue
                 conns = d.metrics.get("active_connections")
                 max_conns = d.metrics.get("max_connections")
-                conns_num = None
-                max_num = None
-                try:
-                    if conns is not None and conns != "N/A (not captured)":
-                        conns_num = float(conns)
-                except (ValueError, TypeError):
-                    pass
-                try:
-                    if max_conns is not None and max_conns != "N/A (not captured)":
-                        max_num = float(max_conns)
-                    else:
-                        max_num = 25.0
-                except (ValueError, TypeError):
-                    max_num = 25.0
-
+                conns_num = _as_number(conns)
+                max_num = _as_number(max_conns)
                 if conns_num is not None:
-                    max_disp = int(max_num) if max_num else 25
-                    if conns_num >= 20 or (max_num and (conns_num / max_num) >= 0.8):
-                        obs_items.append(
-                            f"Database active connections reached {int(conns_num)} threshold on {d.target_resource}"
-                        )
+                    if max_num:
+                        if conns_num / max_num >= 0.8:
+                            obs_items.append(
+                                f"Database active connections reached {int(conns_num)} of {int(max_num)} on {d.target_resource}"
+                            )
+                        else:
+                            obs_items.append(
+                                f"Database active connections normal ({int(conns_num)} of {int(max_num)}) on {d.target_resource}"
+                            )
                     else:
+                        # No limit was captured: state the count only, never an assumed maximum.
                         obs_items.append(
-                            f"Database active connections normal ({int(conns_num)} of {max_disp}) on {d.target_resource}"
+                            f"Database active connections: {int(conns_num)} on {d.target_resource} "
+                            "(max_connections not captured)"
                         )
 
                 num_backends = d.metrics.get("num_backends")
@@ -1653,6 +1737,11 @@ class SynthesizerAgent:
                 has_db_auth = _dossier_has_db_auth_error(d)
                 if has_db_auth:
                     obs_items.append(f"Database authentication failure observed in application logs on {d.target_resource}")
+                elif d.metrics.get("has_db_connect_error"):
+                    obs_items.append(
+                        f"Database connection failures observed in application logs on {d.target_resource} "
+                        "(no authentication failure signature)"
+                    )
             elif d.specialist_name == "ApigeeSpecialist" and d.metrics:
                 cap = d.metrics.get("access_log_cap_hit")
                 if isinstance(cap, dict):
@@ -1763,7 +1852,13 @@ class SynthesizerAgent:
         if recent_rev:
             has_db_auth = _dossier_has_db_auth_error(cr_dossier)
             config_check_cmd = f"gcloud run revisions describe {recent_rev} --region={region} --format=\"yaml(spec.containers[0].env)\""
-            config_check_title = f"Verify database connection credentials and environment variables in {recent_rev}" if has_db_auth else f"Verify revision configuration and environment variables in {recent_rev}"
+            has_db_connect = bool(cr_dossier and cr_dossier.metrics.get("has_db_connect_error"))
+            if has_db_auth:
+                config_check_title = f"Verify database connection credentials and environment variables in {recent_rev}"
+            elif has_db_connect:
+                config_check_title = f"Verify database connection settings and environment variables in {recent_rev}"
+            else:
+                config_check_title = f"Verify revision configuration and environment variables in {recent_rev}"
 
             has_valid_prev = bool(
                 prev_rev
@@ -1860,12 +1955,35 @@ class SynthesizerAgent:
                 command=f"gcloud run services describe {origin} --region={region} --format=\"yaml(status.traffic)\"",
                 verification="Confirm the serving revision is the one that served before the alert onset",
             ),
-            ActionItem(
-                title=f"Review active service telemetry and slow queries via Cloud Monitoring and Cloud Logging for {origin}",
-                command=f"gcloud logging read 'resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"{origin}\" AND severity>=WARNING' --limit=50",
-                verification="Verify latency percentiles stabilize",
-            ),
+            self._generic_log_review_action(origin, alert),
         ]
+
+    @staticmethod
+    def _generic_log_review_action(origin: str, alert: AlertEvent) -> ActionItem:
+        """Log review worded for the alert's signal (no latency wording on a 5xx incident)."""
+        command = (
+            f"gcloud logging read 'resource.type=\"cloud_run_revision\" AND "
+            f"resource.labels.service_name=\"{origin}\" AND severity>=WARNING' --limit=50"
+        )
+        signal = str((alert.policy_user_labels or {}).get("signal") or "").lower()
+        policy = (alert.policy_name or "").lower()
+        if signal == "5xx" or (not signal and "5xx" in policy):
+            return ActionItem(
+                title=f"Review the error logs of {origin} for the cause of the HTTP 5xx responses",
+                command=command,
+                verification=f"Confirm the HTTP 5xx error rate of {origin} returns below the alert threshold",
+            )
+        if signal == "latency" or (not signal and "latency" in policy):
+            return ActionItem(
+                title=f"Review the warning and error logs of {origin} for slow requests and dependencies",
+                command=command,
+                verification=f"Confirm the request latency of {origin} returns below the alert threshold",
+            )
+        return ActionItem(
+            title=f"Review the warning and error logs of {origin}",
+            command=command,
+            verification=f"Confirm the alerting condition on {origin} has cleared",
+        )
 
 
     def _build_alerts(self, alert: AlertEvent, config: AgentConfig) -> list[dict[str, Any]]:
@@ -2274,7 +2392,12 @@ class SynthesizerAgent:
         if chg_d:
             rev = chg_d.metrics.get("recent_revision")
             if rev and (chg_d.metrics.get("change_service") == origin or chg_d.target_resource == origin):
-                return "Deployment regression"
+                origin_db_auth = any(
+                    d.specialist_name == "CloudRunSpecialist" and d.target_resource == origin
+                    and _dossier_has_db_auth_error(d)
+                    for d in dossiers
+                )
+                return "Deployment regression: database authentication failure" if origin_db_auth else "Deployment regression"
         signal = (alert.policy_user_labels or {}).get("signal") or (alert.labels or {}).get("signal")
         if not signal:
             pol = (alert.policy_name or "").lower()

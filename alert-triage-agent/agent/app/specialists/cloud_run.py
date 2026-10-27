@@ -51,7 +51,9 @@ DB_AUTH_PATTERNS = [
 ]
 
 
-# Measured breach thresholds for Cloud Run telemetry (5xx share of requests, P95 latency).
+# Measured breach thresholds for Cloud Run telemetry (5xx share of requests, peak observed
+# latency: the larger of the highest per-minute mean of request_latencies and the slowest
+# logged request >= 2s; it is not a percentile, so it is never labelled P95).
 ERROR_RATE_5XX_BREACH_PCT = 5.0
 LATENCY_P95_BREACH_MS = 2000.0
 
@@ -83,8 +85,26 @@ def measured_breaches(metrics: dict[str, Any]) -> list[str]:
         breaches.append(f"HTTP 5xx error rate {rate_raw}")
     latency = _as_float(metrics.get("latency_p95_ms"))
     if latency is not None and latency >= LATENCY_P95_BREACH_MS:
-        breaches.append(f"P95 latency {latency:g}ms")
+        breaches.append(f"peak observed latency {latency:g}ms")
     return breaches
+
+
+# Database connection failures that do not name a cause. They are recorded as a weaker,
+# separate signal ("database connection failures"), never as an authentication failure, so a
+# change in the connector's error text cannot make a DB-side failure disappear from the RCA.
+DB_CONNECT_FAILURE_PATTERNS = [
+    re.compile(r"\bfailed to connect to cloud sql\b"),
+    re.compile(r"\bcould not connect to server\b"),
+    re.compile(r"\bconnection to server at \S+.* failed\b"),
+    re.compile(r"\bsqlalchemy\.exc\.operationalerror\b"),
+    re.compile(r"\bpg8000\.exceptions\.interfaceerror\b"),
+]
+
+
+def has_db_connect_failure_signature(text: str) -> bool:
+    """Return True if log text reports a database connection failure (cause not named)."""
+    lowered = (text or "").lower()
+    return any(p.search(lowered) for p in DB_CONNECT_FAILURE_PATTERNS)
 
 
 def has_db_auth_signature(text: str) -> bool:
@@ -202,6 +222,7 @@ class CloudRunSpecialist(BaseSpecialist):
         service_describe_info: Optional[dict[str, Any]] = None
         error_logs_captured: list[dict[str, Any]] = []
         detected_db_auth_in_logs: bool = False
+        detected_db_connect_failure_in_logs: bool = False
 
         # 1. Cloud Monitoring time series query
         try:
@@ -360,6 +381,8 @@ class CloudRunSpecialist(BaseSpecialist):
 
                 if has_db_auth_signature(full_entry_text):
                     detected_db_auth_in_logs = True
+                elif has_db_connect_failure_signature(full_entry_text):
+                    detected_db_connect_failure_in_logs = True
 
                 if req_path and is_excluded_endpoint(req_path):
                     continue
@@ -482,6 +505,13 @@ class CloudRunSpecialist(BaseSpecialist):
                 metrics["has_db_auth_error"] = True
                 metrics["observed_symptom"] = "database authentication errors from application logs"
                 findings.append(f"Application error logs on `{target_service}` indicate database authentication failure.")
+            elif detected_db_connect_failure_in_logs:
+                metrics["has_db_connect_error"] = True
+                metrics["observed_symptom"] = "database connection failures from application logs"
+                findings.append(
+                    f"Application error logs on `{target_service}` show database connection failures "
+                    "(no authentication failure signature)."
+                )
 
             if error_logs_captured:
                 findings.append(
@@ -497,7 +527,7 @@ class CloudRunSpecialist(BaseSpecialist):
             evidence_content = (
                 f"Target: {target_service}\n"
                 f"5xx Errors: {metrics['error_rate_5xx']}\n"
-                f"Latency P95: {metrics['latency_p95_ms']}\n"
+                f"Peak observed latency: {metrics['latency_p95_ms']}\n"
                 f"Request Rate: {metrics['request_count_rpm']}\n"
                 f"Container Restarts: {metrics['container_restarts']}\n"
                 f"Sample Logs (excluding /admin/*):\n"
