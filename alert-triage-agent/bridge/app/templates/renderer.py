@@ -433,9 +433,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="callout-box" style="background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; padding: 14px; margin-bottom: 16px;">
         <div style="font-size: 13px; margin-bottom: 8px;">
           <strong>Target Proxy:</strong> <a href="{{ builder.build_apigee_proxy_url(report.apigee_analytics.proxy_name) }}" target="_blank" class="console-link" style="color: #0969da; text-decoration: none;"><code>{{ report.apigee_analytics.proxy_name }}</code></a>
-          &nbsp;|&nbsp; <strong>P50 Latency:</strong> {{ report.apigee_analytics.target_latency_p50 or 'N/A' }}
-          &nbsp;|&nbsp; <strong>P95 Latency:</strong> {{ report.apigee_analytics.target_latency_p95 or 'N/A' }}
-          &nbsp;|&nbsp; <strong>P99 Latency:</strong> {{ report.apigee_analytics.target_latency_p99 or 'N/A' }}
+          &nbsp;|&nbsp; <strong>Target latency{% if report.apigee_analytics.target_latency_basis %} ({{ report.apigee_analytics.target_latency_basis }}){% endif %}:</strong>
+          P50 {{ report.apigee_analytics.target_latency_p50 or 'N/A' }},
+          P95 {{ report.apigee_analytics.target_latency_p95 or 'N/A' }},
+          P99 {{ report.apigee_analytics.target_latency_p99 or 'N/A' }}
         </div>
         <div style="display: flex; gap: 12px; flex-wrap: wrap;">
           {% for code, count in report.apigee_analytics.response_codes.items() %}

@@ -2270,15 +2270,19 @@ class SynthesizerAgent:
                     })
                 else:
                     lat = d.metrics.get("target_latency_p95_ms")
-                    during_val = f"{lat}ms (timeout)" if isinstance(lat, (int, float)) else str(lat)
-                    var_val = f"+{lat}ms" if isinstance(lat, (int, float)) else "N/A (no baseline captured)"
+                    basis = d.metrics.get("target_latency_basis")
+                    during_val = f"{lat}ms" if isinstance(lat, (int, float)) else str(lat)
+                    # "(timeout)" only when the Apigee dossier observed GatewayTimeout faults.
+                    if isinstance(lat, (int, float)) and d.metrics.get("gateway_timeout"):
+                        during_val += " (GatewayTimeout observed)"
                     metrics.append({
                         "layer": "Apigee",
-                        "metric_name": "apigee.googleapis.com/target/latencies (P95)",
+                        # The P95 is of logged requests or of per-minute means; the basis says which.
+                        "metric_name": f"Apigee target latency, P95 ({basis})" if basis else "Apigee target latency",
                         "resource": d.target_resource,
                         "before_value": "N/A (no baseline captured)",
                         "during_value": during_val,
-                        "variance": var_val,
+                        "variance": "N/A (no baseline captured)",
                     })
         return metrics
 
@@ -2331,6 +2335,11 @@ class SynthesizerAgent:
             "target_latency_p50": p50 or "N/A (not captured)",
             "target_latency_p95": p95 or "N/A (not captured)",
             "target_latency_p99": p99 or "N/A (not captured)",
+            **(
+                {"target_latency_basis": apigee_dossier.metrics["target_latency_basis"]}
+                if apigee_dossier.metrics.get("target_latency_basis")
+                else {}
+            ),
         }
 
     def _build_revision_diffs(

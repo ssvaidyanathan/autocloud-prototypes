@@ -26,6 +26,37 @@ SPIKE_ARREST_FAULT = "SpikeArrestViolation"
 ACCESS_LOG_NAME = "ata-apigee-access"
 
 
+TARGET_LATENCIES_METRIC = "apigee.googleapis.com/target/latencies"
+
+
+def _nearest_rank(sorted_vals: list[float], q: float) -> int:
+    return int(round(sorted_vals[min(int(len(sorted_vals) * q), len(sorted_vals) - 1)]))
+
+
+def target_latency_summary(logged_ms: list[float], minute_means_ms: list[float]) -> Optional[dict[str, Any]]:
+    """P50/P95/P99 over one population, with the population named in `basis`.
+
+    Per-request access-log latencies are used when there are any. Otherwise the percentiles
+    are over the per-minute target/latencies means, each minute counted once: a percentile of
+    means, not of requests. The two are never mixed. None when neither was captured.
+    """
+    if logged_ms:
+        vals, noun, source = logged_ms, "logged request", ACCESS_LOG_NAME
+    elif minute_means_ms:
+        vals, noun, source = minute_means_ms, "per-minute mean", TARGET_LATENCIES_METRIC
+    else:
+        return None
+    ordered = sorted(vals)
+    n = len(ordered)
+    return {
+        "p50_ms": _nearest_rank(ordered, 0.50),
+        "p95_ms": _nearest_rank(ordered, 0.95),
+        "p99_ms": _nearest_rank(ordered, 0.99),
+        "population": f"{n} {noun}{'' if n == 1 else 's'}",
+        "basis": f"percentiles of {n} {noun}{'' if n == 1 else 's'} ({source})",
+    }
+
+
 def access_log_name(project_id: str) -> str:
     """Full Cloud Logging log name of the Apigee access log in `project_id`."""
     return f"projects/{project_id}/logs/{ACCESS_LOG_NAME}"
@@ -164,7 +195,9 @@ class ApigeeSpecialist(BaseSpecialist):
 
         # Real telemetry containers
         status_counts: dict[str, int] = {}
-        latencies_ms: list[float] = []
+        # Kept apart: per-minute distribution means and per-request access-log latencies.
+        minute_means_ms: list[float] = []
+        logged_latencies_ms: list[float] = []
         top_client_ip: Optional[str] = None
         fault_codes: set[str] = set()
         # GatewayTimeout evidence: metric series (response_code/fault_code/fault_source labels)
@@ -254,10 +287,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 for pt in ts.points:
                     dist = getattr(pt.value, "distribution_value", None)
                     if dist and getattr(dist, "count", 0) > 0:
-                        mean_val = getattr(dist, "mean", 0.0)
-                        count_val = getattr(dist, "count", 0)
-                        for _ in range(min(count_val, 10)):
-                            latencies_ms.append(float(mean_val))
+                        minute_means_ms.append(float(getattr(dist, "mean", 0.0)))
         except Exception as exc:
             logger.warning("Cloud Monitoring target/latencies query error: %s", exc)
 
@@ -338,7 +368,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 tlat = payload.get("target_latency_ms")
                 if tlat and str(tlat).strip():
                     try:
-                        latencies_ms.append(float(tlat))
+                        logged_latencies_ms.append(float(tlat))
                     except ValueError:
                         pass
             if client_counter:
@@ -347,17 +377,13 @@ class ApigeeSpecialist(BaseSpecialist):
             logger.warning("Cloud Logging ata-apigee-access query error: %s", exc)
 
         # Calculate latency metrics if captured
-        p50_ms: Optional[int] = None
-        p95_ms: Optional[int] = None
-        p99_ms: Optional[int] = None
-        if latencies_ms:
-            sorted_lats = sorted(latencies_ms)
-            n = len(sorted_lats)
-            p50_ms = int(round(sorted_lats[int(n * 0.50)]))
-            p95_idx = min(int(n * 0.95), n - 1)
-            p95_ms = int(round(sorted_lats[p95_idx]))
-            p99_idx = min(int(n * 0.99), n - 1)
-            p99_ms = int(round(sorted_lats[p99_idx]))
+        lat_summary = target_latency_summary(logged_latencies_ms, minute_means_ms)
+        p50_ms: Optional[int] = lat_summary["p50_ms"] if lat_summary else None
+        p95_ms: Optional[int] = lat_summary["p95_ms"] if lat_summary else None
+        p99_ms: Optional[int] = lat_summary["p99_ms"] if lat_summary else None
+        if lat_summary:
+            # What the p50/p95/p99 values are percentiles of; every label of them names it.
+            metrics["target_latency_basis"] = lat_summary["basis"]
 
         # Assign metrics without static numbers
         if p50_ms is not None:
@@ -472,7 +498,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 client_disp = "<CLIENT_IP>/32"
 
             if p95_ms is not None:
-                backend_status = f"Target latency: {p95_ms}ms"
+                backend_status = f"Target latency P95 of {lat_summary['population']}: {p95_ms}ms"
             else:
                 backend_status = "Target latency: N/A (not captured)"
 
@@ -505,13 +531,14 @@ class ApigeeSpecialist(BaseSpecialist):
                     err_code, target_proxy, err_code, window_start.isoformat(), window_end.isoformat(),
                 )
 
+            lat_label = f"Target Latency (P95 of {lat_summary['population']})" if lat_summary else "Target Latency"
             lat_str = f"{p95_ms}ms" if p95_ms is not None else "N/A (not captured)"
             evidence_items.append(
                 EvidenceItem(
                     headline=f"Apigee Upstream Latency / {err_code}: {target_proxy}",
                     content=(
                         f"Proxy: {target_proxy}\n"
-                        f"Target Latency (P95): {lat_str}\n"
+                        f"{lat_label}: {lat_str}\n"
                         f"Target Errors: {err_str}"
                     ),
                 )
