@@ -74,4 +74,5 @@ def test_applications_ignore_changes_cover_only_client_bookkeeping():
 
     assert lists, "expected client/client_version to be ignored on the Cloud Run services"
     for raw in lists:
-        assert {item.strip() for item in raw.split(",") if item.strip()} == {"client", "client_version"}
+        # scaling = the service-level block (not template.scaling), which this config does not manage.
+        assert {item.strip() for item in raw.split(",") if item.strip()} == {"client", "client_version", "scaling"}
