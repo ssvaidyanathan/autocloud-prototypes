@@ -8,14 +8,17 @@ timer queue. These tests use the generation-enforcing GCS mock to verify that:
 2. A 412 on the duplicate path is retried against a fresh read.
 3. Re-delivery of the same duplicate alert is appended once.
 4. Storage failures propagate (``/triage`` returns 5xx so Cloud Tasks retries).
-5. A vanished group is not resurrected; ``/triage`` falls back to grouping.
+5. A vanished group is not resurrected; ``/triage`` falls back to grouping (logged at ERROR).
+6. An unparseable group is logged at ERROR with its location and ``/triage`` returns 5xx.
 """
 
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from google.api_core import exceptions
+from pydantic import ValidationError
 from starlette.testclient import TestClient
 
 from agent.app import main as agent_main
@@ -318,12 +321,20 @@ def test_triage_duplicate_success_contract(tmp_path, gcs, cloud_cfg, monkeypatch
     assert "0.dup" in _blob(gcs).content
 
 
-def test_triage_falls_back_to_grouping_when_duplicate_target_vanished(tmp_path, gcs, cloud_cfg, monkeypatch):
+def test_triage_falls_back_to_grouping_when_duplicate_target_vanished(tmp_path, gcs, cloud_cfg, monkeypatch, caplog):
     """A vanished duplicate target routes the alert through normal grouping (no silent drop)."""
     local = tmp_path / FILENAME
     client = _triage_client(cloud_cfg, local, monkeypatch)
-    with patch("google.cloud.storage.Client", return_value=gcs):
+    with patch("google.cloud.storage.Client", return_value=gcs), \
+         caplog.at_level(logging.ERROR, logger="agent.app.main"):
         res = client.post("/triage", json=_dup_alert().model_dump(mode="json"))
+
+    vanished = [r for r in caplog.records if r.levelno == logging.ERROR and "vanished" in r.getMessage()]
+    assert len(vanished) == 1
+    msg = vanished[0].getMessage()
+    assert f"gs://{BUCKET}/{BLOB}" in msg
+    assert f"group {GROUP}" in msg
+    assert "0.dup" in msg
 
     assert res.status_code == 200
     body = res.json()
@@ -333,3 +344,90 @@ def test_triage_falls_back_to_grouping_when_duplicate_target_vanished(tmp_path, 
     new_group = store.read(body["group_id"])
     assert new_group is not None
     assert new_group.has_alert("0.dup")
+
+
+MALFORMED_FILES = {
+    # yaml.YAMLError: unterminated flow sequence in the frontmatter.
+    "invalid_yaml": "---\ngroup_id: [unterminated\nstatus: investigating\n---\n\n# Incident\n",
+    # pydantic.ValidationError: well-formed YAML missing the required group_id.
+    "missing_group_id": "---\nstatus: investigating\npolicy_name: ata-inventory-5xx\n---\n\n# Incident\n",
+}
+
+
+def _unparseable_errors(caplog) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.ERROR and r.name == "agent.app.duplicate_checker" and "unparseable" in r.getMessage()
+    ]
+
+
+@pytest.mark.parametrize("content", MALFORMED_FILES.values(), ids=MALFORMED_FILES.keys())
+def test_triage_returns_5xx_and_logs_blob_when_duplicate_target_unparseable(
+    tmp_path, gcs, cloud_cfg, monkeypatch, caplog, content
+):
+    """A malformed group on the duplicate path is a loud 5xx naming the blob, never a false duplicate."""
+    _, local = _seed(gcs, tmp_path)
+    _blob(gcs).upload_from_string(content)
+    client = _triage_client(cloud_cfg, local, monkeypatch)
+
+    with patch("google.cloud.storage.Client", return_value=gcs), \
+         caplog.at_level(logging.ERROR, logger="agent.app.duplicate_checker"):
+        res = client.post("/triage", json=_dup_alert().model_dump(mode="json"))
+
+    assert res.status_code >= 500
+    assert "duplicate" not in res.text
+    assert _blob(gcs).content == content
+    errors = _unparseable_errors(caplog)
+    assert len(errors) == 1
+    assert f"gs://{BUCKET}/{BLOB}" in errors[0]
+    assert f"group {GROUP}" in errors[0]
+    assert "0.dup" in errors[0]
+    # File content (which could carry ticket data) is not echoed into the log.
+    assert "unterminated" not in errors[0]
+    assert "policy_name" not in errors[0]
+
+
+def test_duplicate_append_logs_unparseable_local_target(tmp_path, caplog):
+    """Local backend: the unparseable file is named by path and the parse error propagates."""
+    local = tmp_path / FILENAME
+    local.write_text(MALFORMED_FILES["missing_group_id"], encoding="utf-8")
+
+    with caplog.at_level(logging.ERROR, logger="agent.app.duplicate_checker"), \
+         pytest.raises(ValidationError):
+        append_duplicate_alert_to_incident(local, _dup_alert())
+
+    errors = _unparseable_errors(caplog)
+    assert len(errors) == 1
+    assert str(local) in errors[0]
+    assert f"group {GROUP}" in errors[0]
+    assert local.read_text(encoding="utf-8") == MALFORMED_FILES["missing_group_id"]
+
+
+def test_redelivery_without_source_started_at_is_recorded_once(tmp_path, gcs, cloud_cfg):
+    """Without a source started_at each parse stamps a new "now"; the redelivery still adds one note."""
+    _, local = _seed(gcs, tmp_path)
+    payload = _dup_alert().model_dump(mode="json", exclude={"started_at"})
+    with patch("agent.app.contracts.alert.datetime") as fake_dt:
+        fake_dt.now.return_value.strftime.side_effect = ["2026-10-27T03:04:00Z", "2026-10-27T03:09:00Z"]
+        first, second = AlertEvent.model_validate(payload), AlertEvent.model_validate(payload)
+    assert first.started_at != second.started_at
+
+    with patch("google.cloud.storage.Client", return_value=gcs):
+        append_duplicate_alert_to_incident(local, first, config=cloud_cfg)
+        append_duplicate_alert_to_incident(local, second, config=cloud_cfg)
+
+    final = _final(gcs)
+    assert [a["incident_id"] for a in final.alerts] == ["0.first", "0.dup"]
+    assert _blob(gcs).content.count("**Duplicate Alert Appended**") == 1
+
+
+def test_redelivery_with_new_source_started_at_records_new_note(tmp_path, gcs, cloud_cfg):
+    """A distinct source started_at is a distinct delivery and still gets its own note."""
+    _, local = _seed(gcs, tmp_path)
+    reopened = _dup_alert().model_copy(update={"started_at": "2026-10-27T03:20:00Z"})
+    with patch("google.cloud.storage.Client", return_value=gcs):
+        append_duplicate_alert_to_incident(local, _dup_alert(), config=cloud_cfg)
+        append_duplicate_alert_to_incident(local, reopened, config=cloud_cfg)
+
+    assert [a["incident_id"] for a in _final(gcs).alerts] == ["0.first", "0.dup"]
+    assert _blob(gcs).content.count("**Duplicate Alert Appended**") == 2

@@ -18,6 +18,7 @@ import logging
 from pathlib import Path
 import re
 from typing import Any, Optional
+from pydantic import ValidationError
 import yaml
 
 from .grouping.models import OKFDocument, format_okf_alert_entry
@@ -71,6 +72,12 @@ class DuplicateTargetMissingError(Exception):
     to the normal grouping path instead of reporting the alert as a duplicate.
     """
 
+    def __init__(self, file_path: Path, target: str, group_id: str) -> None:
+        super().__init__(f"Duplicate target {target} (group {group_id}, file {file_path}) no longer exists")
+        self.file_path = file_path
+        self.target = target
+        self.group_id = group_id
+
 
 def _duplicate_target_store(path: Path, config: Optional[Any]) -> tuple[OKFStore, str]:
     """Return the OKF store and identifier addressing the same object as ``path``.
@@ -90,6 +97,13 @@ def _duplicate_target_store(path: Path, config: Optional[Any]) -> tuple[OKFStore
     return store, path.name
 
 
+def _describe_target(store: OKFStore, identifier: str) -> str:
+    """Return a log-safe location for the object ``identifier`` addresses (no content)."""
+    if store.storage_client is not None or (store.bucket_name and not store.is_local):
+        return f"gs://{store.bucket_name}/{identifier}"
+    return str(get_canonical_file_path(store.storage_path, identifier))
+
+
 def append_duplicate_alert_to_incident(
     file_path: str | Path,
     alert: Any,
@@ -104,9 +118,16 @@ def append_duplicate_alert_to_incident(
 
     Raises:
         DuplicateTargetMissingError: the incident group no longer exists.
+        yaml.YAMLError, pydantic.ValidationError: the incident file cannot be parsed
+            (logged at ERROR with the object location and group id first).
     """
     path = Path(file_path)
     store, identifier = _duplicate_target_store(path, config)
+    target = _describe_target(store, identifier)
+    group_id = path.stem.removeprefix("incident-")
+    alert_id = getattr(alert, "incident_id", None)
+    # Without a source started_at, AlertEvent stamps "now", so redeliveries differ on it.
+    started_at_known = "started_at" in (getattr(alert, "model_fields_set", None) or {"started_at"})
 
     # Computed once, outside the mutation, which is re-run on every precondition retry.
     new_ts = getattr(alert, "started_at", None) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -117,7 +138,7 @@ def append_duplicate_alert_to_incident(
     def _mutate(doc: OKFDocument) -> OKFDocument:
         # The store yields a bare document (only group_id set) when the object is missing.
         if doc.model_fields_set <= {"group_id"}:
-            raise DuplicateTargetMissingError(str(path))
+            raise DuplicateTargetMissingError(path, target, group_id)
 
         # 1. Refresh timestamp to current or alert started_at
         doc.timestamp = new_ts
@@ -134,9 +155,8 @@ def append_duplicate_alert_to_incident(
         found = False
         for i, a in enumerate(alerts_list):
             if isinstance(a, dict) and a.get("incident_id") == new_alert_entry["incident_id"]:
-                already_recorded = (
-                    a.get("state") == new_alert_entry.get("state")
-                    and a.get("started_at") == new_alert_entry.get("started_at")
+                already_recorded = a.get("state") == new_alert_entry.get("state") and (
+                    not started_at_known or a.get("started_at") == new_alert_entry.get("started_at")
                 )
                 if not new_alert_entry.get("labels") and a.get("labels"):
                     new_alert_entry["labels"] = a["labels"]
@@ -169,7 +189,20 @@ def append_duplicate_alert_to_incident(
             doc.body = f"{doc.body.rstrip()}{dup_note}"
         return doc
 
-    updated = store.update_atomically(identifier, _mutate)
+    try:
+        updated = store.update_atomically(identifier, _mutate)
+    except (yaml.YAMLError, ValidationError) as exc:
+        # Exception text can quote file content, so only its type is logged.
+        logger.error(
+            "Duplicate target %s (group %s, file %s) is unparseable (%s); "
+            "propagating so alert %s is redelivered.",
+            target,
+            group_id,
+            path,
+            type(exc).__name__,
+            alert_id,
+        )
+        raise
     logger.info(
         "Appended duplicate alert %s to %s and refreshed timestamp to %s",
         base_entry["incident_id"],

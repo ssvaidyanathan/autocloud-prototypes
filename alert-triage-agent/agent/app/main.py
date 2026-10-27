@@ -136,10 +136,14 @@ async def triage_alert(
                     config=settings,
                 )
                 appended = True
-            except DuplicateTargetMissingError:
-                logger.warning(
-                    "Duplicate target %s vanished before append; routing alert %s through grouping.",
-                    dup_res.active_file,
+            except DuplicateTargetMissingError as exc:
+                # Nothing in the agent deletes groups, so FUSE matching a missing object is an anomaly.
+                logger.error(
+                    "Duplicate target %s (group %s, file %s) vanished before append; "
+                    "routing alert %s through grouping.",
+                    exc.target,
+                    exc.group_id,
+                    exc.file_path,
                     alert.incident_id,
                 )
         if appended:
