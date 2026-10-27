@@ -28,3 +28,11 @@ def test_macos_job_runs_the_deploy_script_suites():
     for suite in ("test_bash32_compat.py", "test_macos_userland.py", "test_fresh_deploy_scripts.py",
                   "test_apigee_prefix.py", "test_deploy_scripts_env_vars.py"):
         assert f"tests/{suite}" in job, suite
+
+
+def test_fastmcp_is_pinned_to_the_tested_major():
+    """test review M4: the tools image must not float to a fastmcp that ignores json_response."""
+    import tomllib
+
+    deps = tomllib.loads((ROOT / "tools" / "pyproject.toml").read_text())["project"]["dependencies"]
+    assert [d for d in deps if d.startswith("fastmcp")] == ["fastmcp>=4.1.4,<5"]
