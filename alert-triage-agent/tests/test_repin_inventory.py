@@ -73,6 +73,34 @@ def test_prepare_with_image_tag_builds_first(cloud):
     assert cloud.state["revisions"][candidate_name(cloud)]["digest"] == NEW_DIGEST
 
 
+def test_prepare_build_reads_the_digest_from_the_registry_not_the_streamed_build_log(cloud):
+    """Live ata rollout 2026-10-27: gcloud builds submit streams the build log on stdout, so
+    capturing it as "the digest" failed ("Cloud Build returned no image digest") after a
+    successful push. The log must go to stderr and the digest come from Artifact Registry."""
+    res = cloud.run([REPIN, "prepare", "--image-tag", "v1.2.0"])
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "REMOTE BUILD OUTPUT" in res.stderr and "REMOTE BUILD OUTPUT" not in res.stdout
+    (describe,) = cloud.calls(["artifacts", "docker", "images", "describe"])
+    assert describe[4] == f"{IMAGE_BASE}:v1.2.0"
+    assert "--format=value(image_summary.digest)" in describe
+    assert f"write-pin --revision {candidate_name(cloud)} --digest {NEW_DIGEST}" in res.stdout
+
+
+def test_prepare_fails_loudly_when_the_pushed_digest_cannot_be_read(cloud):
+    state = cloud.state
+    state["fail"] = ["ar_describe"]
+    cloud.set_state(state)
+
+    res = cloud.run([REPIN, "prepare", "--image-tag", "v1.2.0"])
+
+    assert res.returncode != 0
+    assert "its digest could not be read from Artifact Registry" in res.stderr
+    assert "nothing was deployed" in res.stderr
+    assert cloud.calls(["run", "services", "update"]) == []
+    assert cloud.serving() == [(OLD_PIN, 100)]
+
+
 @pytest.mark.parametrize(
     "args, message",
     [

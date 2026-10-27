@@ -106,6 +106,17 @@ elif args[:2] == ["builds", "submit"]:
     fail_if("build")
     state["built_tag"] = opt("tag")
     save()
+    # Like real gcloud: the build log streams on stdout (no machine-readable digest line).
+    print("----- REMOTE BUILD OUTPUT -----")
+    print("Digest: sha256:" + "0" * 64)
+    print(f"{opt('tag')}: digest: {state['build_digest']} size: 1993")
+    print("DONE")
+elif args[:4] == ["artifacts", "docker", "images", "describe"]:
+    fail_if("ar_describe")
+    ref = args[4]
+    if ref != state.get("built_tag"):
+        print(f"ERROR: (gcloud.artifacts.docker.images.describe) NOT_FOUND: {ref}", file=sys.stderr)
+        sys.exit(1)
     print(state["build_digest"])
 elif args[:3] == ["run", "services", "describe"]:
     fail_if("describe")

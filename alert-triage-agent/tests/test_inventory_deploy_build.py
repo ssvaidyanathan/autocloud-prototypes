@@ -67,7 +67,9 @@ def test_build_true_always_builds(iso):
     res = run(iso, [DEPLOY], ISO_AR="found", BUILD_IMAGE="true", **LIVE_ENV)
     assert res.returncode == 0, res.stdout + res.stderr
     assert len(_gcloud(iso, ["builds", "submit"])) == 1
-    assert _gcloud(iso, ["artifacts", "docker", "images", "describe"]) == []
+    # No existence probe of the pinned digest; the only registry read is the pushed tag's digest.
+    describes = _gcloud(iso, ["artifacts", "docker", "images", "describe"])
+    assert [c[5] for c in describes] == [f"{REPO}:v1.1.0"]
 
 
 @pytest.mark.parametrize("value", ["yes", "", "TRUE"])

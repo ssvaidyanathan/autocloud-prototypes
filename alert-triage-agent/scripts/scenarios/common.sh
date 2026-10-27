@@ -342,12 +342,20 @@ build_inventory_image() {
     esac
     ref="${PINNED_INVENTORY_IMAGE_BASE}:${tag}"
     log_info "Building ${ref} from ${INVENTORY_DEMO_DIR} with Cloud Build (service account ${BUILD_SA_EMAIL}, bucket ${BUILD_BUCKET})..." >&2
-    if ! digest="$(gcloud builds submit "${INVENTORY_DEMO_DIR}" --project="${PROJECT_ID}" --tag="${ref}" \
+    # The build log goes to stderr: gcloud builds submit streams it on stdout, so capturing
+    # stdout (e.g. with --format=value(results.images[0].digest)) returns the whole log plus
+    # the digest (live ata rollout 2026-10-27). The digest is read back from Artifact
+    # Registry for the pushed tag instead, like build_image in scripts/cloud-run-deploy-lib.sh.
+    if ! gcloud builds submit "${INVENTORY_DEMO_DIR}" --project="${PROJECT_ID}" --tag="${ref}" \
         --service-account="projects/${PROJECT_ID}/serviceAccounts/${BUILD_SA_EMAIL}" \
         --gcs-source-staging-dir="${BUILD_BUCKET}/source" \
-        --gcs-log-dir="${BUILD_BUCKET}/logs" \
-        --format="value(results.images[0].digest)")"; then
+        --gcs-log-dir="${BUILD_BUCKET}/logs" >&2; then
         log_error "Cloud Build failed for ${ref} (see the build log above)." >&2
+        return 1
+    fi
+    if ! digest="$(gcloud artifacts docker images describe "${ref}" --project="${PROJECT_ID}" \
+        --format="value(image_summary.digest)")"; then
+        log_error "Cloud Build pushed ${ref}, but its digest could not be read from Artifact Registry (see gcloud's error above)." >&2
         return 1
     fi
     if ! is_valid_image_digest "${digest}"; then
