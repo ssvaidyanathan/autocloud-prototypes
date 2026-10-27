@@ -42,7 +42,8 @@ def _request(token: str = "real-token") -> Request:
 
 
 def _cfg(**overrides) -> BridgeConfig:
-    values = {"PROJECT_ID": "proj-x", "NAME_PREFIX": "ata", "REGION": "us-west1", "IS_LOCAL": False}
+    values = {"PROJECT_ID": "proj-x", "NAME_PREFIX": "ata", "REGION": "us-west1", "IS_LOCAL": False,
+              "AGENT_URL": "https://ata-agent-abcdefghij-uw.a.run.app"}
     values.update(overrides)
     return BridgeConfig(**values)
 

@@ -22,7 +22,7 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 | `NAME_PREFIX` | *None (required)* | Stack prefix (`^[a-z][a-z0-9]{1,9}$`, the Terraform rule). Set by `deploy.sh`. |
 | `REGION` | *None (required unless `IS_LOCAL=true`)* | GCP region for Cloud Tasks and Cloud Run. Set by `deploy.sh`. |
 | `ENVIRONMENT` | `prod` | Runtime environment name read by the service. The deploy scripts do not set it, so the default applies. Not the `env` resource label (see [§7.1](#71-label-scheme--value-requirements)). |
-| `AGENT_URL` | `http://localhost:8080` | URL of the `<prefix>-agent` Cloud Run service. Set by `deploy.sh`. |
+| `AGENT_URL` | *none (required when not local; `http://localhost:8080` with `IS_LOCAL=true`)* | URL of the `<prefix>-agent` Cloud Run service (target and audience of the triage tasks). A non-local bridge without it fails at startup. Set by `deploy.sh`. |
 | `TASKS_QUEUE` | `${NAME_PREFIX}-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |
 | `TASKS_LOCATION` | `${REGION}` | GCP region where the Cloud Tasks queue is hosted. |
 | `TASKS_INVOKER_SA` | `${NAME_PREFIX}-bridge-sa@${PROJECT_ID}.iam.gserviceaccount.com` | Service account in the OIDC token of the triage tasks. |

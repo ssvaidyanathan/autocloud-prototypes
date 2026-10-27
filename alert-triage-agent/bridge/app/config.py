@@ -40,7 +40,9 @@ class BridgeConfig(BaseSettings):
     incident_store_path: Optional[str] = Field(default=None, alias="INCIDENT_STORE_PATH")
 
     # Agent Service
-    agent_url: str = Field(default="http://localhost:8080", alias="AGENT_URL")
+    # The agent's URL (Cloud Tasks target and OIDC audience). Required when not local: no silent
+    # localhost fallback outside IS_LOCAL=true (bridge/scripts/deploy.sh sets it).
+    agent_url: Optional[str] = Field(default=None, alias="AGENT_URL")
 
     # Cloud Tasks
     tasks_queue: Optional[str] = Field(default=None, alias="TASKS_QUEUE")
@@ -74,10 +76,12 @@ class BridgeConfig(BaseSettings):
         # IS_LOCAL turns on mock tokens and local fallbacks; never on Cloud Run (K_SERVICE is set there).
         if self.is_local and os.getenv("K_SERVICE"):
             raise ValueError("IS_LOCAL=true is not allowed on Cloud Run (K_SERVICE is set)")
-        for field_name in ("project_id", "region"):
+        for field_name in ("project_id", "region", "agent_url"):
             value = getattr(self, field_name)
             if isinstance(value, str) and not value.strip():
                 setattr(self, field_name, None)
+        if self.is_local and self.agent_url is None:
+            self.agent_url = "http://localhost:8080"  # local development only
         missing = [env for env, value in (("PROJECT_ID", self.project_id), ("REGION", self.region)) if not value]
         if missing and not self.is_local:
             raise ValueError(f"required setting(s) not set: {', '.join(missing)} (only IS_LOCAL=true may omit them)")
@@ -119,7 +123,7 @@ class BridgeConfig(BaseSettings):
         """Settings without which a non-local bridge cannot authenticate callers correctly."""
         if self.is_local:
             return []
-        required = {"PROJECT_NUMBER": self.project_number, "BRIDGE_URL": self.bridge_url}
+        required = {"PROJECT_NUMBER": self.project_number, "BRIDGE_URL": self.bridge_url, "AGENT_URL": self.agent_url}
         return [name for name, value in required.items() if value is None]
 
     @property

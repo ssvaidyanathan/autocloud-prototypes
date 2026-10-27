@@ -28,7 +28,8 @@ AGENT = "ata-agent-sa@proj-x.iam.gserviceaccount.com"
 
 def _cfg(**overrides) -> BridgeConfig:
     values = {"PROJECT_ID": "proj-x", "NAME_PREFIX": "ata", "REGION": "us-west1", "IS_LOCAL": False,
-              "PROJECT_NUMBER": PROJECT_NUMBER, "BRIDGE_URL": BRIDGE_URL}
+              "PROJECT_NUMBER": PROJECT_NUMBER, "BRIDGE_URL": BRIDGE_URL,
+              "AGENT_URL": "https://ata-agent-abcdefghij-uw.a.run.app"}
     values.update(overrides)
     return BridgeConfig(**values)
 
@@ -129,3 +130,13 @@ def test_no_environment_literals_in_bridge_auth():
     text = (ROOT / "bridge" / "app" / "auth.py").read_text()
     assert not re.search(r"-[a-z0-9]{10}-[a-z]{2}\.a\.run\.app", text)
     assert "deploy-demo-test" not in text and "scion-fde-ops" not in text
+
+
+def test_agent_url_is_required_when_not_local_and_local_keeps_the_dev_port(monkeypatch):
+    """test review H2: no silent localhost AGENT_URL (the Cloud Tasks target) outside IS_LOCAL."""
+    monkeypatch.delenv("AGENT_URL", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    cfg = _cfg(AGENT_URL=None)
+    assert cfg.agent_url is None and cfg.missing_required_settings() == ["AGENT_URL"]
+    assert _cfg(AGENT_URL="").missing_required_settings() == ["AGENT_URL"]
+    assert _cfg(AGENT_URL=None, IS_LOCAL=True).agent_url == "http://localhost:8080"
