@@ -1224,9 +1224,17 @@ def get_gke_workload_events(
                 }
             )
         else:
+            raw_payload = getattr(entry, "payload", None)
+            if hasattr(raw_payload, "_mock_name"):
+                raw_payload = None
+            if raw_payload is None and isinstance(entry, dict):
+                raw_payload = entry.get("payload")
+
             jp = (
-                getattr(entry, "json_payload", None)
+                raw_payload
+                or getattr(entry, "json_payload", None)
                 or getattr(entry, "jsonPayload", None)
+                or (entry.get("payload") if isinstance(entry, dict) else {})
                 or (entry.get("jsonPayload") if isinstance(entry, dict) else {})
                 or (entry.get("json_payload") if isinstance(entry, dict) else {})
                 or {}

@@ -63,7 +63,7 @@ sub_agents:
       - If no revision was deployed near onset, report that no causal deployments occurred and down-calibrate confidence.
 
       CRITICAL WORKFLOW REQUIREMENT:
-      1. On Turn 1, invoke 'load_skill' exactly once with skill_name='change-correlation'. Do NOT invoke list_skills or load other skills.
+      1. On Turn 1, invoke 'load_skill' exactly once with skill_name='change-correlation' (or 'k8s-change-correlation' if investigating Kubernetes or GKE workloads). Do NOT invoke list_skills or load other skills.
       2. On Turn 2, execute at most ONE targeted diagnostic query (such as list_cloud_run_revisions or query_audit_logs) for the affected service.
       3. STRICT PROHIBITION ON MULTI-QUERY HUNTING: You are strictly forbidden from executing multiple diagnostic queries or hunting across other tools.
       4. Finding 0 recent changes, receiving an empty list [], or observing no revisions is conclusive diagnostic proof that zero disruptive deployments occurred.
@@ -78,7 +78,7 @@ sub_agents:
         Time Window: {window_start} to {window_end}{symptoms_line}{hypotheses_line}
 
         CRITICAL INSTRUCTIONS:
-        1. Turn 1: Invoke load_skill exactly once with skill_name='change-correlation'. Do NOT call list_skills.
+        1. Turn 1: Invoke load_skill exactly once with skill_name='change-correlation' (or 'k8s-change-correlation' if investigating Kubernetes or GKE workloads). Do NOT call list_skills.
         2. Turn 2: Formulate at most ONE targeted diagnostic query using list_cloud_run_revisions, query_audit_logs, or list_cloud_builds for the affected service.
         3. STRICT PROHIBITION ON MULTI-QUERY HUNTING: You are strictly forbidden from executing multiple diagnostic queries or hunting across other tools.
         4. Finding 0 recent changes, receiving an empty list [], or observing no revisions is conclusive diagnostic proof that zero disruptive deployments occurred.
@@ -95,11 +95,12 @@ sub_agents:
       - query_request_logs: query and aggregate Cloud Run request logs by status class, route, and latency percentiles.
       - summarize_error_groups: summarize error reporting clusters and frequencies.
       - list_log_names: discover relevant log streams.
+      - get_gke_workload_events: query structured Kubernetes lifecycle events, warnings, and K8s audit activity.
       Produce a structured Findings report containing evidence, anomalies, queries run, and confidence.
 
       CRITICAL WORKFLOW REQUIREMENT:
-      1. On Turn 1, invoke 'load_skill' exactly once to load your assigned domain skill ('cloud-logging-queries'). Do NOT invoke list_skills or load other skills.
-      2. On Turn 2, execute at most ONE diagnostic query (such as summarize_error_groups or query_logs) for the affected service.
+      1. On Turn 1, invoke 'load_skill' exactly once to load an assigned domain skill ('cloud-logging-queries' or 'gke-troubleshooting'). Do NOT invoke list_skills or load other skills.
+      2. On Turn 2, execute at most ONE diagnostic query (such as summarize_error_groups, query_logs, or get_gke_workload_events) for the affected service.
       3. On Turn 3, conclude immediately by invoking 'set_model_response' with your structured Findings response. Do NOT invoke any other tools. Zero log entries or empty error groups is a conclusive finding confirming service health. Conclude immediately without trying alternative queries or performing exhaustive scans.
     output_schema: app.contracts.findings.Findings
     prompt_templates:
@@ -111,8 +112,8 @@ sub_agents:
         Time Window: {window_start} to {window_end}{symptoms_line}{hypotheses_line}
 
         CRITICAL INSTRUCTIONS:
-        1. Turn 1: Invoke load_skill exactly once with skill_name='cloud-logging-queries'. Do NOT call list_skills.
-        2. Turn 2: Execute at most ONE diagnostic query using query_logs or summarize_error_groups focusing on the affected service.
+        1. Turn 1: Invoke load_skill exactly once with skill_name='cloud-logging-queries' (or 'gke-troubleshooting' if investigating Kubernetes or GKE workloads). Do NOT call list_skills.
+        2. Turn 2: Execute at most ONE diagnostic query using query_logs, summarize_error_groups, or get_gke_workload_events focusing on the affected service.
         3. Turn 3: Conclude immediately by invoking 'set_model_response' with your structured Findings report. Do NOT invoke any other tools. Zero log entries or empty results is a conclusive finding confirming service health. Do not loop or try alternative queries.
   - agent_class: LlmAgent
     name: metrics_specialist
@@ -126,11 +127,12 @@ sub_agents:
       - compare_to_baseline: compare incident period against historical baseline to detect anomalous shifts.
       - list_alert_policies: inspect active alerting rules and threshold conditions.
       - list_open_alerts: inspect active firing incidents and alerts.
+      - query_gke_metrics: inspect GKE cluster, node, and workload CPU, memory, and container metrics.
       Produce a structured Findings report containing evidence, anomalies, queries run, and confidence.
 
       CRITICAL WORKFLOW REQUIREMENT:
-      1. On Turn 1, invoke 'load_skill' exactly once to load your assigned domain skill ('cloud-monitoring-metrics'). Do NOT invoke list_skills or load other skills.
-      2. On Turn 2, execute at most ONE diagnostic query (such as list_open_alerts or compare_to_baseline) for the affected service.
+      1. On Turn 1, invoke 'load_skill' exactly once to load an assigned domain skill ('cloud-monitoring-metrics' or 'gke-troubleshooting'). Do NOT invoke list_skills or load other skills.
+      2. On Turn 2, execute at most ONE diagnostic query (such as list_open_alerts, compare_to_baseline, query_time_series, or query_gke_metrics) for the affected service.
       3. On Turn 3, conclude immediately by invoking 'set_model_response' with your structured Findings response. Do NOT invoke any other tools. Empty metric points or normal baseline comparison is a conclusive finding confirming service health. Conclude immediately without trying alternative queries or performing exhaustive scans.
     output_schema: app.contracts.findings.Findings
     prompt_templates:
@@ -142,8 +144,8 @@ sub_agents:
         Time Window: {window_start} to {window_end}{symptoms_line}{hypotheses_line}
 
         CRITICAL INSTRUCTIONS:
-        1. Turn 1: Invoke load_skill exactly once with skill_name='cloud-monitoring-metrics'. Do NOT call list_skills.
-        2. Turn 2: Formulate at most ONE targeted diagnostic query using query_time_series, compare_to_baseline, or alert tools for the affected service.
+        1. Turn 1: Invoke load_skill exactly once with skill_name='cloud-monitoring-metrics' (or 'gke-troubleshooting' if investigating Kubernetes or GKE workloads). Do NOT call list_skills.
+        2. Turn 2: Formulate at most ONE targeted diagnostic query using query_time_series, query_gke_metrics, compare_to_baseline, or alert tools for the affected service.
         3. Turn 3: Conclude immediately by invoking 'set_model_response' with your structured Findings report. Do NOT invoke any other tools. Empty metric points or normal baselines is a conclusive finding confirming service health. Do not loop or try alternative queries.
   - agent_class: LlmAgent
     name: resources_specialist
@@ -158,11 +160,13 @@ sub_agents:
       - describe_gke_clusters: check cluster status, node count, and location.
       - describe_compute_instances: verify instance status and machine types.
       - describe_cloud_sql_instances: check database tier, state, and version.
+      - resolve_endpoint_to_gke: resolve external IP, ingress, or custom domain endpoint to backend GKE service and cluster.
+      - query_gke_workload_status: inspect Kubernetes deployments, daemonsets, statefulsets, replica counts, and pod statuses.
       Produce a structured Findings report containing evidence, anomalies, queries run, and confidence.
 
       CRITICAL WORKFLOW REQUIREMENT:
       1. On Turn 1, invoke 'load_skill' exactly once to load an assigned domain skill ('cloud-run-troubleshooting', 'gke-troubleshooting', or 'cloud-sql-troubleshooting'). Do NOT invoke list_skills or load other skills.
-      2. On Turn 2, formulate at most ONE targeted diagnostic query (e.g. describe_cloud_run_service for a Cloud Run service hint).
+      2. On Turn 2, formulate at most ONE targeted diagnostic query (e.g. describe_cloud_run_service for a Cloud Run service hint, or resolve_endpoint_to_gke / query_gke_workload_status for GKE endpoints or workloads).
       3. STRICT PROHIBITION ON CROSS-PLATFORM HUNTING: If investigating a Cloud Run service, you are strictly forbidden from searching GKE clusters, Compute Engine instances, or Cloud SQL instances.
       4. Receiving 'status': 'NOT_FOUND' or 'conclusive': True, finding 0 resources, or observing normal status means the investigation is complete and conclusive. Zero infrastructure defects exist. You are strictly forbidden from calling load_skill again under any circumstances.
       5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' with your structured Findings report. You are strictly forbidden from calling load_skill, describe_cloud_run_service, or any other tool after receiving a conclusive or NOT_FOUND result. Your ONLY valid action on Turn 3 is to invoke 'set_model_response'.
@@ -177,7 +181,7 @@ sub_agents:
 
         CRITICAL INSTRUCTIONS:
         1. Turn 1: Invoke load_skill exactly once with an assigned domain skill ('cloud-run-troubleshooting', 'gke-troubleshooting', or 'cloud-sql-troubleshooting'). Do NOT call list_skills.
-        2. Turn 2: Formulate at most ONE targeted diagnostic query (e.g. describe_cloud_run_service for a Cloud Run service hint).
+        2. Turn 2: Formulate at most ONE targeted diagnostic query (e.g. describe_cloud_run_service for a Cloud Run service hint, or resolve_endpoint_to_gke / query_gke_workload_status for GKE endpoints or workloads).
         3. Turn 3: Conclude immediately by invoking 'set_model_response' with your structured Findings report. Receiving 'status': 'NOT_FOUND', 'conclusive': True, or finding 0 resources is definitive diagnostic proof that zero infrastructure defects exist. Do NOT invoke any further tools. Your ONLY valid action on Turn 3 is to invoke 'set_model_response'.
         4. STRICT PROHIBITION ON CROSS-PLATFORM HUNTING: If investigating a Cloud Run service, you are strictly forbidden from searching GKE clusters, Compute Engine instances, or Cloud SQL instances.
 - agent_class: LlmAgent

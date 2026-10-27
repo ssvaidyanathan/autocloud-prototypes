@@ -151,7 +151,10 @@ def test_skill_toolset_integration_and_filtering() -> None:
     assert "service-shop-api" not in disp_skill_names
 
     logs_base = get_skill_toolset_for_target("logs")
-    assert [s.name for s in logs_base.skills] == ["cloud-logging-queries"]
+    assert set(s.name for s in logs_base.skills) == {
+        "cloud-logging-queries",
+        "gke-troubleshooting",
+    }
 
     # 2. Verify dynamic runtime resolution with service_name="shop-api"
     disp_toolset_svc = get_skill_toolset_for_target("dispatcher", service_name="shop-api")
@@ -163,13 +166,21 @@ def test_skill_toolset_integration_and_filtering() -> None:
     logs_toolset = get_skill_toolset_for_target("logs", service_name="shop-api")
     assert isinstance(logs_toolset, SkillToolset)
     logs_skill_names = [s.name for s in logs_toolset.skills]
-    assert set(logs_skill_names) == {"cloud-logging-queries", "service-shop-api"}
+    assert set(logs_skill_names) == {
+        "cloud-logging-queries",
+        "gke-troubleshooting",
+        "service-shop-api",
+    }
 
     # Verify metrics specialist skill toolset with dynamic resolution
     metrics_toolset = get_skill_toolset_for_target("metrics", service_name="shop-api")
     assert isinstance(metrics_toolset, SkillToolset)
     metrics_skill_names = [s.name for s in metrics_toolset.skills]
-    assert set(metrics_skill_names) == {"cloud-monitoring-metrics", "service-shop-api"}
+    assert set(metrics_skill_names) == {
+        "cloud-monitoring-metrics",
+        "gke-troubleshooting",
+        "service-shop-api",
+    }
 
     # Verify changes specialist skill toolset with dynamic resolution
     changes_toolset = get_skill_toolset_for_target("changes", service_name="shop-api")

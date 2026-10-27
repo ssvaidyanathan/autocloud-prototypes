@@ -120,7 +120,7 @@ def test_get_gke_workload_events() -> None:
     entry_event = MagicMock()
     entry_event.timestamp = datetime(2026, 10, 26, 21, 30, 22, tzinfo=timezone.utc)
     entry_event.log_name = "projects/test-proj/logs/events"
-    entry_event.json_payload = {
+    entry_event.payload = {
         "reason": "Killing",
         "message": "Stopping container app; pod was terminated",
         "type": "Warning",
@@ -1437,7 +1437,7 @@ def test_get_gke_workload_events_truncation() -> None:
         entry = MagicMock()
         entry.timestamp = datetime(2026, 10, 26, 21, 30, i, tzinfo=timezone.utc)
         entry.log_name = "projects/test-proj/logs/events"
-        entry.json_payload = {
+        entry.payload = {
             "reason": "Killing",
             "message": f"Pod {i} killing",
             "type": "Warning",
@@ -1455,6 +1455,71 @@ def test_get_gke_workload_events_truncation() -> None:
     )
     assert len(res["events"]) == 5
     assert res["truncated"] is True
+
+
+def test_get_gke_workload_events_payload_attribute_corr_06() -> None:
+    """CORR-06: Verify entry.payload extraction on real Cloud Logging LogEntry/StructEntry."""
+    mock_client = MagicMock()
+    # Emulate real SDK StructEntry which has .payload but NOT .json_payload
+    entry = MagicMock(spec=["timestamp", "log_name", "payload"])
+    entry.timestamp = datetime(2026, 10, 27, 1, 0, 32, tzinfo=timezone.utc)
+    entry.log_name = "projects/test-proj/logs/events"
+    entry.payload = {
+        "reason": "Killing",
+        "message": "Stopping container app",
+        "type": "Warning",
+        "involvedObject": {
+            "name": "service-alpha-different-ids1-59b969db59-p57nf",
+            "kind": "Pod",
+        },
+    }
+    mock_client.list_entries.return_value = [entry]
+
+    # 1. With workload_name filter matching the pod name
+    res = get_gke_workload_events(
+        cluster_name="california-snow-2",
+        namespace="service-alpha",
+        workload_name="service-alpha-different-ids1",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert res["total_events"] == 1
+    assert len(res["events"]) == 1
+    ev = res["events"][0]
+    assert ev["event_type"] == "k8s_event"
+    assert ev["reason"] == "Killing"
+    assert ev["message"] == "Stopping container app"
+    assert ev["involved_object"] == "service-alpha-different-ids1-59b969db59-p57nf"
+    assert ev["involved_kind"] == "Pod"
+    assert ev["severity"] == "WARNING"
+
+    # 2. Dict-style entry with payload key
+    dict_entry = {
+        "timestamp": "2026-10-27T01:03:32Z",
+        "log_name": "projects/test-proj/logs/events",
+        "payload": {
+            "reason": "Scheduled",
+            "message": "Successfully assigned pod",
+            "type": "Normal",
+            "involvedObject": {
+                "name": "service-alpha-different-ids1-59b969db59-mw4rm",
+                "kind": "Pod",
+            },
+        },
+    }
+    mock_client.list_entries.return_value = [dict_entry]
+    res_dict = get_gke_workload_events(
+        cluster_name="california-snow-2",
+        namespace="service-alpha",
+        workload_name="service-alpha-different-ids1",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert res_dict["total_events"] == 1
+    ev_dict = res_dict["events"][0]
+    assert ev_dict["reason"] == "Scheduled"
+    assert ev_dict["message"] == "Successfully assigned pod"
+    assert ev_dict["severity"] == "INFO"
 
 
 def test_query_gke_metrics_filter_regression_and_entity_type() -> None:

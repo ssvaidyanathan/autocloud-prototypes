@@ -99,6 +99,7 @@ def query_audit_logs(
         for cand in candidates:
             svc_clauses.append(f'protoPayload.serviceName = "{cand}"')
             svc_clauses.append(f'protoPayload.resourceName =~ "{cand}"')
+        svc_clauses.append('protoPayload.serviceName = "k8s.io"')
         svc_clauses = list(dict.fromkeys(svc_clauses))
         filter_parts.append(f"({' OR '.join(svc_clauses)})")
 
@@ -244,7 +245,12 @@ def query_audit_logs(
                 continue
 
             # Ensure returned audit events match candidate services in resource_name
-            if candidates and not any(cand.lower() in resource_name.lower() for cand in candidates):
+            # or k8s.io audit activity
+            if (
+                candidates
+                and event_service_name != "k8s.io"
+                and not any(cand.lower() in resource_name.lower() for cand in candidates)
+            ):
                 continue
 
             results.append(

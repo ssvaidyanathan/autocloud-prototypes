@@ -120,6 +120,22 @@ class TriageAgent:
 
         combined_text = f"{incident.title} {incident.description}".lower()
 
+        # Check for IP endpoint resolution to GKE service
+        ip_match = re.search(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b", combined_text)
+        if ip_match:
+            try:
+                from .tools.resources import resolve_endpoint_to_gke
+
+                endpoint_ip = ip_match.group(1)
+                gke_res = resolve_endpoint_to_gke(endpoint=endpoint_ip)
+                if gke_res and gke_res.get("found"):
+                    k8s_svc = gke_res.get("k8s_service_name") or gke_res.get("service_name") or ""
+                    workload = k8s_svc[:-6] if k8s_svc.endswith("-envoy") else k8s_svc
+                    if workload:
+                        return workload
+            except Exception:
+                pass
+
         # Check for generic service name pattern e.g. *-api, *-svc, *-service
         match = re.search(r"\b([a-z0-9]+(?:-[a-z0-9]+)*(?:-api|-svc|-service))\b", combined_text)
         if match:
@@ -360,6 +376,45 @@ class TriageAgent:
 
         return hypotheses
 
+    def _enrich_plan_with_endpoint_resolution(
+        self,
+        incident: Incident,
+        plan: InvestigationPlan,
+    ) -> InvestigationPlan:
+        """If incident references an IP endpoint, resolve to GKE workload and enrich plan."""
+        combined_text = f"{incident.title} {incident.description} {' '.join(incident.labels or [])}"
+        ip_match = re.search(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b", combined_text)
+        if ip_match:
+            try:
+                from .tools.resources import resolve_endpoint_to_gke
+
+                endpoint_ip = ip_match.group(1)
+                gke_res = resolve_endpoint_to_gke(endpoint=endpoint_ip)
+                if gke_res and gke_res.get("found"):
+                    k8s_svc = gke_res.get("k8s_service_name") or gke_res.get("service_name") or ""
+                    workload = k8s_svc[:-6] if k8s_svc.endswith("-envoy") else k8s_svc
+                    cluster = gke_res.get("cluster_name", "")
+                    ns = gke_res.get("k8s_namespace") or gke_res.get("namespace", "")
+                    if workload:
+                        plan.affected_service = workload
+                        incident.service_hint = workload
+                    if cluster and ns:
+                        symp = (
+                            f"Endpoint {endpoint_ip} resolved to GKE cluster {cluster}, "
+                            f"namespace {ns}, workload {workload}"
+                        )
+                        if symp not in plan.symptoms:
+                            plan.symptoms.append(symp)
+                        hyp = (
+                            f"GKE workload {workload} on cluster {cluster} (namespace {ns}) "
+                            "experienced pod terminations, scale-down, or restart loops."
+                        )
+                        if hyp not in plan.initial_hypotheses:
+                            plan.initial_hypotheses.insert(0, hyp)
+            except Exception:
+                pass
+        return plan
+
     def plan(
         self,
         incident: Incident,
@@ -398,7 +453,7 @@ class TriageAgent:
                         llm_res.onset_time = onset_time_override
                     else:
                         llm_res.onset_time = None
-                    return llm_res
+                    return self._enrich_plan_with_endpoint_resolution(incident, llm_res)
                 if isinstance(llm_res, dict):
                     self.triage_mode = "llm"
                     plan_obj = InvestigationPlan(**llm_res)
@@ -423,7 +478,7 @@ class TriageAgent:
                         plan_obj.onset_time = onset_time_override
                     else:
                         plan_obj.onset_time = None
-                    return plan_obj
+                    return self._enrich_plan_with_endpoint_resolution(incident, plan_obj)
             except Exception:
                 # Fallback to deterministic triage on LLM failure
                 pass
@@ -449,12 +504,15 @@ class TriageAgent:
         selected_specialists = self._select_specialists(incident, symptoms)
         hypotheses = self._generate_hypotheses(service, symptoms, selected_specialists)
 
-        return InvestigationPlan(
-            affected_service=service,
-            symptoms=symptoms,
-            start_time=start_time,
-            end_time=end_time,
-            selected_specialists=selected_specialists,
-            initial_hypotheses=hypotheses,
-            onset_time=onset_time,
+        return self._enrich_plan_with_endpoint_resolution(
+            incident,
+            InvestigationPlan(
+                affected_service=service,
+                symptoms=symptoms,
+                start_time=start_time,
+                end_time=end_time,
+                selected_specialists=selected_specialists,
+                initial_hypotheses=hypotheses,
+                onset_time=onset_time,
+            ),
         )
