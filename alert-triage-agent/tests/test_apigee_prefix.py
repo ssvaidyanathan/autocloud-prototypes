@@ -233,7 +233,7 @@ def env(tmp_path):
     keep.update(PATH=f"{bin_dir}{os.pathsep}{keep['PATH']}", STUB_CALLS=str(tmp_path / "calls"),
                 STUB_STATE=str(tmp_path / "state.json"), STUB_DIR=str(tmp_path), TMPDIR=str(tmp_path),
                 PROJECT_ID="proj-x", REGION="region-x", NAME_PREFIX="atat", APIGEE_ORG="org-x",
-                APIGEE_ENV="env-x", APIGEE_HOST="host.example.test", ALERT_TRIAGE_DIR=str(out),
+                APIGEE_ENV="env-x", APIGEE_HOST="host.example.test", ATA_STACK_DIR=str(out),
                 DEPLOY_POLL_SECS="0", DEPLOY_TIMEOUT_SECS="3", UNDEPLOY_TIMEOUT_SECS="3")
     return keep
 
@@ -310,18 +310,35 @@ def test_deploy_happy_path_touches_only_prefixed_resources(env):
                  "developer     atat-dev@example.com", "app           atat-dev@example.com/atat-demo-app"]:
         assert name in plan, name
     assert res.stdout.index("will be created or updated") < res.stdout.index("Imported revision")
-    key = Path(env["ALERT_TRIAGE_DIR"]) / ".atat-api-key"
+    key = Path(env["ATA_STACK_DIR"]) / ".atat-api-key"
     assert key.read_text() == "key-atat-demo-app\n"
     assert stat.S_IMODE(key.stat().st_mode) == 0o600
-    assert (Path(env["ALERT_TRIAGE_DIR"]) / ".atat-apigee.env").read_text() == \
+    assert (Path(env["ATA_STACK_DIR"]) / ".atat-apigee.env").read_text() == \
         "APIGEE_HOST=host.example.test\nAPIGEE_ORG=org-x\nAPIGEE_ENV=env-x\n"
     assert "key-atat-demo-app" not in res.stdout
     assert "/atat/orders/v1" in res.stdout and "/atat/inventory/v1" in res.stdout
 
 
+def test_deploy_older_alert_triage_dir_name_still_sets_the_file_dir(env, tmp_path):
+    """ALERT_TRIAGE_DIR is the older name of ATA_STACK_DIR (which wins when both are set)."""
+    old = tmp_path / "old-name"
+    old.mkdir()
+    out = Path(env.pop("ATA_STACK_DIR"))
+    assert run(DEPLOY, dict(env, ALERT_TRIAGE_DIR=str(old))).returncode == 0
+    assert (old / ".atat-api-key").is_file() and (old / ".atat-apigee.env").is_file()
+    assert not (out / ".atat-api-key").exists()
+    assert run(DEPLOY, dict(env, ALERT_TRIAGE_DIR=str(old), ATA_STACK_DIR=str(out))).returncode == 0
+    assert (out / ".atat-api-key").is_file() and (out / ".atat-apigee.env").is_file()
+
+
+def test_deploy_rejects_a_stack_dir_that_is_not_a_directory(env, tmp_path):
+    res = run(DEPLOY, dict(env, ATA_STACK_DIR=str(tmp_path / "missing")))
+    assert res.returncode != 0 and "is not a directory" in res.stderr
+
+
 def test_deploy_env_file_is_sourceable(env):
     assert run(DEPLOY, env).returncode == 0
-    out = subprocess.run([TEST_BASH, "-c", f'. "{env["ALERT_TRIAGE_DIR"]}/.atat-apigee.env"; '
+    out = subprocess.run([TEST_BASH, "-c", f'. "{env["ATA_STACK_DIR"]}/.atat-apigee.env"; '
                           'printf "%s|%s|%s" "$APIGEE_HOST" "$APIGEE_ORG" "$APIGEE_ENV"'],
                          capture_output=True, text=True, check=True, env={"PATH": env["PATH"]})
     assert out.stdout == "host.example.test|org-x|env-x"
@@ -353,7 +370,7 @@ def test_deploy_fails_on_non_2xx_and_prints_body(env):
     assert res.returncode != 0
     assert "HTTP 403" in res.stderr and "caller lacks apigee.targetservers.create" in res.stderr
     assert not any("import" in c for c in calls(env))
-    assert not (Path(env["ALERT_TRIAGE_DIR"]) / ".atat-api-key").exists()
+    assert not (Path(env["ATA_STACK_DIR"]) / ".atat-api-key").exists()
 
 
 def test_deploy_fails_when_environment_missing(env):
@@ -430,7 +447,7 @@ def test_deploy_existing_app_key_gets_product(env):
     ])
     res = run(DEPLOY, env)
     assert res.returncode == 0, res.stderr
-    assert (Path(env["ALERT_TRIAGE_DIR"]) / ".atat-api-key").read_text() == "oldkey\n"
+    assert (Path(env["ATA_STACK_DIR"]) / ".atat-api-key").read_text() == "oldkey\n"
 
 
 def test_bearer_token_is_in_a_curl_config_never_on_argv(env):
@@ -474,7 +491,7 @@ def test_deploy_never_uses_a_key_from_another_app(env):
     env["STUB_RULES"] = json.dumps([{"method": "POST", "match": "/apps", "code": 201, "body": other}])
     res = run(DEPLOY, env)
     assert res.returncode != 0
-    assert not (Path(env["ALERT_TRIAGE_DIR"]) / ".atat-api-key").exists()
+    assert not (Path(env["ATA_STACK_DIR"]) / ".atat-api-key").exists()
 
 
 # ---------------------------------------------------------------- the prefix guard in the shared lib

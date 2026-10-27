@@ -27,7 +27,7 @@
 #      exits 1 if anything remains (the state bucket is expected without --delete-state).
 # Never touches a resource whose name does not start with "${NAME_PREFIX}-" (buckets:
 # "${PROJECT_ID}-${NAME_PREFIX}-"). APIs stay enabled. Local files (.deploy-state,
-# .${NAME_PREFIX}-api-key, .${NAME_PREFIX}-apigee.env) are left alone.
+# .${NAME_PREFIX}-api-key, .${NAME_PREFIX}-apigee.env in ATA_STACK_DIR) are left alone.
 # Note: Cloud SQL keeps a deleted instance name reserved for about a week; a redeploy with the
 # same NAME_PREFIX in that window fails at the database phase.
 # ==============================================================================

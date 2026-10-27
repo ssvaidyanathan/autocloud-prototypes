@@ -5,6 +5,7 @@ fault action on GET /admin/*, so a stale pin turns preflight/reset probes into l
 """
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -102,7 +103,7 @@ def _source_with_pin(tmp_path, pin_text, guard='echo "PIN=${PINNED_INVENTORY_REV
     pin.write_text(pin_text)
     script = tmp_path / "src.sh"
     script.write_text(f'#!/usr/bin/env bash\nsource "{SCENARIOS_DIR}/common.sh"\n{guard}\n')
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
+    env = {k: v for k, v in os.environ.items() if k == "ATA_STACK_DIR" or not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
     env.update(ATA_INVENTORY_PIN_FILE=str(pin), **env_extra)
     return subprocess.run([os.environ.get("ATA_TEST_BASH", "bash"), str(script)], capture_output=True,
                           text=True, env=env, check=False, cwd=str(tmp_path))
@@ -162,11 +163,20 @@ def test_missing_pin_file_fails_loudly(tmp_path):
     assert "run scripts/repin-inventory.sh prepare --initial" in res.stderr
 
 
-def _source_default_pin(tmp_path, prefix, guard="echo REACHED", **env_extra):
+def _isolated_scenarios_dir(tmp_path):
+    """A copy of common.sh under tmp_path: the default pin path is next to it, so a pin file
+    of the prefix in this checkout (one that deployed that stack) is never read."""
+    scenarios = tmp_path / "pkg" / "alert-triage-agent" / "scripts" / "scenarios"
+    scenarios.mkdir(parents=True)
+    shutil.copy2(SCENARIOS_DIR / "common.sh", scenarios / "common.sh")
+    return scenarios
+
+
+def _source_default_pin(tmp_path, prefix, guard="echo REACHED", scenarios_dir=SCENARIOS_DIR, **env_extra):
     """Source common.sh with NAME_PREFIX=<prefix> and the default (per-prefix) pin path."""
     script = tmp_path / "src.sh"
-    script.write_text(f'#!/usr/bin/env bash\nsource "{SCENARIOS_DIR}/common.sh"\n{guard}\n')
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
+    script.write_text(f'#!/usr/bin/env bash\nsource "{scenarios_dir}/common.sh"\n{guard}\n')
+    env = {k: v for k, v in os.environ.items() if k == "ATA_STACK_DIR" or not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
     env.update(NAME_PREFIX=prefix, **env_extra)
     return subprocess.run([os.environ.get("ATA_TEST_BASH", "bash"), str(script)], capture_output=True,
                           text=True, env=env, check=False, cwd=str(tmp_path))
@@ -189,17 +199,20 @@ def test_default_pin_path_follows_the_prefix(tmp_path):
 
 def test_new_prefix_without_pin_file_says_to_run_prepare_initial(tmp_path):
     """atat has no pin file: scenarios/preflight fail; the ata pin is never used for it."""
-    res = _source_default_pin(tmp_path, "atat")
+    scenarios = _isolated_scenarios_dir(tmp_path)
+    shutil.copy2(PIN_FILE, scenarios / PIN_FILE.name)  # the ata pin is right there, and not used
+    res = _source_default_pin(tmp_path, "atat", scenarios_dir=scenarios)
     assert res.returncode != 0 and "REACHED" not in res.stdout
     assert "no inventory pin for stack 'atat'" in res.stderr
-    assert str(SCENARIOS_DIR / "inventory-pin.atat.env") in res.stderr
+    assert str(scenarios / "inventory-pin.atat.env") in res.stderr
     assert "scripts/repin-inventory.sh prepare --initial" in res.stderr
 
 
 @pytest.mark.parametrize("script", ["s1_backend_5xx.sh", "preflight.sh"])
 def test_scenarios_and_preflight_fail_without_a_pin_for_the_prefix(tmp_path, script):
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
-    env.update(NAME_PREFIX="atat", MOCK_MODE="true")
+    env = {k: v for k, v in os.environ.items() if k == "ATA_STACK_DIR" or not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
+    # A path that does not exist, not the default: this checkout may have deployed stack atat.
+    env.update(NAME_PREFIX="atat", MOCK_MODE="true", ATA_INVENTORY_PIN_FILE=str(tmp_path / "inventory-pin.atat.env"))
     res = subprocess.run([os.environ.get("ATA_TEST_BASH", "bash"), str(SCENARIOS_DIR / script)],
                          capture_output=True, text=True, env=env, check=False, cwd=str(tmp_path))
     assert res.returncode != 0
@@ -208,12 +221,14 @@ def test_scenarios_and_preflight_fail_without_a_pin_for_the_prefix(tmp_path, scr
 
 def test_pin_optional_scripts_load_without_a_pin(tmp_path):
     """repin --initial / inventory deploy.sh / caps / check-result set INVENTORY_PIN_OPTIONAL."""
-    res = _source_default_pin(tmp_path, "atat", guard='echo "PRESENT=${INVENTORY_PIN_PRESENT} PIN=${PINNED_INVENTORY_REVISION}."')
+    scenarios = _isolated_scenarios_dir(tmp_path)
+    res = _source_default_pin(tmp_path, "atat", guard='echo "PRESENT=${INVENTORY_PIN_PRESENT} PIN=${PINNED_INVENTORY_REVISION}."',
+                              scenarios_dir=scenarios)
     assert res.returncode != 0
     script = tmp_path / "opt.sh"
-    script.write_text(f'#!/usr/bin/env bash\nINVENTORY_PIN_OPTIONAL=true\nsource "{SCENARIOS_DIR}/common.sh"\n'
+    script.write_text(f'#!/usr/bin/env bash\nINVENTORY_PIN_OPTIONAL=true\nsource "{scenarios}/common.sh"\n'
                       'echo "PRESENT=${INVENTORY_PIN_PRESENT} PIN=${PINNED_INVENTORY_REVISION}."\n')
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
+    env = {k: v for k, v in os.environ.items() if k == "ATA_STACK_DIR" or not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
     env.update(NAME_PREFIX="atat")
     res = subprocess.run([os.environ.get("ATA_TEST_BASH", "bash"), str(script)], capture_output=True,
                          text=True, env=env, check=False, cwd=str(tmp_path))

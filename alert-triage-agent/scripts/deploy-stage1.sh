@@ -31,7 +31,9 @@
 # Optional: SERVICENOW_USERNAME / SERVICENOW_PASSWORD (else prompted), VERIFIER_SA,
 #   AUTO_RESOLVE_ON_RECOVERY, MODEL_NAME, GEMINI_LOCATION, IMAGE_TAG, TFSTATE_BUCKET,
 #   PGPASSWORD (postgres password for the schema phase; else a new random one is set),
-#   SCHEMA_PROXY_PORT (default 54329), DEPLOY_STATE_DIR (default <alert-triage-agent>/.deploy-state).
+#   SCHEMA_PROXY_PORT (default 54329), ATA_STACK_DIR (stack-local files .<prefix>-api-key,
+#   .<prefix>-apigee.env, .deploy-state/; default <alert-triage-agent>),
+#   DEPLOY_STATE_DIR (default ${ATA_STACK_DIR}/.deploy-state).
 # Image refs built by the images phase are kept in
 #   ${DEPLOY_STATE_DIR}/${PROJECT_ID}-${NAME_PREFIX}-images.env
 # for later phases; exported INVENTORY_IMAGE/ORDERS_IMAGE/AGENT_IMAGE/BRIDGE_IMAGE/TOOLS_IMAGE win.
@@ -48,7 +50,7 @@ source "${SCRIPT_DIR}/cloud-run-deploy-lib.sh"
 
 PHASES="preflight bootstrap foundation secrets images database schema applications inventory-pin triage triage-iam apigee observability verify"
 
-usage() { sed -n '2,44p' "$0"; }
+usage() { sed -n '2,42p' "$0"; }
 
 die() {
     echo "ERROR: $*" >&2
@@ -126,7 +128,10 @@ if [ -z "${APIGEE_ORG:-}" ]; then
     APIGEE_ORG="${PROJECT_ID}"
     APIGEE_ORG_NOTE=" (defaulted to PROJECT_ID)"
 fi
-DEPLOY_STATE_DIR="${DEPLOY_STATE_DIR:-${REPO_ROOT}/.deploy-state}"
+# Stack-local files; exported so deploy-apigee-proxies.sh and the verify scripts use the same dir.
+ATA_STACK_DIR="${ATA_STACK_DIR:-${REPO_ROOT}}"
+export ATA_STACK_DIR
+DEPLOY_STATE_DIR="${DEPLOY_STATE_DIR:-${ATA_STACK_DIR}/.deploy-state}"
 IMAGES_FILE="${DEPLOY_STATE_DIR}/${PROJECT_ID}-${NAME_PREFIX}-images.env"
 export PROJECT_ID REGION NAME_PREFIX ENVIRONMENT OWNER SERVICENOW_INSTANCE_URL APIGEE_ORG APIGEE_ENV APIGEE_HOST
 
@@ -454,7 +459,7 @@ phase_hints() {
             echo "    gcloud run services describe ${N}-agent --project=${P} --region=${R} --format=\"yaml(spec.template.spec.containers[0].env)\""
             echo "    gcloud run services describe ${N}-bridge --project=${P} --region=${R} --format=\"value(status.url)\"" ;;
         triage-iam) echo "    gcloud run services get-iam-policy ${N}-agent --project=${P} --region=${R}   # bridge SA and agent SA: roles/run.invoker" ;;
-        apigee) echo "    cat .${N}-apigee.env; curl -sk https://${APIGEE_HOST}/${N}/inventory/v1/health" ;;
+        apigee) echo "    cat ${ATA_STACK_DIR}/.${N}-apigee.env; curl -sk https://${APIGEE_HOST}/${N}/inventory/v1/health" ;;
         observability) echo "    (cd infra/terraform/observability && terraform state list)" ;;
         verify) echo "    scripts/scenarios/preflight.sh; scripts/run-all-scenarios.sh --scenario s1" ;;
     esac

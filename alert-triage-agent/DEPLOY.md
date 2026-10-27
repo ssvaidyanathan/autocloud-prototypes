@@ -180,7 +180,7 @@ Every phase reads the same exported variables, and there are **no defaults** for
 | `SERVICENOW_USERNAME`, `SERVICENOW_PASSWORD` | `secrets`. Each one that is not exported is prompted for; the password is read without echo. Values are never printed. |
 | `APIGEE_ORG`, `APIGEE_ENV`, `APIGEE_HOST` | `triage` (tools), `apigee`, `verify`, the scenarios and the teardown. |
 | `VERIFIER_SA` | `triage` (bridge), only when exported ([§4.6](#46-read-only-ticket-verification-endpoint)). `VERIFIER_SA=none` removes it from the service. |
-| Optional | `AUTO_RESOLVE_ON_RECOVERY`, `MODEL_NAME`, `GEMINI_LOCATION` (agent, passed only when exported); `IMAGE_TAG` (image tag; default: the git commit); `TFSTATE_BUCKET` (custom state bucket name); `PGPASSWORD` (postgres password for `schema`; default: a new random one); `SCHEMA_PROXY_PORT` (default 54329); `DEPLOY_STATE_DIR` (default `.deploy-state/`). |
+| Optional | `AUTO_RESOLVE_ON_RECOVERY`, `MODEL_NAME`, `GEMINI_LOCATION` (agent, passed only when exported); `IMAGE_TAG` (image tag; default: the git commit); `TFSTATE_BUCKET` (custom state bucket name); `PGPASSWORD` (postgres password for `schema`; default: a new random one); `SCHEMA_PROXY_PORT` (default 54329); `ATA_STACK_DIR` (directory of the stack-local files `.<prefix>-api-key`, `.<prefix>-apigee.env` and `.deploy-state/`; default `alert-triage-agent/`); `DEPLOY_STATE_DIR` (default `${ATA_STACK_DIR}/.deploy-state/`). |
 | Extra Terraform variables | For example `deployer_members`: put them in a `terraform.tfvars` in that root, which Terraform loads automatically. |
 
 ### 2.3 Second stack in an existing project and Apigee organization
@@ -674,7 +674,7 @@ The script prints the exact list before it changes anything, and stops on any no
 ./scripts/deploy-stage1.sh --only apigee
 ```
 
-**Expected:** each proxy reaches `READY`. The script writes two local files, both ignored by Git:
+**Expected:** each proxy reaches `READY`. The script writes two local files in `ATA_STACK_DIR` (default `alert-triage-agent/`), both ignored by Git:
 - `.<prefix>-api-key`: the app's consumer key (mode 600);
 - `.<prefix>-apigee.env`: `APIGEE_HOST`, `APIGEE_ORG` and `APIGEE_ENV`.
 
@@ -989,7 +989,7 @@ It asks you to type `NAME_PREFIX` (`--confirm-prefix <prefix>` instead makes it 
 - The foundation destroy fails with `the bucket you tried to delete is not empty`: an object was written after step 5, for example by a late alert. Run T2 again.
 - The final check lists a resource: delete it by hand (the check names it), then run [§6](#6-verify-that-nothing-is-left).
 
-**T3. Local files** in the clone: `.deploy-state/`, `.<prefix>-api-key`, `.<prefix>-apigee.env`, `infra/terraform/*/backend.hcl` and `infra/terraform/*/.terraform/`. The teardown leaves them alone. Delete the clone, or:
+**T3. Local files** in the clone: `.deploy-state/`, `.<prefix>-api-key`, `.<prefix>-apigee.env`, `infra/terraform/*/backend.hcl` and `infra/terraform/*/.terraform/` (the first three in `ATA_STACK_DIR` if you set it). The teardown leaves them alone. Delete the clone, or:
 
 ```bash
 cd "${ATA_DIR}"

@@ -48,8 +48,11 @@ def isolated_scripts(tmp_path):
     return scripts
 
 
-def script_env(stub_bin, tmp_path, **extra):
-    env = {k: v for k, v in os.environ.items() if k not in ("ATA_API_KEY", "MOCK_MODE", "DRY_RUN")}
+def script_env(stub_bin, tmp_path, default_stack_dir=False, **extra):
+    """default_stack_dir=True: no ATA_STACK_DIR, so the scripts use their default key location
+    (only with an isolated_scripts() copy; the checkout's own may hold a deployed stack's key)."""
+    drop = ("ATA_API_KEY", "MOCK_MODE", "DRY_RUN") + (("ATA_STACK_DIR",) if default_stack_dir else ())
+    env = {k: v for k, v in os.environ.items() if k not in drop}
     env.update(PATH=f"{stub_bin}{os.pathsep}{env['PATH']}", ATA_TEST_CALLS=str(tmp_path / "calls"),
                MOCK_MODE="false", DRY_RUN="false", RUN_PREFLIGHT="false",
                APIGEE_HOST="apigee.example", APIGEE_ORG="test-org", APIGEE_ENV="test-env")
@@ -111,7 +114,7 @@ def test_scripts_parse(script):
 @pytest.mark.parametrize("sc", SCENARIOS)
 def test_scenario_fails_loudly_without_api_key(sc, tmp_path, stub_bin):
     scripts = isolated_scripts(tmp_path)
-    res = run([scripts / "scenarios" / sc, "--hold", "1s"], tmp_path, script_env(stub_bin, tmp_path))
+    res = run([scripts / "scenarios" / sc, "--hold", "1s"], tmp_path, script_env(stub_bin, tmp_path, default_stack_dir=True))
 
     assert res.returncode != 0, res.stdout + res.stderr
     for text in ["Apigee consumer API key not found for stack 'ata'", "ATA_API_KEY",
@@ -127,7 +130,7 @@ def test_scenario_fails_loudly_on_empty_key_file(sc, tmp_path, stub_bin):
     """An empty .<prefix>-api-key (e.g. a failed DEMO.md fetch) is an error, not an empty key."""
     scripts = isolated_scripts(tmp_path)
     (tmp_path / "pkg" / "alert-triage-agent" / ".ata-api-key").write_text("\n")
-    res = run([scripts / "scenarios" / sc, "--hold", "1s"], tmp_path, script_env(stub_bin, tmp_path))
+    res = run([scripts / "scenarios" / sc, "--hold", "1s"], tmp_path, script_env(stub_bin, tmp_path, default_stack_dir=True))
 
     assert res.returncode != 0, res.stdout + res.stderr
     assert f"{tmp_path}/pkg/alert-triage-agent/.ata-api-key is empty" in res.stderr
@@ -142,7 +145,7 @@ def test_stack_key_file_is_used_and_trimmed(tmp_path, stub_bin):
     probe = tmp_path / "probe.sh"
     probe.write_text(f'set -euo pipefail\nSCRIPT_DIR="{scripts}/scenarios"\n'
                      f'source "{scripts}/scenarios/common.sh"\nresolve_api_key\n')
-    res = run([probe], tmp_path, script_env(stub_bin, tmp_path))
+    res = run([probe], tmp_path, script_env(stub_bin, tmp_path, default_stack_dir=True))
     assert (res.returncode, res.stdout) == (0, "pkg-key\n"), res.stderr
 
 
@@ -158,7 +161,7 @@ def test_key_of_another_stack_or_directory_is_never_used(prefix, tmp_path, stub_
     pin = tmp_path / f"inventory-pin.{prefix}.env"
     pin.write_text(f"PIN_INVENTORY_REVISION={prefix}-inventory-api-00001-abc\n"
                    f"PIN_INVENTORY_DIGEST=sha256:{'ab' * 32}\n")
-    res = run([probe], tmp_path, script_env(stub_bin, tmp_path, NAME_PREFIX=prefix,
+    res = run([probe], tmp_path, script_env(stub_bin, tmp_path, default_stack_dir=True, NAME_PREFIX=prefix,
                                             ATA_INVENTORY_PIN_FILE=str(pin)))
     assert res.returncode != 0 and res.stdout == "", res.stdout + res.stderr
     assert f"{tmp_path}/pkg/alert-triage-agent/.{prefix}-api-key" in res.stderr
@@ -180,7 +183,7 @@ def test_scenario_mock_and_dry_run_skip_the_key_check(sc, mode, tmp_path, stub_b
     scripts = isolated_scripts(tmp_path)
     shutil.copytree(SCRIPTS_DIR.parent / "demo" / "apigee", scripts.parent / "demo" / "apigee")  # S3 reads it
     (tmp_path / "pkg" / "alert-triage-agent" / ".ata-api-key").write_text("\n")
-    res = run([scripts / "scenarios" / sc, mode, "--hold", "0s"], tmp_path, script_env(stub_bin, tmp_path))
+    res = run([scripts / "scenarios" / sc, mode, "--hold", "0s"], tmp_path, script_env(stub_bin, tmp_path, default_stack_dir=True))
 
     assert res.returncode == 0, res.stdout + res.stderr
     assert "NEXT STEPS" in res.stdout
@@ -195,7 +198,7 @@ def test_resolve_api_key_prints_nothing_in_mock_and_dry_run(mode, tmp_path, stub
     probe = tmp_path / "probe.sh"
     probe.write_text(f'set -euo pipefail\nSCRIPT_DIR="{scripts}/scenarios"\n'
                      f'source "{scripts}/scenarios/common.sh"\nresolve_api_key\necho RESOLVED\n')
-    res = run([probe], tmp_path, script_env(stub_bin, tmp_path, **{mode: "true"}))
+    res = run([probe], tmp_path, script_env(stub_bin, tmp_path, default_stack_dir=True, **{mode: "true"}))
     assert (res.returncode, res.stdout, res.stderr) == (0, "RESOLVED\n", "")
 
 
@@ -207,7 +210,7 @@ def test_live_scenario_runs_with_empty_auth_header(sc, tmp_path, stub_bin):
     """gcloud yields no ID token, so AUTH_HEADER is empty: the curl calls must still run."""
     scripts = isolated_scripts(tmp_path)
     res = run([scripts / "scenarios" / sc, "--hold", "1s"], tmp_path,
-              script_env(stub_bin, tmp_path, ATA_API_KEY="test-key"))
+              script_env(stub_bin, tmp_path, default_stack_dir=True, ATA_API_KEY="test-key"))
 
     assert res.returncode == 0, res.stdout + res.stderr
     assert "unbound variable" not in res.stderr

@@ -223,7 +223,7 @@ def stack(tmp_path):
         env = {k: v for k, v in os.environ.items() if not re.match(
             r"^(PROJECT_ID|REGION|NAME_PREFIX|ENVIRONMENT|OWNER|SERVICENOW_.*|APIGEE_.*|GCP_.*|TFSTATE_BUCKET|"
             r"PROJECT_NUMBER|VERIFIER_SA|.*_IMAGE|IMAGE_TAG|ASSUME_YES|PGPASSWORD|BRIDGE_URL|AGENT_URL|TOOLS_URL|"
-            r"MODEL_NAME|GEMINI_LOCATION|AUTO_RESOLVE_ON_RECOVERY|DEPLOY_STATE_DIR)$", k)}
+            r"MODEL_NAME|GEMINI_LOCATION|AUTO_RESOLVE_ON_RECOVERY|DEPLOY_STATE_DIR|ATA_STACK_DIR)$", k)}
         env.update(PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", STUB_DIR=str(stub_dir),
                    PROJECT_ID="fresh-proj", REGION="us-central1", NAME_PREFIX="atat", ENVIRONMENT="test",
                    OWNER="team-x", SERVICENOW_INSTANCE_URL="https://dev1.service-now.com", APIGEE_ENV="eval",
@@ -467,6 +467,17 @@ def test_images_file_carries_refs_to_a_resumed_run(stack, tmp_path):
     app = [c for c in calls if c[:3] == ["terraform", "applications", "apply"]][0]
     assert any(a.startswith("inventory_image=us-central1-docker.pkg.dev/fresh-proj/atat-docker/atat-inventory-api@sha256:") for a in app)
     assert not [c for c in calls if c[:3] == ["gcloud", "builds", "submit"]]
+
+
+def test_deploy_state_dir_follows_ata_stack_dir(stack, tmp_path):
+    """ATA_STACK_DIR moves .deploy-state/ (and is passed on to the scripts deploy-stage1.sh starts)."""
+    stack_dir = tmp_path / "stack-files"
+    stack_dir.mkdir()
+    res, _ = stack("deploy-stage1.sh", "--yes", "--only", "images", ATA_STACK_DIR=str(stack_dir))
+    assert res.returncode == 0, _out(res)
+    assert (stack_dir / ".deploy-state" / "fresh-proj-atat-images.env").is_file()
+    assert (stack_dir / ".deploy-state" / ".gitignore").read_text() == "*\n"
+    assert not (stack.work / ".deploy-state").exists()
 
 
 def test_resume_without_image_refs_fails_with_the_fix(stack):

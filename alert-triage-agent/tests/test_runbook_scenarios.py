@@ -123,6 +123,7 @@ resolve_api_key
     test_sh.chmod(0o755)
 
     env = os.environ.copy()
+    env.pop("ATA_STACK_DIR", None)  # the default location, in the copy
     env.pop("ATA_API_KEY", None)
     env["MOCK_MODE"] = "false"
     env["DRY_RUN"] = "false"

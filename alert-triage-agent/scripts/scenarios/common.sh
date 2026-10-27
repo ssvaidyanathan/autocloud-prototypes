@@ -76,9 +76,13 @@ export DRY_RUN="${DRY_RUN:-false}"
 export MOCK_MODE="${MOCK_MODE:-false}"
 
 COMMON_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# The alert-triage-agent directory (stack-local files .${NAME_PREFIX}-api-key and
-# .${NAME_PREFIX}-apigee.env live here).
+# The alert-triage-agent directory of this checkout.
 ALERT_TRIAGE_DIR="$(cd "${COMMON_SH_DIR}/../.." && pwd)"
+# ATA_STACK_DIR: the directory of the stack-local, gitignored files .${NAME_PREFIX}-api-key,
+# .${NAME_PREFIX}-apigee.env and .deploy-state/ (default: ALERT_TRIAGE_DIR). Exported so the
+# scripts this one starts read and write the same files. The committed inventory pin is not a
+# stack-local file: ATA_INVENTORY_PIN_FILE moves it (below).
+export ATA_STACK_DIR="${ATA_STACK_DIR:-${ALERT_TRIAGE_DIR}}"
 
 # --- Derived names (the only place they are spelled out) ------------------------------
 # Cloud Run services
@@ -123,8 +127,8 @@ export POLICY_APIGEE_ORDERS_429="${NAME_PREFIX}-apigee-orders-429"
 export POLICY_CLOUDSQL_CONNECTIONS="${NAME_PREFIX}-cloudsql-connections-critical"
 export POLICY_CLOUDSQL_CPU="${NAME_PREFIX}-cloudsql-cpu-high"
 # Stack-local files
-export API_KEY_FILE="${ALERT_TRIAGE_DIR}/.${NAME_PREFIX}-api-key"
-export APIGEE_ENV_FILE="${ALERT_TRIAGE_DIR}/.${NAME_PREFIX}-apigee.env"
+export API_KEY_FILE="${ATA_STACK_DIR}/.${NAME_PREFIX}-api-key"
+export APIGEE_ENV_FILE="${ATA_STACK_DIR}/.${NAME_PREFIX}-apigee.env"
 
 # Incident bucket
 export INCIDENTS_BUCKET="${INCIDENTS_BUCKET:-${PROJECT_ID}-${NAME_PREFIX}-incidents}"

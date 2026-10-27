@@ -15,11 +15,19 @@
   ordinary connection failure) and is recorded in BLOCKED_NETWORK_ATTEMPTS. Scripts run as
   subprocesses use stub binaries and are not affected. ATA_TESTS_ALLOW_NETWORK=1 turns the
   guard off for a local debugging run; CI never sets it.
+- ATA_STACK_DIR (where the scripts keep .<prefix>-api-key, .<prefix>-apigee.env, .deploy-state/)
+  is an empty per-session directory, so a checkout that deployed a stack gives the same results
+  as a clean one. A session fixture fails the run if the checkout's stack-local files change.
 """
 
+import atexit
+import glob
+import hashlib
 import ipaddress
 import os
+import shutil
 import socket
+import tempfile
 
 import pytest
 
@@ -103,6 +111,16 @@ os.environ["NAME_PREFIX"] = TEST_NAME_PREFIX
 os.environ["PROJECT_ID"] = TEST_PROJECT_ID
 os.environ["REGION"] = TEST_REGION
 
+# Stack-local files (.<prefix>-api-key, .<prefix>-apigee.env, .deploy-state/): the scripts read
+# and write them in ATA_STACK_DIR (default: the checkout's alert-triage-agent/). A checkout that
+# deployed a stack has real ones; the tests must never read or overwrite them, so every script
+# the suite starts gets an empty per-session directory instead. Helpers that scrub ATA_* from a
+# script's environment keep ATA_STACK_DIR; only tests of the default location drop it, and they
+# run a copy of scripts/ under tmp_path.
+TEST_STACK_DIR = tempfile.mkdtemp(prefix="ata-tests-stack-")
+atexit.register(shutil.rmtree, TEST_STACK_DIR, True)
+os.environ["ATA_STACK_DIR"] = TEST_STACK_DIR
+
 
 class _LiveGeminiBlocked:
     def __init__(self, *args, **kwargs):
@@ -118,3 +136,30 @@ def _block_live_gemini(monkeypatch):
         return
     monkeypatch.setattr(genai, "Client", _LiveGeminiBlocked)
     yield
+
+
+_CHECKOUT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _checkout_stack_files() -> dict:
+    """Stack-local files in the checkout (a deployed stack's), with their content."""
+    paths = glob.glob(os.path.join(_CHECKOUT, ".*-api-key")) + glob.glob(os.path.join(_CHECKOUT, ".*-apigee.env"))
+    paths += glob.glob(os.path.join(_CHECKOUT, "scripts", "scenarios", "inventory-pin.*.env"))
+    for root, _dirs, files in os.walk(os.path.join(_CHECKOUT, ".deploy-state")):
+        paths += [os.path.join(root, f) for f in files]
+    out = {}
+    for p in paths:
+        with open(p, "rb") as f:
+            out[p] = hashlib.sha256(f.read()).hexdigest()
+    return out
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _checkout_stack_files_untouched():
+    """No test creates, changes or deletes the checkout's stack-local files (see ATA_STACK_DIR above).
+    Tests that plant such files (tests/test_stack_dir_isolation.py) remove them again."""
+    before = _checkout_stack_files()
+    yield
+    after = _checkout_stack_files()
+    changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+    assert not changed, f"the test run changed stack-local files in the checkout: {changed}"

@@ -351,7 +351,7 @@ class FakeCloud:
 
     def run(self, argv, **extra_env):
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("PINNED_INVENTORY_", "ATA_", "GCP_")) and k not in (
+               if (k == "ATA_STACK_DIR" or not k.startswith(("PINNED_INVENTORY_", "ATA_", "GCP_"))) and k not in (
                    "PROJECT_ID", "REGION", "NAME_PREFIX", "MOCK_MODE", "DRY_RUN")}
         # The stack identity is required (common.sh has no defaults): this fake's stack.
         env.update(PATH=f"{self.dir}{os.pathsep}{env['PATH']}", ATA_INVENTORY_PIN_FILE=str(self.pin_file),
