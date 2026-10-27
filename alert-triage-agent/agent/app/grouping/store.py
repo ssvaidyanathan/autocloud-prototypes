@@ -146,12 +146,20 @@ def _update_gcs_atomically(
 LOCAL_FALLBACK_DIR = Path("/tmp/knowledge/incident-manager")
 
 
-def resolve_local_target_file(storage_path: Path, identifier: str) -> Path:
+def resolve_local_target_file(storage_path: Path, identifier: str, create: bool = True) -> Path:
     """Return the local file that a local atomic update writes, creating its directory.
 
     Falls back to ``LOCAL_FALLBACK_DIR`` when the primary directory cannot be created.
+    With ``create=False`` nothing is created: the fallback file is returned only when the
+    primary directory does not exist and the fallback directory does, else the primary file.
     """
     target_file = get_canonical_file_path(storage_path, identifier)
+    if not create:
+        fallback_file = LOCAL_FALLBACK_DIR / target_file.name
+        # os.path.isdir never raises (Path.is_dir can, on an unreadable parent before 3.13).
+        if not os.path.isdir(target_file.parent) and os.path.isdir(fallback_file.parent):
+            return fallback_file
+        return target_file
     try:
         target_file.parent.mkdir(parents=True, exist_ok=True)
     except PermissionError:

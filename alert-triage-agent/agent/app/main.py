@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import time
+import traceback
 from typing import Any, Callable, Optional
 
 from fastapi import Body, Depends, FastAPI, HTTPException
@@ -84,6 +85,18 @@ def _unpack_request(payload: dict[str, Any]) -> tuple[AlertEvent, Optional[str],
         return alert, payload.get("group_id"), payload.get("filename"), payload.get("member_alerts")
 
 
+def _raising_frame(exc: BaseException) -> str:
+    """Return ``file:line in function`` of the innermost frame that raised ``exc``.
+
+    The location carries no exception text, so it is safe to log.
+    """
+    frames = traceback.extract_tb(exc.__traceback__)
+    if not frames:
+        return "unknown location"
+    frame = frames[-1]
+    return f"{Path(frame.filename).name}:{frame.lineno} in {frame.name}"
+
+
 def _fallback_report(
     alert: AlertEvent,
     group_id: str,
@@ -95,14 +108,16 @@ def _fallback_report(
     """Build the single-pass fallback report after a failed multi-agent investigation.
 
     The report is marked degraded so the ticket shows it is not the synthesized report. Only
-    the exception type is logged and recorded; its text can quote incident file content.
+    the exception type and the raising frame's location are logged, and only the type is
+    recorded; the exception text can quote incident file content.
     """
     exc_type = type(exc).__name__
     logger.error(
-        "Multi-agent investigation failed on %s for group %s: %s; using the fallback report.",
+        "Multi-agent investigation failed on %s for group %s: %s at %s; using the fallback report.",
         caller,
         group_id,
         exc_type,
+        _raising_frame(exc),
     )
     return generate_investigation_report(
         alert,

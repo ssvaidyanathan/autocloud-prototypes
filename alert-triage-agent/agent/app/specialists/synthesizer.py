@@ -10,7 +10,6 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import os
-from pathlib import Path
 import re
 import time
 from typing import Any, Optional
@@ -215,12 +214,24 @@ class SynthesizerAgent:
 
         # Update OKF file with synthesized findings. Only persistence can fail here; the
         # investigation is complete, so a failure must not discard the synthesized report.
-        store = OKFStore(config=config)
+        # The store is built inside the try: locally its constructor can create directories.
+        store: Optional[OKFStore] = None
         try:
+            store = OKFStore(config=config)
             self._update_okf_file(report, alert, config, store=store)
         except Exception as exc:
-            # _update_okf_file has already logged it at ERROR (group, location, type).
-            self._mark_okf_persistence_degraded(report, self._describe_okf_target(store, filename), exc)
+            if store is None:
+                logger.error(
+                    "Failed to open the OKF store for incident file %s (group %s): %s",
+                    filename,
+                    group_id,
+                    type(exc).__name__,
+                )
+                target = filename
+            else:
+                # _update_okf_file has already logged it at ERROR (group, location, type).
+                target = self._describe_okf_target(store, filename)
+            self._mark_okf_persistence_degraded(report, target, exc)
 
         return report
 
@@ -1487,14 +1498,11 @@ class SynthesizerAgent:
         """Return a log-safe location for the incident object (no content).
 
         Locally this is the file the store actually writes, including its fallback directory.
+        It only inspects the filesystem; no directory is created.
         """
         if store.storage_client is not None or (store.bucket_name and not store.is_local):
             return f"gs://{store.bucket_name}/{get_canonical_blob_name(identifier)}"
-        try:
-            return str(resolve_local_target_file(store.storage_path, identifier))
-        except OSError:
-            # Neither directory can be created; the update fails too and is logged with this path.
-            return str(store.storage_path / Path(identifier).name)
+        return str(resolve_local_target_file(store.storage_path, identifier, create=False))
 
     @staticmethod
     def _mark_okf_persistence_degraded(report: InvestigationReport, target: str, exc: Exception) -> None:

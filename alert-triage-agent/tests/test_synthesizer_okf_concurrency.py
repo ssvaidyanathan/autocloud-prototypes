@@ -16,7 +16,8 @@ the same incident group. These tests use the generation-enforcing GCS mock to ve
    (``/timer/wake`` settle and max-wait, ``/investigate``) the ticket or callback carries the
    synthesized report, not the fallback.
 6. When the investigation itself fails, the callers' fallback report is marked degraded and the
-   caller logs the group id and exception type at ERROR, never the exception text.
+   caller logs the group id, exception type and raising frame (``file:line in function``) at
+   ERROR, never the exception text.
 
 In production the incident store path is the GCS FUSE mount of the incidents bucket, so a
 ``Path.write_text`` on it is an unconditional upload of the same object. ``FuseShim`` models
@@ -536,6 +537,26 @@ def test_local_okf_log_names_fallback_path_when_primary_dir_cannot_be_created(tm
     assert str(primary) not in updated[0]
 
 
+def test_describe_local_okf_target_creates_no_directory(tmp_path, local_cfg, monkeypatch):
+    primary = tmp_path / "missing" / "store"
+    fallback_dir = tmp_path / "fallback"
+    monkeypatch.setattr(store_module, "LOCAL_FALLBACK_DIR", fallback_dir)
+    store = OKFStore(storage_path=primary, config=local_cfg, is_local=True)
+
+    # Neither directory exists: the primary file is named and nothing is created.
+    assert SynthesizerAgent._describe_okf_target(store, FILENAME) == str(primary / FILENAME)
+    assert not primary.exists() and not fallback_dir.exists()
+
+    # Only the fallback directory exists (the primary could not be created): the fallback is named.
+    fallback_dir.mkdir()
+    assert SynthesizerAgent._describe_okf_target(store, FILENAME) == str(fallback_dir / FILENAME)
+    assert not primary.exists()
+
+    # The primary directory exists: it wins.
+    primary.mkdir(parents=True)
+    assert SynthesizerAgent._describe_okf_target(store, FILENAME) == str(primary / FILENAME)
+
+
 # ------------------------------------------------------------------------------
 # 5. A persistence-only failure keeps the synthesized report and marks it degraded
 # ------------------------------------------------------------------------------
@@ -615,6 +636,25 @@ def test_execute_investigation_returns_synthesized_report_marked_degraded_when_o
     errors = _synth_errors(caplog)
     assert len(errors) == 1
     assert GROUP in errors[0] and f"gs://{BUCKET}/{BLOB}" in errors[0] and exc_type in errors[0]
+
+
+def test_execute_investigation_returns_synthesized_report_marked_degraded_when_local_store_cannot_be_built(
+    tmp_path, local_cfg, stub_specialists, monkeypatch, caplog
+):
+    def _unavailable(self):
+        raise PermissionError("cannot create /secret-token-xyz")
+
+    monkeypatch.setattr(AgentConfig, "get_effective_store_path", _unavailable)
+
+    report = asyncio.run(SynthesizerAgent().execute_investigation(_alert(), GROUP, FILENAME, local_cfg))
+
+    assert SYNTH_MARKER in report.observations
+    assert report.observations.startswith(f"{DEGRADED_OKF_NOTE} (PermissionError). {FILENAME} does not contain")
+    assert "secret-token-xyz" not in report.observations
+    errors = _synth_errors(caplog)
+    assert len(errors) == 1
+    assert GROUP in errors[0] and FILENAME in errors[0] and "PermissionError" in errors[0]
+    assert "secret-token-xyz" not in errors[0]
 
 
 def test_execute_investigation_persisted_report_carries_no_degraded_note(tmp_path, gcs, cloud_cfg, stub_specialists, caplog):
@@ -736,6 +776,16 @@ async def _failing_investigation(alert, group_id, filename, config):
     raise RuntimeError(LEAKY_MESSAGE)
 
 
+# Content-free location of the raise above, as the caller's ERROR log reports it.
+FAILING_FRAME = (
+    f"{Path(__file__).name}:{_failing_investigation.__code__.co_firstlineno + 1} in _failing_investigation"
+)
+
+
+def test_raising_frame_without_traceback_is_unknown():
+    assert agent_main._raising_frame(RuntimeError(LEAKY_MESSAGE)) == "unknown location"
+
+
 def _main_logs(caplog, min_level: int = logging.WARNING) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.name == "agent.app.main" and r.levelno >= min_level]
 
@@ -750,6 +800,7 @@ def _assert_fallback_marked_degraded(report, fallback_calls: list[dict], caplog)
         assert "DEGRADED MODE: " in text, name
     caller_errors = [r.getMessage() for r in _main_logs(caplog, logging.ERROR)]
     assert any(GROUP in m and "RuntimeError" in m for m in caller_errors), caller_errors
+    assert any(FAILING_FRAME in m for m in caller_errors), caller_errors
     assert all("secret-token-xyz" not in r.getMessage() for r in _main_logs(caplog))
     assert "secret-token-xyz" not in report.summary + report.observations
 
