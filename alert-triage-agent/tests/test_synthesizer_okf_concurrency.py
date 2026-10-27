@@ -772,7 +772,7 @@ def test_investigate_returns_synthesized_report_marked_degraded_when_okf_persist
 LEAKY_MESSAGE = "while parsing a block mapping secret-token-xyz"
 
 
-async def _failing_investigation(alert, group_id, filename, config):
+async def _failing_investigation(alert, group_id, filename, config, group_alerts=None):
     raise RuntimeError(LEAKY_MESSAGE)
 
 

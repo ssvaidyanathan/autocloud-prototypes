@@ -195,14 +195,20 @@ async def execute_multi_agent_investigation(
     group_id: str,
     filename: str,
     config: AgentConfig,
+    group_alerts: Optional[list[dict[str, Any]]] = None,
 ) -> InvestigationReport:
-    """Run full ADK multi-agent investigation across parallel specialists."""
+    """Run full ADK multi-agent investigation across parallel specialists.
+
+    ``group_alerts`` (the incident group's alerts) let the synthesizer pick the origin
+    group-wide from the topology instead of investigating ``alert`` (the first alert) only.
+    """
     synthesizer = SynthesizerAgent()
     report = await synthesizer.execute_investigation(
         alert=alert,
         group_id=group_id,
         filename=filename,
         config=config,
+        group_alerts=group_alerts,
     )
     return report
 

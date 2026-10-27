@@ -7,6 +7,7 @@ the final InvestigationReport.
 """
 
 import asyncio
+import dataclasses
 from datetime import datetime, timezone
 import logging
 import os
@@ -14,7 +15,7 @@ import re
 import time
 from typing import Any, Optional
 
-from ..config import AgentConfig
+from ..config import AgentConfig, get_agent_settings
 from ..contracts.alert import AlertEvent
 from ..contracts.report import (
     ActionItem,
@@ -33,7 +34,8 @@ from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist
 from .apigee import ApigeeSpecialist
 from .cloud_sql import CloudSQLSpecialist
-from .change import ChangeSpecialist
+from .change import ChangeSpecialist, is_genuine_change
+from .origin_selection import OriginSelection, alert_event_from_entry, select_origin
 
 try:
     from topology.topology_graph import (
@@ -160,9 +162,28 @@ class SynthesizerAgent:
         group_id: str,
         filename: str,
         config: AgentConfig,
+        group_alerts: Optional[list[dict[str, Any]]] = None,
     ) -> InvestigationReport:
-        """Run specialists concurrently with asyncio.gather and synthesize findings."""
+        """Run specialists concurrently with asyncio.gather and synthesize findings.
+
+        ``group_alerts`` are the incident group's alerts (OKF ``alerts``). When they span more
+        than one service, the investigation starts from the topology-selected origin rather
+        than from ``alert`` (the group's first alert); see origin_selection.
+        """
         start_time = time.monotonic()
+        selection = self._select_group_origin(alert, group_alerts)
+        if selection is not None and selection.is_multi_service:
+            trigger_alert = alert
+            alert = alert_event_from_entry(selection.primary_alert, trigger_alert)
+            if alert.incident_id != trigger_alert.incident_id:
+                logger.info(
+                    "Group %s: investigating from topology-selected origin %s (alert %s) instead of the first alert %s on %s",
+                    group_id,
+                    selection.origin,
+                    alert.incident_id,
+                    trigger_alert.incident_id,
+                    trigger_alert.resource_name,
+                )
         # Follow topology DAG upstream from alert resource
         canonical_res = alert.resource_name
         try:
@@ -183,17 +204,38 @@ class SynthesizerAgent:
         for dep in upstream_deps:
             if "db" not in dep and "apigee" not in dep and dep != canonical_res:
                 dep_tasks[dep] = self.cloud_run_specialist.investigate(alert, config, target_service=dep)
+        # Bounded: also gather Cloud Run evidence for the runner-up candidate origin, so the
+        # report can state why it was not chosen. Keyed by service, so origin rules that walk
+        # upstream dependencies do not consider it.
+        if selection is not None and selection.is_multi_service:
+            for cand in selection.investigated_candidates()[1:]:
+                if cand.service != canonical_res and cand.service not in dep_tasks and self._is_cloud_run(cand.service):
+                    dep_tasks[cand.service] = self.cloud_run_specialist.investigate(
+                        alert, config, target_service=cand.service
+                    )
 
         all_keys = list(spec_tasks.keys()) + list(dep_tasks.keys())
         all_futures = list(spec_tasks.values()) + list(dep_tasks.values())
         all_results = await asyncio.gather(*all_futures)
 
         dossier_map = dict(zip(all_keys, all_results))
-        dossiers: list[EvidenceDossier] = all_results
-        self._last_dossiers = dossiers
+        dossiers: list[EvidenceDossier] = list(all_results)
 
         # Determine probable origin and blast radius
-        origin = self._determine_probable_origin(alert, dossier_map, upstream_deps)
+        origin = self._determine_probable_origin(alert, dossier_map, upstream_deps, group_selection=selection)
+
+        # A recent change that is not implicated must not drive the narrative or the actions.
+        verdict = self._assess_change(alert, dossier_map, upstream_deps, selection)
+        if verdict is not None and (not verdict["implicated"] or not self._same_node(verdict["service"], origin)):
+            if verdict["implicated"]:
+                verdict = dict(verdict, implicated=False, reason=(
+                    f"origin is {origin}; recent revision {verdict['revision']} on {verdict['service']} not implicated"
+                ))
+            neutral = self._neutralize_change_dossier(dossier_map["ChangeSpecialist"], verdict)
+            dossier_map["ChangeSpecialist"] = neutral
+            dossiers = [neutral if d.specialist_name == "ChangeSpecialist" else d for d in dossiers]
+        self._last_dossiers = dossiers
+        origin_notes = self._origin_selection_notes(selection, origin, verdict, dossier_map.get("ChangeSpecialist"))
         try:
             downstream = get_blast_radius(origin)
         except Exception as exc:
@@ -225,7 +267,9 @@ class SynthesizerAgent:
         summary = self._synthesize_problem(alert, dossiers, origin, blast_radius)
         title_problem = self._synthesize_title_problem(alert, dossiers, origin)
         observations = self._synthesize_observations(dossiers, alert)
-        recommendations = self._synthesize_recommendations(dossiers, origin, alert)
+        recommendations = self._synthesize_recommendations(
+            dossiers, origin, alert, region=config.region, project_id=config.project_id
+        )
         root_cause_text, confidence = self._determine_root_cause(dossiers, origin, alert, blast_radius=blast_radius)
 
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -241,6 +285,11 @@ class SynthesizerAgent:
         apigee_analytics = self._build_apigee_analytics(dossiers, blast_radius)
         revision_diffs = self._build_revision_diffs(dossiers, origin)
         root_cause_analysis = self._build_root_cause_analysis(root_cause_text, confidence, dossiers, origin, alert)
+        if origin_notes:
+            observations = self._insert_origin_observation(observations, origin_notes["explanation"])
+            root_cause_analysis["origin_selection"] = origin_notes
+            root_cause_analysis["supporting_evidence"].append(f"Origin selection: {origin_notes['explanation']}")
+            root_cause_analysis["alternatives_ruled_out"].extend(origin_notes["ruled_out"])
         longer_term_fixes = self._build_longer_term_fixes(origin, alert)
         execution_duration = time.monotonic() - start_time
         agent_run_metadata = self._build_agent_metadata(config, duration_seconds=execution_duration)
@@ -318,6 +367,7 @@ class SynthesizerAgent:
         alert: AlertEvent,
         dossiers: dict[str, EvidenceDossier],
         upstream_deps: Optional[list[str]] = None,
+        group_selection: Optional[OriginSelection] = None,
     ) -> str:
         """Identify probable origin node using DAG hierarchy, change correlation, and telemetry metric onset.
 
@@ -338,12 +388,18 @@ class SynthesizerAgent:
         # 2. Change-induced fault detection:
         # A change deployment on a service is attributed
         # directly to that service where the revision was deployed, NEVER to downstream database.
-        chg_dossier = dossiers.get("ChangeSpecialist")
-        if chg_dossier and chg_dossier.anomaly_detected:
-            chg_svc = chg_dossier.metrics.get("change_service") or chg_dossier.target_resource
-            if chg_svc:
-                logger.info("Change-induced fault detected on %s; attributing origin to deployed service", chg_svc)
-                return chg_svc
+        # The change is weighed only when the changed service shows its own degradation that no
+        # degraded upstream dependency explains (see _assess_change).
+        verdict = self._assess_change(alert, dossiers, upstream_deps, group_selection)
+        if verdict is not None:
+            if verdict["implicated"]:
+                logger.info(
+                    "Change-induced fault detected on %s (%s); attributing origin to deployed service",
+                    verdict["service"],
+                    verdict["reason"],
+                )
+                return verdict["service"]
+            logger.info("Recent change not implicated: %s", verdict["reason"])
 
         # 3. Cloud SQL check: database is the deepest backend layer in the topology DAG
         # Origin must ONLY attribute to database when database telemetry is actually anomalous in the window
@@ -430,6 +486,249 @@ class SynthesizerAgent:
             return cr_dossier.target_resource or alert.resource_name
 
         return alert.resource_name
+
+    # ------------------------------------------------------------------
+    # Group-wide origin selection and change implication
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _select_group_origin(
+        alert: AlertEvent, group_alerts: Optional[list[dict[str, Any]]]
+    ) -> Optional[OriginSelection]:
+        """Topology-aware origin selection over the group's alerts (None without group alerts)."""
+        if not group_alerts:
+            return None
+        try:
+            topo = get_loader()
+            return select_origin(group_alerts, canonicalize=topo.canonicalize, upstream_of=topo.upstream)
+        except Exception as exc:
+            logger.error(
+                "Origin selection failed for group of %d alerts (%s); investigating from the first alert %s on %s",
+                len(group_alerts),
+                type(exc).__name__,
+                alert.incident_id,
+                alert.resource_name,
+            )
+            return None
+
+    @staticmethod
+    def _canonical(node: Optional[str]) -> Optional[str]:
+        try:
+            return _canonicalize_node(node) or node
+        except Exception:
+            return node
+
+    def _same_node(self, a: Optional[str], b: Optional[str]) -> bool:
+        return bool(a) and bool(b) and self._canonical(a) == self._canonical(b)
+
+    @staticmethod
+    def _is_cloud_run(service: str) -> bool:
+        try:
+            comp = get_loader().components.get(service)
+        except Exception as exc:
+            logger.warning("Topology component lookup failed for %s: %s", service, type(exc).__name__)
+            return False
+        return bool(comp) and str(comp.type).strip().lower() == "cloud run"
+
+    def _db_telemetry_anomalous(self, alert: AlertEvent, dossiers: dict[str, EvidenceDossier]) -> bool:
+        """Cloud SQL telemetry shows saturation/locks (and the caller has no DB auth error)."""
+        sql_dossier = dossiers.get("CloudSQLSpecialist")
+        if not (sql_dossier and sql_dossier.anomaly_detected):
+            return False
+        db_conns = sql_dossier.metrics.get("active_connections")
+        db_max = sql_dossier.metrics.get("max_connections")
+        db_locks = sql_dossier.metrics.get("active_lock_waits")
+        db_cpu = sql_dossier.metrics.get("cpu_utilization_pct")
+        is_conn_anomalous = isinstance(db_conns, (int, float)) and (
+            db_conns >= 20 or (isinstance(db_max, (int, float)) and db_max > 0 and db_conns / db_max >= 0.8)
+        )
+        is_lock_anomalous = isinstance(db_locks, (int, float)) and db_locks > 0
+        is_cpu_anomalous = isinstance(db_cpu, (int, float)) and db_cpu >= 80.0
+        is_explicit_db_alert = any(
+            k in alert.policy_name.lower() for k in ["cloudsql", "max_connections", "lock_wait", "db_lock", "row_lock"]
+        )
+        cr_dossier = dossiers.get("CloudRunSpecialist")
+        has_db_auth_error = (cr_dossier and cr_dossier.metrics.get("has_db_auth_error")) or any(
+            "auth" in str(f).lower() for f in (cr_dossier.findings if cr_dossier else [])
+        )
+        return bool(
+            (is_conn_anomalous or is_lock_anomalous or is_cpu_anomalous or is_explicit_db_alert) and not has_db_auth_error
+        )
+
+    def _assess_change(
+        self,
+        alert: AlertEvent,
+        dossiers: dict[str, EvidenceDossier],
+        upstream_deps: Optional[list[str]],
+        group_selection: Optional[OriginSelection],
+    ) -> Optional[dict[str, Any]]:
+        """Decide whether the ChangeSpecialist's recent change is implicated.
+
+        A recent revision on service X is implicated only when X shows degradation of its own
+        (an alert on X, or anomalous Cloud Run telemetry for X) AND no degraded upstream
+        dependency of X explains it. Returns None when no recent change was detected.
+        """
+        chg = dossiers.get("ChangeSpecialist")
+        if not (chg and chg.anomaly_detected):
+            return None
+        service = chg.metrics.get("change_service") or chg.target_resource
+        if not service:
+            return None
+        node = self._canonical(service)
+        revision = chg.metrics.get("recent_revision") or "unknown revision"
+        degraded = set(group_selection.degraded_services) if group_selection is not None else set()
+
+        own: list[str] = []
+        if self._same_node(node, alert.resource_name):
+            own.append(f"alert {alert.policy_name} fired on it")
+        if node in degraded and not own:
+            own.append("it has its own alert in the incident group")
+        svc_dossier = dossiers.get(node) or dossiers.get(service)
+        if svc_dossier and svc_dossier.anomaly_detected:
+            own.append("its Cloud Run telemetry is anomalous")
+        cr = dossiers.get("CloudRunSpecialist")
+        if cr and cr.anomaly_detected and self._same_node(cr.target_resource, node) and not own:
+            own.append("its Cloud Run telemetry is anomalous")
+
+        try:
+            node_deps = list(get_upstream_dependencies(node) or [])
+        except Exception as exc:
+            logger.error("Topology upstream lookup failed for %s: %s", node, type(exc).__name__)
+            node_deps = []
+        explaining: list[str] = []
+        for dep in node_deps:
+            dep_dossier = dossiers.get(dep)
+            if dep in degraded or (dep_dossier is not None and dep_dossier.anomaly_detected):
+                explaining.append(dep)
+        sql = dossiers.get("CloudSQLSpecialist")
+        if sql is not None and self._db_telemetry_anomalous(alert, dossiers):
+            sql_node = self._canonical(sql.target_resource)
+            if sql_node in node_deps and sql_node not in explaining:
+                explaining.append(sql_node)
+
+        signal_of = self._service_signal(group_selection, alert)
+        if explaining:
+            upstream_desc = ", ".join(
+                f"{dep} {signal_of(dep)}".rstrip() for dep in explaining
+            )
+            reason = (
+                f"{node} {signal_of(node) or 'degradation'} explained by upstream {upstream_desc};"
+                f" recent revision {revision} not implicated"
+            )
+            implicated = False
+        elif not own:
+            reason = f"{node} shows no errors or latency of its own; recent revision {revision} not implicated"
+            implicated = False
+        else:
+            reason = f"{node} degraded ({'; '.join(own)}) with no degraded upstream dependency; recent revision {revision} implicated"
+            implicated = True
+        logger.info(
+            "Change assessment: service=%s revision=%s implicated=%s own_evidence=%s explained_by=%s",
+            node,
+            revision,
+            implicated,
+            own,
+            explaining,
+        )
+        return {"service": service, "revision": revision, "implicated": implicated, "reason": reason}
+
+    @staticmethod
+    def _service_signal(group_selection: Optional[OriginSelection], alert: Optional[AlertEvent]):
+        """Return a function naming a service's alert signal(s), e.g. 'latency'."""
+        def signal_of(service: str) -> str:
+            if group_selection is not None:
+                cand = group_selection.candidate(service)
+                if cand is not None and cand.signals:
+                    return "/".join(cand.signals)
+            if alert is None:
+                return ""
+            labels = alert.policy_user_labels or alert.labels or {}
+            if service == alert.resource_name and labels.get("signal"):
+                return str(labels["signal"])
+            return ""
+        return signal_of
+
+    @staticmethod
+    def _neutralize_change_dossier(chg: EvidenceDossier, verdict: dict[str, Any]) -> EvidenceDossier:
+        """Copy of the change dossier marked not anomalous, carrying the not-implicated reason."""
+        metrics = dict(chg.metrics)
+        metrics["change_not_implicated_reason"] = verdict["reason"]
+        findings = [
+            f"Recent revision {verdict['revision']} on {verdict['service']} detected but not implicated: {verdict['reason']}."
+        ] + [f for f in chg.findings if "aligns with alert onset" not in f and "detected on" not in f]
+        logger.info("Change dossier neutralized: %s", verdict["reason"])
+        return dataclasses.replace(chg, metrics=metrics, findings=findings, anomaly_detected=False)
+
+    def _origin_selection_notes(
+        self,
+        selection: Optional[OriginSelection],
+        origin: str,
+        verdict: Optional[dict[str, Any]],
+        chg: Optional[EvidenceDossier],
+    ) -> Optional[dict[str, Any]]:
+        """Explanation of the origin decision for the report (None when there is nothing to say)."""
+        statements: list[str] = []
+        ruled_out: list[dict[str, str]] = []
+        if selection is not None and selection.is_multi_service:
+            statements.extend(selection.reasons)
+            if not self._same_node(selection.origin, origin):
+                statements.append(f"Specialist evidence moved the origin from {selection.origin} to {origin}.")
+            for cand in selection.candidates:
+                if self._same_node(cand.service, origin):
+                    continue
+                if cand.explained_by:
+                    ruled_out.append({
+                        "alternative": f"{cand.service} as origin",
+                        "reason": f"{cand.service} {'/'.join(cand.signals) or 'degradation'} explained by upstream {', '.join(cand.explained_by)}.",
+                    })
+            # Recent genuine changes on degraded services that the origin explains.
+            changes = (chg.metrics.get("all_changes") or []) if chg is not None else []
+            signal_of = self._service_signal(selection, None)
+            for cand in selection.candidates:
+                if self._same_node(cand.service, origin) or not cand.explained_by:
+                    continue
+                for change in changes:
+                    if self._same_node(change.get("service"), cand.service) and is_genuine_change(change):
+                        upstream_desc = ", ".join(f"{u} {signal_of(u)}".rstrip() for u in cand.explained_by)
+                        text = (
+                            f"{cand.service} {signal_of(cand.service) or 'degradation'} explained by upstream {upstream_desc};"
+                            f" recent revision {change.get('revision')} not implicated"
+                        )
+                        if text not in statements:
+                            statements.append(text + ".")
+                            ruled_out.append({
+                                "alternative": f"Deployment regression on {cand.service} ({change.get('revision')})",
+                                "reason": text + ".",
+                            })
+        if verdict is not None and not verdict["implicated"]:
+            text = verdict["reason"] + "."
+            if text not in statements:
+                statements.append(text)
+                ruled_out.append({
+                    "alternative": f"Deployment regression on {verdict['service']} ({verdict['revision']})",
+                    "reason": text,
+                })
+        if not statements:
+            return None
+        explanation = " ".join(statements)
+        logger.info("Origin selection explanation for origin %s: %s", origin, explanation)
+        return {
+            "origin": origin,
+            "topology_origin": selection.origin if selection is not None else None,
+            "explanation": explanation,
+            "candidates": [c.summary() for c in selection.candidates] if selection is not None else [],
+            "ruled_out": ruled_out,
+        }
+
+    @staticmethod
+    def _insert_origin_observation(observations: str, explanation: str) -> str:
+        """Put 'Origin selection: ...' directly after the first observation (the alert trigger)."""
+        items = split_observations(observations)
+        line = f"Origin selection: {explanation}"
+        if line in items:
+            return observations
+        items[1:1] = [line]
+        return " | ".join(items)
 
     def _determine_dependency_path(self, origin: str, blast_radius: list[str]) -> str:
         """Determine topological dependency path from ingress callers to origin callee."""
@@ -1029,8 +1328,20 @@ class SynthesizerAgent:
         dossiers: list[EvidenceDossier],
         origin: str,
         alert: AlertEvent,
+        region: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> list[ActionItem]:
-        """Synthesize concrete, ordered, executable commands with verification and rollback steps."""
+        """Synthesize concrete, ordered, executable commands with verification and rollback steps.
+
+        Traffic in this environment is pinned to named revisions, so a traffic change always
+        names an explicit revision and says why; routing to the latest revision is never
+        suggested (it can be an unused or faulty revision). A rollback is only recommended for
+        a recent change on the origin itself.
+        """
+        if not region or not project_id:
+            settings = get_agent_settings()
+            region = region or settings.region
+            project_id = project_id or settings.project_id
         change_dossier = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist"), None)
         cr_dossier = next((d for d in dossiers if d.specialist_name == "CloudRunSpecialist"), None)
         sql_dossier = next((d for d in dossiers if d.specialist_name == "CloudSQLSpecialist"), None)
@@ -1038,7 +1349,14 @@ class SynthesizerAgent:
 
         recent_rev = None
         prev_rev = None
+        change_svc = None
         if change_dossier and change_dossier.anomaly_detected:
+            change_svc = change_dossier.metrics.get("change_service") or change_dossier.target_resource
+        if change_svc and not self._same_node(change_svc, origin):
+            logger.info(
+                "Recent change on %s is not on origin %s; no rollback recommended for it", change_svc, origin
+            )
+        elif change_dossier and change_dossier.anomaly_detected:
             recent_rev = change_dossier.metrics.get("recent_revision")
             prev_rev = change_dossier.metrics.get("previous_revision")
             if not recent_rev:
@@ -1059,7 +1377,7 @@ class SynthesizerAgent:
             has_db_auth = (cr_dossier and cr_dossier.metrics.get("has_db_auth_error")) or any(
                 "auth" in str(f).lower() for f in (cr_dossier.findings if cr_dossier else [])
             )
-            config_check_cmd = f"gcloud run revisions describe {recent_rev} --region=us-west1 --format=\"yaml(spec.containers[0].env)\""
+            config_check_cmd = f"gcloud run revisions describe {recent_rev} --region={region} --format=\"yaml(spec.containers[0].env)\""
             config_check_title = f"Verify database connection credentials and environment variables in {recent_rev}" if has_db_auth else f"Verify revision configuration and environment variables in {recent_rev}"
 
             has_valid_prev = bool(
@@ -1068,18 +1386,25 @@ class SynthesizerAgent:
                 and str(prev_rev).strip().lower() not in ("none", "unknown", "previous_revision", "unspecified")
             )
             if has_valid_prev:
-                rollback_title = f"Roll back Cloud Run traffic on {origin} to previous serving revision {prev_rev}"
-                rollback_cmd = f"gcloud run services update-traffic {origin} --to-revisions={prev_rev}=100 --region=us-west1"
+                rollback_title = (
+                    f"Roll back Cloud Run traffic on {origin} to previous serving revision {prev_rev}"
+                    f" (it served before {recent_rev} was deployed)"
+                )
+                rollback_cmd = f"gcloud run services update-traffic {origin} --to-revisions={prev_rev}=100 --region={region}"
             else:
                 rollback_title = f"Roll back Cloud Run traffic on {origin} (previous serving revision could not be identified)"
-                rollback_cmd = f"# previous serving revision could not be identified; inspect revision history to select rollback target: gcloud run revisions list --service={origin} --region=us-west1"
+                rollback_cmd = f"# previous serving revision could not be identified; inspect revision history to select rollback target: gcloud run revisions list --service={origin} --region={region}"
 
             return [
                 ActionItem(
                     title=rollback_title,
                     command=rollback_cmd,
                     verification="Confirm HTTP 5xx error rate drops below 1% via Cloud Monitoring",
-                    rollback=f"Re-route traffic via gcloud run services update-traffic {origin} --to-latest --region=us-west1 if regression persists.",
+                    rollback=(
+                        f"Traffic is pinned to named revisions: to undo, route back explicitly with"
+                        f" gcloud run services update-traffic {origin} --to-revisions={recent_rev}=100 --region={region};"
+                        " do not route to the latest revision, which can be an unused or faulty one."
+                    ),
                 ),
                 ActionItem(
                     title=config_check_title,
@@ -1113,7 +1438,7 @@ class SynthesizerAgent:
             return [
                 ActionItem(
                     title=f"Inspect ingress traffic distribution and verify SpikeArrest policy limits on {origin}",
-                    command=f"gcloud apigee apiproxies describe {origin} --organization=cloud-assist-fde-2",
+                    command=f"gcloud apigee apiproxies describe {origin} --organization={project_id}",
                     verification="Confirm 429 response rate returns to nominal 0% in Apigee Analytics",
                 ),
                 ActionItem(
@@ -1149,13 +1474,17 @@ class SynthesizerAgent:
                 ),
             ]
 
-        # 4. Generic Service Failure
+        # 4. Generic Service Failure: no change on the origin is implicated, so no traffic change
+        # is recommended; confirm which named revision serves traffic first.
         return [
             ActionItem(
-                title=f"Route service traffic to latest healthy revision on {origin}",
-                command=f"gcloud run services update-traffic {origin} --to-latest --region=us-west1",
-                verification="Confirm healthy container startup and error rates return below 1%",
-                rollback="Revert latest service configuration changes if performance degradation persists.",
+                title=(
+                    f"Confirm the named revision serving traffic on {origin}; no recent change on {origin} is"
+                    " implicated, so no traffic change is recommended (if one becomes necessary, route to an"
+                    " explicit known-good revision, never to the latest revision)"
+                ),
+                command=f"gcloud run services describe {origin} --region={region} --format=\"yaml(status.traffic)\"",
+                verification="Confirm the serving revision is the one that served before the alert onset",
             ),
             ActionItem(
                 title=f"Review active service telemetry and slow queries via Cloud Monitoring and Cloud Logging for {origin}",
@@ -1481,7 +1810,11 @@ class SynthesizerAgent:
         chg_dossier = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist"), None)
         if chg_dossier:
             has_chg_check = bool(chg_dossier.queries_executed) or bool(chg_dossier.metrics)
-            if has_chg_check and not chg_dossier.anomaly_detected:
+            not_implicated = chg_dossier.metrics.get("change_not_implicated_reason")
+            if not_implicated:
+                # Stated by the origin selection notes (alternatives_ruled_out) instead.
+                pass
+            elif has_chg_check and not chg_dossier.anomaly_detected:
                 rev = chg_dossier.metrics.get("recent_revision", "N/A")
                 alternatives.append({
                     "alternative": "Recent Application Deployment Regression",
@@ -1677,7 +2010,7 @@ class SynthesizerAgent:
 
 ## Probable Root Cause
 {report.probable_root_cause.text} (Confidence: {int(report.probable_root_cause.confidence * 100)}%)
-
+{self._origin_selection_markdown(report)}
 ## Blast Radius
 - Origin: `{origin}`
 - Impacted Downstream Components: {', '.join(f'`{b}`' for b in merged_blast)}
@@ -1687,6 +2020,20 @@ class SynthesizerAgent:
 - Relevant edges:
 {edges_lines}
 """
+
+    @staticmethod
+    def _origin_selection_markdown(report: InvestigationReport) -> str:
+        """'## Origin selection' section of the OKF report (empty when there was no decision to explain)."""
+        notes = (report.root_cause_analysis or {}).get("origin_selection") or {}
+        if not notes.get("explanation"):
+            return ""
+        lines = ["", "## Origin selection", notes["explanation"]]
+        for cand in notes.get("candidates") or []:
+            lines.append(
+                f"- `{cand.get('service')}`: score {cand.get('score')}, explains {cand.get('explains') or []},"
+                f" explained by {cand.get('explained_by') or []}, onset {cand.get('onset')}"
+            )
+        return "\n".join(lines) + "\n"
 
     def _update_okf_file(
         self,

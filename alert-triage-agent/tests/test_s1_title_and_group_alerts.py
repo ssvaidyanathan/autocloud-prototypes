@@ -272,7 +272,7 @@ def _alert_payload(entry: dict) -> dict:
     ).model_dump(mode="json")
 
 
-async def _primary_only_investigation(primary_alert, group_id, filename, settings):
+async def _primary_only_investigation(primary_alert, group_id, filename, settings, group_alerts=None):
     """Shaped like the real investigation: built from the primary alert only."""
     return _s1_report(
         alerts=[format_okf_alert_entry(primary_alert, valid_ts=primary_alert.started_at)],

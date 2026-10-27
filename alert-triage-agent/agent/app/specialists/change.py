@@ -16,6 +16,45 @@ from .base import BaseSpecialist, EvidenceDossier
 logger = logging.getLogger(__name__)
 
 
+# Evaluate genuine changes within the 2-hour window:
+# A revision is a genuine change ONLY when:
+# 1. Created within lookback window (<= 120m) before anomaly onset.
+# 2. Image digest or env/config differs from previous serving revision.
+# 3. Traffic shifts to older revisions or without digest/env diff are NOT changes (is_traffic_shift: True).
+def is_genuine_change(c: dict[str, Any]) -> bool:
+    """True when a change record is a genuine deployment within the lookback window."""
+    # 1. Discard explicit traffic shifts
+    if (
+        c.get("action") == "traffic_shift"
+        or c.get("is_traffic_shift") is True
+        or c.get("details", {}).get("is_traffic_shift") is True
+    ):
+        return False
+
+    # 2. Time window check: creation / deploy time must be within 120 minutes and before/at anomaly onset
+    mins = c.get("deployed_minutes_ago", 999)
+    if mins > 120 or mins < 0:
+        return False
+
+    # 3. Must be serving (if serving status known)
+    if c.get("is_serving") is False or c.get("details", {}).get("is_serving") is False:
+        return False
+
+    # 4. Must differ from previous serving revision (digest or env/config)
+    if c.get("differs_from_previous") is False or c.get("details", {}).get("differs_from_previous") is False:
+        return False
+
+    details = c.get("details", {})
+    if isinstance(details, dict):
+        cur_img = details.get("image")
+        prev_img = details.get("prev_image")
+        env_diff = details.get("env_diff")
+        if cur_img and prev_img and cur_img == prev_img and env_diff is not None and len(env_diff) == 0:
+            return False
+
+    return True
+
+
 class ChangeSpecialist(BaseSpecialist):
     """Specialist agent correlating recent infrastructure and code changes."""
 
@@ -302,45 +341,8 @@ class ChangeSpecialist(BaseSpecialist):
         except Exception:
             pass
 
-        # Evaluate genuine changes within the 2-hour window:
-        # A revision is a genuine change ONLY when:
-        # 1. Created within lookback window (<= 120m) before anomaly onset.
-        # 2. Image digest or env/config differs from previous serving revision.
-        # 3. Traffic shifts to older revisions or without digest/env diff are NOT changes (is_traffic_shift: True).
-        def _is_genuine_change(c: dict[str, Any]) -> bool:
-            # 1. Discard explicit traffic shifts
-            if (
-                c.get("action") == "traffic_shift"
-                or c.get("is_traffic_shift") is True
-                or c.get("details", {}).get("is_traffic_shift") is True
-            ):
-                return False
-
-            # 2. Time window check: creation / deploy time must be within 120 minutes and before/at anomaly onset
-            mins = c.get("deployed_minutes_ago", 999)
-            if mins > 120 or mins < 0:
-                return False
-
-            # 3. Must be serving (if serving status known)
-            if c.get("is_serving") is False or c.get("details", {}).get("is_serving") is False:
-                return False
-
-            # 4. Must differ from previous serving revision (digest or env/config)
-            if c.get("differs_from_previous") is False or c.get("details", {}).get("differs_from_previous") is False:
-                return False
-
-            details = c.get("details", {})
-            if isinstance(details, dict):
-                cur_img = details.get("image")
-                prev_img = details.get("prev_image")
-                env_diff = details.get("env_diff")
-                if cur_img and prev_img and cur_img == prev_img and env_diff is not None and len(env_diff) == 0:
-                    return False
-
-            return True
-
         relevant_changes = [
-            c for c in recent_changes if c.get("service") in candidate_services and _is_genuine_change(c)
+            c for c in recent_changes if c.get("service") in candidate_services and is_genuine_change(c)
         ]
 
         if relevant_changes:

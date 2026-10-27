@@ -31,7 +31,8 @@ from .grouping.manager import GroupingManager
 from .grouping.models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument
 from .grouping.store import OKFStore, read_okf, update_okf_atomically
 from .grouping.suppression import format_late_alert_work_note
-from .specialists.synthesizer import apply_group_alerts
+from .specialists.origin_selection import alert_event_from_entry
+from .specialists.synthesizer import SynthesizerAgent, apply_group_alerts
 from .timers.scheduler import schedule_delayed_timer
 from .triage import (
     execute_multi_agent_investigation,
@@ -326,9 +327,13 @@ async def timer_wake(
         filename = f"incident-{doc.group_id}.md"
 
         try:
-            report = await execute_multi_agent_investigation(primary_alert, doc.group_id, filename, settings)
+            report = await execute_multi_agent_investigation(
+                primary_alert, doc.group_id, filename, settings, group_alerts=list(doc.alerts or [])
+            )
         except Exception as exc:
-            report = _fallback_report(primary_alert, doc.group_id, filename, settings, exc, "settle wake")
+            report = _fallback_report(
+                _origin_alert(doc, primary_alert), doc.group_id, filename, settings, exc, "settle wake"
+            )
 
         report.group_id = doc.group_id
         report.filename = filename
@@ -419,9 +424,13 @@ async def timer_wake(
         filename = f"incident-{doc.group_id}.md"
 
         try:
-            report = await execute_multi_agent_investigation(primary_alert, doc.group_id, filename, settings)
+            report = await execute_multi_agent_investigation(
+                primary_alert, doc.group_id, filename, settings, group_alerts=list(doc.alerts or [])
+            )
         except Exception as exc:
-            report = _fallback_report(primary_alert, doc.group_id, filename, settings, exc, "max_wait wake")
+            report = _fallback_report(
+                _origin_alert(doc, primary_alert), doc.group_id, filename, settings, exc, "max_wait wake"
+            )
 
         report.group_id = doc.group_id
         report.filename = filename
@@ -639,6 +648,14 @@ def _alert_event_from_entry(first_a: dict[str, Any], doc: OKFDocument) -> AlertE
         policy_user_labels=a_labels,
         labels=a_labels,
     )
+
+
+def _origin_alert(doc: OKFDocument, primary_alert: AlertEvent) -> AlertEvent:
+    """Alert on the group's topology-selected origin (the first alert when only one service alerts)."""
+    selection = SynthesizerAgent._select_group_origin(primary_alert, list(doc.alerts or []))
+    if selection is None or not selection.is_multi_service:
+        return primary_alert
+    return alert_event_from_entry(selection.primary_alert, primary_alert)
 
 
 def _extract_primary_alert(doc: OKFDocument) -> AlertEvent:

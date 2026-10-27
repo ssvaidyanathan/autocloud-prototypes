@@ -277,7 +277,7 @@ def _event(entry: dict) -> AlertEvent:
     )
 
 
-async def _primary_only_investigation(primary_alert, group_id, filename, settings):
+async def _primary_only_investigation(primary_alert, group_id, filename, settings, group_alerts=None):
     return _report(
         AgentReport,
         group_id=group_id,
