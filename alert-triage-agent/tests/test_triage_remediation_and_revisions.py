@@ -46,10 +46,12 @@ def test_triage_remediation_apigee_zero_gcloud_run_commands(agent_config):
     for cmd in commands:
         assert "gcloud run" not in cmd, f"Found illegal gcloud run command for Apigee proxy: {cmd}"
 
-    # Verify Apigee proxy command and security policy command
-    assert any("gcloud apigee apiproxies describe" in cmd for cmd in commands)
-    assert any("gcloud compute security-policies rules create" in cmd for cmd in commands)
-    assert any("<CLIENT_IP>/32" in cmd for cmd in commands)
+    # Read-only access-log review only: no action against resources the agent has not seen
+    # (no Cloud Armor policy, no client IP), and no invalid 'gcloud apigee apiproxies' command.
+    assert any("gcloud logging read" in cmd and "ata-apigee-access" in cmd for cmd in commands)
+    assert not any("security-policies" in cmd for cmd in commands)
+    assert not any("apiproxies" in cmd for cmd in commands)
+    assert not any("CLIENT_IP" in cmd for cmd in commands)
 
 
 def test_triage_remediation_cloud_sql_commands(agent_config):

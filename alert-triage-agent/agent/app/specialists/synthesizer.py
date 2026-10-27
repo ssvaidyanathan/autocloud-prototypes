@@ -1123,6 +1123,126 @@ class SynthesizerAgent:
         )
         return total_conf, contributing_factors, rationale
 
+    @staticmethod
+    def _proxy_change_evidence(dossiers: list[EvidenceDossier], origin: str) -> Optional[dict[str, Any]]:
+        """Access-log evidence that a new Apigee proxy revision brought the SpikeArrest faults.
+
+        Implicated only when the origin proxy switched revision in the window, the new revision
+        has SpikeArrest faults and the previous one served requests without any. Returns the
+        revision change merged with proxy, org/environment and SpikeArrest totals, else None.
+        """
+        apigee = next(
+            (d for d in dossiers if d.specialist_name == "ApigeeSpecialist" and d.target_resource == origin),
+            None,
+        )
+        if not apigee:
+            return None
+        change = apigee.metrics.get("proxy_revision_change")
+        if not isinstance(change, dict):
+            return None
+        if not (
+            change.get("new_spike_arrest_faults", 0) > 0
+            and change.get("previous_spike_arrest_faults", 0) == 0
+            and change.get("previous_requests", 0) > 0
+        ):
+            return None
+        sa = apigee.metrics.get("spike_arrest") if isinstance(apigee.metrics.get("spike_arrest"), dict) else {}
+        return {
+            **change,
+            "proxy": origin,
+            "org": apigee.metrics.get("apigee_org"),
+            "environment": apigee.metrics.get("apigee_environment"),
+            "spike_arrest_count": sa.get("count"),
+            "spike_arrest_fault_code": sa.get("fault_code"),
+        }
+
+    @staticmethod
+    def _proxy_change_root_cause(ev: dict[str, Any], policy_name: str) -> str:
+        """Root cause sentence for a proxy revision change that brought SpikeArrest faults."""
+        fault = f" with fault `{ev['spike_arrest_fault_code']}`" if ev.get("spike_arrest_fault_code") else ""
+        total = f"{ev['spike_arrest_count']} HTTP 429 responses{fault} in total; " if ev.get("spike_arrest_count") else ""
+        text = (
+            f"Configuration change on Apigee proxy `{ev['proxy']}`: revision {ev['new_revision']} "
+            f"(first served {ev['new_first_served_at']}, replacing revision {ev['previous_revision']}) "
+            f"is rejecting requests with SpikeArrest faults under policy `{policy_name}`. "
+            f"{total}access log: revision {ev['new_revision']} served {ev['new_requests']} requests with "
+            f"{ev['new_spike_arrest_faults']} SpikeArrest faults, revision {ev['previous_revision']} served "
+            f"{ev['previous_requests']} requests with none."
+        )
+        prev_rpm, new_rpm = ev.get("previous_requests_per_minute"), ev.get("new_requests_per_minute")
+        if prev_rpm is not None and new_rpm is not None:
+            text += (
+                f" Request rate: {prev_rpm}/min on revision {ev['previous_revision']}, "
+                f"{new_rpm}/min on revision {ev['new_revision']}."
+            )
+        else:
+            text += (
+                f" The request rate before the switch was not measured (revision {ev['previous_revision']} "
+                "served for less than a minute in the query window)."
+                if prev_rpm is None else ""
+            )
+        return text
+
+    def _apigee_recommendations(
+        self, dossiers: list[EvidenceDossier], origin: str, project_id: str
+    ) -> list[ActionItem]:
+        """Actions for an Apigee proxy incident, naming only resources seen in the telemetry.
+
+        With a proxy revision change implicated: redeploy the previous revision (explicit
+        number). Otherwise: read the proxy's SpikeArrest faults from its access log. Commands
+        need the org and environment Apigee reported; without them no command is given.
+        """
+        apigee = next((d for d in dossiers if d.specialist_name == "ApigeeSpecialist"), None)
+        access_log = f"projects/{project_id}/logs/ata-apigee-access"
+        log_cmd = (
+            f"gcloud logging read 'logName=\"{access_log}\" AND jsonPayload.proxy=\"{origin}\" "
+            f"AND jsonPayload.fault_source=\"SpikeArrestViolation\"' --project={project_id} --limit=20"
+        )
+        change = self._proxy_change_evidence(dossiers, origin)
+        if change:
+            prev, new = change["previous_revision"], change["new_revision"]
+            org, env = change.get("org"), change.get("environment")
+            if org and env:
+                deploy = f"gcloud apigee apis deploy {{rev}} --api={origin} --environment={env} --organization={org} --override"
+                rollback_cmd: Optional[str] = deploy.format(rev=prev)
+                undo = f"Redeploy revision {new}: {deploy.format(rev=new)}"
+            else:
+                logger.warning(
+                    "Apigee org/environment not captured for %s; rollback to revision %s given without a command",
+                    origin,
+                    prev,
+                )
+                rollback_cmd = None
+                undo = f"Redeploy revision {new} of {origin}."
+            return [
+                ActionItem(
+                    title=(
+                        f"Roll back Apigee proxy {origin} to revision {prev}, which served before revision {new} "
+                        f"without SpikeArrest faults"
+                    ),
+                    command=rollback_cmd,
+                    verification=(
+                        f"Confirm the ata-apigee-access log shows revision {prev} serving and no new "
+                        f"SpikeArrestViolation faults"
+                    ),
+                    rollback=undo,
+                ),
+                ActionItem(
+                    title=f"Review the SpikeArrest faults of {origin} in its access log",
+                    command=log_cmd,
+                    verification=f"Confirm the faults are on revision {new} only",
+                ),
+            ]
+        if apigee is None:
+            return [ActionItem(title=f"Review Apigee proxy {origin} telemetry (no Apigee evidence captured)")]
+        return [
+            ActionItem(
+                title=f"Review the SpikeArrest faults of {origin} in its access log",
+                command=log_cmd,
+                verification="Identify the proxy revision and clients receiving HTTP 429 responses",
+            ),
+        ]
+
     def _gateway_timeout_fact(self, dossiers: list[EvidenceDossier], origin: str) -> Optional[str]:
         """Sentence stating the Apigee GatewayTimeout evidence for ``origin``, or None.
 
@@ -1258,9 +1378,18 @@ class SynthesizerAgent:
         # 3. Branch: SpikeArrest 429 at Apigee gateway proxy (protects backend)
         is_429 = "429" in (alert.policy_name or "").lower() or "spikearrest" in (alert.policy_name or "").lower()
         if is_429:
+            proxy_change = self._proxy_change_evidence(dossiers, origin)
+            if proxy_change:
+                return self._proxy_change_root_cause(proxy_change, alert.policy_name), confidence
+            apigee = next((d for d in dossiers if d.specialist_name == "ApigeeSpecialist"), None)
+            sa = apigee.metrics.get("spike_arrest") if apigee else None
+            count_str = (
+                f" ({sa['count']} HTTP 429 responses with fault `{sa['fault_code']}`)"
+                if isinstance(sa, dict) and sa.get("count") else ""
+            )
             root_cause_text = (
-                f"SpikeArrest rate-limit violation at Apigee ingress proxy `{origin}` "
-                f"protecting backend services from traffic bursts under policy `{alert.policy_name}`."
+                f"SpikeArrest rate-limit violations at Apigee ingress proxy `{origin}`{count_str} "
+                f"under policy `{alert.policy_name}`."
             )
             return root_cause_text, confidence
 
@@ -1612,30 +1741,7 @@ class SynthesizerAgent:
             or "v1" in origin
         )
         if is_apigee:
-            client_ip = apigee_dossier.metrics.get("top_client_ip") if apigee_dossier else None
-            if not client_ip or client_ip == "N/A (not captured)":
-                client_cidr = "<CLIENT_IP>/32"
-            elif "/" in str(client_ip):
-                client_cidr = str(client_ip)
-            else:
-                client_cidr = f"{client_ip}/32"
-
-            return [
-                ActionItem(
-                    title=f"Inspect ingress traffic distribution and verify SpikeArrest policy limits on {origin}",
-                    command=f"gcloud apigee apiproxies describe {origin} --organization={project_id}",
-                    verification="Confirm 429 response rate returns to nominal 0% in Apigee Analytics",
-                ),
-                ActionItem(
-                    title="Filter or rate-limit abusive client IP addresses via Cloud Armor security policy",
-                    command=f"gcloud compute security-policies rules create 1000 --security-policy=ata-edge-policy --action=deny-429 --src-ip-ranges={client_cidr}",
-                    verification="Check access logs for repeated burst traffic patterns",
-                ),
-                ActionItem(
-                    title="Adjust traffic controls",
-                    rollback="Restore baseline SpikeArrest policy limits once traffic surge subsides.",
-                ),
-            ]
+            return self._apigee_recommendations(dossiers, origin, project_id)
 
         # 3. Database Failure (Cloud SQL)
         is_sql = ((sql_dossier and sql_dossier.anomaly_detected) or "db" in origin) and not (cr_dossier and cr_dossier.metrics.get("has_db_auth_error"))
@@ -1996,7 +2102,8 @@ class SynthesizerAgent:
             has_chg_check = bool(chg_dossier.queries_executed) or bool(chg_dossier.metrics)
             # A not-implicated change is stated by the origin selection notes (alternatives_ruled_out).
             not_implicated = chg_dossier.metrics.get("change_not_implicated_reason")
-            if has_chg_check and not chg_dossier.anomaly_detected and not not_implicated:
+            proxy_changed = self._proxy_change_evidence(dossiers, origin) is not None
+            if has_chg_check and not chg_dossier.anomaly_detected and not not_implicated and not proxy_changed:
                 rev = chg_dossier.metrics.get("recent_revision", "N/A")
                 alternatives.append({
                     "alternative": "Recent Application Deployment Regression",

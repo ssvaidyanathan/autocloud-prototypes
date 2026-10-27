@@ -86,11 +86,17 @@ class ChangeSpecialist(BaseSpecialist):
                 pass
 
         recent_changes: list[dict[str, Any]] = []
+        # Apigee deployment history is only covered by the tools timeline; the direct fallbacks
+        # below query Cloud Run alone, so a "no deployments" finding must say which it covered.
+        apigee_queried = False
 
         # 1. First attempt querying via tools fastmcp server if available
         try:
             from tools.app.server import get_change_timeline
             tl = get_change_timeline(window_hours=2, project_id=config.project_id, region=config.region)
+            apigee_queried = not any(
+                c.get("source") == "apigee" and c.get("error") for c in tl.get("changes", [])
+            )
             for chg in tl.get("changes", []):
                 svc = chg.get("service_name") or chg.get("api_name")
                 rev = chg.get("revision_name") or str(chg.get("revision", ""))
@@ -371,11 +377,22 @@ class ChangeSpecialist(BaseSpecialist):
                 )
             )
         else:
-            findings.append("No configuration or revision deployments detected in the 2-hour window prior to alert onset.")
+            if apigee_queried:
+                findings.append("No configuration or revision deployments detected in the 2-hour window prior to alert onset.")
+                content = "No recent deployments detected; incident is not attributable to a recent change event."
+            else:
+                findings.append(
+                    "No Cloud Run revision deployments detected in the 2-hour window prior to alert onset "
+                    "(Apigee proxy deployment history not queried)."
+                )
+                content = (
+                    "No recent Cloud Run deployments detected. Apigee proxy deployment history was not "
+                    "queried; proxy revision changes come from the Apigee access log."
+                )
             evidence_items.append(
                 EvidenceItem(
                     headline="Deployment History Analysis",
-                    content="No recent deployments detected; incident is not attributable to a recent change event.",
+                    content=content,
                 )
             )
 

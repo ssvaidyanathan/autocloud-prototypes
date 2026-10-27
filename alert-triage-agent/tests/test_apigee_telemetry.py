@@ -120,8 +120,8 @@ async def test_apigee_specialist_with_real_telemetry(test_config):
         assert "203.0.113.42" in dossier.evidence_items[0].content
 
 
-def test_synthesizer_n1_dynamic_client_ip_extraction():
-    """Verify remediation commands dynamically extract real client IP or use <CLIENT_IP>/32 placeholder."""
+def test_synthesizer_429_actions_never_target_client_ip_or_unverified_policy():
+    """429 actions never block a client IP or name a Cloud Armor policy the agent has not seen."""
     synth = SynthesizerAgent()
     alert = AlertEvent(
         incident_id="0.test_n1",
@@ -129,36 +129,21 @@ def test_synthesizer_n1_dynamic_client_ip_extraction():
         resource_name="ata-orders-v1",
         state="open",
     )
-
-    # 1. With real extracted client IP
-    dossier_with_ip = EvidenceDossier(
-        specialist_name="ApigeeSpecialist",
-        target_resource="ata-orders-v1",
-        findings=[],
-        metrics={"top_client_ip": "203.0.113.88"},
-        evidence_items=[],
-        queries_executed={},
-        anomaly_detected=True,
-    )
-    actions = synth._synthesize_recommendations([dossier_with_ip], "ata-orders-v1", alert)
-    armor_action = next(a for a in actions if "security-policies" in a.command)
-    assert "--src-ip-ranges=203.0.113.88/32" in armor_action.command
-    assert "198.51.100.0" not in armor_action.command
-
-    # 2. Without captured client IP (placeholder fallback)
-    dossier_without_ip = EvidenceDossier(
-        specialist_name="ApigeeSpecialist",
-        target_resource="ata-orders-v1",
-        findings=[],
-        metrics={"top_client_ip": "<CLIENT_IP>/32"},
-        evidence_items=[],
-        queries_executed={},
-        anomaly_detected=True,
-    )
-    actions_fallback = synth._synthesize_recommendations([dossier_without_ip], "ata-orders-v1", alert)
-    armor_action_fallback = next(a for a in actions_fallback if "security-policies" in a.command)
-    assert "--src-ip-ranges=<CLIENT_IP>/32" in armor_action_fallback.command
-    assert "198.51.100.0" not in armor_action_fallback.command
+    for client_ip in ("203.0.113.88", "<CLIENT_IP>/32"):
+        dossier = EvidenceDossier(
+            specialist_name="ApigeeSpecialist",
+            target_resource="ata-orders-v1",
+            findings=[],
+            metrics={"top_client_ip": client_ip},
+            evidence_items=[],
+            queries_executed={},
+            anomaly_detected=True,
+        )
+        actions = synth._synthesize_recommendations([dossier], "ata-orders-v1", alert)
+        commands = [a.command or "" for a in actions]
+        assert commands and all("security-policies" not in c for c in commands)
+        assert all("203.0.113.88" not in c and "CLIENT_IP" not in c for c in commands)
+        assert any("gcloud logging read" in c and "ata-orders-v1" in c for c in commands)
 
 
 def test_synthesizer_build_apigee_analytics_dynamic_and_na():

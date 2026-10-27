@@ -138,7 +138,9 @@ def test_s3_group2_apigee_429_consistency(synthesizer):
     cause_comp = _extract_cause_component(text)
     assert cause_comp == origin, f"Named cause component '{cause_comp}' must equal origin '{origin}'"
     assert "upstream dependency" not in text
-    assert "SpikeArrest rate-limit violation at Apigee ingress proxy" in text
+    assert "SpikeArrest rate-limit violations at Apigee ingress proxy" in text
+    # No unevidenced traffic-volume claim.
+    assert "traffic burst" not in text and "surge" not in text
 
 
 def test_s4_cloudsql_consistency(synthesizer):

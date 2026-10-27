@@ -475,3 +475,157 @@ def test_gateway_timeout_fact_requires_topology_path_and_omits_missing_fields():
         "Apigee proxy `ata-inventory-v1` returned 3 responses with fault `GatewayTimeout`. Requests on "
         "ata-inventory-v1 -> ata-inventory-api did not complete within the proxy's target timeout."
     )
+
+
+# ---------------------------------------------------------------------------------------
+# Bugs 6/7 (S3, INC0010324): SpikeArrest 429s after a new ata-orders-v1 proxy revision
+# ---------------------------------------------------------------------------------------
+
+from datetime import timedelta  # noqa: E402
+
+S3_SA_FAULT = "policies.ratelimit.SpikeArrestViolation"
+S3_DEPLOY = datetime(2026, 10, 27, 8, 27, 26, tzinfo=timezone.utc)
+
+
+def _s3_log_entries(prev_faults: int = 0):
+    entries = []
+    # Revision 161: 48 requests over 51 s before the switch (live S3: 47x 404, 1x 200, no SpikeArrest).
+    for i in range(48):
+        e = _MagicMock()
+        e.timestamp = S3_DEPLOY - timedelta(seconds=51) + timedelta(seconds=i)
+        e.payload = {"proxy": "ata-orders-v1", "revision": "161", "environment": "prod",
+                     "status_code": "404", "fault_source": "SpikeArrestViolation" if i < prev_faults else "ErrorResponseCode",
+                     "client_ip": "34.61.176.32"}
+        entries.append(e)
+    # Revision 162: 586 requests over 6 min 24 s, 572 SpikeArrest faults.
+    for i in range(586):
+        e = _MagicMock()
+        e.timestamp = S3_DEPLOY + timedelta(seconds=i * 384 / 585)
+        e.payload = {"proxy": "ata-orders-v1", "revision": "162", "environment": "prod",
+                     "status_code": "", "fault_source": "SpikeArrestViolation" if i < 572 else "ErrorResponseCode",
+                     "client_ip": "34.61.176.32"}
+        entries.append(e)
+    return entries
+
+
+def _s3_series():
+    sa = _ts({"response_code": "429", "method": "GET", "fault_code": S3_SA_FAULT,
+              "fault_source": "policy", "apigee_fault": "false"}, [300, 272])
+    sa.resource.labels = {"org": "cloud-assist-fde-2", "env": "prod", "proxy_name": "ata-orders-v1"}
+    return [sa]
+
+
+async def _s3_apigee_dossier(prev_faults: int = 0):
+    from agent.app.config import AgentConfig
+    from agent.app.specialists.apigee import ApigeeSpecialist
+
+    alert = AlertEvent(
+        incident_id="0.oeb5qvfcvh5r", policy_name="ata-apigee-orders-429",
+        resource_name="ata-orders-v1", started_at="2026-10-27T08:35:28Z",
+    )
+    config = AgentConfig(project_id="cloud-assist-fde-2", region="us-west1", is_local=True)
+    with _patch("google.cloud.monitoring_v3.MetricServiceClient") as mon_cls, \
+         _patch("google.cloud.logging.Client") as log_cls:
+        series = _s3_series()
+        mon_cls.return_value.list_time_series.side_effect = (
+            lambda request: series if "response_count" in request.filter else []
+        )
+        log_cls.return_value.list_entries.return_value = _s3_log_entries(prev_faults)
+        return await ApigeeSpecialist().investigate(alert, config), alert
+
+
+@pytest.mark.asyncio
+async def test_s3_apigee_specialist_records_revision_change_and_spike_arrest():
+    dossier, _ = await _s3_apigee_dossier()
+    assert dossier.metrics["apigee_org"] == "cloud-assist-fde-2"
+    assert dossier.metrics["apigee_environment"] == "prod"
+    assert dossier.metrics["spike_arrest"] == {
+        "count": 572, "count_source": "apigee.googleapis.com/proxy/response_count", "fault_code": S3_SA_FAULT,
+    }
+    change = dossier.metrics["proxy_revision_change"]
+    assert change["previous_revision"] == "161" and change["new_revision"] == "162"
+    assert change["new_first_served_at"] == "2026-10-27T08:27:26Z"
+    assert change["previous_requests"] == 48 and change["previous_spike_arrest_faults"] == 0
+    assert change["new_requests"] == 586 and change["new_spike_arrest_faults"] == 572
+    # Revision 161 served for under a minute: no rate is claimed for it.
+    assert change["previous_requests_per_minute"] is None
+    assert change["new_requests_per_minute"] is not None
+
+
+@pytest.mark.asyncio
+async def test_s3_root_cause_is_proxy_config_change_not_traffic_volume():
+    dossier, alert = await _s3_apigee_dossier()
+    text, _ = SynthesizerAgent()._determine_root_cause([dossier], "ata-orders-v1", alert)
+    assert text.startswith(
+        "Configuration change on Apigee proxy `ata-orders-v1`: revision 162 "
+        "(first served 2026-10-27T08:27:26Z, replacing revision 161)"
+    )
+    assert f"572 HTTP 429 responses with fault `{S3_SA_FAULT}`" in text
+    assert "revision 161 served 48 requests with none" in text
+    assert "request rate before the switch was not measured" in text
+    for claim in ("traffic burst", "surge", "abusive"):
+        assert claim not in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_s3_actions_roll_back_to_explicit_previous_revision_without_cloud_armor():
+    dossier, alert = await _s3_apigee_dossier()
+    actions = SynthesizerAgent()._synthesize_recommendations(
+        [dossier], "ata-orders-v1", alert, region="us-west1", project_id="cloud-assist-fde-2"
+    )
+    first = actions[0]
+    assert first.command == (
+        "gcloud apigee apis deploy 161 --api=ata-orders-v1 --environment=prod "
+        "--organization=cloud-assist-fde-2 --override"
+    )
+    assert "revision 161" in first.title and "revision 162" in first.title
+    assert first.rollback.endswith(
+        "gcloud apigee apis deploy 162 --api=ata-orders-v1 --environment=prod "
+        "--organization=cloud-assist-fde-2 --override"
+    )
+    blob = " ".join(f"{a.title} {a.command} {a.verification} {a.rollback}" for a in actions)
+    for bad in ("security-policies", "ata-edge-policy", "34.61.176.32", "CLIENT_IP", "apiproxies", "surge"):
+        assert bad not in blob
+
+
+@pytest.mark.asyncio
+async def test_s3_without_org_env_gives_rollback_without_guessed_command(caplog):
+    dossier, alert = await _s3_apigee_dossier()
+    dossier.metrics.pop("apigee_org")
+    with caplog.at_level("WARNING"):
+        actions = SynthesizerAgent()._synthesize_recommendations(
+            [dossier], "ata-orders-v1", alert, region="us-west1", project_id="cloud-assist-fde-2"
+        )
+    assert actions[0].command is None
+    assert "revision 161" in actions[0].title
+    assert "Apigee org/environment not captured" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_spike_arrest_on_both_revisions_does_not_blame_the_new_revision():
+    dossier, alert = await _s3_apigee_dossier(prev_faults=10)
+    text, _ = SynthesizerAgent()._determine_root_cause([dossier], "ata-orders-v1", alert)
+    assert "Configuration change" not in text
+    assert text.startswith("SpikeArrest rate-limit violations at Apigee ingress proxy `ata-orders-v1` (572 HTTP 429")
+    actions = SynthesizerAgent()._synthesize_recommendations(
+        [dossier], "ata-orders-v1", alert, region="us-west1", project_id="cloud-assist-fde-2"
+    )
+    assert not any("apis deploy" in (a.command or "") for a in actions)
+
+
+def test_change_specialist_no_deploy_finding_names_what_was_queried():
+    import asyncio
+
+    from agent.app.config import AgentConfig
+    from agent.app.specialists.change import ChangeSpecialist
+
+    alert = AlertEvent(
+        incident_id="0.oeb5qvfcvh5r", policy_name="ata-apigee-orders-429",
+        resource_name="ata-orders-v1", started_at="2026-10-27T08:35:28Z",
+    )
+    config = AgentConfig(project_id="test-proj", region="test-region", is_local=True)
+    with _patch("tools.app.server.get_change_timeline", side_effect=ImportError("no tools in agent image")):
+        dossier = asyncio.run(ChangeSpecialist().investigate(alert, config))
+    joined = " ".join(dossier.findings)
+    assert "No configuration or revision deployments detected" not in joined
+    assert "Apigee proxy deployment history not queried" in joined

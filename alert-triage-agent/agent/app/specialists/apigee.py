@@ -19,6 +19,53 @@ logger = logging.getLogger(__name__)
 
 # Apigee fault raised when the target does not answer within the proxy's target timeout.
 GATEWAY_TIMEOUT_FAULT = "GatewayTimeout"
+# Apigee fault raised by a SpikeArrest policy (metric fault_code ends with it, access-log fault_source equals it).
+SPIKE_ARREST_FAULT = "SpikeArrestViolation"
+# Access-log entries read per investigation, oldest first so a revision switch in the window is seen.
+ACCESS_LOG_MAX_ENTRIES = 1000
+
+
+def _entry_time(entry: Any) -> Optional[datetime]:
+    ts = getattr(entry, "timestamp", None)
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _iso(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def summarize_revision_change(revisions: dict[str, dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Describe the switch to the newest proxy revision seen in the access log, or None.
+
+    ``revisions`` maps revision -> {first, last, requests, spike_arrest_faults}. Only facts
+    from the log are returned: which revision served before and after, when each was first
+    and last seen, and the per-revision request and SpikeArrest fault counts. A request rate
+    is given only for a revision that served for at least a minute.
+    """
+    timed = [(r, v) for r, v in revisions.items() if v.get("first") and v.get("last")]
+    if len(timed) < 2:
+        return None
+    timed.sort(key=lambda rv: rv[1]["first"])
+    (prev_rev, prev), (new_rev, new) = timed[-2], timed[-1]
+
+    def rate(v: dict[str, Any]) -> Optional[float]:
+        minutes = (v["last"] - v["first"]).total_seconds() / 60.0
+        return round(v["requests"] / minutes, 1) if minutes >= 1.0 else None
+
+    return {
+        "previous_revision": prev_rev,
+        "new_revision": new_rev,
+        "previous_last_served_at": _iso(prev["last"]),
+        "new_first_served_at": _iso(new["first"]),
+        "previous_requests": prev["requests"],
+        "new_requests": new["requests"],
+        "previous_spike_arrest_faults": prev["spike_arrest_faults"],
+        "new_spike_arrest_faults": new["spike_arrest_faults"],
+        "previous_requests_per_minute": rate(prev),
+        "new_requests_per_minute": rate(new),
+    }
 
 try:
     from topology.topology_graph import get_loader
@@ -110,6 +157,13 @@ class ApigeeSpecialist(BaseSpecialist):
         gt_response_code: Optional[str] = None
         gt_log_count = 0
         log_revisions: Counter[str] = Counter()
+        # SpikeArrest evidence and per-revision access-log facts; org/env as Apigee reports them.
+        sa_metric_count = 0
+        sa_fault_code: Optional[str] = None
+        sa_log_count = 0
+        revision_stats: dict[str, dict[str, Any]] = {}
+        apigee_org: Optional[str] = None
+        apigee_env: Optional[str] = None
 
         # 1. Query Cloud Monitoring: proxy/response_count
         try:
@@ -139,6 +193,13 @@ class ApigeeSpecialist(BaseSpecialist):
                 )
                 if code and pts_sum > 0:
                     status_counts[code] = status_counts.get(code, 0) + pts_sum
+                res_labels = getattr(getattr(ts, "resource", None), "labels", None)
+                if isinstance(res_labels, dict):
+                    apigee_org = res_labels.get("org") or apigee_org
+                    apigee_env = res_labels.get("env") or apigee_env
+                if fc and str(fc).endswith(SPIKE_ARREST_FAULT) and pts_sum > 0:
+                    sa_metric_count += pts_sum
+                    sa_fault_code = str(fc)
                 if fc and str(fc).endswith(GATEWAY_TIMEOUT_FAULT) and pts_sum > 0:
                     gt_metric_count += pts_sum
                     gt_fault_code = str(fc)
@@ -185,14 +246,18 @@ class ApigeeSpecialist(BaseSpecialist):
                 f'jsonPayload.proxy="{target_proxy}" AND '
                 f'timestamp>="{start_ts}" AND timestamp<="{end_ts}"'
             )
-            entries = list(logging_client.list_entries(filter_=log_filter, max_results=200))
+            entries = list(logging_client.list_entries(
+                filter_=log_filter, max_results=ACCESS_LOG_MAX_ENTRIES, order_by=google.cloud.logging.ASCENDING
+            ))
             if not entries:
                 alt_filter = (
                     f'logName="projects/{config.project_id}/logs/ata-apigee-access" AND '
                     f'(jsonPayload.proxy_name="{target_proxy}" OR textPayload:"{target_proxy}") AND '
                     f'timestamp>="{start_ts}" AND timestamp<="{end_ts}"'
                 )
-                entries = list(logging_client.list_entries(filter_=alt_filter, max_results=200))
+                entries = list(logging_client.list_entries(
+                    filter_=alt_filter, max_results=ACCESS_LOG_MAX_ENTRIES, order_by=google.cloud.logging.ASCENDING
+                ))
 
             client_counter: Counter[str] = Counter()
             for entry in entries:
@@ -203,7 +268,23 @@ class ApigeeSpecialist(BaseSpecialist):
                 cip = payload.get("client_ip")
                 if cip:
                     client_counter[cip] += 1
-                if str(payload.get("fault_source") or "") == GATEWAY_TIMEOUT_FAULT:
+                fault_name = str(payload.get("fault_source") or "")
+                if fault_name == SPIKE_ARREST_FAULT:
+                    sa_log_count += 1
+                if payload.get("environment"):
+                    apigee_env = apigee_env or str(payload["environment"])
+                entry_rev = str(payload.get("revision") or "").strip()
+                entry_ts = _entry_time(entry)
+                if entry_rev and entry_ts:
+                    st = revision_stats.setdefault(
+                        entry_rev, {"first": entry_ts, "last": entry_ts, "requests": 0, "spike_arrest_faults": 0}
+                    )
+                    st["first"] = min(st["first"], entry_ts)
+                    st["last"] = max(st["last"], entry_ts)
+                    st["requests"] += 1
+                    if fault_name == SPIKE_ARREST_FAULT:
+                        st["spike_arrest_faults"] += 1
+                if fault_name == GATEWAY_TIMEOUT_FAULT:
                     gt_log_count += 1
                     rev = str(payload.get("revision") or "").strip()
                     if rev:
@@ -251,6 +332,27 @@ class ApigeeSpecialist(BaseSpecialist):
             metrics["target_latency_p99"] = "N/A (not captured)"
 
         metrics["top_client_ip"] = top_client_ip if top_client_ip else "<CLIENT_IP>/32"
+
+        if apigee_org:
+            metrics["apigee_org"] = apigee_org
+        if apigee_env:
+            metrics["apigee_environment"] = apigee_env
+        if sa_metric_count or sa_log_count:
+            metrics["spike_arrest"] = {
+                "count": sa_metric_count or sa_log_count,
+                "count_source": (
+                    "apigee.googleapis.com/proxy/response_count" if sa_metric_count
+                    else "ata-apigee-access log entries"
+                ),
+                "fault_code": sa_fault_code or SPIKE_ARREST_FAULT,
+            }
+        revision_change = summarize_revision_change(revision_stats)
+        if revision_change:
+            metrics["proxy_revision_change"] = revision_change
+            findings.append(
+                f"Apigee proxy `{target_proxy}` switched from revision {revision_change['previous_revision']} "
+                f"to {revision_change['new_revision']} (first served {revision_change['new_first_served_at']})."
+            )
 
         # Only observed facts: counts, fault code and source as reported, the proxy revision
         # named by the access log. The proxy's timeout value is not part of this telemetry.

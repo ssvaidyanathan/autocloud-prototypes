@@ -292,20 +292,17 @@ def generate_investigation_report(
             ),
         ]
     elif is_apigee:
+        # Single-pass report: no Apigee telemetry was gathered, so only a read-only look at the
+        # proxy's access log is suggested (no change against unverified resources).
+        access_log = f"projects/{config.project_id}/logs/ata-apigee-access"
         recommended_actions = [
             ActionItem(
-                title=f"Inspect ingress traffic distribution and verify SpikeArrest policy limits on {canonical_res}",
-                command=f"gcloud apigee apiproxies describe {canonical_res} --organization={config.project_id}",
-                verification="Confirm 429 response rate returns to nominal 0% in Apigee Analytics",
-            ),
-            ActionItem(
-                title="Filter or rate-limit abusive client IP addresses via Cloud Armor security policy",
-                command="gcloud compute security-policies rules create 1000 --security-policy=ata-edge-policy --action=deny-429 --src-ip-ranges=<CLIENT_IP>/32",
-                verification="Check access logs for repeated burst traffic patterns",
-            ),
-            ActionItem(
-                title="Adjust traffic controls",
-                rollback="Restore baseline SpikeArrest policy limits once traffic surge subsides.",
+                title=f"Review HTTP 429 / SpikeArrest faults and the serving revision of {canonical_res} in its access log",
+                command=(
+                    f"gcloud logging read 'logName=\"{access_log}\" AND jsonPayload.proxy=\"{canonical_res}\"' "
+                    f"--project={config.project_id} --limit=20"
+                ),
+                verification="Identify the proxy revision and fault behind the HTTP 429 responses",
             ),
         ]
     else:
