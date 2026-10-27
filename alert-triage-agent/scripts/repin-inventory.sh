@@ -169,24 +169,17 @@ verify_http() {
 # Fail loudly unless the pin file's revision does NOT exist in this project (for --initial).
 # Any describe error other than "not found" is fatal: it cannot prove there is no pin.
 require_no_existing_pin() {
-    local err_file rc=0
+    local rc=0
     if [ "${INVENTORY_PIN_PRESENT}" != "true" ]; then
         log_info "    No pin file for stack '${NAME_PREFIX}' (${INVENTORY_PIN_FILE}): first pin."
         return 0
     fi
-    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-repin.XXXXXX")"
-    gcloud run revisions describe "${PIN_INVENTORY_REVISION}" --project="${PROJECT_ID}" --region="${REGION}" \
-        --format="value(metadata.name)" >/dev/null 2>"${err_file}" || rc=$?
-    if [ "${rc}" -eq 0 ]; then
-        rm -f "${err_file}"
-        die "--initial: a pin exists: ${PIN_INVENTORY_REVISION} (from ${INVENTORY_PIN_FILE}) is a revision in ${PROJECT_ID}/${REGION}. Re-pin without --initial."
-    fi
-    if ! grep -qiE "not found|could not be found|NOT_FOUND" "${err_file}"; then
-        cat "${err_file}" >&2
-        rm -f "${err_file}"
-        die "--initial: cannot tell whether ${PIN_INVENTORY_REVISION} exists (gcloud error above); nothing changed."
-    fi
-    rm -f "${err_file}"
+    pinned_inventory_revision_exists || rc=$?
+    case "${rc}" in
+        0) die "--initial: a pin exists: ${PIN_INVENTORY_REVISION} (from ${INVENTORY_PIN_FILE}) is a revision in ${PROJECT_ID}/${REGION}. Re-pin without --initial." ;;
+        1) ;;
+        *) die "--initial: cannot tell whether ${PIN_INVENTORY_REVISION} exists (gcloud error above); nothing changed." ;;
+    esac
     log_info "    No pinned revision in ${PROJECT_ID}/${REGION} (${PIN_INVENTORY_REVISION} not found): first pin."
 }
 

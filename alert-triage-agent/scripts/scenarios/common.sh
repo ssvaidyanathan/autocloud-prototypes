@@ -387,6 +387,30 @@ inventory_image_exists() {
     return 2
 }
 
+# pinned_inventory_revision_exists: whether the pin file's revision (PIN_INVENTORY_REVISION) is a
+# Cloud Run revision in ${PROJECT_ID}/${REGION}. 0 if it exists, 1 if gcloud says it is not
+# found, 2 (gcloud's error on stderr) if that cannot be told. Needs INVENTORY_PIN_PRESENT=true.
+# The pin file is per prefix and committed, and a teardown keeps it: a fresh project, or a
+# redeploy after teardown, has the file but not the revision. Shared by repin-inventory.sh
+# (--initial) and deploy-stage1.sh (applications), so the two cannot disagree.
+pinned_inventory_revision_exists() {
+    local err_file rc=0
+    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-rev.XXXXXX")"
+    gcloud run revisions describe "${PIN_INVENTORY_REVISION}" --project="${PROJECT_ID}" --region="${REGION}" \
+        --format="value(metadata.name)" >/dev/null 2>"${err_file}" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        rm -f "${err_file}"
+        return 0
+    fi
+    if grep -qiE "not found|could not be found|NOT_FOUND" "${err_file}"; then
+        rm -f "${err_file}"
+        return 1
+    fi
+    cat "${err_file}" >&2
+    rm -f "${err_file}"
+    return 2
+}
+
 # Max Cloud Run instances of the demo workloads (SVC_INVENTORY, SVC_ORDERS), at
 # service level and per revision. 1: fault state and leaked DB connections live in one
 # instance's memory, and /admin/fault/reset clears only the instance it reaches. Keep it

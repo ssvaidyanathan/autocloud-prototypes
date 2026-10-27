@@ -56,6 +56,20 @@ elif args[:3] == ["run", "services", "list"]:
     else:
         for svc in lines("STUB_LIST_RUN"):
             print(svc)
+elif args[:3] == ["run", "revisions", "describe"]:
+    # STUB_REVISION: unset = the revision exists; "missing" = NOT_FOUND; "error" = another error.
+    mode = os.environ.get("STUB_REVISION", "")
+    if mode == "missing":
+        sys.stderr.write(f"ERROR: (gcloud.run.revisions.describe) Revision [{args[3]}] could not be found.\n")
+        sys.exit(1)
+    if mode == "error":
+        sys.stderr.write("ERROR: (gcloud.run.revisions.describe) PERMISSION_DENIED: run.revisions.get denied\n")
+        sys.exit(1)
+    print(args[3])
+elif args[:3] == ["run", "services", "describe"] and (opt("format") or "").startswith("csv[no-heading](status.traffic"):
+    # STUB_TRAFFIC: "rev,percent" lines separated by ";" (unset: no output, as when describe fails).
+    for l in os.environ.get("STUB_TRAFFIC", "").split(";"):
+        if l: print(l)
 elif args[:3] == ["run", "services", "describe"] and opt("format") == "value(status.url)":
     print(f"https://{args[3]}-hash1234-uc.a.run.app")
 elif args[:3] == ["run", "services", "describe"] and opt("format") == "json":
@@ -560,6 +574,78 @@ def test_applications_fails_loudly_when_the_image_disagrees_with_the_pin(stack, 
     assert "scripts/repin-inventory.sh prepare --image-digest" in res.stderr
 
 
+def test_applications_checks_the_pinned_revision_in_the_target_project(stack):
+    """Q1 (fresh-rev-r2): the pinned branch is keyed on the revision existing here, not on the file."""
+    _write_stack_pin(stack)
+    _write_images(stack, PIN_DIGEST)
+    res, _ = stack("bootstrap-tfstate.sh", "--write-backend-only")
+    assert res.returncode == 0
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "applications")
+    assert res.returncode == 0, _out(res)
+    describes = [c for c in calls if c[:4] == ["gcloud", "run", "revisions", "describe"]]
+    assert describes == [["gcloud", "run", "revisions", "describe", "atat-inventory-api-pin-20260101000000",
+                          "--project=fresh-proj", "--region=us-central1", "--format=value(metadata.name)"]]
+
+
+@pytest.mark.parametrize("exported", [False, True], ids=["images-file", "exported"])
+def test_applications_uses_the_built_image_when_the_pin_file_is_from_another_deployment(stack, exported):
+    """Q1: a committed pin file whose revision is not in this project (fresh project, or a redeploy
+    after teardown) must not block the apply: the built image is applied with a WARNING, and the
+    inventory-pin phase pins it."""
+    _write_stack_pin(stack)
+    env = {"STUB_REVISION": "missing"}
+    if exported:
+        _write_images(stack, PIN_DIGEST)
+        env["INVENTORY_IMAGE"] = f"{INV_REPO}@{OTHER_DIGEST}"
+    else:
+        _write_images(stack, OTHER_DIGEST)
+    res, applies, inv = _applications(stack, **env)
+    assert res.returncode == 0, _out(res)
+    assert inv == [f"inventory_image={INV_REPO}@{OTHER_DIGEST}"]
+    assert "disagrees" not in _out(res)
+    assert "WARNING: the inventory pin file" in res.stderr
+    assert "atat-inventory-api@" + PIN_DIGEST in res.stderr
+    assert "not a revision in fresh-proj/us-central1" in res.stderr
+    assert "another deployment of stack 'atat'" in res.stderr
+    assert "the inventory-pin phase creates a new pin" in res.stderr
+
+
+def test_applications_with_a_stale_pin_file_still_needs_the_inventory_image(stack):
+    _write_stack_pin(stack)
+    _write_images(stack, None)
+    res, applies, _ = _applications(stack, STUB_REVISION="missing")
+    assert res.returncode == 1 and applies == []
+    assert "image ref(s) unknown: INVENTORY_IMAGE" in res.stderr
+
+
+def test_applications_fails_loudly_when_it_cannot_tell_whether_the_pin_serves(stack):
+    """Q1: any gcloud error other than not-found is fatal; nothing is applied."""
+    _write_stack_pin(stack)
+    _write_images(stack, OTHER_DIGEST)
+    res, applies, _ = _applications(stack, STUB_REVISION="error")
+    assert res.returncode == 1
+    assert applies == []
+    assert "PERMISSION_DENIED" in res.stderr
+    assert "cannot tell whether it serves in fresh-proj/us-central1" in res.stderr
+    assert "cannot tell whether the pin serves" in res.stderr
+
+
+def test_full_run_with_a_pin_file_from_another_deployment_pins_the_built_image(stack):
+    """Q1 end to end: fresh project (or teardown + redeploy) with the prefix's pin file present.
+    images -> applications (built image) -> inventory-pin (prepare --initial with that image)."""
+    _write_stack_pin(stack)
+    res, calls = stack("deploy-stage1.sh", "--yes", STUB_REVISION="missing")
+    assert res.returncode == 0, _out(res)
+    app = [c for c in calls if c[:3] == ["terraform", "applications", "apply"]][0]
+    inv = [a for a in app if a.startswith("inventory_image=")][0]
+    built = inv.split("@", 1)[1]
+    assert built != PIN_DIGEST
+    repin = [c for c in calls if c[0] == "repin"]
+    assert [c[1] for c in repin] == ["prepare", "write-pin", "switch"]
+    assert repin[0][1:] == ["prepare", "--initial", "--image-digest", built]
+    assert "WARNING: the inventory pin file" in res.stderr
+
+
 def test_applications_uses_the_built_image_when_the_stack_has_no_pin(stack):
     """A fresh stack's first run: no pin yet; the inventory-pin phase pins the built image."""
     assert not (stack.work / "scripts" / "scenarios" / "inventory-pin.atat.env").exists()
@@ -632,6 +718,77 @@ def test_refuses_another_stacks_backend(stack):
     assert res.returncode == 1
     assert "is not for NAME_PREFIX=atat" in res.stderr
     assert not [c for c in calls if c[0] == "terraform"]
+
+
+# --- inventory-pin phase on an already pinned stack (EM follow-up to fresh-rev-r2) -----------
+PIN_REVISION = "atat-inventory-api-pin-20260101000000"
+
+
+def _inventory_pin(stack, **env):
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "inventory-pin", **env)
+    return res, calls, [c for c in calls if c[0] in ("repin", "caps")]
+
+
+@pytest.mark.parametrize("images_digest", [PIN_DIGEST, None], ids=["images-file-agrees", "no-inventory-in-images-file"])
+def test_inventory_pin_skips_a_stack_whose_pin_exists_and_serves_100(stack, images_digest):
+    _write_stack_pin(stack)
+    _write_images(stack, images_digest)
+    res, calls, steps = _inventory_pin(stack, STUB_TRAFFIC=f"{PIN_REVISION},100")
+    assert res.returncode == 0, _out(res)
+    assert steps == [], "an already pinned stack must not be re-pinned"
+    assert f"already pinned: {PIN_REVISION}; skipping" in res.stdout
+    traffic = [c for c in calls if c[:5] == ["gcloud", "run", "services", "describe", "atat-inventory-api"]]
+    assert traffic and "--project=fresh-proj" in traffic[0] and "--region=us-central1" in traffic[0]
+
+
+@pytest.mark.parametrize("traffic", ["", "atat-inventory-api-00002-xyz,100", f"{PIN_REVISION},50;atat-inventory-api-00002-xyz,50"],
+                         ids=["unknown", "other-revision", "split"])
+def test_inventory_pin_fails_loudly_when_the_live_pin_does_not_serve_100(stack, traffic):
+    _write_stack_pin(stack)
+    _write_images(stack, PIN_DIGEST)
+    res, _, steps = _inventory_pin(stack, STUB_TRAFFIC=traffic)
+    assert res.returncode == 1
+    assert steps == []
+    assert f"is pinned to {PIN_REVISION}" in res.stderr and f"not {PIN_REVISION}=100" in res.stderr
+    assert "scripts/reset-scenarios.sh" in res.stderr and "repin-inventory.sh switch" in res.stderr
+    assert "already pinned" not in res.stdout
+
+
+def test_inventory_pin_fails_loudly_when_the_image_disagrees_with_a_live_pin(stack):
+    _write_stack_pin(stack)
+    _write_images(stack, OTHER_DIGEST)
+    res, _, steps = _inventory_pin(stack, STUB_TRAFFIC=f"{PIN_REVISION},100")
+    assert res.returncode == 1
+    assert steps == []
+    assert "is already pinned" in res.stderr and f"INVENTORY_IMAGE: {INV_REPO}@{OTHER_DIGEST}" in res.stderr
+    assert "scripts/repin-inventory.sh prepare --image-digest" in res.stderr
+
+
+def test_inventory_pin_with_a_pin_file_from_another_deployment_pins_the_built_image(stack):
+    _write_stack_pin(stack)
+    _write_images(stack, OTHER_DIGEST)
+    res, _, steps = _inventory_pin(stack, STUB_REVISION="missing")
+    assert res.returncode == 0, _out(res)
+    assert [c[1] for c in steps if c[0] == "repin"] == ["prepare", "write-pin", "switch"]
+    assert steps[0][1:] == ["prepare", "--initial", "--image-digest", OTHER_DIGEST]
+
+
+def test_inventory_pin_fails_loudly_when_it_cannot_tell_whether_the_pin_exists(stack):
+    _write_stack_pin(stack)
+    _write_images(stack, PIN_DIGEST)
+    res, _, steps = _inventory_pin(stack, STUB_REVISION="error")
+    assert res.returncode == 1 and steps == []
+    assert "PERMISSION_DENIED" in res.stderr and "cannot tell whether it serves" in res.stderr
+
+
+def test_full_rerun_of_a_pinned_stack_skips_the_inventory_pin(stack):
+    """A full deploy-stage1.sh re-run of a live, serving stack (same inventory build) completes."""
+    _write_stack_pin(stack)
+    res, calls = stack("deploy-stage1.sh", "--yes", STUB_DIGEST=PIN_DIGEST, STUB_TRAFFIC=f"{PIN_REVISION},100")
+    assert res.returncode == 0, _out(res)
+    assert [c for c in calls if c[0] == "repin"] == []
+    assert f"already pinned: {PIN_REVISION}; skipping" in res.stdout
+    assert [c[0] for c in calls if c[0] == "verify-stage1"] == ["verify-stage1"]
 
 
 def test_inventory_pin_needs_the_repin_script(stack):
