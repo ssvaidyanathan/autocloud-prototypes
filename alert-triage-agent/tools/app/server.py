@@ -295,13 +295,13 @@ def get_apigee_logs(
     max_entries: int = 50,
     project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Queries Cloud Logging for access log entries in projects/{project}/logs/ata-apigee-access."""
+    """Queries Cloud Logging for access log entries in projects/{project}/logs/{NAME_PREFIX}-apigee-access."""
     import google.cloud.logging
 
     cfg = get_tools_config()
     proj = project_id or cfg.project_id
 
-    log_name = f"projects/{proj}/logs/ata-apigee-access"
+    log_name = f"projects/{proj}/logs/{cfg.apigee_access_log_id}"
     filter_clauses = [f'logName="{log_name}"']
     if proxy_name:
         filter_clauses.append(f'(jsonPayload.proxy_name="{proxy_name}" OR textPayload:"{proxy_name}")')
@@ -513,7 +513,7 @@ def get_change_timeline(
     # 2. Apigee deployments and proxy revisions
     try:
         org = cfg.apigee_org or proj
-        deps_url = f"https://apigee.googleapis.com/v1/organizations/{org}/environments/{cfg.environment}/deployments"
+        deps_url = f"https://apigee.googleapis.com/v1/organizations/{org}/environments/{cfg.require_apigee_env()}/deployments"
         resp = requests.get(deps_url, headers=headers, timeout=15)
         if resp.status_code == 200:
             deployments = resp.json().get("deployments", [])

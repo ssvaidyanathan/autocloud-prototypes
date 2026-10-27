@@ -47,7 +47,11 @@ class MockHttpClient:
 
 
 def test_scoping_helper_criteria():
-    """Assert is_ata_alert_payload matches all 4 scoping criteria and rejects foreign alerts."""
+    """is_ata_alert_payload accepts NAME_PREFIX-named policies and rejects foreign alerts.
+
+    Stack isolation (contracts/stack_scope.py): a summary mentioning a prefixed name, or the
+    shared app/managed_by=alert-triage-agent label, no longer puts an alert in scope.
+    """
     # 1. Policy display name prefix 'ata-'
     raw_prefix = {
         "incident": {
@@ -57,7 +61,7 @@ def test_scoping_helper_criteria():
     }
     assert is_ata_alert_payload(raw_prefix) is True
 
-    # 2. Policy name containing 'ata-'
+    # 2. Policy resource name whose last segment starts with 'ata-'
     raw_pol_name = {
         "incident": {
             "incident_id": "0.2",
@@ -66,7 +70,7 @@ def test_scoping_helper_criteria():
     }
     assert is_ata_alert_payload(raw_pol_name) is True
 
-    # 3. Incident summary containing 'ata-'
+    # 3. Incident summary mentioning 'ata-' is NOT enough (free text, not an identity)
     raw_summary = {
         "incident": {
             "incident_id": "0.3",
@@ -74,9 +78,9 @@ def test_scoping_helper_criteria():
             "summary": "High latency detected on ata-orders-v1 proxy",
         }
     }
-    assert is_ata_alert_payload(raw_summary) is True
+    assert is_ata_alert_payload(raw_summary) is False
 
-    # 4a. user_labels containing 'app': 'alert-triage-agent'
+    # 4a. user_labels 'app': 'alert-triage-agent' is NOT enough: every stack sets it
     raw_user_labels_app = {
         "incident": {
             "incident_id": "0.4",
@@ -84,9 +88,9 @@ def test_scoping_helper_criteria():
             "user_labels": {"app": "alert-triage-agent"},
         }
     }
-    assert is_ata_alert_payload(raw_user_labels_app) is True
+    assert is_ata_alert_payload(raw_user_labels_app) is False
 
-    # 4b. user_labels containing 'managed_by': 'alert-triage-agent'
+    # 4b. user_labels 'managed_by': 'alert-triage-agent' is NOT enough either
     raw_user_labels_managed = {
         "incident": {
             "incident_id": "0.5",
@@ -94,7 +98,7 @@ def test_scoping_helper_criteria():
             "userLabels": {"managed_by": "alert-triage-agent"},
         }
     }
-    assert is_ata_alert_payload(raw_user_labels_managed) is True
+    assert is_ata_alert_payload(raw_user_labels_managed) is False
 
     # Foreign alerts: suite_cd_001, IMA Alert
     raw_suite_cd = {
@@ -237,7 +241,9 @@ def test_bridge_webhook_defensively_ignores_foreign_alerts():
 
 def test_agent_correlation_drops_non_ata_alert():
     """Assert CorrelationEngine defensively drops non-ata alerts."""
-    engine = CorrelationEngine(incident_store_path="/tmp/test-incidents")
+    engine = CorrelationEngine(
+        incident_store_path="/tmp/test-incidents", model_name="test-model", project_id="test-project", gemini_location="global"
+    )
 
     foreign_alert = AlertEvent(
         incident_id="0.foreign_corr",

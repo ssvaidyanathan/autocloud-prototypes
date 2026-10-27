@@ -216,8 +216,13 @@ def test_gray_zone_resolution_and_schema():
         anchor_time=now,
     )
 
-    res = resolve_gray_zone_with_gemini(alert, candidate, breakdown)
+    # Live Gemini is blocked in tests (conftest), so the deterministic fallback decides and says so.
+    res = resolve_gray_zone_with_gemini(
+        alert, candidate, breakdown, model_name="test-model", project_id="test-project", location="global"
+    )
     assert isinstance(res, GrayZoneResolution)
+    assert res.source == "deterministic_fallback"
+    assert res.fallback_reason
     assert res.decision in {"attach", "new_group"}
     assert 0.0 <= res.confidence <= 1.0
     assert len(res.rationale) > 0

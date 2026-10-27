@@ -32,7 +32,7 @@ from ..grouping.models import OKFDocument, format_okf_alert_entry
 from ..grouping.store import OKFStore, get_canonical_blob_name, resolve_local_target_file
 from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches
-from .apigee import ACCESS_LOG_NAME, SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_name
+from .apigee import SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_id, access_log_name
 from .cloud_sql import CloudSQLSpecialist
 from .change import NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_genuine_change
 from .origin_selection import (
@@ -323,6 +323,17 @@ def low_traffic_sentence(facts: dict[str, Any]) -> str:
 CORRELATION_PREFIX = "Correlation:"
 
 
+def _gray_zone_reviewer(correlation: dict[str, Any]) -> str:
+    """Who decided the gray zone: Gemini, or the deterministic fallback (with Gemini's failure)."""
+    source = correlation.get("gray_zone_source")
+    if source == "gemini":
+        return "the gray-zone review by Gemini"
+    if source == "deterministic_fallback":
+        reason = correlation.get("gray_zone_fallback_reason") or "reason not recorded"
+        return f"the gray-zone review by deterministic fallback (Gemini unavailable: {reason})"
+    return "the gray-zone review"
+
+
 def correlation_observation(correlation: Optional[dict[str, Any]]) -> Optional[str]:
     """Observation stating the correlation decision that opened the group, or None."""
     if not isinstance(correlation, dict) or correlation.get("decision") != "new_group":
@@ -343,7 +354,7 @@ def correlation_observation(correlation: Optional[dict[str, Any]]) -> Optional[s
     groups = "group" if compared == 1 else "groups"
     text = f"{CORRELATION_PREFIX} opened a new incident group; best correlation score {score:g} pts against {compared} open {groups}"
     if correlation.get("is_gray_zone") and low is not None and high is not None:
-        return text + f" (between {low:g} and {high:g} pts; the gray-zone review decided a new group)"
+        return text + f" (between {low:g} and {high:g} pts; {_gray_zone_reviewer(correlation)} decided a new group)"
     if low is not None and score < low:
         return text + f", below the {low:g} pts new-group threshold"
     return text
@@ -643,6 +654,7 @@ class SynthesizerAgent:
             last_alert=last_alert,
             report_generated_at=now_str,
             project_id=config.project_id,
+            region=config.region,
             alerts=alerts_list,
             triage_decision=triage_decision,
             dependency_path=dep_path,
@@ -1729,7 +1741,7 @@ class SynthesizerAgent:
                     ),
                     command=rollback_cmd,
                     verification=(
-                        f"Confirm the {ACCESS_LOG_NAME} log shows revision {prev} serving and no new "
+                        f"Confirm the {access_log_id()} log shows revision {prev} serving and no new "
                         f"{SPIKE_ARREST_FAULT} faults"
                     ),
                     rollback=undo,
@@ -2466,7 +2478,7 @@ class SynthesizerAgent:
 
     def _build_alerts(self, alert: AlertEvent, config: AgentConfig) -> list[dict[str, Any]]:
         sa = alert.started_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        builder = ConsoleLinkBuilder(project_id=config.project_id)
+        builder = ConsoleLinkBuilder(project_id=config.project_id, region=config.region)
         entry = format_okf_alert_entry(alert, valid_ts=sa)
         pol_id = entry.get("policy_id")
         entry["policy_url"] = builder.build_policy_url(pol_id or alert.policy_name)
@@ -3064,7 +3076,7 @@ class SynthesizerAgent:
             _topology_for(report_origin)
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         alert_started_at = alert.started_at if alert.started_at and str(alert.started_at).strip() else now_str
-        builder = ConsoleLinkBuilder(project_id=config.project_id)
+        builder = ConsoleLinkBuilder(project_id=config.project_id, region=config.region)
         inc_url = alert.url or builder.build_incident_url(alert.incident_id)
         pol_id = getattr(alert, "policy_id", None)
         base_entry = format_okf_alert_entry(alert, valid_ts=alert_started_at)

@@ -347,7 +347,7 @@ def generate_investigation_report(
     else:
         root_cause_text = f"Primary anomaly isolated to {origin} under policy {alert.policy_name}."
 
-    link_builder = ConsoleLinkBuilder(project_id=config.project_id)
+    link_builder = ConsoleLinkBuilder(project_id=config.project_id, region=config.region)
     primary_alert_entry = format_okf_alert_entry(alert, valid_ts=valid_ts)
     pol_id = primary_alert_entry.get("policy_id")
     primary_alert_entry["policy_url"] = link_builder.build_policy_url(pol_id or alert.policy_name)
@@ -375,6 +375,7 @@ def generate_investigation_report(
         last_alert=valid_ts,
         report_generated_at=now_ts,
         project_id=config.project_id,
+        region=config.region,
         alerts=[primary_alert_entry],
         triage_decision={
             "correlation_score": 0.91,

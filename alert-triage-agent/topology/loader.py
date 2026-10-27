@@ -17,6 +17,27 @@ class TopologyValidationError(ValueError):
     pass
 
 
+# TOPOLOGY.md writes stack-specific names as {prefix}-<name>; the loader substitutes NAME_PREFIX.
+PREFIX_PLACEHOLDER = "{prefix}"
+# Same rule as the Terraform name_prefix validation.
+NAME_PREFIX_PATTERN = r"[a-z][a-z0-9]{1,9}"
+_LEFTOVER_PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def resolve_name_prefix(name_prefix: Optional[str] = None) -> str:
+    """NAME_PREFIX (argument, else the NAME_PREFIX env var), validated. Raises when unset/invalid."""
+    value = name_prefix if name_prefix is not None else os.environ.get("NAME_PREFIX")
+    if not value:
+        raise TopologyValidationError(
+            "NAME_PREFIX is not set: TOPOLOGY.md component names are {prefix}-relative and cannot be resolved"
+        )
+    if not re.fullmatch(NAME_PREFIX_PATTERN, value):
+        raise TopologyValidationError(
+            f"NAME_PREFIX {value!r} is invalid: it must match ^{NAME_PREFIX_PATTERN}$ (the Terraform name_prefix rule)"
+        )
+    return value
+
+
 ALLOWED_TYPES = {
     "apigee-proxy",
     "apigee proxy",
@@ -76,8 +97,9 @@ def find_topology_file(path: Optional[str] = None) -> Path:
 class TopologyLoader:
     """Parses, validates, and queries the application topology."""
 
-    def __init__(self, file_path: Optional[str | Path] = None):
+    def __init__(self, file_path: Optional[str | Path] = None, name_prefix: Optional[str] = None):
         self.source_path = find_topology_file(str(file_path) if file_path else None)
+        self.name_prefix = resolve_name_prefix(name_prefix)
         self.components: Dict[str, Component] = {}
         self.edges: List[Dependency] = []
         self.alias_map: Dict[str, str] = {}
@@ -97,8 +119,8 @@ class TopologyLoader:
         return rows
 
     def _load_and_validate(self) -> None:
-        content = self.source_path.read_text(encoding="utf-8")
-        
+        content = self.source_path.read_text(encoding="utf-8").replace(PREFIX_PLACEHOLDER, self.name_prefix)
+
         # Split into sections based on ## headers
         sections: Dict[str, str] = {}
         current_section = None
@@ -118,6 +140,14 @@ class TopologyLoader:
 
         components_text = sections.get("components", "")
         dependencies_text = sections.get("dependencies", "")
+
+        for section_name, section_text in (("Components", components_text), ("Dependencies", dependencies_text)):
+            leftover = _LEFTOVER_PLACEHOLDER.search(section_text)
+            if leftover:
+                raise TopologyValidationError(
+                    f"Unsubstituted placeholder '{leftover.group(0)}' in the {section_name} section of "
+                    f"{self.source_path} (only {PREFIX_PLACEHOLDER} is supported)"
+                )
 
         if not components_text:
             raise TopologyValidationError(f"Missing '## Components' section in {self.source_path}")
@@ -475,11 +505,20 @@ class TopologyLoader:
 _DEFAULT_LOADER: Optional[TopologyLoader] = None
 
 
-def get_loader(file_path: Optional[str | Path] = None, force_reload: bool = False) -> TopologyLoader:
-    """Returns the singleton TopologyLoader, initializing or reloading if required."""
+def get_loader(
+    file_path: Optional[str | Path] = None,
+    force_reload: bool = False,
+    name_prefix: Optional[str] = None,
+) -> TopologyLoader:
+    """Returns the singleton TopologyLoader, initializing or reloading if required.
+
+    The singleton follows NAME_PREFIX: it is rebuilt when the prefix (argument or env) differs
+    from the one it was loaded with.
+    """
     global _DEFAULT_LOADER
-    if _DEFAULT_LOADER is None or force_reload or file_path is not None:
-        loader = TopologyLoader(file_path)
+    stale = _DEFAULT_LOADER is not None and _DEFAULT_LOADER.name_prefix != resolve_name_prefix(name_prefix)
+    if _DEFAULT_LOADER is None or force_reload or stale or file_path is not None:
+        loader = TopologyLoader(file_path, name_prefix=name_prefix)
         if file_path is None:
             _DEFAULT_LOADER = loader
         return loader

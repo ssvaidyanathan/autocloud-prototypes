@@ -2,10 +2,15 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
-from pydantic import Field
+import re
+
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
+
+# Same rule as the Terraform name_prefix validation.
+NAME_PREFIX_PATTERN = r"[a-z][a-z0-9]{1,9}"
 
 
 class AgentConfig(BaseSettings):
@@ -16,9 +21,11 @@ class AgentConfig(BaseSettings):
         extra="ignore",
     )
 
-    project_id: str = Field(default="cloud-assist-fde-2", alias="PROJECT_ID")
-    name_prefix: str = Field(default="ata", alias="NAME_PREFIX")
-    region: str = Field(default="us-west1", alias="REGION")
+    # Deployment identity. No defaults: PROJECT_ID and REGION are required unless IS_LOCAL;
+    # NAME_PREFIX is always required and follows the Terraform rule ^[a-z][a-z0-9]{1,9}$.
+    project_id: Optional[str] = Field(default=None, alias="PROJECT_ID")
+    name_prefix: str = Field(alias="NAME_PREFIX")
+    region: Optional[str] = Field(default=None, alias="REGION")
     environment: str = Field(default="prod", alias="ENVIRONMENT")
 
     # Cloud Storage Incidents Bucket & Mount Path
@@ -30,16 +37,16 @@ class AgentConfig(BaseSettings):
     bridge_url: str = Field(default="http://localhost:8080", alias="BRIDGE_URL")
     agent_url: str = Field(default="http://localhost:8000", alias="AGENT_URL")
 
-    # Cloud Tasks Timers Configuration
-    location: str = Field(default="us-west1", alias="LOCATION")
-    timer_queue_name: str = Field(default="ata-timer-queue", alias="TIMER_QUEUE_NAME")
-    service_account_email: str = Field(
-        default="ata-agent-sa@cloud-assist-fde-2.iam.gserviceaccount.com",
-        alias="SERVICE_ACCOUNT_EMAIL",
-    )
+    # Cloud Tasks timers. Derived when unset: LOCATION = REGION,
+    # TIMER_QUEUE_NAME = {NAME_PREFIX}-timer-queue,
+    # SERVICE_ACCOUNT_EMAIL = {NAME_PREFIX}-agent-sa@{PROJECT_ID}.iam.gserviceaccount.com.
+    location: Optional[str] = Field(default=None, alias="LOCATION")
+    timer_queue_name: Optional[str] = Field(default=None, alias="TIMER_QUEUE_NAME")
+    service_account_email: Optional[str] = Field(default=None, alias="SERVICE_ACCOUNT_EMAIL")
 
-    # Model Configuration
+    # Gemini gray-zone correlation (Vertex AI). Model tuning values, overridable per deploy.
     model_name: str = Field(default="gemini-3.8-flash", alias="MODEL_NAME")
+    gemini_location: str = Field(default="global", alias="GEMINI_LOCATION")
 
     is_local: bool = Field(default=False, alias="IS_LOCAL")
 
@@ -103,9 +110,56 @@ class AgentConfig(BaseSettings):
     # group is marked degraded (ERROR) and new alerts open a new group instead of joining it.
     investigation_max_recoveries: int = Field(default=3, alias="INVESTIGATION_MAX_RECOVERIES", ge=1)
 
+    @field_validator("name_prefix")
+    @classmethod
+    def _validate_name_prefix(cls, value: str) -> str:
+        if not re.fullmatch(NAME_PREFIX_PATTERN, value or ""):
+            raise ValueError(f"NAME_PREFIX {value!r} must match ^{NAME_PREFIX_PATTERN}$ (the Terraform name_prefix rule)")
+        return value
+
+    @field_validator("model_name")
+    @classmethod
+    def _validate_model_name(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9.@_-]*", value or ""):
+            raise ValueError(f"MODEL_NAME {value!r} is not a Vertex AI model id (e.g. gemini-2.5-flash)")
+        return value
+
+    @field_validator("gemini_location")
+    @classmethod
+    def _validate_gemini_location(cls, value: str) -> str:
+        if not re.fullmatch(r"global|[a-z]+-[a-z]+[0-9]{1,2}", value or ""):
+            raise ValueError(f"GEMINI_LOCATION {value!r} must be 'global' or a region such as us-central1")  # prefix-ok: example in an error message
+        return value
+
+    @model_validator(mode="after")
+    def _require_and_derive(self) -> "AgentConfig":
+        for field_name in ("project_id", "region", "location", "timer_queue_name", "service_account_email"):
+            value = getattr(self, field_name)
+            if isinstance(value, str) and not value.strip():
+                setattr(self, field_name, None)
+        missing = [env for env, value in (("PROJECT_ID", self.project_id), ("REGION", self.region)) if not value]
+        if missing and not self.is_local:
+            raise ValueError(f"required setting(s) not set: {', '.join(missing)} (only IS_LOCAL=true may omit them)")
+        if self.location is None:
+            self.location = self.region
+        if self.timer_queue_name is None:
+            self.timer_queue_name = f"{self.name_prefix}-timer-queue"
+        if self.service_account_email is None and self.project_id:
+            self.service_account_email = f"{self.name_prefix}-agent-sa@{self.project_id}.iam.gserviceaccount.com"
+        return self
+
     @property
     def effective_incidents_bucket(self) -> str:
-        return self.incidents_bucket or f"{self.project_id}-{self.name_prefix}-incidents"
+        if self.incidents_bucket:
+            return self.incidents_bucket
+        if not self.project_id:
+            raise ValueError("INCIDENTS_BUCKET or PROJECT_ID must be set to name the incidents bucket")
+        return f"{self.project_id}-{self.name_prefix}-incidents"
+
+    @property
+    def apigee_access_log_id(self) -> str:
+        """Cloud Logging log id written by the Apigee proxies' MessageLogging policy."""
+        return f"{self.name_prefix}-apigee-access"
 
     def get_effective_store_path(self) -> Path:
         """Return primary store path if accessible/writable, otherwise fallback."""

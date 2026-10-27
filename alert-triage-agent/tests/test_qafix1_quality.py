@@ -79,13 +79,13 @@ def test_dependency_path_for_unknown_origin_is_none_and_logged(caplog):
 
 
 def test_description_renders_topology_path():
-    desc = _report(dependency_path=S1_EXPECTED_PATH).build_structured_description()
+    desc = _report(dependency_path=S1_EXPECTED_PATH).build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")
     assert f"  - Dependency Path: {S1_EXPECTED_PATH}\n" in desc
     assert "ata-orders-v1 -> ata-orders-api -> ata-inventory-v1" not in desc
 
 
 def test_description_without_path_omits_line_instead_of_guessing():
-    desc = _report().build_structured_description()
+    desc = _report().build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")
     assert "Dependency Path" not in desc
     assert "Client -> Ingress" not in desc
     assert "ata-orders-v1 -> ata-orders-api -> ata-inventory-v1 -> ata-inventory-api" not in desc
@@ -261,7 +261,7 @@ def test_description_keeps_redaction_token_and_timestamp_in_log_excerpt():
         "Log excerpt (ata-inventory-api): [2026-10-27T07:12:01Z] ERROR HTTP 500 /items/reserve - "
         '[REDACTED_IP]:50318 - "POST /items/reserve HTTP/1.1" 500 Internal Server Error'
     )
-    desc = _report(observations=f"first | {excerpt}").build_structured_description()
+    desc = _report(observations=f"first | {excerpt}").build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")
     assert "[2026-10-27T07:12:01Z]" in desc
     assert "[REDACTED_IP]:50318" in desc
     assert " :50318" not in desc

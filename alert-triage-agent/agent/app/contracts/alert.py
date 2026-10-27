@@ -113,9 +113,15 @@ import re
 from typing import Any, Optional, Set
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .stack_scope import in_stack_scope, stack_label_of, validate_name_prefix
+
 logger = logging.getLogger(__name__)
 
-SYSTEM_PARTS: Set[str] = {"ata-agent", "ata-bridge", "ata-tools"}
+
+def system_parts(name_prefix: Optional[str] = None) -> Set[str]:
+    """Component IDs of the triage system itself: {prefix}-agent, -bridge, -tools."""
+    prefix = validate_name_prefix(name_prefix) if name_prefix is not None else configured_name_prefix()
+    return {f"{prefix}-agent", f"{prefix}-bridge", f"{prefix}-tools"}
 
 
 try:
@@ -130,7 +136,7 @@ except ImportError:
 
 def load_topology_components() -> Set[str]:
     """Load valid component IDs and aliases from TOPOLOGY.md via topology.loader, supplemented with system parts."""
-    components = set(SYSTEM_PARTS)
+    components = system_parts()
     loader = get_loader()
     components.update(loader.components.keys())
     components.update(loader.alias_map.keys())
@@ -426,18 +432,45 @@ class AlertEvent(BaseModel):
         return is_ata_alert_event(self)
 
 
-def is_ata_alert_payload(payload: dict[str, Any]) -> bool:
-    """Determine whether a raw Cloud Monitoring alert incident payload belongs to ata.
+# Resource labels that name the alerting component (Cloud Run, Apigee, Cloud SQL).
+COMPONENT_RESOURCE_LABELS = ("service_name", "configuration_name", "proxy_name", "database_id")
 
-    Scoping criteria:
-    - Policy display name prefix 'ata-'
-    - Policy name containing 'ata-'
-    - Incident summary containing 'ata-'
-    - user_labels containing 'app': 'alert-triage-agent' or 'managed_by': 'alert-triage-agent'
-    - Policy display name or name containing 'alert-triage-agent'
-    """
-    if not isinstance(payload, dict):
-        return False
+
+def configured_name_prefix() -> str:
+    """NAME_PREFIX from this service's config, validated (raises ValueError when invalid)."""
+    from ..config import get_settings
+
+    return validate_name_prefix(get_settings().name_prefix)
+
+
+def _payload_user_labels(inc: dict[str, Any], payload: dict[str, Any], pol_val: Any) -> dict[str, Any]:
+    labels = (
+        inc.get("policy_user_labels")
+        or inc.get("policyUserLabels")
+        or inc.get("user_labels")
+        or inc.get("userLabels")
+        or payload.get("policy_user_labels")
+        or payload.get("policyUserLabels")
+        or payload.get("user_labels")
+        or payload.get("userLabels")
+        or (pol_val.get("user_labels") if isinstance(pol_val, dict) else None)
+        or (pol_val.get("userLabels") if isinstance(pol_val, dict) else None)
+        or {}
+    )
+    return labels if isinstance(labels, dict) else {}
+
+
+def _component_names(resource_name: Any, resource_labels: Any, user_labels: Any) -> list[Any]:
+    names: list[Any] = [resource_name]
+    if isinstance(resource_labels, dict):
+        names.extend(resource_labels.get(key) for key in COMPONENT_RESOURCE_LABELS)
+    if isinstance(user_labels, dict):
+        names.append(user_labels.get("component"))
+    return names
+
+
+def _payload_scope_facts(payload: dict[str, Any]) -> tuple[list[Any], Optional[str], str]:
+    """(candidate names, stack label or None, alert ref) from a raw Cloud Monitoring payload."""
     inc = payload.get("incident", payload)
     if not isinstance(inc, dict):
         inc = {}
@@ -458,78 +491,49 @@ def is_ata_alert_payload(payload: dict[str, Any]) -> bool:
     if not pol_display and isinstance(inc.get("condition"), dict):
         pol_display = str(inc.get("condition", {}).get("displayName") or inc.get("condition", {}).get("display_name") or "")
 
-    p_disp = pol_display.lower().strip()
-    p_name = pol_name.lower().strip()
-
-    # 1. Policy display name prefix 'ata-'
-    if p_disp.startswith("ata-"):
-        return True
-
-    # 2. Policy name containing 'ata-' or starting with 'ata-'
-    if "ata-" in p_name:
-        return True
-
-    # Policy name / display name containing 'alert-triage-agent'
-    if "alert-triage-agent" in p_disp or "alert-triage-agent" in p_name:
-        return True
-
-    # 3. Incident summary containing 'ata-'
-    summary = str(inc.get("summary") or payload.get("summary") or "").lower()
-    if "ata-" in summary:
-        return True
-
-    # 4. user_labels containing 'app': 'alert-triage-agent' or 'managed_by': 'alert-triage-agent'
-    user_labels = (
-        inc.get("policy_user_labels")
-        or inc.get("policyUserLabels")
-        or inc.get("user_labels")
-        or inc.get("userLabels")
-        or payload.get("policy_user_labels")
-        or payload.get("policyUserLabels")
-        or payload.get("user_labels")
-        or payload.get("userLabels")
-        or (pol_val.get("user_labels") if isinstance(pol_val, dict) else None)
-        or (pol_val.get("userLabels") if isinstance(pol_val, dict) else None)
-        or {}
+    user_labels = _payload_user_labels(inc, payload, pol_val)
+    res = inc.get("resource") if isinstance(inc.get("resource"), dict) else {}
+    names = [pol_display, pol_name] + _component_names(
+        inc.get("resource_name") or res.get("name"), res.get("labels"), user_labels
     )
-    if isinstance(user_labels, dict):
-        if user_labels.get("app") == "alert-triage-agent" or user_labels.get("managed_by") == "alert-triage-agent":
-            return True
-
-    return False
+    ref = str(inc.get("incident_id") or inc.get("id") or pol_display or pol_name or "")
+    return names, stack_label_of(user_labels), ref
 
 
-def is_ata_alert_event(alert: AlertEvent) -> bool:
-    """Check if an AlertEvent instance belongs to ata."""
-    if alert.raw_payload and is_ata_alert_payload(alert.raw_payload):
-        return True
+def is_ata_alert_payload(payload: dict[str, Any], name_prefix: Optional[str] = None) -> bool:
+    """Whether a raw Cloud Monitoring alert payload belongs to this stack (stack_scope rule).
 
-    if getattr(alert, "policy_user_labels", None):
-        if alert.policy_user_labels.get("app") == "alert-triage-agent" or alert.policy_user_labels.get("managed_by") == "alert-triage-agent":
-            return True
-
-    p_name = (alert.policy_name or "").lower().strip()
-    if p_name.startswith("ata-") or "ata-" in p_name or "alert-triage-agent" in p_name:
-        return True
-
-    if alert.summary and "ata-" in alert.summary.lower():
-        return True
-
-    if alert.condition_name and "ata-" in alert.condition_name.lower():
-        return True
-
-    if alert.resource_labels:
-        if alert.resource_labels.get("app") == "alert-triage-agent" or alert.resource_labels.get("managed_by") == "alert-triage-agent":
-            return True
-
-    return False
+    In scope iff the policy display name / name or a resource-derived component starts with
+    f"{NAME_PREFIX}-", and a `stack` policy user label, when present, equals NAME_PREFIX.
+    """
+    if not isinstance(payload, dict):
+        return False
+    prefix = validate_name_prefix(name_prefix) if name_prefix is not None else configured_name_prefix()
+    names, stack, ref = _payload_scope_facts(payload)
+    return in_stack_scope(prefix, names, stack, ref)
 
 
-def is_ata_alert(alert_or_payload: Any) -> bool:
+def is_ata_alert_event(alert: AlertEvent, name_prefix: Optional[str] = None) -> bool:
+    """Whether an AlertEvent belongs to this stack (stack_scope rule)."""
+    prefix = validate_name_prefix(name_prefix) if name_prefix is not None else configured_name_prefix()
+    user_labels = getattr(alert, "policy_user_labels", None) or {}
+    names: list[Any] = [alert.policy_name] + _component_names(alert.resource_name, alert.resource_labels, user_labels)
+    stacks = {stack_label_of(user_labels)}
+    if alert.raw_payload and isinstance(alert.raw_payload, dict):
+        raw_names, raw_stack, _ = _payload_scope_facts(alert.raw_payload)
+        names.extend(raw_names)
+        stacks.add(raw_stack)
+    stacks.discard(None)
+    if not stacks:
+        return in_stack_scope(prefix, names, None, alert.incident_id)
+    # Every stack label present (event and raw payload) must match.
+    return all(in_stack_scope(prefix, names, s, alert.incident_id) for s in sorted(stacks))
+
+
+def is_ata_alert(alert_or_payload: Any, name_prefix: Optional[str] = None) -> bool:
     """Universal scoping filter: checks both raw alert payload dict and AlertEvent instance."""
     if isinstance(alert_or_payload, dict):
-        return is_ata_alert_payload(alert_or_payload)
+        return is_ata_alert_payload(alert_or_payload, name_prefix)
     if hasattr(alert_or_payload, "policy_name"):
-        return is_ata_alert_event(alert_or_payload)
+        return is_ata_alert_event(alert_or_payload, name_prefix)
     return False
-
