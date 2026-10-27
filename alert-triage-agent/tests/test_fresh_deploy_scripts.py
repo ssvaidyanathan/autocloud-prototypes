@@ -124,12 +124,18 @@ args = sys.argv[1:]
 d = os.environ["STUB_DIR"]
 out = url = data = None
 has_w = "-w" in args
+configs = []
 i = 0
 while i < len(args):
     a = args[i]
-    if a in ("-o", "-w", "-H", "-d", "-X", "--connect-timeout", "--max-time"):
+    if a in ("-o", "-w", "-H", "-d", "-X", "--connect-timeout", "--max-time", "--config", "--data-binary"):
         if a == "-o": out = args[i + 1]
         if a == "-d": data = args[i + 1]
+        if a == "--data-binary": data = sys.stdin.read() if args[i + 1] == "@-" else args[i + 1]
+        if a == "--config":
+            p = args[i + 1]
+            configs.append({"path": p, "mode": oct(os.stat(p).st_mode & 0o777) if p != "-" else "stdin",
+                            "text": sys.stdin.read() if p == "-" else open(p).read()})
         i += 2
         continue
     if not a.startswith("-"):
@@ -137,7 +143,11 @@ while i < len(args):
     i += 1
 with open(os.path.join(d, "log"), "a") as f:
     f.write(json.dumps(["curl", url, data or ""]) + "\n")
+with open(os.path.join(d, "curl-argv"), "a") as f:
+    f.write(json.dumps({"argv": args, "configs": configs, "data": data or ""}) + "\n")
 code, body = 200, "{}"
+if "sqladmin.googleapis.com" in (url or ""):
+    body = '{"kind": "sql#operation", "name": "op-1234abcd"}'
 if "/webhook/monitoring" in (url or ""):
     if "token=wrong" in url:
         code, body = 401, '{"detail": "Invalid or missing webhook token"}'
@@ -205,6 +215,7 @@ def stack(tmp_path):
     def run(script, *args, record_verify_stage1=True, **env_overrides):
         log = stub_dir / "log"
         log.write_text("")
+        (stub_dir / "curl-argv").unlink(missing_ok=True)
         if record_verify_stage1 and script != "verify-stage1.sh":
             _recorder(scripts / "verify-stage1.sh", "verify-stage1")
         env = {k: v for k, v in os.environ.items() if not re.match(
@@ -313,25 +324,69 @@ def test_triage_deploys_use_the_built_images(stack):
         assert re.fullmatch(rf"--image=us-central1-docker\.pkg\.dev/fresh-proj/atat-docker/{c[3]}@sha256:[0-9a-f]{{64}}", image)
 
 
+def _curl_calls(stack):
+    path = stack.stub_dir / "curl-argv"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
 def test_schema_uses_the_proxy_and_grants_the_iam_user(stack):
     res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema")
     assert res.returncode == 0, _out(res)
-    setpw = [c for c in calls if c[:4] == ["gcloud", "sql", "users", "set-password"]]
-    assert setpw and "--instance=atat-inventory-db" in setpw[0]
+    setpw = [c for c in _curl_calls(stack) if "sqladmin.googleapis.com" in json.dumps(c["argv"])]
+    assert len(setpw) == 1
+    assert setpw[0]["argv"][-1] == ("https://sqladmin.googleapis.com/v1/projects/fresh-proj/instances/"
+                                    "atat-inventory-db/users?name=postgres")
     proxy = [c for c in calls if c[0] == "cloud-sql-proxy"][0]
     assert proxy[1:] == ["--port", "54399", "fresh-proj:us-central1:atat-inventory-db"]
     psql = [c for c in calls if c[0] == "psql"][0]
     assert psql[1] == "PGPASSWORD=set"
     assert "iam_user=atat-inventory-sa@fresh-proj.iam" in psql and "ON_ERROR_STOP=1" in psql
     assert psql[-1].endswith("demo/db/schema.sql")
-    pw = [a for a in setpw[0] if a.startswith("--password=")][0]
-    assert pw.split("=", 1)[1] not in _out(res)
+    # The admin call finishes before the proxy starts.
+    wait = _idx(calls, lambda c: c[:4] == ["gcloud", "sql", "operations", "wait"], "operations wait")[0]
+    assert calls[wait][4] == "op-1234abcd"
+    assert wait < _idx(calls, lambda c: c[0] == "cloud-sql-proxy", "proxy")[0]
+
+
+def test_schema_password_and_token_stay_off_argv_and_out_of_the_output(stack, tmp_path):
+    """sec M1: no `--password=` on any argv; the password only in curl's stdin body; the bearer
+    token only in a 0600 curl config file that is gone after the run."""
+    (tmp_path / "t").mkdir()
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema", TMPDIR=str(tmp_path / "t"))
+    assert res.returncode == 0, _out(res)
+    flat = json.dumps(calls)
+    assert "--password" not in flat
+    assert not [c for c in calls if c[:4] == ["gcloud", "sql", "users", "set-password"]]
+    setpw = [c for c in _curl_calls(stack) if "sqladmin.googleapis.com" in json.dumps(c["argv"])][0]
+    body = json.loads(setpw["data"])
+    password = body["password"]
+    assert body["name"] == "postgres" and len(password) == 32
+    for c in calls:
+        assert not any(password in a for a in c[1:] if c[0] != "curl"), c
+    assert password not in json.dumps(setpw["argv"]) and password not in _out(res)
+    # The stub ran from the log: its "data" field is the stdin body, never an argv value.
+    assert "@-" in setpw["argv"]
+    assert "access-token" not in json.dumps(setpw["argv"])
+    assert [c["mode"] for c in setpw["configs"]] == ["0o600"]
+    assert setpw["configs"][0]["text"] == 'header = "Authorization: Bearer access-token"\n'
+    assert not Path(setpw["configs"][0]["path"]).exists(), "curl config left behind"
+    assert not list((tmp_path / "t").glob("atat-sqladmin.*")), "temp files left behind"
+
+
+def test_schema_fails_loudly_when_the_admin_call_fails(stack, tmp_path):
+    curl = tmp_path / "bin" / "curl"
+    curl.write_text("#!/bin/sh\ncat >/dev/null\necho 'curl: (22) The requested URL returned error: 403' >&2\nexit 22\n")
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema")
+    assert res.returncode == 1
+    assert "users.update (postgres on atat-inventory-db) failed" in res.stderr
+    assert not [c for c in calls if c[0] in ("cloud-sql-proxy", "psql")]
 
 
 def test_schema_with_pgpassword_does_not_reset_the_password(stack):
     res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema", PGPASSWORD="given")
     assert res.returncode == 0, _out(res)
     assert not [c for c in calls if c[:4] == ["gcloud", "sql", "users", "set-password"]]
+    assert not [c for c in _curl_calls(stack) if "sqladmin.googleapis.com" in json.dumps(c["argv"])]
 
 
 def test_schema_fails_loudly_without_psql(stack, tmp_path):
