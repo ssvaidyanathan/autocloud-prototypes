@@ -141,40 +141,52 @@ monitoring_token_command "${ATA_MONITORING_TOKEN_SOURCE}" >/dev/null || exit 1
 # open_alerts.py names the source in its 401 messages.
 export ATA_MONITORING_TOKEN_SOURCE
 
+# Revisions that receive traffic now (percent > 0 in status.traffic), each listed once.
+# latestReadyRevisionName is not used: it can be a retired 0%-traffic revision (after an
+# S5 revert it is the bad S5 revision), and counting it would let a stale alert on it
+# block the reset.
 get_serving_revisions() {
-    local revs=()
+    local revs=""
+    add_rev() {
+        case " ${revs} " in
+            *" $1 "*) ;;
+            *) revs="${revs:+${revs} }$1" ;;
+        esac
+    }
     if [ -n "${PINNED_INVENTORY_REVISION:-}" ]; then
-        revs+=("${PINNED_INVENTORY_REVISION}")
+        add_rev "${PINNED_INVENTORY_REVISION}"
     fi
     if [ -n "${ATA_SERVING_REVISIONS:-}" ]; then
         for r in ${ATA_SERVING_REVISIONS//,/ }; do
-            revs+=("${r}")
+            add_rev "${r}"
         done
     fi
 
     if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
         for svc in "${NAME_PREFIX}-inventory-api" "${NAME_PREFIX}-orders-api"; do
-            local svc_revs
-            svc_revs="$(gcloud run services describe "${svc}" \
+            local svc_json svc_revs
+            if ! svc_json="$(gcloud run services describe "${svc}" \
                 --project="${PROJECT_ID}" \
                 --region="${REGION}" \
-                --format="value(status.traffic[].revisionName)" 2>/dev/null || true)"
-            if [ -n "${svc_revs}" ]; then
-                for r in ${svc_revs}; do
-                    revs+=("${r}")
-                done
+                --format=json 2>/dev/null)"; then
+                log_warn "    Could not describe ${svc}; its serving revisions are not scoped." >&2
+                continue
             fi
-            local latest_ready
-            latest_ready="$(gcloud run services describe "${svc}" \
-                --project="${PROJECT_ID}" \
-                --region="${REGION}" \
-                --format="value(status.latestReadyRevisionName)" 2>/dev/null || true)"
-            if [ -n "${latest_ready}" ]; then
-                revs+=("${latest_ready}")
-            fi
+            svc_revs="$(printf '%s' "${svc_json}" | python3 -c '
+import json, sys
+for t in (json.load(sys.stdin).get("status") or {}).get("traffic") or []:
+    if (t.get("percent") or 0) > 0 and t.get("revisionName"):
+        print(t["revisionName"])
+' 2>/dev/null)" || {
+                log_warn "    Could not parse the traffic of ${svc}; its serving revisions are not scoped." >&2
+                continue
+            }
+            for r in ${svc_revs}; do
+                add_rev "${r}"
+            done
         done
     fi
-    echo "${revs[@]:-}"
+    echo "${revs}"
 }
 
 # Cloud Monitoring query helper (CA bundle resolution, scoping, fail-loud errors).
@@ -423,6 +435,93 @@ verify_no_active_incident_groups() {
     log_success "    Verified 0 active incident groups (knowledge/incident-manager/ is empty)."
 }
 
+# --- Steps 1 and 9: authenticated demo admin calls ----------------------------
+# A fresh Cloud Run ID token is minted for every call: a reset with a long quiet period
+# outlives a token minted at start (QA: 401 about 10 min in).
+
+# Print the HTTP status of METHOD BASE_URL+PATH ("000" when the request itself failed).
+admin_http_status() {
+    local method="$1" base="$2" path="$3"
+    local token status
+    local auth=()
+    token="$(resolve_id_token "${base}")"
+    if [ -n "${token}" ] && [ "${token}" != "mock-id-token" ]; then
+        auth=(-H "Authorization: Bearer ${token}")
+    fi
+    status="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 30 -X "${method}" \
+        ${auth[@]+"${auth[@]}"} "${base}${path}" 2>/dev/null)" || true
+    echo "${status:-000}"
+}
+
+# Explain a non-2xx admin status on stderr.
+admin_status_error() {
+    local what="$1" status="$2"
+    case "${status}" in
+        401|403)
+            log_error "FATAL: ${what} was rejected with HTTP ${status} (authentication/authorization)." >&2
+            log_error "The ID token from 'gcloud auth print-identity-token' was refused. Run 'gcloud auth login' and make sure the account has roles/run.invoker on the demo services in project ${PROJECT_ID}." >&2
+            ;;
+        000)
+            log_error "FATAL: ${what} failed: no HTTP response (connection error or timeout)." >&2
+            ;;
+        *)
+            log_error "FATAL: ${what} returned HTTP ${status}." >&2
+            ;;
+    esac
+}
+
+# Step 1: POST /admin/fault/reset on one demo app; non-2xx is fatal.
+reset_app_faults() {
+    local name="$1" base="$2" status
+    status="$(admin_http_status POST "${base}" /admin/fault/reset)"
+    case "${status}" in
+        2??)
+            log_success "    ${name}: POST ${base}/admin/fault/reset -> HTTP ${status}"
+            ;;
+        *)
+            admin_status_error "POST ${base}/admin/fault/reset (${name})" "${status}"
+            log_error "The ${name} fault state was NOT cleared." >&2
+            return 1
+            ;;
+    esac
+}
+
+# Step 3: local pg_sleep helpers (started by s4_db_connection_pool.sh on this machine).
+terminate_local_pg_sleep() {
+    local rc=0
+    pkill -f "pg_sleep" 2>/dev/null || rc=$?
+    case "${rc}" in
+        0) log_success "    Terminated local pg_sleep helper process(es)." ;;
+        1) log_info "    No local pg_sleep helper processes were running." ;;
+        *) log_warn "    pkill -f pg_sleep failed (exit ${rc}); local pg_sleep helpers may still be running." ;;
+    esac
+}
+
+# Step 9: GET probes of the admin endpoints on the pinned inventory code (each returns 200).
+verify_admin_endpoints() {
+    local base="$1" path status failed=0
+    for path in /admin/leak-connections /admin/fault/inject; do
+        status="$(admin_http_status GET "${base}" "${path}")"
+        case "${status}" in
+            2??)
+                log_success "    Verified ${path} endpoint exists (HTTP ${status})"
+                ;;
+            404)
+                log_error "Admin endpoint ${path} is MISSING on ${base} (HTTP 404)!" >&2
+                failed=$((failed + 1))
+                ;;
+            *)
+                admin_status_error "GET ${base}${path}" "${status}"
+                failed=$((failed + 1))
+                ;;
+        esac
+    done
+    if [ "${failed}" -gt 0 ]; then
+        log_error "FATAL: ${failed} admin fault injection endpoint check(s) failed on ${base}." >&2
+        return 1
+    fi
+}
+
 # Sourced (tests): define the functions above without running the reset.
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     return 0
@@ -435,30 +534,15 @@ verify_pinned_inventory_revision || exit 1
 
 INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
 ORD_URL="$(resolve_service_url "${NAME_PREFIX}-orders-api" "https://ata-orders-api-4klvlqnmpa-uw.a.run.app")"
-ID_TOKEN_INV="$(resolve_id_token "${INV_URL}")"
-AUTH_HEADER_INV=()
-if [ -n "${ID_TOKEN_INV}" ] && [ "${ID_TOKEN_INV}" != "mock-id-token" ]; then
-    AUTH_HEADER_INV=(-H "Authorization: Bearer ${ID_TOKEN_INV}")
-fi
-
-ID_TOKEN_ORD="$(resolve_id_token "${ORD_URL}")"
-AUTH_HEADER_ORD=()
-if [ -n "${ID_TOKEN_ORD}" ] && [ "${ID_TOKEN_ORD}" != "mock-id-token" ]; then
-    AUTH_HEADER_ORD=(-H "Authorization: Bearer ${ID_TOKEN_ORD}")
-fi
 
 # 1. Reset Faults on Cloud Run Demo Apps
 log_info "--> 1. Resetting demo applications via /admin/fault/reset..."
-if [ "${DRY_RUN}" = "false" ]; then
-    # Inventory API reset
-    curl -s -X POST ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/admin/fault/reset" > /dev/null 2>&1 || \
-    curl -s -X POST ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/admin/reset" > /dev/null 2>&1 || true
-
-    # Orders API reset
-    curl -s -X POST ${AUTH_HEADER_ORD[@]+"${AUTH_HEADER_ORD[@]}"} "${ORD_URL}/admin/fault/reset" > /dev/null 2>&1 || \
-    curl -s -X POST ${AUTH_HEADER_ORD[@]+"${AUTH_HEADER_ORD[@]}"} "${ORD_URL}/admin/reset" > /dev/null 2>&1 || true
-
+if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
+    reset_app_faults "${NAME_PREFIX}-inventory-api" "${INV_URL}" || exit 1
+    reset_app_faults "${NAME_PREFIX}-orders-api" "${ORD_URL}" || exit 1
     log_success "    Demo application fault states cleared."
+else
+    log_info "    [MOCK/DRY-RUN] Simulating demo application fault reset."
 fi
 
 # 2. Bridge State (Stateless; incident state managed in GCS OKFs by Agent)
@@ -467,13 +551,19 @@ log_success "    Bridge windowing reset skipped (stateless bridge)."
 
 # 3. Terminate background DB sleep connections and close leaks
 log_info "--> 3. Terminating background database sleep connections..."
-pkill -f "pg_sleep" 2>/dev/null || true
+terminate_local_pg_sleep
 
 # 4. Restore Healthy Apigee Proxy Revisions
 log_info "--> 4. Restoring healthy Apigee proxy revisions..."
 if [ -f "${SCRIPT_DIR}/deploy-apigee-proxies.sh" ] && [ "${MOCK_MODE}" = "false" ] && [ "${DRY_RUN}" = "false" ]; then
-    "${SCRIPT_DIR}/deploy-apigee-proxies.sh" > /dev/null 2>&1 || \
-        log_warn "Apigee redeployment skipped or permissions restricted in test runner."
+    APIGEE_LOG="$(mktemp)"
+    if ! "${SCRIPT_DIR}/deploy-apigee-proxies.sh" > "${APIGEE_LOG}" 2>&1; then
+        log_error "FATAL: deploy-apigee-proxies.sh failed; the Apigee proxy baselines were NOT restored. Last output:" >&2
+        tail -n 20 "${APIGEE_LOG}" >&2
+        rm -f "${APIGEE_LOG}"
+        exit 1
+    fi
+    rm -f "${APIGEE_LOG}"
     log_success "    Apigee proxy baselines restored."
 else
     log_info "    Apigee restore simulation completed."
@@ -527,29 +617,7 @@ log_info "--> 9. Verifying admin fault injection endpoints exist on deployed inv
 if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
     # The GET probes below are only harmless on the pinned code; never send them elsewhere.
     verify_inventory_serving_pinned || exit 1
-    STATUS_LEAK=$(curl -s -o /dev/null -w "%{http_code}" ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/admin/leak-connections" || echo "000")
-    STATUS_INJECT=$(curl -s -o /dev/null -w "%{http_code}" ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/admin/fault/inject" || echo "000")
-
-    MISSING=0
-
-    if [ "${STATUS_LEAK}" = "404" ] || [ "${STATUS_LEAK}" = "000" ]; then
-        log_error "Admin endpoint /admin/leak-connections is MISSING or unreachable (HTTP ${STATUS_LEAK})!"
-        MISSING=$((MISSING + 1))
-    else
-        log_success "    Verified /admin/leak-connections endpoint exists (HTTP ${STATUS_LEAK})"
-    fi
-
-    if [ "${STATUS_INJECT}" = "404" ] || [ "${STATUS_INJECT}" = "000" ]; then
-        log_error "Admin endpoint /admin/fault/inject is MISSING or unreachable (HTTP ${STATUS_INJECT})!"
-        MISSING=$((MISSING + 1))
-    else
-        log_success "    Verified /admin/fault/inject endpoint exists (HTTP ${STATUS_INJECT})"
-    fi
-
-    if [ "${MISSING}" -gt 0 ]; then
-        log_error "FATAL: ${MISSING} required admin fault injection endpoints are missing from ${INV_URL}! Failing loudly."
-        exit 1
-    fi
+    verify_admin_endpoints "${INV_URL}" || exit 1
 fi
 
 log_success "=== All Scenarios Reset Successfully: Environment Healthy ==="
