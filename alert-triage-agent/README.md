@@ -145,71 +145,44 @@ The system integrates with ServiceNow via the Table and Attachment APIs:
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant Monitoring as Cloud Monitoring
     participant Bridge as ata-bridge
-    participant TriageQueue as Cloud Tasks (ata-triage-queue)
-    participant TimerQueue as Cloud Tasks (ata-timer-queue)
+    participant Tasks as Cloud Tasks (triage + timer queues)
     participant Agent as ata-agent
-    participant GCS as GCS Incident Store (OKF)
-    participant GCP as GCP APIs & ata-tools
-    participant Gemini as Vertex AI Gemini
-    participant ServiceNow as ServiceNow Table API
+    participant OKF as GCS Incident Store (OKF)
+    participant Telemetry as GCP APIs & ata-tools
+    participant ServiceNow as ServiceNow
 
     Monitoring->>Bridge: POST /webhook/monitoring (HTTP Basic Auth)
-    activate Bridge
-    Bridge->>Bridge: Authenticate & Validate Alert Scope
-    Bridge->>TriageQueue: Enqueue Raw Alert Payload
-    TriageQueue-->>Bridge: 202 Accepted
+    Bridge->>Tasks: Enqueue alert (ata-triage-queue)
     Bridge-->>Monitoring: 202 Accepted
-    deactivate Bridge
 
-    TriageQueue->>Agent: POST /triage (OIDC ID Token)
-    activate Agent
-    Agent->>Agent: Check In-Group Duplicate Suppression
-    Agent->>GCS: Read OKF with generation precondition
-    Agent->>Agent: Evaluate Correlation Scoring Matrix
-    alt Ambiguous Gray Zone (35 <= Score < 65)
-        Agent->>Gemini: Reason on Incident Attachment (gemini-3.8-flash)
-        Gemini-->>Agent: Attachment Decision & Rationale
-    end
-    Agent->>GCS: Update OKF (if_generation_match)
-    Agent->>TimerQueue: Schedule Settle Timer (now + 120s)
-    deactivate Agent
+    Tasks->>Agent: POST /triage (OIDC)
+    Note over Agent: Duplicate check, then correlation scoring<br/>(Gemini only for gray-zone scores 35-65)
+    Agent->>OKF: Create or update incident group (if_generation_match)
+    Agent->>Tasks: Schedule settle (120s) and max-wait (300s) timers (ata-timer-queue)
 
-    TimerQueue->>Agent: POST /timer/wake (OIDC ID Token)
-    activate Agent
-    Agent->>Agent: Stale-Wake Check (now vs okf.settle_deadline)
-    alt Settle Deadline Extended (Stale Wake)
-        Agent-->>TimerQueue: 200 OK (Stale wake ignored, no-op)
-    else Settle Expired (Valid Wake)
-        Agent->>GCS: Transition OKF to INVESTIGATING
-        par Concurrent Telemetry Inspection
-            Agent->>GCP: CloudRunSpecialist (restarts, CPU, latency, error logs)
-        and
-            Agent->>GCP: ApigeeSpecialist (access logs, SpikeArrest 429, timeouts)
-        and
-            Agent->>GCP: CloudSQLSpecialist (connections, CPU, lock timeouts)
-        and
-            Agent->>GCP: ChangeSpecialist (recent revisions, deploy timeline)
-        end
-        Agent->>Agent: Synthesize Findings, Blast Radius & Formulaic Confidence
-        Agent->>Bridge: POST /instructions/ticket/create (OIDC Token)
-        activate Bridge
-        Bridge->>ServiceNow: POST /api/now/table/incident (Create Ticket)
-        ServiceNow-->>Bridge: 201 Created (INC0010482)
-        Bridge-->>Agent: 200 OK (sys_id, ticket_number)
-        deactivate Bridge
-        Agent->>Bridge: POST /instructions/ticket/update-report (HTML Dossier)
-        activate Bridge
-        Bridge->>ServiceNow: POST /api/now/attachment/file (Attach Dossier)
-        ServiceNow-->>Bridge: 201 Created
-        Bridge-->>Agent: 200 OK
-        deactivate Bridge
-        Agent->>GCS: Update OKF with Ticket ID & Final Dossier
+    Tasks->>Agent: POST /timer/wake (settle or max-wait)
+    alt Deadline not yet reached (e.g. settle extended by a later alert)
+        Agent-->>Tasks: 200 OK, ignored (no-op)
+    else Deadline reached
+        Agent->>OKF: Set status INVESTIGATING
+        Agent->>Telemetry: Run specialists in parallel (Cloud Run, Apigee, Cloud SQL, Change)
+        Telemetry-->>Agent: Metrics, logs, revision and deploy history
+        Agent->>Bridge: POST /instructions/ticket/create (OIDC)
+        Bridge->>ServiceNow: Create incident and attach HTML dossier
+        Bridge-->>Agent: sys_id, ticket number
+        Agent->>OKF: Record ticket, set TICKETED (or COOLING_DOWN)
     end
-    deactivate Agent
 ```
+
+Paths not shown in the diagram:
+
+- **Filtering and duplicates**: `ata-bridge` drops non-`ata` alerts with HTTP 200 and does no deduplication. `ata-agent` suppresses repeat alerts for an already-active policy and resource by appending them to the existing incident group.
+- **Timer extension**: Each alert that attaches to an open group pushes the settle deadline out by 120s, capped at the 300s max-wait deadline. A wake that arrives more than 2.0s before the group's current deadline is ignored.
+- **Late alerts**: Alerts that attach to an already-ticketed group are added to the ServiceNow ticket as work notes (`POST /instructions/ticket/work-note`).
+- **Cool-down and resolution**: When every alert in a group has closed, the group enters `COOLING_DOWN` and a 180s cooling timer is scheduled. If no new alert reopens the group before that timer fires, the agent calls `POST /instructions/ticket/resolve` and marks the group `RESOLVED`.
+- **Investigation fallback**: If the multi-agent investigation raises an error, the agent falls back to a single-pass report (`generate_investigation_report`) and still creates the ticket.
 
 ### Topology as Single Source of Truth (`TOPOLOGY.md`)
 
