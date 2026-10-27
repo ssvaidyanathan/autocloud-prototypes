@@ -13,6 +13,12 @@ data "google_service_account" "apigee_sa" {
   project    = var.project_id
 }
 
+locals {
+  # Cloud SQL IAM database user for ata-inventory-api. Rendered into both
+  # ATA_INVENTORY_DB_USER and its legacy alias DB_USER so the two cannot diverge.
+  inventory_db_user = "${var.name_prefix}-inventory-sa@${var.project_id}.iam"
+}
+
 # -------------------------------------------------------------
 # Cloud Run: ata-inventory-api
 # -------------------------------------------------------------
@@ -51,7 +57,7 @@ resource "google_cloud_run_v2_service" "inventory_api" {
       }
       env {
         name  = "ATA_INVENTORY_DB_USER"
-        value = "${var.name_prefix}-inventory-sa@${var.project_id}.iam"
+        value = local.inventory_db_user
       }
       env {
         name  = "ATA_INVENTORY_DB_NAME"
@@ -63,9 +69,28 @@ resource "google_cloud_run_v2_service" "inventory_api" {
       }
       env {
         name  = "ATA_INVENTORY_MOCK_DB"
-        value = "false"
+        value = tostring(var.inventory_mock_db)
+      }
+      # Legacy aliases. The app reads ATA_INVENTORY_* first and falls back to
+      # these (demo/ata-inventory-api/app/config.py). deploy.sh, s5_bad_deploy.sh
+      # and reset-scenarios.sh set both name families, so they are declared here
+      # to keep Terraform in line with the live service.
+      env {
+        name  = "DB_USER"
+        value = local.inventory_db_user
+      }
+      env {
+        name  = "MOCK_DB"
+        value = tostring(var.inventory_mock_db)
       }
     }
+  }
+
+  lifecycle {
+    # client/client_version record which tool last wrote the service (gcloud
+    # stamps "gcloud"/<sdk version>). They are not configuration and do not
+    # affect revisions; the demo scripts update this service via gcloud.
+    ignore_changes = [client, client_version]
   }
 }
 
@@ -106,6 +131,11 @@ resource "google_cloud_run_v2_service" "orders_api" {
         value = google_cloud_run_v2_service.inventory_api.uri
       }
     }
+  }
+
+  lifecycle {
+    # See inventory_api: tool-of-last-write bookkeeping, not configuration.
+    ignore_changes = [client, client_version]
   }
 }
 

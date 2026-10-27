@@ -39,3 +39,9 @@ variable "owner" {
   default     = "sre-prototypes"
   description = "Ownership team for resources"
 }
+
+variable "inventory_mock_db" {
+  type        = bool
+  default     = false
+  description = "Serve ata-inventory-api from the in-memory catalog instead of Cloud SQL. Rendered into both ATA_INVENTORY_MOCK_DB and its legacy alias MOCK_DB."
+}
