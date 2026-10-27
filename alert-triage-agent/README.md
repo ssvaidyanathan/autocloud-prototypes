@@ -732,6 +732,16 @@ for dir in foundation database applications observability; do
 done
 ```
 
+**CI:** [`.github/workflows/alert-triage-agent-ci.yml`](../.github/workflows/alert-triage-agent-ci.yml) runs on pull requests and pushes to `main` that touch `alert-triage-agent/**`. It has a read-only token, no secrets, and actions pinned to commit SHAs. It runs:
+- the full `pytest tests` suite on Linux (bash 5);
+- the script tests (`test_bash32_compat.py`, `test_macos_userland.py`, `test_run_all_*.py`, `test_deploy_scripts_env_vars.py`) on macOS with `/bin/bash` 3.2 and the BSD userland;
+- ShellCheck on every script (fails on errors; warnings are listed);
+- `terraform fmt -check -recursive` and `validate` for each stack (Terraform 1.9.8).
+
+Ruff and mypy are not part of CI.
+
+To run the scripts under bash 3.2 locally, put a bash 3.2 binary first on `PATH` (named `bash`) and set `ATA_TEST_BASH` to it, then run `pytest tests`.
+
 ---
 
 ## 14. Testing Guide & Post-Deploy Smoke Tests
