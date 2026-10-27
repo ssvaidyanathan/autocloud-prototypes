@@ -1,5 +1,5 @@
 """reset-scenarios.sh step 6 waits for every incident group to reach a terminal state
-before the quiet period and the step-7 archive.
+before the step-7 archive, concurrently with the quiet period.
 
 QA S4: the reset archived the incident files while a group was still cooling_down, so the
 agent's recovery note (posted when the 180s cool-down ends) raced the archive. The fix is
@@ -11,9 +11,14 @@ active groups. --no-wait skips the check (documented as risky).
 A fake `gcloud` serves `gcloud storage ls/cat/mv` from a local directory. A file
 `<root>/_seq/<name>` holds one status per line; each `cat` of <name> rewrites the file's
 status to the next line (the last one repeats), so a group can change state between
-polls. The Monitoring alert query is stubbed to "no open alerts". reset-scenarios.sh is
-sourced (which defines its functions without running the reset) and run under
-ATA_TEST_BASH, as in test_bash32_compat.py.
+polls. The Monitoring alert query is stubbed to "no open alerts", or to a per-poll sequence
+of open-alert counts. reset-scenarios.sh is sourced (which defines its functions without
+running the reset) and run under ATA_TEST_BASH, as in test_bash32_compat.py.
+
+Ordering (round 4): the quiet period starts when the alerts close and runs while the reset
+waits for terminal groups; the archive follows when both are done, so the wait after the
+close is max(quiet period, time to terminal), not the sum. The ordering tests use a fake
+clock: `date +%s` and `sleep` are shell functions over FAKE_NOW (starts at 1000).
 """
 
 import os
@@ -121,20 +126,56 @@ def put(root, name, text, sequence=None):
         seq.write_text("\n".join(sequence) + "\n")
 
 
-def run_step6(tmp_path, gcs, after="", fail="", quiet=0, timeout=900, poll=0, **extra):
-    """Source the reset, stub the alert query to 0 open alerts, run step 6 (then `after`)."""
+# Fake clock: `date +%s` prints FAKE_NOW and `sleep N` advances it (other `date` calls
+# use the real one). `sleep` runs in the main shell, `date` in $(...) reads the variable.
+FAKE_CLOCK = (
+    "FAKE_NOW=1000\n"
+    'date() { if [ "$*" = "+%s" ]; then echo "${FAKE_NOW}"; else command date "$@"; fi; }\n'
+    'sleep() { FAKE_NOW=$((FAKE_NOW + $1)); }\n'
+)
+
+# Open-alert counts, one per query (the last one repeats), read from $ATA_TEST_ALERTS.
+ALERT_SEQUENCE_STUB = """query_open_ata_alerts() {
+    local n i out=""
+    n="$(head -n 1 "${ATA_TEST_ALERTS}")"
+    if [ "$(wc -l < "${ATA_TEST_ALERTS}")" -gt 1 ]; then
+        tail -n +2 "${ATA_TEST_ALERTS}" > "${ATA_TEST_ALERTS}.next"
+        mv "${ATA_TEST_ALERTS}.next" "${ATA_TEST_ALERTS}"
+    fi
+    i=0
+    while [ "${i}" -lt "${n}" ]; do
+        i=$((i + 1))
+        out="${out}${out:+, }{\\"id\\": \\"a${i}\\", \\"policy_display\\": \\"ata-inventory-5xx\\"}"
+    done
+    echo "{\\"active\\": [${out}], \\"ignored\\": []}"
+}
+"""
+
+
+def run_step6(tmp_path, gcs, after="", fail="", quiet=0, timeout=900, poll=0,
+              alerts=None, fake_clock=False, **extra):
+    """Source the reset, stub the alert query (0 open alerts, or the per-poll counts in
+    `alerts`), optionally the clock, and run step 6 (then `after`)."""
     bin_dir, root = gcs
+    if alerts is None:
+        alert_stub = """query_open_ata_alerts() { echo '{"active": [], "ignored": []}'; }\n"""
+    else:
+        (tmp_path / "alerts").write_text("".join(f"{n}\n" for n in alerts))
+        extra.setdefault("ATA_TEST_ALERTS", str(tmp_path / "alerts"))
+        alert_stub = ALERT_SEQUENCE_STUB
     probe = tmp_path / "probe.sh"
     probe.write_text(
         "set -euo pipefail\n"
         f'source "{RESET_SCRIPT}"\n'
         f"POLL_INTERVAL_SECS={poll}\nQUIET_PERIOD_SECS={quiet}\nWAIT_TIMEOUT_SECS={timeout}\n"
-        "get_serving_revisions() { echo ''; }\n"
+        + (FAKE_CLOCK if fake_clock else "")
+        + "get_serving_revisions() { echo ''; }\n"
         "resolve_monitoring_token() { echo tok; }\n"
-        """query_open_ata_alerts() { echo '{"active": [], "ignored": []}'; }\n"""
-        "wait_for_open_alerts\n"
+        + alert_stub
+        + "wait_for_open_alerts\n"
         "echo STEP6_DONE\n"
-        f"{after}\n"
+        + ('echo "DONE_AT=${FAKE_NOW}"\n' if fake_clock else "")
+        + f"{after}\n"
     )
     env = {k: v for k, v in os.environ.items()
            if k not in ("ATA_API_KEY", "INCIDENTS_BUCKET", "ATA_RESET_NO_WAIT", "NO_WAIT")}
@@ -159,6 +200,13 @@ def active_names(root):
 
 def out(res):
     return res.stdout + res.stderr
+
+
+def done_at(res):
+    """Fake-clock seconds since the start (1000) at which step 6 returned."""
+    match = re.search(r"^DONE_AT=(\d+)$", res.stdout, re.M)
+    assert match, out(res)
+    return int(match.group(1)) - 1000
 
 
 # --- terminal immediately ---------------------------------------------------------
@@ -225,20 +273,90 @@ def test_waits_through_every_active_status_the_agent_writes(tmp_path, gcs):
         assert f"incident-{status}.md ({status})" in progress[0]
 
 
-def test_quiet_period_starts_only_once_groups_are_terminal_and_restarts_on_regression(tmp_path, gcs):
-    """A group back in cooling during the quiet period (alert reopened and closed) restarts it."""
+# --- ordering: quiet period and terminal-state wait run concurrently ----------------
+
+
+def test_terminal_before_the_quiet_period_ends_archives_at_the_quiet_end(tmp_path, gcs):
+    """Group recovered 30s after the close; the 180s quiet period still runs to its end."""
     _, root = gcs
     put(root, "incident-a.md", okf("a", IncidentGroupStatus.COOLING_DOWN),
-        sequence=["cooling_down", "recovered", "cooling_down", "recovered"])
+        sequence=["cooling_down", "cooling_down", "recovered"])
 
-    res = run_step6(tmp_path, gcs, quiet=1, poll=1)
+    res = run_step6(tmp_path, gcs, quiet=180, poll=15, fake_clock=True,
+                    after="archive_active_incidents || exit 1")
 
     assert res.returncode == 0, out(res)
+    assert done_at(res) == 180
     lines = res.stdout.splitlines()
-    events = [("wait" if "not terminal yet" in line else "quiet")
-              for line in lines if "not terminal yet" in line or "Entering 1s quiet period" in line]
-    assert events == ["wait", "quiet", "wait", "quiet"]
-    assert "Quiet period complete" in res.stdout
+    assert sum("not terminal yet" in line for line in lines) == 2
+    assert "quiet period 15s / 180s | 1 incident group(s) not terminal yet" in res.stdout
+    assert "Starting the 180s quiet period" in res.stdout
+    assert "Quiet period complete (180s >= 180s with zero open ATA alerts) and all incident groups terminal" in res.stdout
+    assert "status: recovered" in (root / BUCKET / "archive" / "incident-a.md").read_text()
+    assert active_names(root) == []
+
+
+def test_terminal_after_the_quiet_period_ends_archives_when_terminal(tmp_path, gcs):
+    """Alerts close at t=30; the group is recovered 150s later. Archive at the close + 150s,
+    not at the close + 60s quiet period + 150s."""
+    _, root = gcs
+    put(root, "incident-a.md", okf("a", IncidentGroupStatus.COOLING_DOWN),
+        sequence=["cooling_down"] * 10 + ["recovered"])
+
+    res = run_step6(tmp_path, gcs, quiet=60, poll=15, alerts=[1, 1, 0], fake_clock=True,
+                    after="archive_active_incidents || exit 1")
+
+    assert res.returncode == 0, out(res)
+    assert done_at(res) == 30 + 150
+    assert "quiet period complete | 1 incident group(s) not terminal yet" in res.stdout
+    assert "Zero open ATA alerts and all incident groups terminal" not in res.stdout
+    assert "and all incident groups terminal. Proceeding." in res.stdout
+    assert "status: recovered" in (root / BUCKET / "archive" / "incident-a.md").read_text()
+    assert active_names(root) == []
+
+
+def test_reopened_alert_restarts_the_quiet_clock(tmp_path, gcs):
+    """Close at t=0, reopen at t=30, close again at t=45: archive at 45 + 60s."""
+    _, root = gcs
+    put(root, "incident-a.md", okf("a", IncidentGroupStatus.RECOVERED))
+
+    res = run_step6(tmp_path, gcs, quiet=60, poll=15, alerts=[0, 0, 1, 0], fake_clock=True)
+
+    assert res.returncode == 0, out(res)
+    assert done_at(res) == 45 + 60
+    assert res.stdout.count("Starting the 60s quiet period") == 2
+    assert "Still open: 1 alert(s) [ata-inventory-5xx (a1)]" in res.stdout
+
+
+def test_group_regression_does_not_restart_the_quiet_clock(tmp_path, gcs):
+    """Only an alert reopening restarts the quiet period; a group that goes back to
+    cooling_down only delays the archive until it is terminal again."""
+    _, root = gcs
+    put(root, "incident-a.md", okf("a", IncidentGroupStatus.RECOVERED),
+        sequence=["recovered", "cooling_down", "recovered"])
+
+    res = run_step6(tmp_path, gcs, quiet=60, poll=15, fake_clock=True)
+
+    assert res.returncode == 0, out(res)
+    assert done_at(res) == 60
+    assert res.stdout.count("Starting the 60s quiet period") == 1
+    assert sum("not terminal yet" in line for line in res.stdout.splitlines()) == 1
+
+
+def test_timeout_while_groups_are_active_fails_before_the_quiet_period_ends(tmp_path, gcs):
+    _, root = gcs
+    put(root, "incident-a.md", okf("a", IncidentGroupStatus.COOLING_DOWN))
+
+    res = run_step6(tmp_path, gcs, quiet=180, poll=15, timeout=120, fake_clock=True,
+                    after="archive_active_incidents || exit 1")
+
+    assert res.returncode == 1, out(res)
+    assert "STEP6_DONE" not in res.stdout
+    assert "Timed out after 120s (120s elapsed)" in res.stderr
+    assert "  - incident-a.md (cooling_down)" in res.stderr
+    assert "NOT archived" in res.stderr
+    assert calls(tmp_path, "mv") == []
+    assert active_names(root) == ["incident-a.md"]
 
 
 # --- timeout -> loud failure --------------------------------------------------------

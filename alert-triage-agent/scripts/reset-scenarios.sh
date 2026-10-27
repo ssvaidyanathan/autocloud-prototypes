@@ -14,8 +14,8 @@
 # 3. Terminate background DB sleep connections and release locks
 # 4. Restore healthy Apigee proxy revisions (re-deploy base bundles)
 # 5. Restore Cloud Run service configuration if S5 was deployed
-# 6. Wait for open ATA alerts to close, for every incident group to reach a terminal
-#    state (the agent's recovery note is posted), then the quiet period (Apigee metric lag)
+# 6. Wait for open ATA alerts to close, then, concurrently, for the quiet period (Apigee
+#    metric lag) and for every incident group to reach a terminal state (recovery note posted)
 # 7. Archive active OKF incident files and clean leftover root storage
 # 8. Verify healthy 200 responses across all services and 0 active incident groups
 # 9. Admin fault injection preflight verification
@@ -41,7 +41,7 @@ parse_duration() {
 # Configuration options & defaults
 NO_WAIT="${ATA_RESET_NO_WAIT:-${NO_WAIT:-false}}"
 # 180s covers Apigee's 1-3 min metric lag. The agent's recovery note is not covered by
-# time: step 6 waits for every incident group to reach a terminal state first.
+# time: step 6 also waits (concurrently) for every incident group to reach a terminal state.
 QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-180}}")"
 WAIT_TIMEOUT_SECS="$(parse_duration "${ATA_RESET_TIMEOUT:-${WAIT_TIMEOUT:-900}}")"
 POLL_INTERVAL_SECS="$(parse_duration "${ATA_RESET_POLL_INTERVAL:-${POLL_INTERVAL:-15}}")"
@@ -119,7 +119,8 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --no-wait                  Skip waiting for open alerts, terminal incident groups and quiet period"
             echo "                             (risky: can archive groups the agent is still working on)"
-            echo "  --quiet-period <duration>  Quiet period after alerts close and groups are terminal (default: 180s / 3m)"
+            echo "  --quiet-period <duration>  Quiet period after alerts close, run alongside the wait for terminal"
+            echo "                             incident groups (default: 180s / 3m)"
             echo "  --timeout <duration>       Max timeout waiting for alerts to close and groups to reach"
             echo "                             a terminal state (default: 900s / 15m)"
             echo "  --poll-interval <duration> Polling interval for alert and incident group queries (default: 15s)"
@@ -381,8 +382,23 @@ PYEOF
             log_info "    [Progress] Elapsed: ${elapsed}s / ${WAIT_TIMEOUT_SECS}s | Still open: ${count} alert(s) [${alert_summary}]"
             sleep "${POLL_INTERVAL_SECS}"
         else
-            # Archiving a group the agent is still working on races its recovery note
-            # (posted when the 180s cool-down after the last close ends): wait by state.
+            # The quiet period (Apigee metric lag) and the terminal-state wait run together
+            # from the first poll with zero open alerts. The quiet clock restarts only when an
+            # alert reopens (above). Archiving a group the agent is still working on races its
+            # recovery note (posted when the 180s cool-down after the last close ends), so the
+            # reset proceeds only once the quiet period is over AND every group is terminal.
+            if [ -z "${quiet_start}" ]; then
+                quiet_start="${now}"
+                if [ "${QUIET_PERIOD_SECS}" -gt 0 ]; then
+                    log_success "    All open ATA alerts have closed! Starting the ${QUIET_PERIOD_SECS}s quiet period (Apigee metric ingestion lag) while waiting for incident groups to reach a terminal state..."
+                fi
+            fi
+            local quiet_elapsed=$((now - quiet_start))
+            local quiet_status="quiet period complete"
+            if [ "${quiet_elapsed}" -lt "${QUIET_PERIOD_SECS}" ]; then
+                quiet_status="quiet period ${quiet_elapsed}s / ${QUIET_PERIOD_SECS}s"
+            fi
+
             local non_terminal="" group_count
             if ! non_terminal="$(non_terminal_incident_groups)"; then
                 log_error "FATAL: could not read incident group states from gs://${INCIDENTS_BUCKET}/${ACTIVE_INCIDENTS_URL_SUFFIX}; incident files were NOT archived." >&2
@@ -391,7 +407,6 @@ PYEOF
                 exit 1
             fi
             if [ -n "${non_terminal}" ]; then
-                quiet_start=""
                 group_count="$(count_lines "${non_terminal}")"
                 if [ "${now}" -ge "${deadline}" ]; then
                     log_error "Timed out after ${WAIT_TIMEOUT_SECS}s (${elapsed}s elapsed): all ATA alerts are closed, but ${group_count} incident group(s) are not in a terminal state (${TERMINAL_GROUP_STATUSES}):" >&2
@@ -399,7 +414,7 @@ PYEOF
                     log_error "Incident files were NOT archived. Check the agent (cooling timer, recovery note) and rerun, raise --timeout, or re-run with --no-wait to archive anyway (risky)." >&2
                     exit 1
                 fi
-                log_info "    [Progress] Elapsed: ${elapsed}s / ${WAIT_TIMEOUT_SECS}s | 0 open alerts | ${group_count} incident group(s) not terminal yet [$(summarize_lines "${non_terminal}")]"
+                log_info "    [Progress] Elapsed: ${elapsed}s / ${WAIT_TIMEOUT_SECS}s | 0 open alerts | ${quiet_status} | ${group_count} incident group(s) not terminal yet [$(summarize_lines "${non_terminal}")]"
                 sleep "${POLL_INTERVAL_SECS}"
                 continue
             fi
@@ -408,20 +423,12 @@ PYEOF
                 log_success "    Zero open ATA alerts and all incident groups terminal (quiet period disabled). Proceeding."
                 return 0
             fi
-
-            if [ -z "${quiet_start}" ]; then
-                quiet_start=$(date +%s)
-                log_success "    All open ATA alerts have closed and all incident groups are terminal! Entering ${QUIET_PERIOD_SECS}s quiet period to cover Apigee metric ingestion lag..."
-            else
-                local quiet_elapsed=$((now - quiet_start))
-                if [ "${quiet_elapsed}" -ge "${QUIET_PERIOD_SECS}" ]; then
-                    log_success "    Quiet period complete (${quiet_elapsed}s >= ${QUIET_PERIOD_SECS}s with zero open ATA alerts)."
-                    return 0
-                else
-                    local quiet_remaining=$((QUIET_PERIOD_SECS - quiet_elapsed))
-                    log_info "    [Quiet Period] ${quiet_elapsed}s / ${QUIET_PERIOD_SECS}s elapsed (${quiet_remaining}s remaining, 0 open alerts)..."
-                fi
+            if [ "${quiet_elapsed}" -ge "${QUIET_PERIOD_SECS}" ]; then
+                log_success "    Quiet period complete (${quiet_elapsed}s >= ${QUIET_PERIOD_SECS}s with zero open ATA alerts) and all incident groups terminal. Proceeding."
+                return 0
             fi
+            local quiet_remaining=$((QUIET_PERIOD_SECS - quiet_elapsed))
+            log_info "    [Quiet Period] ${quiet_elapsed}s / ${QUIET_PERIOD_SECS}s elapsed (${quiet_remaining}s remaining, 0 open alerts, all incident groups terminal)..."
             sleep "${POLL_INTERVAL_SECS}"
         fi
     done
