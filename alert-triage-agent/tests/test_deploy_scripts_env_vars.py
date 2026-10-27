@@ -61,7 +61,19 @@ elif args[:2] == ["projects", "describe"]:
     print(os.environ["STUB_PROJECT_NUMBER"])
 elif args[:3] == ["run", "services", "describe"] and opt("format") == "value(status.url)":
     print(f"https://{args[3]}-hash1234-uw.a.run.app")
+elif args[:3] == ["run", "services", "describe"] and opt("format") == "json":
+    env = [{"name": k, "value": v} for k, v in json.loads(os.environ.get("STUB_SERVICE_ENV", "{}")).items()]
+    print(json.dumps({"spec": {"template": {"spec": {"containers": [{"env": env}]}}}}))
+elif args[:2] == ["builds", "submit"]:
+    if os.environ.get("STUB_BUILD_FAIL"):
+        sys.exit(1)
+    print("BUILD LOG LINE (stdout)")
+elif args[:4] == ["artifacts", "docker", "images", "describe"]:
+    print(os.environ.get("STUB_DIGEST", "sha256:" + "ab" * 32))
 '''
+
+
+NO_YES = object()
 
 
 @pytest.fixture
@@ -74,6 +86,9 @@ def deploy(tmp_path):
     (work / "scripts").mkdir()
     shutil.copy(ROOT / "scripts" / "cloud-run-deploy-lib.sh", work / "scripts" / "cloud-run-deploy-lib.sh")
     (work / "topology").mkdir()
+    (work / "topology" / "TOPOLOGY.md").write_text("# topology\n")
+    for component in ("agent", "bridge", "tools"):
+        shutil.copy(ROOT / component / "Dockerfile", work / component / "Dockerfile")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     stub = bin_dir / "gcloud"
@@ -81,11 +96,13 @@ def deploy(tmp_path):
     stub.chmod(0o755)
     log = tmp_path / "gcloud.log"
 
-    def run(component, **env_overrides):
+    def run(component, *args, **env_overrides):
         log.write_text("")
         env = {k: v for k, v in os.environ.items()
                if k not in ("PROJECT_ID", "REGION", "APIGEE_ORG", "PROJECT_NUMBER", "VERIFIER_SA", "AUTO_RESOLVE_ON_RECOVERY", "BRIDGE_URL", "AGENT_URL",
-                            "SERVICENOW_INSTANCE_URL", "GCP_PROJECT", "GCP_REGION")}
+                            "SERVICENOW_INSTANCE_URL", "GCP_PROJECT", "GCP_REGION", "NAME_PREFIX", "APIGEE_ENV", "TOOLS_URL",
+                            "AGENT_IMAGE", "BRIDGE_IMAGE", "TOOLS_IMAGE", "IMAGE_TAG", "ASSUME_YES", "MODEL_NAME", "GEMINI_LOCATION",
+                            "ALLOWED_SERVICE_ACCOUNTS", "ENVIRONMENT", "OWNER", "TOOLS_TIMEOUT_SECONDS")}
         env.update(
             PATH=f"{bin_dir}{os.pathsep}{env['PATH']}",
             STUB_LOG=str(log),
@@ -94,11 +111,16 @@ def deploy(tmp_path):
             PROJECT_ID="proj-x",
             REGION="europe-west1",
             SERVICENOW_INSTANCE_URL="https://example.service-now.com",
+            NAME_PREFIX="ata",
+            APIGEE_ENV="eval-x",
+            IMAGE_TAG="t1",
         )
         env.update(env_overrides)
         env = {k: v for k, v in env.items() if v is not None}  # None: unset
-        res = subprocess.run([TEST_BASH, str(work / component / "scripts" / "deploy.sh")], cwd=str(work / component),
-                             capture_output=True, text=True, env=env, timeout=60)
+        # Default --yes; NO_YES: no arguments at all (stdin is not a terminal).
+        argv = [] if args == (NO_YES,) else (list(args) if args else ["--yes"])
+        res = subprocess.run([TEST_BASH, str(work / component / "scripts" / "deploy.sh"), *argv], cwd=str(work / component),
+                             capture_output=True, text=True, env=env, timeout=60, stdin=subprocess.DEVNULL)
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         return res, calls
 
@@ -170,7 +192,8 @@ def test_agent_uses_deterministic_bridge_url_when_bridge_is_not_deployed(deploy)
 
 
 def test_exported_urls_win(deploy):
-    res, calls = deploy("agent", BRIDGE_URL="https://bridge.example", AGENT_URL="https://agent.example")
+    res, calls = deploy("agent", BRIDGE_URL="https://bridge.example", AGENT_URL="https://agent.example",
+                        TOOLS_URL="https://tools.example")
 
     assert res.returncode == 0, res.stdout + res.stderr
     env = _env(_deploy_call(calls))
@@ -284,15 +307,169 @@ def test_agent_sets_timer_queue_location_and_oidc_sa_from_prefix_project_and_reg
     assert env["SERVICE_ACCOUNT_EMAIL"] == "abc-agent-sa@proj-x.iam.gserviceaccount.com"
 
 
-def test_bridge_reads_servicenow_url_from_tfvars_with_posix_classes(deploy, tmp_path):
-    """BSD sed has no \\s: the tfvars parse uses [[:space:]] (macOS)."""
+def test_bridge_ignores_tfvars_and_requires_servicenow_url_when_not_deployed(deploy, tmp_path):
+    """No terraform.tfvars parse any more: the env var, else the deployed service's value."""
     tfvars = tmp_path / "ata" / "infra" / "terraform" / "foundation" / "terraform.tfvars"
     tfvars.parent.mkdir(parents=True)
-    tfvars.write_text('project_id = "proj-x"\n\tservicenow_instance_url\t=  "https://dev1.service-now.com"\n')
+    tfvars.write_text('servicenow_instance_url = "https://dev1.service-now.com"\n')
 
-    res, calls = deploy("bridge", SERVICENOW_INSTANCE_URL=None)
+    res, calls = deploy("bridge", SERVICENOW_INSTANCE_URL=None, STUB_DEPLOYED="ata-agent")
+
+    assert res.returncode == 1
+    assert "SERVICENOW_INSTANCE_URL is required" in res.stderr
+    assert not [c for c in calls if c[:2] in (["run", "deploy"], ["builds", "submit"])]
+    text = (ROOT / "bridge" / "scripts" / "deploy.sh").read_text()
+    assert "terraform.tfvars" not in text and "\\s" not in text
+
+
+def test_bridge_keeps_the_deployed_servicenow_url_with_a_log_line(deploy):
+    res, calls = deploy("bridge", SERVICENOW_INSTANCE_URL=None,
+                        STUB_SERVICE_ENV=json.dumps({"SERVICENOW_INSTANCE_URL": "https://dev9.service-now.com"}))
 
     assert res.returncode == 0, res.stdout + res.stderr
-    assert _env(_deploy_call(calls))["SERVICENOW_INSTANCE_URL"] == "https://dev1.service-now.com"
-    text = (ROOT / "bridge" / "scripts" / "deploy.sh").read_text()
-    assert "\\s" not in text
+    assert _env(_deploy_call(calls))["SERVICENOW_INSTANCE_URL"] == "https://dev9.service-now.com"
+    assert "keeping the value on the deployed ata-bridge: https://dev9.service-now.com" in res.stdout
+
+
+@pytest.mark.parametrize("component", ["agent", "bridge", "tools"])
+def test_is_local_false_is_always_asserted(deploy, component):
+    res, calls = deploy(component)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert _env(_deploy_call(calls))["IS_LOCAL"] == "false"
+
+
+def test_bridge_verifier_sa_none_removes_it(deploy):
+    res, calls = deploy("bridge", VERIFIER_SA="none")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    call = _deploy_call(calls)
+    assert "VERIFIER_SA" not in _env(call)
+    assert "--remove-env-vars=VERIFIER_SA" in call
+
+
+def test_bridge_exported_bridge_url_is_never_replaced_after_the_deploy(deploy):
+    res, calls = deploy("bridge", BRIDGE_URL="https://bridge.custom.example")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert _env(_deploy_call(calls))["BRIDGE_URL"] == "https://bridge.custom.example"
+    assert not [c for c in calls if c[:3] == ["run", "services", "update"]]
+
+
+def test_agent_sets_tools_url_and_passes_optional_tuning_only_when_exported(deploy):
+    res, calls = deploy("agent", STUB_DEPLOYED="ata-agent ata-bridge")
+    assert res.returncode == 0, res.stdout + res.stderr
+    env = _env(_deploy_call(calls))
+    assert env["TOOLS_URL"] == f"https://ata-tools-{PROJECT_NUMBER}.europe-west1.run.app"
+    for name in ("MODEL_NAME", "GEMINI_LOCATION", "TOOLS_TIMEOUT_SECONDS"):
+        assert name not in env
+
+    res, calls = deploy("agent", MODEL_NAME="gemini-x", GEMINI_LOCATION="global", TOOLS_TIMEOUT_SECONDS="20")
+    assert res.returncode == 0, res.stdout + res.stderr
+    env = _env(_deploy_call(calls))
+    assert (env["MODEL_NAME"], env["GEMINI_LOCATION"], env["TOOLS_TIMEOUT_SECONDS"]) == ("gemini-x", "global", "20")
+    assert env["TOOLS_URL"] == "https://ata-tools-hash1234-uw.a.run.app"
+
+
+def test_agent_no_longer_grants_invoker_bindings(deploy):
+    res, calls = deploy("agent")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert not [c for c in calls if "add-iam-policy-binding" in c]
+    assert "add-iam-policy-binding" not in (ROOT / "agent" / "scripts" / "deploy.sh").read_text()
+
+
+def test_tools_sets_its_auth_env(deploy):
+    res, calls = deploy("tools")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    env = _env(_deploy_call(calls))
+    assert env["ENFORCE_AUTH"] == "true" and env["VERIFY_OIDC"] == "true"
+    assert env["PROJECT_NUMBER"] == PROJECT_NUMBER
+    assert env["APIGEE_ENV"] == "eval-x"
+    # The same URL the agent resolves as TOOLS_URL (here: the deployed status.url).
+    assert env["EXPECTED_AUDIENCE"] == "https://ata-tools-hash1234-uw.a.run.app"
+    assert "ALLOWED_SERVICE_ACCOUNTS" not in env
+
+    res, calls = deploy("tools", ALLOWED_SERVICE_ACCOUNTS="a@proj-x.iam.gserviceaccount.com")
+    assert _env(_deploy_call(calls))["ALLOWED_SERVICE_ACCOUNTS"] == "a@proj-x.iam.gserviceaccount.com"
+
+
+def test_tools_first_deploy_moves_expected_audience_to_the_status_url(deploy):
+    res, calls = deploy("tools", STUB_DEPLOYED="ata-agent")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert _env(_deploy_call(calls))["EXPECTED_AUDIENCE"] == f"https://ata-tools-{PROJECT_NUMBER}.europe-west1.run.app"
+    updates = [c for c in calls if c[:3] == ["run", "services", "update"]]
+    assert len(updates) == 1 and _env(updates[0]) == {"EXPECTED_AUDIENCE": "https://ata-tools-hash1234-uw.a.run.app"}
+
+
+def test_tools_requires_apigee_env(deploy):
+    res, calls = deploy("tools", APIGEE_ENV=None)
+
+    assert res.returncode == 1
+    assert "APIGEE_ENV" in res.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("component", ["agent", "bridge", "tools"])
+def test_name_prefix_is_required(deploy, component):
+    res, calls = deploy(component, NAME_PREFIX=None)
+
+    assert res.returncode == 1
+    assert "NAME_PREFIX is required" in res.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("component", ["agent", "bridge", "tools"])
+def test_build_uses_the_build_sa_and_deploys_by_digest_with_stack_label(deploy, component):
+    res, calls = deploy(component, NAME_PREFIX="atat", STUB_DEPLOYED="atat-agent atat-bridge atat-tools")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    builds = [c for c in calls if c[:2] == ["builds", "submit"]]
+    assert len(builds) == 1, calls
+    b = builds[0]
+    assert _opt(b, "service-account") == "projects/proj-x/serviceAccounts/atat-build-sa@proj-x.iam.gserviceaccount.com"
+    assert _opt(b, "gcs-source-staging-dir") == "gs://proj-x-atat-build/source"
+    assert _opt(b, "gcs-log-dir") == "gs://proj-x-atat-build/logs"
+    assert _opt(b, "tag") == f"europe-west1-docker.pkg.dev/proj-x/atat-docker/atat-{component}:t1"
+    call = _deploy_call(calls)
+    assert _opt(call, "image") == f"europe-west1-docker.pkg.dev/proj-x/atat-docker/atat-{component}@sha256:" + "ab" * 32
+    labels = dict(kv.split("=", 1) for kv in _opt(call, "labels").split(","))
+    assert labels["stack"] == "atat" and labels["component"] == f"atat-{component}"
+    assert labels["managed-by"] == "script"
+
+
+@pytest.mark.parametrize("component", ["agent", "bridge", "tools"])
+def test_prebuilt_image_skips_the_build(deploy, component):
+    image = f"europe-west1-docker.pkg.dev/proj-x/ata-docker/ata-{component}@sha256:" + "cd" * 32
+    res, calls = deploy(component, **{f"{component.upper()}_IMAGE": image})
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert not [c for c in calls if c[:2] == ["builds", "submit"]]
+    assert _opt(_deploy_call(calls), "image") == image
+
+
+def test_prebuilt_image_of_another_repo_is_refused(deploy):
+    res, calls = deploy("agent", AGENT_IMAGE="us-docker.pkg.dev/other/repo/ata-agent@sha256:" + "cd" * 32)
+
+    assert res.returncode != 0
+    assert "is not europe-west1-docker.pkg.dev/proj-x/ata-docker/ata-agent" in res.stderr
+    assert not [c for c in calls if c[:2] == ["run", "deploy"]]
+
+
+def test_bad_digest_from_artifact_registry_stops_the_deploy(deploy):
+    res, calls = deploy("agent", STUB_DIGEST="latest")
+
+    assert res.returncode != 0
+    assert "unexpected digest" in res.stderr
+    assert not [c for c in calls if c[:2] == ["run", "deploy"]]
+
+
+@pytest.mark.parametrize("component", ["agent", "bridge", "tools"])
+def test_without_yes_and_without_a_terminal_nothing_is_changed(deploy, component):
+    res, calls = deploy(component, NO_YES)
+
+    assert res.returncode == 1
+    assert "re-run with --yes" in res.stderr
+    assert not [c for c in calls if c[:2] in (["run", "deploy"], ["builds", "submit"])]

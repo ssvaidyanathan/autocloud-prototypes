@@ -60,7 +60,8 @@ def test_no_live_identifiers_in_terraform(path):
     assert not hits, f"live-project literal in {path}: {hits}"
 
 
-@pytest.mark.parametrize("script", [BOOTSTRAP, DEPLOY_DEMO_INFRA], ids=lambda p: p.name)
+@pytest.mark.parametrize("script", [BOOTSTRAP, DEPLOY_DEMO_INFRA, SCRIPTS / "deploy-stage1.sh", SCRIPTS / "teardown-stack.sh"],
+                         ids=lambda p: p.name)
 def test_no_live_identifiers_in_owned_scripts(script):
     hits = [f"{n}: {line.strip()}" for n, line in enumerate(script.read_text().splitlines(), 1)
             if LIVE_LITERALS.search(line)]
@@ -243,53 +244,12 @@ def test_bootstrap_enables_the_bootstrap_apis(tmp_path):
     assert (repo / "infra/terraform/triage-iam/backend.hcl").read_text().endswith('prefix = "atat/triage-iam"\n')
 
 
-def test_deploy_demo_infra_requires_its_inputs(tmp_path):
-    repo = _copy_repo(tmp_path)
-    res = _run([repo / "scripts" / DEPLOY_DEMO_INFRA.name], _clean_env())
-    assert res.returncode == 1
-    for name in ("PROJECT_ID", "REGION", "NAME_PREFIX", "INVENTORY_IMAGE", "ORDERS_IMAGE"):
-        assert name in res.stderr
-
-
-def test_deploy_demo_infra_reconfigures_backend_and_passes_vars(tmp_path):
-    repo = _copy_repo(tmp_path)
-    env_vars = dict(PROJECT_ID="fresh-example", REGION="us-central1", NAME_PREFIX="atat",
-                    INVENTORY_IMAGE="img-inv", ORDERS_IMAGE="img-ord")
-    assert _run([repo / "scripts" / BOOTSTRAP.name, "--write-backend-only"], _clean_env(**env_vars)).returncode == 0
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    calls = tmp_path / "calls"
-    for name in ("terraform",):
-        stub = bin_dir / name
-        stub.write_text('#!/bin/sh\necho "$(basename "$PWD") $*" >> "$CALLS"\n')
-        stub.chmod(0o755)
-    # The Apigee step is out of scope here; replace it with a recorder.
-    apigee = repo / "scripts" / "deploy-apigee-proxies.sh"
-    apigee.write_text('#!/bin/sh\necho "apigee $PROJECT_ID $NAME_PREFIX" >> "$CALLS"\n')
-    apigee.chmod(0o755)
-    env = _clean_env(PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", CALLS=str(calls), **env_vars)
-    res = _run([repo / "scripts" / DEPLOY_DEMO_INFRA.name], env)
-    assert res.returncode == 0, res.stderr
-    lines = calls.read_text().splitlines()
-    for root in ("database", "applications", "observability"):
-        init = [l for l in lines if l.startswith(f"{root} init")]
-        apply = [l for l in lines if l.startswith(f"{root} apply")]
-        assert init and "-reconfigure -backend-config=backend.hcl" in init[0], lines
-        assert apply and all(v in apply[0] for v in (
-            "-var project_id=fresh-example", "-var region=us-central1", "-var name_prefix=atat")), lines
-    app_apply = [l for l in lines if l.startswith("applications apply")][0]
-    assert "-var inventory_image=img-inv" in app_apply and "-var orders_image=img-ord" in app_apply
-    assert "-var environment=demo" in app_apply
-    assert "environment" not in [l for l in lines if l.startswith("observability apply")][0]
-    assert lines[-1] == "apigee fresh-example atat"
-
-
-def test_deploy_demo_infra_refuses_another_stacks_backend(tmp_path):
-    repo = _copy_repo(tmp_path)
-    assert _run([repo / "scripts" / BOOTSTRAP.name, "--write-backend-only"],
-                _clean_env(PROJECT_ID="fresh-example", REGION="r", NAME_PREFIX="ata")).returncode == 0
-    env = _clean_env(PROJECT_ID="fresh-example", REGION="r", NAME_PREFIX="atat",
-                     INVENTORY_IMAGE="i", ORDERS_IMAGE="o")
-    res = _run([repo / "scripts" / DEPLOY_DEMO_INFRA.name], env)
-    assert res.returncode == 1
-    assert "not for NAME_PREFIX=atat" in res.stderr
+def test_deploy_demo_infra_forwards_to_the_single_entrypoint():
+    """deploy-demo-infra.sh is a thin wrapper: deploy-stage1.sh --from database. The backend
+    check, init -reconfigure and -var passing now live in deploy-stage1.sh and are tested in
+    tests/test_fresh_deploy_scripts.py."""
+    text = DEPLOY_DEMO_INFRA.read_text()
+    assert 'exec bash "${SCRIPT_DIR}/deploy-stage1.sh" --from database "$@"' in text
+    stage1 = (SCRIPTS / "deploy-stage1.sh").read_text()
+    assert "terraform init -input=false -reconfigure -backend-config=backend.hcl" in stage1
+    assert 'prefix = \\"${NAME_PREFIX}/${root}\\"' in stage1
