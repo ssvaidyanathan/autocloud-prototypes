@@ -314,7 +314,6 @@ class SynthesizerAgent:
         revision_diffs = self._build_revision_diffs(dossiers, origin)
         root_cause_analysis = self._build_root_cause_analysis(
             root_cause_text, confidence, dossiers, origin, alert,
-            region=config.region, project_id=config.project_id,
         )
         if origin_notes:
             label = origin_notes["label"]
@@ -1855,13 +1854,7 @@ class SynthesizerAgent:
         dossiers: list[EvidenceDossier],
         origin: str,
         alert: AlertEvent,
-        region: Optional[str] = None,
-        project_id: Optional[str] = None,
     ) -> dict[str, Any]:
-        if not region or not project_id:
-            settings = get_agent_settings()
-            region = region or settings.region
-            project_id = project_id or settings.project_id
         supporting: list[str] = [
             f"Telemetric breach on '{origin}' coincides with alert trigger timestamp.",
             f"Multi-service correlation confirms causal failure propagation across {len(dossiers)} specialist domains.",
@@ -1872,10 +1865,9 @@ class SynthesizerAgent:
                 supporting.append(f"Supporting hint: Alert policy user label signal '{sig_label}' indicates ingress rate-limiting; rate-limit at the edge stays at the edge based on corroborating telemetry.")
             else:
                 supporting.append(f"Supporting hint: Alert policy user label signal '{sig_label}' provides supporting evidence for observed {sig_label} telemetry.")
-        contradicting: list[str] = [
-            f"Zero host-level compute/hypervisor hyperthreading faults reported in {region}.",
-            f"No upstream Google Cloud infrastructure service outages affecting project {project_id}.",
-        ]
+        # Only evidence that was actually observed belongs here. No specialist queries host
+        # faults or Google Cloud Service Health, so nothing is claimed about either.
+        contradicting: list[str] = []
         alternatives: list[dict[str, str]] = []
         all_queries_flat = [q for d in dossiers for q_list in d.queries_executed.values() for q in q_list]
 

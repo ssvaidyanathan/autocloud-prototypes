@@ -464,9 +464,7 @@ def generate_investigation_report(
                 f"Anomalous metric values breached threshold on {origin}.",
                 f"Condition {alert.condition_name or alert.policy_name} active.",
             ],
-            "contradicting_evidence": [
-                f"Zero compute host faults detected in {config.region}.",
-            ],
+            "contradicting_evidence": [],
             "confidence": 0.91,
             "confidence_rationale": "Direct alert condition match against telemetry signals.",
             "alternatives_ruled_out": [],

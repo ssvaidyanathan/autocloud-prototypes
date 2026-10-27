@@ -4,8 +4,8 @@
    never on a bare "auth"/"denied"/"password" substring. Ordinary request logs that mention
    "Authorization: Bearer" or "OAuth" (S2 live false positive) must not be reported as DB
    auth failures; the S5 invalid IAM DB user log must still be detected.
-2. The RCA "contradicting evidence" lines must name the configured region and project,
-   not hardcoded environment literals.
+2. The RCA must not state unverified "contradicting evidence" (host faults, Google Cloud
+   outages are never queried), and report text must not contain hardcoded environment literals.
 """
 
 import ast
@@ -222,8 +222,14 @@ def test_observations_do_not_claim_db_auth_for_oauth_findings():
 
 
 # ---------------------------------------------------------------------------
-# RCA contradicting evidence: region / project come from config
+# RCA contradicting evidence: no unverified boilerplate claims
 # ---------------------------------------------------------------------------
+# Nothing in the pipeline queries host/hypervisor faults or Google Cloud Service Health, so
+# the RCA must not claim either was checked. contradicting_evidence holds only what was
+# actually observed; today nothing produces such entries, so it is empty.
+
+UNVERIFIED_CLAIM_MARKERS = ("host", "hypervisor", "hyperthreading", "outage", "service health")
+
 
 def _rca_alert() -> AlertEvent:
     return AlertEvent(
@@ -234,37 +240,24 @@ def _rca_alert() -> AlertEvent:
     )
 
 
-def test_rca_contradicting_evidence_uses_passed_region_and_project():
-    rca = SynthesizerAgent()._build_root_cause_analysis(
-        root_cause_text="x", confidence=0.5, dossiers=[], origin="ata-orders-api",
-        alert=_rca_alert(), region="test-region-9", project_id="example-project-id",
-    )
-    joined = " ".join(rca["contradicting_evidence"])
-
-    assert "test-region-9" in joined
-    assert "example-project-id" in joined
-    assert "us-west1" not in joined
-    assert "cloud-assist-fde-2" not in joined
+def _assert_no_unverified_claims(rca: dict) -> None:
+    assert rca["contradicting_evidence"] == []
+    text = " ".join(
+        str(x) for key in ("supporting_evidence", "contradicting_evidence") for x in rca.get(key, [])
+    ).lower()
+    for marker in UNVERIFIED_CLAIM_MARKERS:
+        assert marker not in text, marker
 
 
-def test_rca_contradicting_evidence_falls_back_to_agent_settings(monkeypatch):
-    from agent.app import config as config_mod
-
-    monkeypatch.setattr(
-        config_mod, "_agent_settings",
-        AgentConfig(project_id="settings-project", region="settings-region", is_local=True),
-    )
+def test_rca_has_no_unverified_contradicting_evidence():
     rca = SynthesizerAgent()._build_root_cause_analysis(
         root_cause_text="x", confidence=0.5, dossiers=[], origin="ata-orders-api", alert=_rca_alert(),
     )
-    joined = " ".join(rca["contradicting_evidence"])
-
-    assert "settings-region" in joined
-    assert "settings-project" in joined
+    _assert_no_unverified_claims(rca)
 
 
 @pytest.mark.asyncio
-async def test_synthesize_report_rca_names_configured_region_and_project():
+async def test_synthesize_report_rca_has_no_unverified_contradicting_evidence():
 
     async def empty_dossier(self, alert, config, target_service=None):
         return EvidenceDossier(specialist_name=self.__class__.__name__, target_resource=target_service or "")
@@ -278,23 +271,23 @@ async def test_synthesize_report_rca_names_configured_region_and_project():
          patch.object(SynthesizerAgent, "_update_okf_file", lambda *a, **k: None):
         report = await synth.execute_investigation(_rca_alert(), "grp-test", "grp-test.md", config)
 
-    joined = " ".join(report.root_cause_analysis["contradicting_evidence"])
-    assert "test-region-9" in joined
-    assert "example-project-id" in joined
-    assert "us-west1" not in joined
-    assert "cloud-assist-fde-2" not in joined
+    _assert_no_unverified_claims(report.root_cause_analysis)
 
 
-def test_triage_baseline_report_contradicting_evidence_uses_config_region(tmp_path):
+def test_triage_baseline_report_has_no_unverified_contradicting_evidence(tmp_path):
     from agent.app.triage import generate_investigation_report
 
     config = AgentConfig(project_id="example-project-id", region="test-region-9", is_local=True,
                          INCIDENT_STORE_PATH=str(tmp_path), FALLBACK_STORE_PATH=str(tmp_path))
     report = generate_investigation_report(_rca_alert(), "grp-test", "grp-test.md", config)
-    joined = " ".join(report.root_cause_analysis["contradicting_evidence"])
+    _assert_no_unverified_claims(report.root_cause_analysis)
 
-    assert "test-region-9" in joined
-    assert "us-west1" not in joined
+
+def test_report_modules_have_no_host_fault_or_outage_boilerplate():
+    for rel in ("agent/app/specialists/synthesizer.py", "agent/app/triage.py"):
+        src = (Path(__file__).resolve().parents[1] / rel).read_text().lower()
+        for phrase in ("hyperthreading", "host faults", "host-level", "infrastructure service outages"):
+            assert phrase not in src, (rel, phrase)
 
 
 # ---------------------------------------------------------------------------
