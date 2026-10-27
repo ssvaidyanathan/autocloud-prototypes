@@ -2,10 +2,13 @@ import logging
 import os
 import re
 from typing import Optional
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
+
+# Same rule as the Terraform name_prefix validation (and the agent/tools configs).
+NAME_PREFIX_PATTERN = r"[a-z][a-z0-9]{1,9}"
 
 
 class BridgeConfig(BaseSettings):
@@ -16,7 +19,9 @@ class BridgeConfig(BaseSettings):
         extra="ignore",
     )
 
-    project_id: str = Field(default="cloud-assist-fde-2", alias="PROJECT_ID")
+    # Deployment identity. No defaults: PROJECT_ID and REGION are required unless IS_LOCAL;
+    # NAME_PREFIX is always required and follows the Terraform rule ^[a-z][a-z0-9]{1,9}$.
+    project_id: Optional[str] = Field(default=None, alias="PROJECT_ID")
     # Numeric GCP project number. Used to build the bridge's deterministic Cloud Run URL
     # (https://<prefix>-bridge-<number>.<region>.run.app), an accepted ID-token audience.
     # Required when not local: startup fails and auth returns 500 without it.
@@ -26,8 +31,8 @@ class BridgeConfig(BaseSettings):
     # the URL it calls (agent BRIDGE_URL, set from this status.url), so it is an accepted
     # audience. Required when not local. bridge/scripts/deploy.sh sets it.
     bridge_url: Optional[str] = Field(default=None, alias="BRIDGE_URL")
-    name_prefix: str = Field(default="ata", alias="NAME_PREFIX")
-    region: str = Field(default="us-west1", alias="REGION")
+    name_prefix: str = Field(alias="NAME_PREFIX")
+    region: Optional[str] = Field(default=None, alias="REGION")
     environment: str = Field(default="prod", alias="ENVIRONMENT")
 
     # Cloud Storage Incidents Bucket
@@ -56,6 +61,24 @@ class BridgeConfig(BaseSettings):
     verifier_sa: Optional[str] = Field(default=None, alias="VERIFIER_SA")
     adapter_timeout_seconds: float = Field(default=30.0, alias="ADAPTER_TIMEOUT_SECONDS")
     cool_down_duration: float = Field(default=180.0, alias="COOL_DOWN_DURATION")
+
+    @field_validator("name_prefix")
+    @classmethod
+    def _validate_name_prefix(cls, value: str) -> str:
+        if not re.fullmatch(NAME_PREFIX_PATTERN, value or ""):
+            raise ValueError(f"NAME_PREFIX {value!r} must match ^{NAME_PREFIX_PATTERN}$ (the Terraform name_prefix rule)")
+        return value
+
+    @model_validator(mode="after")
+    def _require_project_and_region(self) -> "BridgeConfig":
+        for field_name in ("project_id", "region"):
+            value = getattr(self, field_name)
+            if isinstance(value, str) and not value.strip():
+                setattr(self, field_name, None)
+        missing = [env for env, value in (("PROJECT_ID", self.project_id), ("REGION", self.region)) if not value]
+        if missing and not self.is_local:
+            raise ValueError(f"required setting(s) not set: {', '.join(missing)} (only IS_LOCAL=true may omit them)")
+        return self
 
     @field_validator("project_number", mode="before")
     @classmethod

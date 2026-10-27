@@ -434,7 +434,7 @@ resource "google_monitoring_notification_channel" "bridge_webhook" {
     # Deterministic Cloud Run URL of the bridge (https://<service>-<project
     # number>.<region>.run.app), known before the bridge is deployed.
     url      = "https://${var.name_prefix}-bridge-${data.google_project.this.number}.${var.region}.run.app/webhook/monitoring"
-    username = "ata-monitoring"
+    username = "${var.name_prefix}-monitoring"
   }
   sensitive_labels {
     password = random_password.webhook_token.result

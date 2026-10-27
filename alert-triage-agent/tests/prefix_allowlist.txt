@@ -11,7 +11,6 @@ infra/terraform/applications/outputs.tf:ata\-inventory\-api
 infra/terraform/applications/outputs.tf:ata\-orders\-api
 infra/terraform/applications/variables.tf:ata\-inventory\-api
 infra/terraform/applications/variables.tf:ata\-orders\-api
-infra/terraform/foundation/main.tf:ata\-monitoring
 infra/terraform/observability/outputs.tf:ata\-bridge
 infra/terraform/observability/variables.tf:ata\-bridge
 
@@ -21,15 +20,11 @@ tools/app/server.py:ata\-tools
 
 # --- ata-s4: bridge config and auth (PROJECT_ID/REGION/NAME_PREFIX defaults, Cloud Run URL hash, log text) ---
 bridge/app/auth.py:ata\-bridge
-bridge/app/config.py:ata
-bridge/app/config.py:cloud\-assist\-fde\-2
-bridge/app/config.py:us\-west1
 
 # --- ata-s3/ata-s4: deploy.sh files: none left ---
 
 # --- ata-s3/ata-s4: demo inventory/orders apps (directory names, config defaults, Dockerfiles) ---
 demo/ata-inventory-api:ata\-i
-demo/ata-orders-api/app/config.py:cloud\-assist\-fde\-2
 demo/ata-orders-api:ata\-o
 
 # --- ata-fresh-scen (not merged yet): scenarios, reset-scenarios.sh, run-all-scenarios.sh ---

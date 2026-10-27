@@ -2,7 +2,7 @@
 
 Resource names are shown with their prefix as `<prefix>` or `${NAME_PREFIX}`; with the live stack's prefix `ata` they read `ata-*` (there is no default prefix). Where a table names `ata-bridge`, `ata-agent` or `ata-tools`, read `<prefix>-bridge`, `<prefix>-agent`, `<prefix>-tools`.
 
-**Defaults.** The agent and tools have no project, region or prefix defaults: `PROJECT_ID`, `REGION` and `NAME_PREFIX` are required unless `IS_LOCAL=true`, and the stack's resource names derive from them. The bridge's code still has fallbacks for these three; where the bridge table says *Set by `deploy.sh`*, `bridge/scripts/deploy.sh` always passes the value, so the fallback never applies to a deployed bridge.
+**Defaults.** The bridge, agent and tools have no project, region or prefix defaults: `PROJECT_ID`, `REGION` and `NAME_PREFIX` are required (`PROJECT_ID`/`REGION` only unless `IS_LOCAL=true`), startup fails without them, and the stack's resource names derive from them. The deploy scripts always pass them.
 
 This document provides a comprehensive reference for all environment variables, Secret Manager secrets, IAM permissions, Cloud Tasks queue configurations, agent-owned grouping and timer parameters, and Apigee credentials used across the **Alert Triage Agent (ATA)** system.
 
@@ -16,11 +16,11 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
-| `PROJECT_ID` | *Set by `deploy.sh`* (`${PROJECT_ID}`) | Google Cloud project ID. |
+| `PROJECT_ID` | *None (required unless `IS_LOCAL=true`)* | Google Cloud project ID. Set by `deploy.sh`. |
 | `PROJECT_NUMBER` | *None (required unless `IS_LOCAL=true`)* | Numeric GCP project number. The bridge accepts `https://<NAME_PREFIX>-bridge-<PROJECT_NUMBER>.<REGION>.run.app` as an ID-token audience on `/instructions/*`. Without it a non-local bridge fails at startup, and auth returns HTTP 500. `bridge/scripts/deploy.sh` sets it from `gcloud projects describe` unless it is already in the environment. |
 | `BRIDGE_URL` | *None (required unless `IS_LOCAL=true`)* | The bridge's own Cloud Run URL, i.e. the service's `status.url` (e.g. `https://<NAME_PREFIX>-bridge-<hash>-<region code>.a.run.app`), as an https URL without a path. `ata-agent` mints its ID tokens for the bridge URL it calls (the agent's `BRIDGE_URL`), so the bridge accepts this value as an ID-token audience on `/instructions/*`, next to the `PROJECT_NUMBER` URL and the request's base URL. Without it a non-local bridge fails at startup, and auth returns HTTP 500. `bridge/scripts/deploy.sh` sets it from the service's `status.url`; on a first deploy it starts with the deterministic URL and sets `status.url` right after the deploy. |
-| `NAME_PREFIX` | `ata` | Resource namespace prefix. Set by `deploy.sh`. |
-| `REGION` | *Set by `deploy.sh`* (`${REGION}`) | GCP region for Cloud Tasks and Cloud Run. |
+| `NAME_PREFIX` | *None (required)* | Stack prefix (`^[a-z][a-z0-9]{1,9}$`, the Terraform rule). Set by `deploy.sh`. |
+| `REGION` | *None (required unless `IS_LOCAL=true`)* | GCP region for Cloud Tasks and Cloud Run. Set by `deploy.sh`. |
 | `ENVIRONMENT` | `prod` | Runtime environment name read by the service. The deploy scripts do not set it, so the default applies. Not the `env` resource label (see [§7.1](#71-label-scheme--value-requirements)). |
 | `AGENT_URL` | `http://localhost:8080` | URL of the `<prefix>-agent` Cloud Run service. Set by `deploy.sh`. |
 | `TASKS_QUEUE` | `${NAME_PREFIX}-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |

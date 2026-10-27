@@ -4,7 +4,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    project_id: str = "cloud-assist-fde-2"
     inventory_service_url: str = "http://localhost:8080"
     port: int = 8080
 

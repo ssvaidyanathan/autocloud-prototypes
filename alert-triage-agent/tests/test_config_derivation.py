@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from agent.app.config import AgentConfig
+from bridge.app.config import BridgeConfig
 from tools.app.config import ToolsConfig
 from topology.loader import TopologyLoader, TopologyValidationError
 
@@ -115,6 +116,29 @@ def test_tools_apigee_org_and_env_are_explicit_with_no_project_fallback(no_env):
     assert cfg.apigee_access_log_id == "atat-apigee-access"
     cfg = ToolsConfig(PROJECT_ID="p", REGION="r1", NAME_PREFIX="ata", APIGEE_ORG="org2", APIGEE_ENV="test")
     assert (cfg.apigee_org, cfg.apigee_env) == ("org2", "test")
+
+
+# --- bridge (integration: no project/region/prefix defaults) -------------------------------
+
+def test_bridge_requires_project_region_and_a_valid_prefix(no_env):
+    with pytest.raises(ValidationError, match="PROJECT_ID"):
+        BridgeConfig(NAME_PREFIX="ata", REGION="r1")
+    with pytest.raises(ValidationError, match="REGION"):
+        BridgeConfig(NAME_PREFIX="ata", PROJECT_ID="p")
+    with pytest.raises(ValidationError, match="NAME_PREFIX"):
+        BridgeConfig(PROJECT_ID="p", REGION="r1")
+    with pytest.raises(ValidationError, match="NAME_PREFIX"):
+        BridgeConfig(PROJECT_ID="p", REGION="r1", NAME_PREFIX="Bad-")
+    local = BridgeConfig(NAME_PREFIX="atat", IS_LOCAL="true")
+    assert (local.project_id, local.region) == (None, None)
+
+
+def test_bridge_derives_stack_names_from_the_configured_values(no_env):
+    cfg = BridgeConfig(PROJECT_ID="proj-a", REGION="r9", NAME_PREFIX="atat")
+    assert cfg.effective_tasks_queue == "atat-triage-queue"
+    assert cfg.effective_tasks_location == "r9"
+    assert cfg.effective_incidents_bucket == "proj-a-atat-incidents"
+    assert cfg.effective_tasks_invoker_sa == "atat-bridge-sa@proj-a.iam.gserviceaccount.com"
 
 
 # --- docs match the code (gap 42) ----------------------------------------------------------

@@ -487,7 +487,7 @@ def test_terraform_notification_channel_has_no_query_parameters():
     assert "token=" not in url
 
     # Assert username and password are configured
-    assert 'username = "ata-monitoring"' in channel_block
+    assert 'username = "${var.name_prefix}-monitoring"' in channel_block
     assert "password = random_password.webhook_token.result" in channel_block
 
     # Assert random_password has rotation keeper
