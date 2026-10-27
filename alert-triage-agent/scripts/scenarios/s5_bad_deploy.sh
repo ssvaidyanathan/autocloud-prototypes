@@ -85,29 +85,26 @@ log_info "--> Updating ata-inventory-api with invalid DB credentials on pinned i
 if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
     log_info "[MOCK/DRY-RUN] Simulating Cloud Run deployment with DB_USER=invalid_user on ${PINNED_INVENTORY_IMAGE}..."
 else
-    inventory_latest_created() {
-        gcloud run services describe "${NAME_PREFIX}-inventory-api" \
-            --project="${PROJECT_ID}" \
-            --region="${REGION}" \
-            --format="value(status.latestCreatedRevisionName)"
-    }
-    PREV_REVISION="$(inventory_latest_created)" || {
-        log_error "FATAL: could not describe ${NAME_PREFIX}-inventory-api." >&2
-        exit 1
-    }
+    # Name the revision ourselves: reading latestCreatedRevisionName races with any
+    # concurrent `services update`, which would make S5 route to someone else's revision.
+    S5_REVISION_SUFFIX="s5-$(date +%s)"
+    BAD_REVISION="${NAME_PREFIX}-inventory-api-${S5_REVISION_SUFFIX}"
     if ! gcloud run services update "${NAME_PREFIX}-inventory-api" \
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --image="${PINNED_INVENTORY_IMAGE}" \
         --update-env-vars="ATA_INVENTORY_DB_USER=invalid-iam-user@${PROJECT_ID}.iam,DB_USER=invalid-iam-user@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false,MOCK_DB=false" \
+        --revision-suffix="${S5_REVISION_SUFFIX}" \
         --quiet; then
         log_error "FATAL: Cloud Run update of ${NAME_PREFIX}-inventory-api failed; S5 not injected." >&2
         log_error "The service template may already carry the invalid DB user; run '$0 --revert' to restore the baseline." >&2
         exit 1
     fi
-    BAD_REVISION="$(inventory_latest_created)" || BAD_REVISION=""
-    if [ -z "${BAD_REVISION}" ] || [ "${BAD_REVISION}" = "${PREV_REVISION}" ] || [ "${BAD_REVISION}" = "${PINNED_INVENTORY_REVISION}" ]; then
-        log_error "FATAL: no new ${NAME_PREFIX}-inventory-api revision after the update (latest created: '${BAD_REVISION:-<unknown>}', before: '${PREV_REVISION}')." >&2
+    if ! gcloud run revisions describe "${BAD_REVISION}" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --format="value(metadata.name)" >/dev/null; then
+        log_error "FATAL: no new ${NAME_PREFIX}-inventory-api revision ${BAD_REVISION} after the update; S5 not injected. Run '$0 --revert'." >&2
         exit 1
     fi
     log_info "    Faulty revision created: ${BAD_REVISION}. Routing 100% traffic to it..."

@@ -76,7 +76,13 @@ elif args[:3] == ["run", "services", "update"]:
     state["env"].update(dict(kv.split("=", 1) for kv in opt("update-env-vars").split(",")))
     if "no-new-revision" not in state["fail"]:
         state["counter"] += 1
-        state["latest"] = f"ata-inventory-api-{state['counter']:05d}-new"
+        suffix = opt("revision-suffix") or f"{state['counter']:05d}-new"
+        state["latest"] = f"ata-inventory-api-{suffix}"
+        state["revisions"][state["latest"]] = state["digest_for_new"]
+    if "concurrent-writer" in state["fail"]:
+        # Another writer's `services update` lands right after ours.
+        state["counter"] += 1
+        state["latest"] = f"ata-inventory-api-{state['counter']:05d}-other"
         state["revisions"][state["latest"]] = state["digest_for_new"]
     save()
 elif args[:3] == ["run", "services", "update-traffic"]:
@@ -159,13 +165,21 @@ class Env:
 # --- S5 injection --------------------------------------------------------------
 
 
+def s5_revision(env):
+    """Revision name S5 asked for via --revision-suffix on its services update."""
+    update = next(c for c in env.calls if c[:3] == ["run", "services", "update"])
+    suffix = next(a.split("=", 1)[1] for a in update if a.startswith("--revision-suffix="))
+    return f"ata-inventory-api-{suffix}"
+
+
 def test_s5_routes_all_traffic_to_the_new_faulty_revision(tmp_path):
     env = Env(tmp_path, baseline_state())
 
     res = env.run([str(S5_SCRIPT), "--hold", "0s"])
 
     assert res.returncode == 0, res.stdout + res.stderr
-    new_rev = "ata-inventory-api-00140-new"
+    new_rev = s5_revision(env)
+    assert new_rev.startswith("ata-inventory-api-s5-")
     assert env.state["traffic"] == [[new_rev, 100]]
     assert env.state["env"]["DB_USER"] == BAD_USER
     assert env.writes() == [["run", "services", "update"], ["run", "services", "update-traffic"]]
@@ -180,9 +194,10 @@ def test_s5_routes_all_traffic_to_the_new_faulty_revision(tmp_path):
     [
         ("update", "Cloud Run update of ata-inventory-api failed"),
         ("no-new-revision", "no new ata-inventory-api revision"),
-        ("update-traffic", "could not route traffic to ata-inventory-api-00140-new"),
+        ("update-traffic", "could not route traffic to ata-inventory-api-s5-"),
         ("ignore-traffic", "is not serving 100% of traffic"),
-        ("describe", "could not describe ata-inventory-api"),
+        # S5 no longer describes before updating; a describe failure trips the serving check.
+        ("describe", "ata-inventory-api traffic is '<unknown>'"),
     ],
 )
 def test_s5_fails_loudly_instead_of_driving_traffic_at_the_pinned_revision(tmp_path, fail, message):
@@ -194,6 +209,19 @@ def test_s5_fails_loudly_instead_of_driving_traffic_at_the_pinned_revision(tmp_p
     assert message in res.stderr
     assert "Injected Successfully" not in res.stdout
     assert "sustained traffic loop" not in res.stdout
+
+
+def test_s5_routes_to_its_own_revision_despite_a_concurrent_writer(tmp_path):
+    """A concurrent `services update` must not make S5 route to the other writer's revision."""
+    env = Env(tmp_path, baseline_state(fail=["concurrent-writer"]))
+
+    res = env.run([str(S5_SCRIPT), "--hold", "0s"])
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert env.state["latest"].endswith("-other")
+    assert env.state["traffic"] == [[s5_revision(env), 100]]
+    assert not any(c[:3] == ["run", "services", "describe"] and
+                   "--format=value(status.latestCreatedRevisionName)" in c for c in env.calls)
 
 
 def test_s5_update_failure_does_not_attempt_traffic_routing(tmp_path):
