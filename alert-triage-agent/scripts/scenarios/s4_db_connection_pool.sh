@@ -75,8 +75,50 @@ if [ -n "${ID_TOKEN}" ] && [ "${ID_TOKEN}" != "mock-id-token" ]; then
     AUTH_HEADER=(-H "Authorization: Bearer ${ID_TOKEN}")
 fi
 
+# Pre-flight BEFORE the fault: with the pool exhausted, GET /items through Apigee returns
+# HTTP 500, so selecting the order item after the leak aborted the run with no traffic and
+# the connections still leaked (QA round 2, S4).
+if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ] || [ "${HOLD_SECS}" -le 0 ]; then
+    ORDER_ITEM="item-101"
+else
+    # One order per second of hold.
+    ORDER_ITEM="$(select_order_item "${API_KEY}" "${HOLD_SECS}")" || exit 1
+    log_info "    Order traffic uses ${ORDER_ITEM} (the in-stock item with the most stock)."
+fi
+
+# From the first leak request on, an exit with an error releases the leaked connections
+# (POST /admin/fault/reset, as reset-scenarios.sh does) instead of leaving the pool
+# exhausted. A successful run keeps them: the scenario needs the leak to persist until reset.
+LEAK_STARTED=false
+release_leak_on_error() {
+    local rc=$? code
+    if [ "${rc}" -eq 0 ] || [ "${LEAK_STARTED}" != "true" ]; then
+        return 0
+    fi
+    log_error "S4 aborted (exit ${rc}) after leaking DB connections; releasing them via POST ${INV_URL}/admin/fault/reset." >&2
+    # Same condition as the leak requests below: --mock still sends them.
+    if [ "${DRY_RUN}" = "true" ]; then
+        log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/fault/reset" >&2
+    else
+        code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 30 -X POST \
+            ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} "${INV_URL}/admin/fault/reset" 2>/dev/null) || code="000"
+        case "${code}" in
+            2??)
+                log_warn "Leaked connections released (POST ${INV_URL}/admin/fault/reset -> HTTP ${code})." >&2
+                ;;
+            *)
+                log_error "FATAL: POST ${INV_URL}/admin/fault/reset returned HTTP ${code}; the DB connections are STILL LEAKED. Run ./scripts/reset-scenarios.sh now." >&2
+                ;;
+        esac
+    fi
+    pkill -f "pg_sleep" 2>/dev/null || true
+    exit "${rc}"
+}
+trap release_leak_on_error EXIT
+
 # 1. Leak connections via admin endpoint
 log_info "--> Triggering connection leak on ${INV_URL}/admin/leak-connections..."
+LEAK_STARTED=true
 if [ "${DRY_RUN}" = "true" ]; then
     log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/leak-connections -d '{\"count\": 85}'"
 else
@@ -139,14 +181,6 @@ FAIL_COUNT=0
 START_EPOCH=$(date +%s)
 LAST_REPORT=${START_EPOCH}
 LAST_LEAK_PULSE=${START_EPOCH}
-
-if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ] || [ "${HOLD_SECS}" -le 0 ]; then
-    ORDER_ITEM="item-101"
-else
-    # One order per second of hold.
-    ORDER_ITEM="$(select_order_item "${API_KEY}" "${HOLD_SECS}")" || exit 1
-    log_info "    Order traffic uses ${ORDER_ITEM} (the in-stock item with the most stock)."
-fi
 
 if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ] || [ "${HOLD_SECS}" -le 0 ]; then
     log_info "    [MOCK/DRY-RUN] Simulating DB starvation traffic wave (0s hold)..."
