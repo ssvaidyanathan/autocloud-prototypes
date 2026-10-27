@@ -162,44 +162,51 @@ To verify ServiceNow ticket lifecycle state without distributing or exposing Ser
 
 ## 4. Cloud Tasks Queue Configuration
 
-Alert processing and delayed timer evaluations utilize dedicated Cloud Tasks queues to guarantee isolation and prevent head-of-line blocking:
+Alert processing and delayed timer evaluations utilize dedicated Cloud Tasks queues to guarantee isolation and prevent head-of-line blocking. Both queues are defined in `infra/terraform/foundation/main.tf`:
 
 ```hcl
-# Ingestion dispatch queue (serialized triage delivery)
 resource "google_cloud_tasks_queue" "triage_queue" {
-  name     = "ata-triage-queue"
-  location = "us-west1"
+  name     = "${var.name_prefix}-triage-queue"
+  location = var.region
 
   rate_limits {
-    max_concurrent_dispatches = 10
+    max_concurrent_dispatches = 1
     max_dispatches_per_second = 10
   }
 
+  # Cloud Tasks stops retrying only once BOTH max_attempts and max_retry_duration
+  # are satisfied, so a small max_attempts makes the duration the binding limit.
   retry_config {
-    max_attempts = 5
-    min_backoff  = "5s"
-    max_backoff  = "60s"
+    max_attempts       = var.triage_queue_max_attempts
+    max_retry_duration = var.triage_queue_max_retry_duration
+    min_backoff        = var.triage_queue_min_backoff
+    max_backoff        = var.triage_queue_max_backoff
   }
 }
 
-# Dedicated delayed timer queue (settle, max-wait, and cooling wakes)
 resource "google_cloud_tasks_queue" "timer_queue" {
-  name     = "ata-timer-queue"
-  location = "us-west1"
-
+  name     = "${var.name_prefix}-timer-queue"
+  location = var.region
   rate_limits {
     max_concurrent_dispatches = 50
     max_dispatches_per_second = 50
   }
-
-  retry_config {
-    max_attempts = 5
-    min_backoff  = "2s"
-    max_backoff  = "30s"
-  }
 }
 ```
 
+The triage queue retry values come from variables in `infra/terraform/foundation/variables.tf`:
+
+| Variable | Default | Effect |
+| :--- | :--- | :--- |
+| `triage_queue_max_retry_duration` | `"7200s"` (2h) | How long a failed task keeps being retried, measured from its first attempt. |
+| `triage_queue_min_backoff` | `"1s"` | First wait between retries. The wait doubles on each retry. |
+| `triage_queue_max_backoff` | `"300s"` (5 min) | Longest wait between retries. |
+| `triage_queue_max_attempts` | `5` | Minimum attempts per task. Cloud Tasks stops retrying only when **both** this and the retry duration are satisfied. The value is kept low so that the 2-hour duration sets the limit (about 30 attempts in total). Do not set it to `-1`: unlimited attempts means tasks retry until the 31-day task retention limit. |
+
+- **Serialized `ata-triage-queue` (`max_concurrent_dispatches = 1`):** Alerts are processed one at a time, which keeps correlation and grouping deterministic and prevents one incident from being split across groups.
+- **Explicit triage retry window:** A failed `/triage` dispatch is retried for up to 2 hours, so alerts survive an agent or downstream outage of up to about 2h instead of being silently dropped. Alerts still failing after 2h are deleted by Cloud Tasks.
+- **Timer queue retries:** `ata-timer-queue` sets no `retry_config`, so it uses the GCP default retry policy.
+- **Applying changes:** Queue settings change only when you apply the foundation module (`cd infra/terraform/foundation && terraform apply`). Editing `main.tf` or the variables does not affect the live queues until then.
 - **Dedicated `ata-timer-queue`:** Prevents delayed timers from being head-of-line blocked behind high-volume alert webhook bursts.
 - **OIDC Dispatch Authentication:** Cloud Tasks generates Google-signed ID tokens for both raw alert dispatch (`/triage`) and timer wakeups (`/timer/wake`), validated via `verify_agent_caller`.
 

@@ -35,6 +35,15 @@ resource "google_cloud_tasks_queue" "triage_queue" {
     max_concurrent_dispatches = 1
     max_dispatches_per_second = 10
   }
+
+  # Cloud Tasks stops retrying only once BOTH max_attempts and max_retry_duration
+  # are satisfied, so a small max_attempts makes the duration the binding limit.
+  retry_config {
+    max_attempts       = var.triage_queue_max_attempts
+    max_retry_duration = var.triage_queue_max_retry_duration
+    min_backoff        = var.triage_queue_min_backoff
+    max_backoff        = var.triage_queue_max_backoff
+  }
 }
 
 resource "google_cloud_tasks_queue" "timer_queue" {

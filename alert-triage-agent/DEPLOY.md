@@ -47,7 +47,7 @@ This guide details the complete, step-by-step deployment procedure for the **Ale
      +-----------------------+           +-----------------------+
      | Cloud Run: ata-bridge | --------> | Cloud Tasks Queue     |
      +-----------+-----------+           | ata-triage-queue      |
-                 ^   |                   | (max_concurrent: 10)  |
+                 ^   |                   | (max_concurrent: 1)   |
                  |   |                   +-----------+-----------+
                  |   | Instructions                  |
                  |   | (POST /instructions/ticket/*) v
@@ -115,8 +115,8 @@ terraform apply tfplan
 ### Resources Created
 - **GCS Bucket:** `gs://cloud-assist-fde-2-ata-incidents` (Object versioning enabled, mounted at `/knowledge/incident-manager` using `mount-options=only-dir=knowledge/incident-manager`). Active OKF files reside exclusively under `gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/`, while reset/historical files are moved to `gs://cloud-assist-fde-2-ata-incidents/archive/`.
 - **Cloud Tasks Queues:**
-  - `ata-triage-queue`: Serialized alert dispatch queue (`max_concurrent_dispatches: 10`, `max_dispatches_per_second: 10`, `max_attempts: 5`).
-  - `ata-timer-queue`: Dedicated delayed timer queue for settle, max-wait, and cool-down deadlines (`max_concurrent_dispatches: 50`, `max_dispatches_per_second: 50`, `max_attempts: 5`).
+  - `ata-triage-queue`: Serialized alert dispatch queue (`max_concurrent_dispatches: 1`, `max_dispatches_per_second: 10`). Failed dispatches are retried for up to 2 hours (`max_retry_duration: 7200s`, backoff `1s` to `300s`). For details, see [CONFIGURATION.md §4](CONFIGURATION.md#4-cloud-tasks-queue-configuration).
+  - `ata-timer-queue`: Dedicated delayed timer queue for settle, max-wait, and cool-down deadlines (`max_concurrent_dispatches: 50`, `max_dispatches_per_second: 50`). No `retry_config` is set, so the GCP default retry policy applies.
 - **Service Accounts:**
   - `ata-orders-sa`: Identity for `ata-orders-api`
   - `ata-inventory-sa`: Identity for `ata-inventory-api` (Cloud SQL Client & IAM user)
