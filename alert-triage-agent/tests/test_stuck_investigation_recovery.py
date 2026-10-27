@@ -13,7 +13,9 @@ Covered here (agent/app/grouping/stuck_investigation.py, manager.py, main.py):
    recovers when stuck, and is ignored after the group is ticketed.
 4. Bounded: after INVESTIGATION_MAX_RECOVERIES the group is degraded (ERROR) and new alerts
    open a new group. A failed recovery scheduling call uses up one attempt; it does not degrade
-   the group (R1). The next group for the same scope lists the degraded group's alerts (O1).
+   the group (R1). Attempts are at least INVESTIGATION_RECOVERY_MIN_INTERVAL_SECONDS apart, so
+   a burst of triggers uses one attempt. The next group for the same scope lists the degraded
+   group's alerts (O1).
 5. Idempotent: two triggers in one stale period recover once.
 6. Config: env overrides, validation, and the stale default exceeds the timer queue backoff
    plus the request timeout (drift guard against the Terraform default).
@@ -48,6 +50,7 @@ from agent.app.main import app, set_clock_func
 from agent.app.timers.scheduler import TimerScheduleError, set_timer_scheduler_hook
 
 STALE = 3600.0
+INTERVAL = 300.0  # INVESTIGATION_RECOVERY_MIN_INTERVAL_SECONDS
 FOUNDATION_VARIABLES = Path(__file__).resolve().parents[1] / "infra" / "terraform" / "foundation" / "variables.tf"
 CLOUD_RUN_DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
 
@@ -67,6 +70,7 @@ def agent_cfg(tmp_path: Path) -> AgentConfig:
         is_local=True,
         INVESTIGATION_STALE_SECONDS=STALE,
         INVESTIGATION_MAX_RECOVERIES=2,
+        INVESTIGATION_RECOVERY_MIN_INTERVAL_SECONDS=INTERVAL,
     )
 
 
@@ -302,7 +306,7 @@ def test_next_ingest_after_a_failed_recovery_scheduling_retries_the_recovery(age
     assert _triage(client, 2).status_code == 200
 
     clock["timers"].fail_types = set()
-    clock["now"] += 5.0
+    clock["now"] += INTERVAL + 1.0
     settles_before = len(clock["timers"].of("settle"))
     with caplog.at_level(logging.ERROR):
         res = _triage(client, 3)
@@ -325,7 +329,7 @@ def test_next_ingest_after_a_failed_recovery_scheduling_retries_the_recovery(age
     assert "alert 0.stuck-alert-3 ingested" in note
 
 
-def test_watchdog_reraises_when_the_recovery_settle_cannot_be_scheduled_and_its_retry_recovers(
+def test_watchdog_reraises_when_the_recovery_settle_cannot_be_scheduled_and_retries_after_the_interval(
     agent_cfg, monkeypatch, clock, caplog
 ):
     bridge = FakeBridge()
@@ -344,11 +348,20 @@ def test_watchdog_reraises_when_the_recovery_settle_cannot_be_scheduled_and_its_
     assert is_stuck_investigation(doc, clock["now"], STALE)
     assert _schedule_failure_logs(caplog)
 
+    # The Cloud Tasks retry seconds later does not use an attempt: it re-arms the watchdog for
+    # the moment the next attempt is allowed and returns 200, so the retries stop.
     clock["timers"].fail_types = set()
     clock["now"] += 2.0
     retry = _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, watchdog_epoch)
     assert retry.status_code == 200
-    assert retry.json()["reason"] == "stuck_investigation_recovered"
+    assert retry.json() == {"status": "ignored", "group_id": group_id, "reason": "recovery_throttled"}
+    assert len(store.read(group_id).investigation_recoveries) == 1
+    next_epoch = clock["timers"].of(WATCHDOG_DEADLINE_TYPE)[-1]
+    assert next_epoch == int(watchdog_epoch + INTERVAL)
+
+    clock["now"] = next_epoch
+    later = _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, next_epoch)
+    assert later.json()["reason"] == "stuck_investigation_recovered"
     doc = store.read(group_id)
     assert doc.status == "investigating" and len(doc.investigation_recoveries) == 2
 
@@ -363,17 +376,23 @@ def test_recovery_scheduling_failures_degrade_the_group_only_after_max_recoverie
     clock["timers"].fail_types = {"settle"}
 
     for n in (2, 3):  # INVESTIGATION_MAX_RECOVERIES=2: two failed attempts, group kept
-        clock["now"] += 1.0
+        clock["now"] += INTERVAL + 1.0
         res = _triage(client, n)
         assert res.status_code == 200 and res.json()["group_id"] == group_id
         assert store.read(group_id).status == "investigating"
     assert len(store.read(group_id).investigation_recoveries) == 2
 
+    # Within the interval after the last attempt the group is not degraded yet.
+    clock["now"] += INTERVAL - 1.0
+    assert _triage(client, 4).json()["group_id"] == group_id
+    assert store.read(group_id).status == "investigating"
+    assert len(store.read(group_id).investigation_recoveries) == 2
+
     clock["timers"].fail_types = set()
-    clock["now"] += 1.0
+    clock["now"] += 2.0
     caplog.clear()
     with caplog.at_level(logging.ERROR):
-        res = _triage(client, 4)
+        res = _triage(client, 5)
 
     assert res.status_code == 200
     assert res.json()["group_id"] != group_id
@@ -381,6 +400,87 @@ def test_recovery_scheduling_failures_degrade_the_group_only_after_max_recoverie
     assert stuck.status == "degraded" and stuck.degraded is True
     assert "2 of 2 recoveries already used" in stuck.degraded_reason
     assert [e["action"] for e in _stuck_logs(caplog)] == ["degraded"]
+    ats = [r["at"] for r in stuck.investigation_recoveries]
+    assert ats[1] > ats[0]
+
+
+def _throttle_warnings(caplog, group_id: str) -> list[logging.LogRecord]:
+    return [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "RECOVERY_THROTTLED" in r.getMessage() and group_id in r.getMessage()
+    ]
+
+
+def test_burst_of_ingests_within_the_interval_consumes_exactly_one_attempt(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    clock["now"] = last_attempt + STALE + 10.0
+    clock["timers"].fail_types = {"settle"}
+
+    with caplog.at_level(logging.WARNING):
+        for n in range(2, 8):  # 6 alerts within 60 s
+            res = _triage(client, n)
+            assert res.status_code == 200 and res.json()["group_id"] == group_id
+            clock["now"] += 10.0
+
+    doc = store.read(group_id)
+    assert doc.status == "investigating"
+    assert len(doc.investigation_recoveries) == 1
+    assert all(doc.has_alert(f"0.stuck-alert-{n}") for n in range(2, 8))  # every alert ingested
+    assert len(_throttle_warnings(caplog, group_id)) == 1  # once per group per interval
+    assert len(clock["timers"].of("settle")) == 1  # only the group's original settle (no new attempts)
+
+    # After the interval the next trigger uses the second attempt (scheduling works again).
+    clock["timers"].fail_types = set()
+    clock["now"] = last_attempt + STALE + 10.0 + INTERVAL
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert _triage(client, 8).json()["group_id"] == group_id
+    doc = store.read(group_id)
+    assert [r["recovery_number"] for r in doc.investigation_recoveries] == [1, 2]
+    assert _throttle_warnings(caplog, group_id) == []
+
+
+def test_throttle_warning_is_logged_once_in_each_interval(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    t0 = last_attempt + STALE + 10.0
+    clock["timers"].fail_types = {"settle"}
+
+    with caplog.at_level(logging.WARNING):
+        for offset in (0.0, 10.0, 20.0, INTERVAL + 1.0, INTERVAL + 11.0, INTERVAL + 21.0):
+            clock["now"] = t0 + offset
+            assert _triage(client, 2 + int(offset)).status_code == 200
+
+    # Attempts at t0 and t0+INTERVAL+1; one throttle WARNING in each interval after them.
+    assert len(store.read(group_id).investigation_recoveries) == 2
+    assert len(_throttle_warnings(caplog, group_id)) == 2
+
+
+def test_burst_of_watchdog_wakes_within_the_interval_consumes_exactly_one_attempt(
+    agent_cfg, monkeypatch, clock, caplog
+):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, _ = _stuck_group(client, store, clock, bridge)
+    watchdog_epoch = clock["timers"].of(WATCHDOG_DEADLINE_TYPE)[0]
+    clock["now"] = watchdog_epoch
+    clock["timers"].fail_types = {"settle"}
+    assert _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, watchdog_epoch).status_code >= 500
+    clock["timers"].fail_types = set()
+
+    with caplog.at_level(logging.WARNING):
+        for delay in (1.0, 3.0, 7.0, 15.0, 31.0):  # Cloud Tasks backoff
+            clock["now"] = watchdog_epoch + delay
+            res = _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, watchdog_epoch)
+            assert res.status_code == 200 and res.json()["reason"] == "recovery_throttled"
+
+    assert len(store.read(group_id).investigation_recoveries) == 1
+    # Every throttled wake re-arms the same single watchdog (same task name), at the allowed time.
+    assert set(clock["timers"].of(WATCHDOG_DEADLINE_TYPE)[1:]) == {int(watchdog_epoch + INTERVAL)}
+    assert len(_throttle_warnings(caplog, group_id)) == 5  # each watchdog wake logs: at most 1 per backoff step
 
 
 def test_recovery_observation_states_an_attempt_whose_settle_wake_was_not_scheduled():
@@ -767,9 +867,15 @@ def test_apply_recovery_note_is_idempotent():
 def test_stuck_investigation_settings_read_from_env(monkeypatch):
     monkeypatch.setenv("INVESTIGATION_STALE_SECONDS", "7200")
     monkeypatch.setenv("INVESTIGATION_MAX_RECOVERIES", "5")
+    monkeypatch.setenv("INVESTIGATION_RECOVERY_MIN_INTERVAL_SECONDS", "900")
     cfg = AgentConfig()
     assert cfg.investigation_stale_seconds == 7200.0
     assert cfg.investigation_max_recoveries == 5
+    assert cfg.investigation_recovery_min_interval_seconds == 900.0
+
+
+def test_recovery_min_interval_default():
+    assert AgentConfig().investigation_recovery_min_interval_seconds == 300.0
 
 
 @pytest.mark.parametrize(
@@ -780,6 +886,9 @@ def test_stuck_investigation_settings_read_from_env(monkeypatch):
         ("INVESTIGATION_STALE_SECONDS", "soon"),
         ("INVESTIGATION_MAX_RECOVERIES", "0"),
         ("INVESTIGATION_MAX_RECOVERIES", "1.5"),
+        ("INVESTIGATION_RECOVERY_MIN_INTERVAL_SECONDS", "0"),
+        ("INVESTIGATION_RECOVERY_MIN_INTERVAL_SECONDS", "-5"),
+        ("INVESTIGATION_RECOVERY_MIN_INTERVAL_SECONDS", "later"),
     ],
 )
 def test_invalid_stuck_investigation_settings_are_rejected(monkeypatch, env, value):

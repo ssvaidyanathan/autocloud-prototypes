@@ -23,6 +23,12 @@ the group stays detectable as stuck, and the failure is logged at ERROR. The wat
 re-raises (Cloud Tasks retries the watchdog wake); the ingest path does not, so one group's
 failure cannot fail the ingest of an unrelated alert.
 
+Attempts on one group are at least ``INVESTIGATION_RECOVERY_MIN_INTERVAL_SECONDS`` apart. A
+trigger sooner than that after the last recorded attempt starts no attempt and does not
+degrade (``OUTCOME_THROTTLED``, logged ``RECOVERY_THROTTLED`` at WARNING): the ingest path
+logs once per group per interval and continues; the watchdog path re-arms itself for the
+moment the next attempt is allowed.
+
 After ``INVESTIGATION_MAX_RECOVERIES`` recoveries the group is marked ``degraded`` instead
 (ERROR, listing its alert ids and policies): degraded groups are not attachable, so new
 alerts open a new group rather than joining one that is not being ticketed. The next group
@@ -57,6 +63,7 @@ OUTCOME_DEGRADED = "degraded"
 OUTCOME_NOT_STUCK = "not_stuck"
 OUTCOME_GROUP_GONE = "group_gone"
 OUTCOME_SCHEDULE_FAILED = "recovery_schedule_failed"
+OUTCOME_THROTTLED = "recovery_throttled"
 
 
 def _iso(epoch: float) -> str:
@@ -107,6 +114,16 @@ def schedule_watchdog(settings: AgentConfig, group_id: str, deadline_epoch: floa
 class RecoveryResult:
     outcome: str
     doc: Optional[OKFDocument]
+    # OUTCOME_THROTTLED: epoch from which the next attempt is allowed.
+    retry_after_epoch: Optional[float] = None
+
+
+def _last_attempt_epoch(recoveries: list[Any]) -> Optional[float]:
+    for r in reversed(recoveries):
+        if isinstance(r, dict):
+            dt = parse_iso_timestamp(r.get("at"))
+            return dt.timestamp() if dt else None
+    return None
 
 
 def recover_stuck_investigation(
@@ -116,6 +133,7 @@ def recover_stuck_investigation(
     settings: AgentConfig,
     trigger: str,
     reraise_schedule_failure: bool = True,
+    throttle_warning_once_per_interval: bool = False,
 ) -> RecoveryResult:
     """Recover (re-enqueue) or degrade a stuck group. No-op if the fresh document is not stuck.
 
@@ -125,21 +143,43 @@ def recover_stuck_investigation(
     is then re-raised (watchdog path: Cloud Tasks retries the wake) unless
     ``reraise_schedule_failure`` is False (ingest path), which returns
     ``OUTCOME_SCHEDULE_FAILED`` with the restored document instead.
+
+    Within ``INVESTIGATION_RECOVERY_MIN_INTERVAL_SECONDS`` of the last recorded attempt no
+    attempt is started and the group is not degraded: returns ``OUTCOME_THROTTLED`` with
+    ``retry_after_epoch``, logged at WARNING (once per group per interval when
+    ``throttle_warning_once_per_interval``, ingest path; on every call otherwise, watchdog path).
     """
     stale = settings.investigation_stale_seconds
     max_recoveries = settings.investigation_max_recoveries
+    min_interval = settings.investigation_recovery_min_interval_seconds
     now_iso = _iso(now)
     outcome = OUTCOME_NOT_STUCK
     record: dict[str, Any] = {}
+    throttle: dict[str, Any] = {}
 
     def _mutate(d: OKFDocument) -> OKFDocument:
-        nonlocal outcome, record
+        nonlocal outcome, record, throttle
         outcome = OUTCOME_NOT_STUCK
         record = {}
+        throttle = {}
         if not is_stuck_investigation(d, now, stale):
             return d
         prior = list(getattr(d, "investigation_recoveries", None) or [])
         last_attempt = getattr(d, "investigation_started_at", None)
+        last_recovery = _last_attempt_epoch(prior)
+        if last_recovery is not None and now - last_recovery < min_interval:
+            outcome = OUTCOME_THROTTLED
+            warned = parse_iso_timestamp(getattr(d, "investigation_recovery_throttle_warned_at", None))
+            warn = not throttle_warning_once_per_interval or warned is None or warned.timestamp() < last_recovery
+            if warn and throttle_warning_once_per_interval:
+                d.investigation_recovery_throttle_warned_at = now_iso
+            throttle = {
+                "warn": warn,
+                "retry_after_epoch": last_recovery + min_interval,
+                "last_recovery_at": _iso(last_recovery),
+                "recoveries_used": len(prior),
+            }
+            return d
         record = {
             "at": now_iso,
             "trigger": trigger,
@@ -173,6 +213,22 @@ def recover_stuck_investigation(
         return RecoveryResult(outcome=OUTCOME_GROUP_GONE, doc=None)
     if outcome == OUTCOME_NOT_STUCK:
         return RecoveryResult(outcome=outcome, doc=updated)
+    if outcome == OUTCOME_THROTTLED:
+        if throttle["warn"]:
+            logger.warning(
+                "RECOVERY_THROTTLED: %s",
+                json.dumps({
+                    "event": "stuck_investigation_recovery_throttled",
+                    "group_id": group_id,
+                    "trigger": trigger,
+                    "last_recovery_at": throttle["last_recovery_at"],
+                    "next_attempt_allowed_at": _iso(throttle["retry_after_epoch"]),
+                    "min_interval_seconds": min_interval,
+                    "recoveries_used": throttle["recoveries_used"],
+                    "max_recoveries": max_recoveries,
+                }),
+            )
+        return RecoveryResult(outcome=outcome, doc=updated, retry_after_epoch=throttle["retry_after_epoch"])
 
     logger.error(
         "STUCK_INVESTIGATION: %s",
