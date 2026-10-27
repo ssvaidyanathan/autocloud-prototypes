@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
     settings = app.dependency_overrides.get(get_agent_settings, get_agent_settings)()
     missing = settings.missing_required_settings()
     if missing:
-        message = f"ata-agent cannot start: required setting(s) not set: {', '.join(missing)}"
+        message = f"{settings.name_prefix}-agent cannot start: required setting(s) not set: {', '.join(missing)}"
         logger.error(message)
         raise RuntimeError(message)
     yield

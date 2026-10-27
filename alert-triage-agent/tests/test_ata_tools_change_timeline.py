@@ -201,7 +201,7 @@ async def test_success_ticket_states_apigee_deployment_history_and_never_not_que
     report = await _investigate(app, _orders_alert(), _remote_cfg(agent_cfg))
 
     evidence = str(report.evidence_by_area)
-    desc = report.build_structured_description(project_id=PROJECT)
+    desc = report.build_structured_description(project_id=PROJECT, incidents_bucket=f"{PROJECT}-ata-incidents")
     # Apigee deployment history (this stack's proxies only) is in the ticket.
     assert (f"Apigee deployment history (org {APIGEE_ORG}, environment {APIGEE_ENV}, proxies ata-*): "
             f"proxy ata-orders-v1 revision 177 deployed {DEPLOYED} (12m before alert onset).") in evidence
@@ -248,7 +248,7 @@ def _assert_loud(report, dossier_findings: str, reason_part: str, caplog) -> Non
     assert report.change_induced.startswith(
         f"Not assessed (change detection incomplete: change timeline unavailable: {reason_part}"
     )
-    assert "Change-Induced: Not assessed (" in report.build_structured_description(project_id=PROJECT)
+    assert "Change-Induced: Not assessed (" in report.build_structured_description(project_id=PROJECT, incidents_bucket=f"{PROJECT}-ata-incidents")
     assert "No Cloud Run revision deployments detected" not in dossier_findings
     errors = [r for r in caplog.records if r.levelno == logging.ERROR and "change timeline unavailable" in r.getMessage()]
     assert errors and reason_part in errors[0].getMessage()
