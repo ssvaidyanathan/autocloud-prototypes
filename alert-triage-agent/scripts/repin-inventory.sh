@@ -181,7 +181,7 @@ require_no_existing_pin() {
         rm -f "${err_file}"
         die "--initial: a pin exists: ${PIN_INVENTORY_REVISION} (from ${INVENTORY_PIN_FILE}) is a revision in ${PROJECT_ID}/${REGION}. Re-pin without --initial."
     fi
-    if ! grep -qi "not found\|could not be found\|NOT_FOUND" "${err_file}"; then
+    if ! grep -qiE "not found|could not be found|NOT_FOUND" "${err_file}"; then
         cat "${err_file}" >&2
         rm -f "${err_file}"
         die "--initial: cannot tell whether ${PIN_INVENTORY_REVISION} exists (gcloud error above); nothing changed."

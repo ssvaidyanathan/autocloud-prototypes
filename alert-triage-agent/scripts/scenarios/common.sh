@@ -366,7 +366,7 @@ inventory_image_exists() {
         rm -f "${err_file}"
         return 0
     fi
-    if grep -qi "NOT_FOUND\|not found" "${err_file}"; then
+    if grep -qiE "NOT_FOUND|not found" "${err_file}"; then
         rm -f "${err_file}"
         return 1
     fi
