@@ -61,7 +61,8 @@ run_request() {
     local label="$1" out secs="" reason=""
     shift
     : > "${REQ_BODY_FILE}"
-    out="$(curl -s -o "${REQ_BODY_FILE}" -w "%{http_code} %{time_total}" --connect-timeout 5 --max-time 10 "$@" 2>/dev/null)" || true
+    # LC_ALL=C: time_total and awk's number parsing use a '.' decimal point.
+    out="$(LC_ALL=C curl -s -o "${REQ_BODY_FILE}" -w "%{http_code} %{time_total}" --connect-timeout 5 --max-time 10 "$@" 2>/dev/null)" || true
     REQ_STATUS="${out%% *}"
     case "${out}" in
         *" "*) secs="${out#* }" ;;
@@ -70,7 +71,7 @@ run_request() {
         [0-9][0-9][0-9]) ;;
         *) REQ_STATUS="000" ;;
     esac
-    REQ_MS="$(awk -v s="${secs}" 'BEGIN { if (s ~ /^[0-9]+([.][0-9]+)?$/) printf "%d", s * 1000 }')"
+    REQ_MS="$(LC_ALL=C awk -v s="${secs}" 'BEGIN { if (s ~ /^[0-9]+([.][0-9]+)?$/) printf "%d", s * 1000 }')"
     REQ_BODY="$(cat "${REQ_BODY_FILE}")"
     case "${REQ_STATUS}" in
         5??|000) reason="HTTP ${REQ_STATUS}" ;;
@@ -97,10 +98,11 @@ report_alert_risk() {
     echo "--> [WARN] Requests that can raise an ata-* latency or 5xx alert (slower than ${SLOW_REQUEST_MS} ms, HTTP 5xx or no response):"
     printf '%s' "${ALERT_RISK_REQUESTS}"
     echo "    The first request to an idle revision is a cold start (~5 s). With the Terraform latency retest window"
-    echo "    (latency_duration_secs, default 180s) applied, a single cold start cannot open a latency alert. With the"
-    echo "    older 60s window it opens one about 6 min from now, and the agent creates a ServiceNow ticket for it."
-    echo "    Next, run: ./scripts/reset-scenarios.sh --alert-window-from-start"
-    echo "    It keeps watching for alerts for 8 min from its start and archives such an incident before it finishes."
+    echo "    (latency_duration_secs, default 240s) applied, a single cold start cannot open a latency alert. With the"
+    echo "    older 60s window it opens one 5.5-7 min from now, and the agent creates a ServiceNow ticket for it"
+    echo "    (the reset cannot prevent that ticket). Next, run: ./scripts/reset-scenarios.sh --alert-window-from-start"
+    echo "    It keeps watching for alerts for --alert-lag (default 10 min) from its start, waits for such an alert to"
+    echo "    close and its incident group to finish, and archives it, so it does not spill into the next scenario."
 }
 
 if [ "${MOCK_MODE:-false}" = "true" ] || [ "${DRY_RUN:-false}" = "true" ]; then

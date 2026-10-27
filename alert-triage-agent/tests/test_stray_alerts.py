@@ -50,8 +50,9 @@ def test_latency_policies_take_the_retest_window_from_a_variable():
 def test_retest_window_default_outlasts_a_cold_start_but_not_s2():
     alignment = 60
     duration = _default_duration()
-    # A cold start (one ~5 s burst) raises the p99 of at most 2 consecutive 60s windows.
-    assert duration >= 3 * alignment
+    # A cold start (one ~5 s burst) raised the p99 of 1 or 2 consecutive 60s windows live; two
+    # adjacent windows can keep the sliding-window condition true for just under 180s.
+    assert duration > 3 * alignment
     # S2 held p99 > 6500 ms for 8 consecutive windows (7 min hold); the alert must still open
     # with room to spare (at least two windows more than the retest window needs).
     s2_violating_windows = 8
@@ -180,8 +181,8 @@ def test_slow_5xx_or_failed_demo_request_arms_the_alert_window(tmp_path, statuse
                         statuses=statuses + "\n")
     assert res.returncode == 0, out(res)
     assert reason in res.stdout
-    assert "can open up to 480s later; step 6 keeps watching for alerts until then before archiving" in res.stdout
-    assert 470 <= _window_left(res) <= 480
+    assert "can open up to 600s later; step 6 keeps watching for alerts until then before archiving" in res.stdout
+    assert 570 <= _window_left(res) <= 600
 
 
 def test_request_without_a_duration_is_not_assumed_fast(tmp_path):
@@ -198,7 +199,7 @@ def test_slow_threshold_and_lag_are_configurable(tmp_path):
     res = _source_reset(tmp_path, f'demo_request "GET {BASE}/health" "{BASE}/health"\n' + WINDOW_LEFT,
                         statuses="/health 200 1.500\n", ATA_RESET_SLOW_REQUEST_MS="1000", ATA_RESET_ALERT_LAG="2m")
     assert "took 1500 ms (>= 1000 ms" in res.stdout, out(res)
-    assert 110 <= _window_left(res) <= 120
+    assert 90 <= _window_left(res) <= 120
 
 
 def test_window_survives_the_admin_call_sites_and_keeps_the_latest_deadline(tmp_path):
@@ -209,7 +210,7 @@ def test_window_survives_the_admin_call_sites_and_keeps_the_latest_deadline(tmp_
     assert res.returncode == 0, out(res)
     assert f"ata-inventory-api: GET {BASE}/health -> HTTP 200 in 20 ms" in res.stdout
     assert f"POST {BASE}/admin/fault/reset took 5100 ms" in res.stdout
-    assert 470 <= _window_left(res) <= 480
+    assert 570 <= _window_left(res) <= 600
     assert (tmp_path / "curl_calls").read_text().splitlines() == [
         f"POST {BASE}/admin/fault/reset", f"GET {BASE}/health"]
 
@@ -247,7 +248,8 @@ def test_step6_without_a_window_proceeds_at_once(tmp_path, gcs):
 def test_step6_keeps_watching_for_alerts_until_the_window_ends(tmp_path, gcs):
     res = run_step6(tmp_path, gcs, fake_clock=True, poll=15, pre="ALERT_WINDOW_UNTIL=1120\n")
     assert res.returncode == 0, out(res)
-    assert "Alert window: watching for alerts from slow demo requests for another 120s." in res.stdout
+    assert ("Alert window: watching for alerts from slow demo requests for another 120s "
+            "(max timeout counted from its end: 1020s from now).") in res.stdout
     assert "[Alert window] 120s left for alerts from slow demo requests" in res.stdout
     assert done_at(res) == 120
 
@@ -267,6 +269,14 @@ def test_alert_from_a_slow_request_is_waited_for_with_its_group_before_archiving
     # Alert seen at t=45 and 60, closed at t=75; group terminal at t=105, quiet 30s from 75.
     assert done_at(res) == 105
     assert not (root / "proj-ata-incidents" / "knowledge" / "incident-manager" / "incident-late.md").exists()
+
+
+def test_timeout_counts_from_the_end_of_the_alert_window(tmp_path, gcs):
+    """An alert that opens at the end of the window still gets the full --timeout to close."""
+    res = run_step6(tmp_path, gcs, fake_clock=True, poll=15, timeout=60, alerts=[0, 0, 1],
+                    pre="ALERT_WINDOW_UNTIL=1120\n")
+    assert res.returncode == 1
+    assert "Timed out waiting for open ATA alerts to close after 60s (180s elapsed)" in out(res)
 
 
 def test_no_wait_warns_about_an_armed_window(tmp_path, gcs):
@@ -319,8 +329,8 @@ def test_alert_window_from_start_is_armed_and_reported(tmp_path):
                          cwd=str(tmp_path), capture_output=True, text=True, env=_stub_env(tmp_path), timeout=60)
     assert res.returncode == 0, out(res)
     assert "--alert-window-from-start: requests made before this reset may have been slow" in res.stdout
-    assert "can open up to 300s later" in res.stdout
-    assert "Alert window armed" in res.stdout
+    assert "would keep watching for alerts for 300s in step 6 (simulated here)" in res.stdout
+    assert "[MOCK/DRY-RUN] Alert window armed (" in res.stdout
     assert "--> 5b. Warming up the demo services" in res.stdout
 
 
@@ -334,7 +344,7 @@ def test_mock_reset_without_flag_arms_no_window(tmp_path):
 
 def test_help_documents_alert_window_options():
     res = subprocess.run([str(RESET_SCRIPT), "--help"], capture_output=True, text=True, timeout=30)
-    assert "--alert-lag <duration>" in res.stdout and "default: 480s / 8m" in res.stdout
+    assert "--alert-lag <duration>" in res.stdout and "default: 600s / 10m" in res.stdout
     assert "--alert-window-from-start" in res.stdout
 
 
@@ -418,23 +428,25 @@ def default_settings(monkeypatch):
 
 
 def test_low_traffic_facts_only_from_measured_values_below_the_threshold():
-    assert low_traffic_facts(_cr(1, 21), 5.0) == {
-        "service": "ata-inventory-api", "volume": "21 requests in 17.2 min (1 request/min)"}
-    assert low_traffic_facts(_cr(1, 1, minutes=1.0), 5.0)["volume"] == "1 request in 1 min (1 request/min)"
-    assert low_traffic_facts(_cr(33, 629), 5.0) is None  # S2's origin
-    assert low_traffic_facts(_cr(5, 90), 5.0) is None  # at the threshold: not low
-    for missing in ({"request_count_rpm": "N/A (not captured)"}, {"request_count_total": "N/A (not captured)"},
-                    {"request_window_minutes": None}):
-        d = _cr(1, 21)
+    assert low_traffic_facts(_cr(1, 32), 5.0) == {
+        "service": "ata-inventory-api", "volume": "32 requests in 17.2 min (1.9 requests/min)"}
+    assert low_traffic_facts(_cr(1, 1, minutes=1.0), 5.0)["volume"] == "1 request in 1 min (1.0 requests/min)"
+    # The truncated request_count_rpm (0) is not used: the rate comes from total / window.
+    assert low_traffic_facts(_cr(0, 3), 5.0)["volume"] == "3 requests in 17.2 min (0.2 requests/min)"
+    assert low_traffic_facts(_cr(35, 627, minutes=17.7), 5.0) is None  # S2's origin
+    assert low_traffic_facts(_cr(5, 86, minutes=17.2), 5.0) is None  # exactly 5.0/min: not low
+    for missing in ({"request_count_total": "N/A (not captured)"}, {"request_window_minutes": None},
+                    {"request_window_minutes": 0}):
+        d = _cr(1, 32)
         d.metrics.update(missing)
         assert low_traffic_facts(d, 5.0) is None, missing
 
 
 def test_stray_latency_problem_states_low_traffic_not_service_wide_degradation(default_settings):
-    problem = SynthesizerAgent()._synthesize_problem(_alert(), [_cr(1, 21)], "ata-inventory-api", STRAY_BLAST)
+    problem = SynthesizerAgent()._synthesize_problem(_alert(), [_cr(1, 32)], "ata-inventory-api", STRAY_BLAST)
     assert problem == (
         "Elevated latency (4957ms) on ata-inventory-api since 2026-10-27T10:10:58Z under low traffic: "
-        "21 requests in 17.2 min (1 request/min) on ata-inventory-api, so the latency may come from a few slow "
+        "32 requests in 17.2 min (1.9 requests/min) on ata-inventory-api, so the latency may come from a few slow "
         "requests (such as a cold start) rather than a service-wide degradation"
     )
     assert ";" not in problem
@@ -442,28 +454,49 @@ def test_stray_latency_problem_states_low_traffic_not_service_wide_degradation(d
 
 def test_stray_latency_root_cause_and_observation_state_low_traffic(default_settings):
     synth = SynthesizerAgent()
-    text, _ = synth._determine_root_cause([_cr(1, 21)], "ata-inventory-api", _alert(), blast_radius=STRAY_BLAST)
+    text, _ = synth._determine_root_cause([_cr(1, 32)], "ata-inventory-api", _alert(), blast_radius=STRAY_BLAST)
     assert text.startswith("Elevated latency on `ata-inventory-api` (peak observed latency: 4957ms) under low traffic: "
-                           "21 requests in 17.2 min (1 request/min)")
+                           "32 requests in 17.2 min (1.9 requests/min)")
     assert "Service degradation" not in text
-    obs = synth._synthesize_observations([_cr(1, 21)], _alert())
-    assert "Low traffic on ata-inventory-api: 21 requests in 17.2 min (1 request/min) in the investigation window" in obs
+    obs = synth._synthesize_observations([_cr(1, 32)], _alert())
+    assert "Low traffic on ata-inventory-api: 32 requests in 17.2 min (1.9 requests/min) in the investigation window" in obs
+
+
+def test_upstream_origin_root_cause_states_low_traffic_like_the_problem(default_settings):
+    """Alert on orders-api, origin inventory-api (upstream): both texts use the origin's volume."""
+    synth = SynthesizerAgent()
+    alert = AlertEvent(incident_id="i-1", policy_name="ata-orders-latency", resource_name="ata-orders-api",
+                       started_at="2026-10-27T10:10:58Z")
+    dossiers = [_cr(1, 32), _cr(40, 700, service="ata-orders-api")]
+    problem = synth._synthesize_problem(alert, dossiers, "ata-inventory-api", STRAY_BLAST)
+    text, _ = synth._determine_root_cause(dossiers, "ata-inventory-api", alert, blast_radius=STRAY_BLAST)
+    assert "under low traffic: 32 requests in 17.2 min (1.9 requests/min) on ata-inventory-api" in problem
+    assert "under low traffic: 32 requests in 17.2 min (1.9 requests/min) on ata-inventory-api" in text
+    assert "cascading" not in text and text.endswith("on caller `ata-orders-api`.")
+
+
+def test_root_cause_never_states_another_services_volume_for_the_origin(default_settings):
+    """No Cloud Run dossier for the origin: no low-traffic claim from a fallback dossier."""
+    synth = SynthesizerAgent()
+    text, _ = synth._determine_root_cause([_cr(1, 32, service="ata-orders-api")], "ata-inventory-api", _alert(),
+                                          blast_radius=STRAY_BLAST)
+    assert "low traffic" not in text
 
 
 def test_s2_traffic_keeps_the_degradation_wording(default_settings):
     synth = SynthesizerAgent()
-    problem = synth._synthesize_problem(_alert(), [_cr(33, 629, latency=6546.0)], "ata-inventory-api", STRAY_BLAST)
+    problem = synth._synthesize_problem(_alert(), [_cr(35, 627, minutes=17.7, latency=6546.0)], "ata-inventory-api", STRAY_BLAST)
     assert problem.startswith("Elevated service latency and request timeouts (6546ms) on ata-inventory-api impacting")
-    text, _ = synth._determine_root_cause([_cr(33, 629, latency=6546.0)], "ata-inventory-api", _alert(),
+    text, _ = synth._determine_root_cause([_cr(35, 627, minutes=17.7, latency=6546.0)], "ata-inventory-api", _alert(),
                                           blast_radius=STRAY_BLAST)
     assert text.startswith("Service degradation on `ata-inventory-api`")
     assert "low traffic" not in problem.lower() + text.lower()
-    assert "Low traffic" not in synth._synthesize_observations([_cr(33, 629)], _alert())
+    assert "Low traffic" not in synth._synthesize_observations([_cr(35, 627, minutes=17.7)], _alert())
 
 
 def test_low_traffic_is_not_stated_for_5xx_alerts(default_settings):
     synth = SynthesizerAgent()
-    obs = synth._synthesize_observations([_cr(1, 21)], _alert("ata-inventory-5xx"))
+    obs = synth._synthesize_observations([_cr(1, 32)], _alert("ata-inventory-5xx"))
     assert "Low traffic" not in obs
 
 
@@ -471,9 +504,9 @@ def test_low_traffic_threshold_is_configurable(monkeypatch):
     monkeypatch.setenv("LOW_TRAFFIC_RPM", "40")
     reset_agent_settings()
     try:
-        problem = SynthesizerAgent()._synthesize_problem(_alert(), [_cr(33, 629, latency=6546.0)],
+        problem = SynthesizerAgent()._synthesize_problem(_alert(), [_cr(35, 627, minutes=17.7, latency=6546.0)],
                                                          "ata-inventory-api", STRAY_BLAST)
-        assert "under low traffic: 629 requests in 17.2 min (33 requests/min)" in problem
+        assert "under low traffic: 627 requests in 17.7 min (35.4 requests/min)" in problem
     finally:
         monkeypatch.delenv("LOW_TRAFFIC_RPM")
         reset_agent_settings()

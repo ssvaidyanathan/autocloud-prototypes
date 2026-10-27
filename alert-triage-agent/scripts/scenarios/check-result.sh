@@ -152,7 +152,7 @@ DEMO_EXPECTATIONS = {
         "expected_tickets": 1,
         "expected_origin_pattern": r"ata-inventory-api(-[a-z0-9\-]+)?",
         # ata-inventory-latency opened in QA (2026-10-27) only from the new revision's cold start
-        # (2 windows); the 180s retest window (latency_duration_secs) no longer fires on that.
+        # (2 windows); the 240s retest window (latency_duration_secs) no longer fires on that.
         "expected_alerts": ["ata-inventory-5xx", "ata-orders-5xx"],
         "blast_radius": ["ata-inventory-api", "ata-inventory-v1", "ata-orders-api", "ata-orders-v1"],
         "root_cause": "Change-induced database authentication failure; rollback to the revision that served before (traffic history)",

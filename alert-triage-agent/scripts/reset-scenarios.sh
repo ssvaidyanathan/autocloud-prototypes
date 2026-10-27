@@ -24,12 +24,14 @@
 # 8. Verify 0 active incident groups
 #
 # Alert window: the first request to an idle revision is a cold start (~5 s). Cloud Run's
-# latency metric reaches the alert policies ~6 min later, after a 3 min quiet period would
-# have ended, so an alert caused by the reset's own requests used to open after the reset
-# had archived and finished (stray ticket INC0010327). A demo request that is slower than
-# the latency alert threshold, returns HTTP 5xx or gets no response therefore keeps step 6
-# watching for alerts for --alert-lag after it; an alert that opens in that time is waited
-# for (close, then its incident group's terminal state) like any other before archiving.
+# latency metric reaches the alert policies 5.5-7 min later, after a 3 min quiet period
+# would have ended, so an alert caused by the reset's own requests used to open after the
+# reset had archived and finished (stray ticket INC0010327). A demo request that is slower
+# than the latency alert threshold, returns HTTP 5xx or gets no response therefore keeps
+# step 6 watching for alerts for --alert-lag after it. An alert that opens in that time
+# (the agent still tickets it while the latency policy has a 60s retest window) is waited
+# for like any other before archiving: it must close and its incident group must become
+# terminal. Only the Terraform retest window (latency_duration_secs) stops the ticket itself.
 # ==============================================================================
 
 set -euo pipefail
@@ -64,10 +66,11 @@ MAX_QUERY_ATTEMPTS="${ATA_RESET_MAX_QUERY_ATTEMPTS:-3}"
 # A demo request at least this slow (ms) can raise an ata-*-latency alert: keep it equal to
 # threshold_value of the latency policies (infra/terraform/observability/main.tf, 2000).
 SLOW_REQUEST_MS="${ATA_RESET_SLOW_REQUEST_MS:-2000}"
-# Time from a request to the alert it can open. Live 2026-10-27: 332 s (cold /health at
-# 10:05:26Z, ata-inventory-latency opened 10:10:58Z) and 356 s (S2: first slow minute
-# 07:34:53Z, alert 07:40:49Z), both with the 60s retest window; 480 s adds 2 min margin.
-ALERT_LAG_SECS="$(parse_duration "${ATA_RESET_ALERT_LAG:-480}")"
+# Time from a request to the alert it can open. Live 2026-10-27, with the 60s retest
+# window: 332 s (cold /health 10:05:26Z, alert 10:10:58Z), 356 s (S2: first slow minute
+# 07:34:53Z, alert 07:40:49Z) and 411 s (verify cold start 11:47:48Z, alert 11:54:39Z).
+# 600 s covers 411 s plus 3 min, the extra time a 240s retest window can add.
+ALERT_LAG_SECS="$(parse_duration "${ATA_RESET_ALERT_LAG:-600}")"
 # Arm the alert window from the reset start, for requests made before the reset (e.g. by
 # verify-demo-infra.sh, which tells you when to use this).
 ALERT_WINDOW_FROM_START="${ATA_RESET_ALERT_WINDOW_FROM_START:-false}"
@@ -176,7 +179,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --max-alert-age <duration> Max age of open alerts before reset start (default: 60m / 3600s)"
             echo "  --alert-lag <duration>     How long after a slow (>= ATA_RESET_SLOW_REQUEST_MS, default 2000 ms), HTTP 5xx"
             echo "                             or failed demo request step 6 keeps watching for the alert it can open"
-            echo "                             (Cloud Run metric lag; default: 480s / 8m; env ATA_RESET_ALERT_LAG)"
+            echo "                             (--timeout then counts from the end of this window)"
+            echo "                             (Cloud Run metric lag; default: 600s / 10m; env ATA_RESET_ALERT_LAG)."
             echo "  --alert-window-from-start  Watch for alerts for --alert-lag from the reset start even if no request of the"
             echo "                             reset was slow: for slow requests made just before it (verify-demo-infra.sh"
             echo "                             says when; env ATA_RESET_ALERT_WINDOW_FROM_START=true)"
@@ -210,7 +214,7 @@ validate_alert_window_settings() {
     esac
     case "${ALERT_LAG_SECS}" in
         ""|*[!0-9]*)
-            log_error "Invalid --alert-lag / ATA_RESET_ALERT_LAG '${ALERT_LAG_SECS}' (expected e.g. 480, 480s or 8m)." >&2
+            log_error "Invalid --alert-lag / ATA_RESET_ALERT_LAG '${ALERT_LAG_SECS}' (expected e.g. 600, 600s or 10m)." >&2
             return 1
             ;;
     esac
@@ -404,6 +408,11 @@ wait_for_open_alerts() {
     local start_time
     start_time=$(date +%s)
     local deadline=$((start_time + WAIT_TIMEOUT_SECS))
+    # An alert from a slow demo request can open as late as the end of the alert window; it
+    # then needs to close and its group to become terminal, so --timeout counts from there.
+    if [ $((ALERT_WINDOW_UNTIL + WAIT_TIMEOUT_SECS)) -gt "${deadline}" ]; then
+        deadline=$((ALERT_WINDOW_UNTIL + WAIT_TIMEOUT_SECS))
+    fi
     local quiet_start=""
     local ignored_groups=""
     local first_poll="true"
@@ -419,7 +428,7 @@ wait_for_open_alerts() {
     log_info "    Polling Cloud Monitoring API (read-only) for OPEN alerts on ata-* policies (label app=alert-triage-agent)..."
     log_info "    Max timeout: ${WAIT_TIMEOUT_SECS}s | Quiet period: ${QUIET_PERIOD_SECS}s | Polling interval: ${POLL_INTERVAL_SECS}s | Max alert age: ${MAX_ALERT_AGE_SECS}s | Token source: ${ATA_MONITORING_TOKEN_SOURCE}"
     if [ "${ALERT_WINDOW_UNTIL}" -gt "${start_time}" ]; then
-        log_info "    Alert window: watching for alerts from slow demo requests for another $((ALERT_WINDOW_UNTIL - start_time))s."
+        log_info "    Alert window: watching for alerts from slow demo requests for another $((ALERT_WINDOW_UNTIL - start_time))s (max timeout counted from its end: $((deadline - start_time))s from now)."
     fi
     if [ -n "${serving_revs}" ]; then
         log_info "    Serving revisions scoped: ${serving_revs}"
@@ -673,10 +682,14 @@ verify_no_active_incident_groups() {
 
 # Arm or extend the step-6 alert window for a request sent at epoch $1 (reason $2).
 extend_alert_window() {
-    local at="$1" reason="$2" until
-    until=$((at + ALERT_LAG_SECS))
-    if [ "${until}" -gt "${ALERT_WINDOW_UNTIL}" ]; then
-        ALERT_WINDOW_UNTIL="${until}"
+    local at="$1" reason="$2" deadline
+    deadline=$((at + ALERT_LAG_SECS))
+    if [ "${deadline}" -gt "${ALERT_WINDOW_UNTIL}" ]; then
+        ALERT_WINDOW_UNTIL="${deadline}"
+    fi
+    if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
+        log_warn "    [MOCK/DRY-RUN] ${reason}. A live reset would keep watching for alerts for ${ALERT_LAG_SECS}s in step 6 (simulated here)."
+        return 0
     fi
     log_warn "    ${reason}. A latency or 5xx alert from it can open up to ${ALERT_LAG_SECS}s later; step 6 keeps watching for alerts until then before archiving."
 }
@@ -690,7 +703,8 @@ demo_request() {
     local label="$1" out status secs="" ms at reason=""
     shift
     at="$(date +%s)"
-    out="$(curl -s -o /dev/null -w "%{http_code} %{time_total}" "$@" 2>/dev/null)" || true
+    # LC_ALL=C: time_total and awk's number parsing use a '.' decimal point.
+    out="$(LC_ALL=C curl -s -o /dev/null -w "%{http_code} %{time_total}" "$@" 2>/dev/null)" || true
     status="${out%% *}"
     case "${out}" in
         *" "*) secs="${out#* }" ;;
@@ -699,7 +713,7 @@ demo_request() {
         [0-9][0-9][0-9]) ;;
         *) status="000" ;;
     esac
-    ms="$(awk -v s="${secs}" 'BEGIN { if (s ~ /^[0-9]+([.][0-9]+)?$/) printf "%d", s * 1000 }')"
+    ms="$(LC_ALL=C awk -v s="${secs}" 'BEGIN { if (s ~ /^[0-9]+([.][0-9]+)?$/) printf "%d", s * 1000 }')"
     LAST_HTTP_STATUS="${status}"
     LAST_HTTP_MS="${ms}"
     case "${status}" in
@@ -911,7 +925,11 @@ else
     log_info "    [MOCK/DRY-RUN] Simulating warm-up, health and admin endpoint checks."
 fi
 if [ "${ALERT_WINDOW_UNTIL}" -gt "$(date +%s)" ]; then
-    log_warn "    Alert window armed: step 6 watches for alerts for another $((ALERT_WINDOW_UNTIL - $(date +%s)))s before archiving."
+    if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
+        log_warn "    [MOCK/DRY-RUN] Alert window armed ($((ALERT_WINDOW_UNTIL - $(date +%s)))s); step 6 is simulated and does not wait."
+    else
+        log_warn "    Alert window armed: step 6 watches for alerts for another $((ALERT_WINDOW_UNTIL - $(date +%s)))s before archiving."
+    fi
 else
     log_info "    No slow, 5xx or failed demo request: no alert window needed."
 fi

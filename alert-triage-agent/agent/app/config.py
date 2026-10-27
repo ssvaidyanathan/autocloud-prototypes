@@ -68,7 +68,8 @@ class AgentConfig(BaseSettings):
     # Latency reports: below this many requests/min on the origin over the investigation window
     # the report says the latency rests on little traffic (it may be a cold start) instead of
     # calling it a service-wide degradation. Live 2026-10-27: the stray cold-start ticket
-    # INC0010327 had 1 rpm; S2's origin ata-inventory-api ~35 rpm (627 requests in ~18 min).
+    # INC0010327 had 1.9 requests/min (32 in 17.2 min); S2's origin ata-inventory-api ~35
+    # requests/min (627 in ~18 min).
     low_traffic_rpm: float = Field(default=5.0, alias="LOW_TRAFFIC_RPM", gt=0)
 
     @property

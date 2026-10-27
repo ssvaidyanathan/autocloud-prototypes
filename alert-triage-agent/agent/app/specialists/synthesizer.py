@@ -255,20 +255,23 @@ def _is_latency_alert(alert: AlertEvent) -> bool:
 def low_traffic_facts(dossier: Optional[EvidenceDossier], threshold_rpm: float) -> Optional[dict[str, Any]]:
     """Measured request volume of a Cloud Run dossier when it is below `threshold_rpm`, else None.
 
-    Only measured values: no total, window or rate means no statement (never assumed low).
+    The rate is total / window from the measured values (not the truncated request_count_rpm,
+    which reads 0 for 3 requests in 17 min). No measured total or window means no statement
+    (never assumed low).
     """
     if not dossier or dossier.specialist_name != "CloudRunSpecialist" or not dossier.metrics:
         return None
-    rpm = _as_number(dossier.metrics.get("request_count_rpm"))
     total = _as_number(dossier.metrics.get("request_count_total"))
     minutes = _as_number(dossier.metrics.get("request_window_minutes"))
-    if rpm is None or total is None or minutes is None or rpm >= threshold_rpm:
+    if total is None or not minutes or minutes <= 0:
         return None
-    rpm_txt = f"{int(rpm)} request/min" if int(rpm) == 1 else f"{int(rpm)} requests/min"
+    rate = total / minutes
+    if rate >= threshold_rpm:
+        return None
     req_txt = "1 request" if int(total) == 1 else f"{int(total)} requests"
     return {
         "service": dossier.target_resource,
-        "volume": f"{req_txt} in {minutes:g} min ({rpm_txt})",
+        "volume": f"{req_txt} in {minutes:g} min ({rate:.1f} requests/min)",
     }
 
 
@@ -1685,14 +1688,18 @@ class SynthesizerAgent:
             cr_target = next((d for d in dossiers if d.specialist_name == "CloudRunSpecialist"), None)
 
         signal_facts = self._format_dominant_signal_facts(alert, cr_target)
+        # The origin's own traffic only (as in the problem statement): a fallback dossier of
+        # another service must not describe the origin's volume.
+        origin_cr = cr_target if cr_target is not None and cr_target.target_resource == origin else None
         low_traffic = (
-            low_traffic_facts(cr_target, get_agent_settings().low_traffic_rpm) if _is_latency_alert(alert) else None
+            low_traffic_facts(origin_cr, get_agent_settings().low_traffic_rpm) if _is_latency_alert(alert) else None
         )
 
-        if low_traffic and not is_upstream:
+        if low_traffic:
             root_cause_text = (
                 f"Elevated latency on `{origin}`{signal_facts} under {low_traffic_sentence(low_traffic)}. "
-                f"It triggered policy `{alert.policy_name}`."
+                f"It triggered policy `{alert.policy_name}`"
+                + (f" on caller `{alert.resource_name}`." if origin != alert.resource_name else ".")
             )
         elif is_upstream:
             root_cause_text = (
