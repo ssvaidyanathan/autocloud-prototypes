@@ -92,14 +92,14 @@ flowchart LR
     Mon -->|2: webhook, Basic Auth| Bridge["PREFIX-bridge (Cloud Run)"]
     Bridge -->|3: enqueue alert| TriageQ["Cloud Tasks: PREFIX-triage-queue"]
     TriageQ -->|4: POST /triage, OIDC| Agent["PREFIX-agent (Cloud Run)"]
-    Agent -->|5: save incident group| Bucket[("GCS: PROJECT-PREFIX-incidents")]
-    Agent -->|6: schedule settle / max-wait / cool-down| TimerQ["Cloud Tasks: PREFIX-timer-queue"]
-    TimerQ -->|7: POST /timer/wake, OIDC| Agent
-    Topo["TOPOLOGY.md in agent image"] -.->|8: origin selection| Agent
-    Agent -->|9: telemetry reads| APIs["GCP APIs: Monitoring, Logging, Cloud Run, Cloud SQL"]
-    Agent -->|10: MCP get_change_timeline| Tools["PREFIX-tools FastMCP (Cloud Run)"]
-    Tools -->|10a: revisions and deployments| ChangeAPIs["Cloud Run Admin API + Apigee API"]
-    Agent -->|11: gray-zone correlation| Gemini["Vertex AI Gemini"]
+    Agent -->|5: gray-zone grouping correlation| Gemini["Vertex AI Gemini"]
+    Agent -->|6: save incident group| Bucket[("GCS: PROJECT-PREFIX-incidents")]
+    Agent -->|7: schedule settle / max-wait / cool-down| TimerQ["Cloud Tasks: PREFIX-timer-queue"]
+    TimerQ -->|8: POST /timer/wake, OIDC| Agent
+    Topo["TOPOLOGY.md in agent image"] -.->|9: origin selection| Agent
+    Agent -->|10: telemetry reads| APIs["GCP APIs: Monitoring, Logging, Cloud Run, Cloud SQL"]
+    Agent -->|11: MCP get_change_timeline| Tools["PREFIX-tools FastMCP (Cloud Run)"]
+    Tools -->|11a: revisions and deployments| ChangeAPIs["Cloud Run Admin API + Apigee API"]
     Agent -->|12: ticket instructions, ID token| Bridge
     Bridge -->|13: HTML report| Bucket
     Bridge -->|14: create / update / work notes| SN["ServiceNow"]
