@@ -1,49 +1,6 @@
 # Google Kubernetes Engine (GKE) Investigation Guide
 
-This document details the Google Kubernetes Engine (GKE) investigation capabilities added in PR #45. It covers end-to-end telemetry flow, triage endpoint resolution, specialist tool references, operational troubleshooting skills, network reachability prerequisites, security guardrails, live testing, and operational troubleshooting.
-
----
-
-## Table of Contents
-
-- [1. Overview & Motivation](#1-overview--motivation)
-- [2. How It Works End-to-End](#2-how-it-works-end-to-end)
-  - [Pre-Fanout Triage Endpoint Resolution](#pre-fanout-triage-endpoint-resolution)
-  - [Specialist Fan-Out & Context Propagation](#specialist-fan-out--context-propagation)
-  - [Architecture Flow Diagram](#architecture-flow-diagram)
-- [3. Tools Reference](#3-tools-reference)
-  - [`describe_gke_clusters`](#describe_gke_clusters)
-  - [`get_gke_workload_events`](#get_gke_workload_events)
-  - [`query_gke_metrics`](#query_gke_metrics)
-  - [`query_gke_workload_status`](#query_gke_workload_status)
-  - [`resolve_endpoint_to_gke`](#resolve_endpoint_to_gke)
-  - [`query_audit_logs` (Kubernetes Audit Activity)](#query_audit_logs-kubernetes-audit-activity)
-- [4. Operational Skills](#4-operational-skills)
-  - [`gke-troubleshooting`](#gke-troubleshooting)
-  - [`k8s-change-correlation`](#k8s-change-correlation)
-- [5. Prerequisites, IAM & Network Architecture](#5-prerequisites-iam--network-architecture)
-  - [IAM Permissions](#iam-permissions)
-  - [Control Plane Reachability (Private Clusters & Authorized Networks)](#control-plane-reachability-private-clusters--authorized-networks)
-  - [Kubernetes RBAC](#kubernetes-rbac)
-  - [TLS CA Certificate Verification](#tls-ca-certificate-verification)
-  - [Logging & Telemetry Sources](#logging--telemetry-sources)
-- [6. Security Architecture & Guardrails](#6-security-architecture--guardrails)
-- [7. Testing & Verification](#7-testing--verification)
-  - [Automated Tests](#automated-tests)
-  - [Live Read-Only Verification Snippet](#live-read-only-verification-snippet)
-- [8. Troubleshooting Guide](#8-troubleshooting-guide)
-- [9. Known Limitations & Future Work](#9-known-limitations--future-work)
-
----
-
-## 1. Overview & Motivation
-
-Historically, autonomous SRE agents in cloud environments exhibited two significant blind spots:
-1. **Cloud Run Diagnostic Bias**: Telemetry queries defaulted exclusively to Cloud Run metrics (`run.googleapis.com/*`), Cloud Run revisions, and service descriptors. When an outage occurred on Kubernetes workloads, agents executed empty queries against Cloud Run APIs and failed to detect active incidents.
-2. **Regional Cluster Discovery Blind Spots**: Cluster discovery tools defaulted to the agent's deployment region (`settings.gcp_region`). Multi-region or remote-region GKE clusters went undiscovered during triage.
-3. **External Load Balancer Disconnection**: When monitoring systems or customer tickets reported failures against an external IP address (e.g. `203.0.113.10:8501`) or Uptime Check URL without mentioning a Kubernetes service name, the agent lacked the capability to traverse Google Cloud load balancer infrastructure to find the backing Kubernetes workload.
-
-The GKE investigation capability solves these issues by:
+The GKE investigation capability extends the incident SRE agent to investigate workloads on Google Kubernetes Engine (GKE) Standard and Autopilot clusters by:
 - Enabling multi-region cluster discovery across all locations by default.
 - Dynamically resolving external IP and Uptime Check endpoints through Google Cloud Compute Forwarding Rules, Target Pools, Regional/Global Backend Services, and Network Endpoint Groups (NEGs) directly to backing Kubernetes Services, clusters, and namespaces.
 - Supplying domain specialists with tools to inspect structured Kubernetes lifecycle events (`logs/events`), container metrics, autoscaler telemetry, and live Kubernetes control-plane workload statuses (Deployments, StatefulSets, Pods, probe configurations).
@@ -51,7 +8,38 @@ The GKE investigation capability solves these issues by:
 
 ---
 
-## 2. How It Works End-to-End
+## Table of Contents
+
+- [1. How It Works End-to-End](#1-how-it-works-end-to-end)
+  - [Pre-Fanout Triage Endpoint Resolution](#pre-fanout-triage-endpoint-resolution)
+  - [Specialist Fan-Out & Context Propagation](#specialist-fan-out--context-propagation)
+  - [Architecture Flow Diagram](#architecture-flow-diagram)
+- [2. Tools Reference](#2-tools-reference)
+  - [`describe_gke_clusters`](#describe_gke_clusters)
+  - [`get_gke_workload_events`](#get_gke_workload_events)
+  - [`query_gke_metrics`](#query_gke_metrics)
+  - [`query_gke_workload_status`](#query_gke_workload_status)
+  - [`resolve_endpoint_to_gke`](#resolve_endpoint_to_gke)
+  - [`query_audit_logs` (Kubernetes Audit Activity)](#query_audit_logs-kubernetes-audit-activity)
+- [3. Operational Skills](#3-operational-skills)
+  - [`gke-troubleshooting`](#gke-troubleshooting)
+  - [`k8s-change-correlation`](#k8s-change-correlation)
+- [4. Prerequisites, IAM & Network Architecture](#4-prerequisites-iam--network-architecture)
+  - [IAM Permissions](#iam-permissions)
+  - [Control Plane Reachability (Private Clusters & Authorized Networks)](#control-plane-reachability-private-clusters--authorized-networks)
+  - [Kubernetes RBAC](#kubernetes-rbac)
+  - [TLS CA Certificate Verification](#tls-ca-certificate-verification)
+  - [Logging & Telemetry Sources](#logging--telemetry-sources)
+- [5. Security Architecture & Guardrails](#5-security-architecture--guardrails)
+- [6. Testing & Verification](#6-testing--verification)
+  - [Automated Tests](#automated-tests)
+  - [Live Read-Only Verification Snippet](#live-read-only-verification-snippet)
+- [7. Troubleshooting Guide](#7-troubleshooting-guide)
+- [8. Known Limitations & Future Work](#8-known-limitations--future-work)
+
+---
+
+## 1. How It Works End-to-End
 
 ### Pre-Fanout Triage Endpoint Resolution
 
@@ -144,7 +132,7 @@ sequenceDiagram
 
 ---
 
-## 3. Tools Reference
+## 2. Tools Reference
 
 ### `describe_gke_clusters`
 
@@ -451,7 +439,7 @@ sequenceDiagram
 
 ---
 
-## 4. Operational Skills
+## 3. Operational Skills
 
 The agent ships with two dedicated operational playbooks under `agent/skills/` registered in [`agent/skills/skills.yaml`](../agent/skills/skills.yaml):
 
@@ -479,7 +467,7 @@ The agent ships with two dedicated operational playbooks under `agent/skills/` r
 
 ---
 
-## 5. Prerequisites, IAM & Network Architecture
+## 4. Prerequisites, IAM & Network Architecture
 
 ### IAM Permissions
 
@@ -530,7 +518,7 @@ To protect against man-in-the-middle attacks when communicating with the Kuberne
 
 ---
 
-## 6. Security Architecture & Guardrails
+## 5. Security Architecture & Guardrails
 
 The GKE tools adhere to strict zero-trust security principles:
 
@@ -546,7 +534,7 @@ The GKE tools adhere to strict zero-trust security principles:
 
 ---
 
-## 7. Testing & Verification
+## 6. Testing & Verification
 
 ### Automated Tests
 
@@ -628,7 +616,7 @@ print(f"Metric series captured: {metrics['total_series']}")
 
 ---
 
-## 8. Troubleshooting Guide
+## 7. Troubleshooting Guide
 
 | Symptom / Status | Probable Cause | Diagnostic & Remediation Steps |
 |---|---|---|
@@ -641,7 +629,7 @@ print(f"Metric series captured: {metrics['total_series']}")
 
 ---
 
-## 9. Known Limitations & Future Work
+## 8. Known Limitations & Future Work
 
 1. **Direct Master REST Network Requirements**:
    `query_gke_workload_status` communicates directly with the Kubernetes master IP. In organizations with strict Master Authorized Networks that block external egress from Cloud Run without a VPC connector, direct workload status returns `UNREACHABLE`. (As noted, Cloud Logging events, audit logs, and Cloud Monitoring metrics are fully decoupled and remain available.)
