@@ -10,11 +10,9 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import os
-from pathlib import Path
 import re
 import time
 from typing import Any, Optional
-import yaml
 
 from ..config import AgentConfig
 from ..contracts.alert import AlertEvent
@@ -26,7 +24,8 @@ from ..contracts.report import (
     TimelineItem,
 )
 from ..contracts.links import ConsoleLinkBuilder
-from ..grouping.models import format_okf_alert_entry
+from ..grouping.models import OKFDocument, format_okf_alert_entry
+from ..grouping.store import OKFStore, get_canonical_blob_name, get_canonical_file_path
 from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist
 from .apigee import ApigeeSpecialist
@@ -45,6 +44,25 @@ except ImportError as err:
     raise
 
 logger = logging.getLogger(__name__)
+
+# Delimits the synthesizer-owned part of the OKF body; content outside it belongs to other
+# writers (e.g. duplicate-alert notes) and is preserved across synthesizer updates.
+REPORT_SECTION_BEGIN = "<!-- ata:synthesizer-report:begin -->"
+REPORT_SECTION_END = "<!-- ata:synthesizer-report:end -->"
+
+
+def _merge_report_section(body: str, report_markdown: str) -> str:
+    """Return ``body`` with its synthesizer report section replaced by ``report_markdown``.
+
+    The section is placed first; any other content of ``body`` is kept after it.
+    """
+    start = body.find(REPORT_SECTION_BEGIN)
+    end = body.find(REPORT_SECTION_END, start) if start != -1 else -1
+    if start != -1 and end != -1:
+        body = body[:start] + body[end + len(REPORT_SECTION_END):]
+    remainder = body.strip()
+    section = f"{REPORT_SECTION_BEGIN}\n{report_markdown.strip()}\n{REPORT_SECTION_END}"
+    return f"{section}\n\n{remainder}" if remainder else section
 
 
 class SynthesizerAgent:
@@ -1432,133 +1450,43 @@ class SynthesizerAgent:
             "bridge_revision": os.environ.get("BRIDGE_REVISION") or "Unspecified",
         }
 
-    def _update_okf_file(
+    def _reconcile_report_origin(self, report: InvestigationReport, alert: AlertEvent, origin: str) -> None:
+        """Align the report's origin, root cause and summary with the reconciled ``origin``."""
+        logger.info("Reconciling report origin from %s to %s", report.origin, origin)
+        report.origin = origin
+        active_dossiers = getattr(self, "_last_dossiers", None) or []
+        if active_dossiers:
+            new_text, new_conf = self._determine_root_cause(
+                dossiers=active_dossiers,
+                origin=origin,
+                alert=alert,
+                blast_radius=report.blast_radius,
+            )
+            report.probable_root_cause.text = new_text
+            report.probable_root_cause.confidence = new_conf
+            report.summary = self._synthesize_problem(
+                alert=alert,
+                dossiers=active_dossiers,
+                origin=origin,
+                blast_radius=report.blast_radius,
+            )
+
+    @staticmethod
+    def _describe_okf_target(store: OKFStore, identifier: str) -> str:
+        """Return a log-safe location for the incident object (no content)."""
+        if store.storage_client is not None or (store.bucket_name and not store.is_local):
+            return f"gs://{store.bucket_name}/{get_canonical_blob_name(identifier)}"
+        return str(get_canonical_file_path(store.storage_path, identifier))
+
+    def _build_report_markdown(
         self,
         report: InvestigationReport,
         alert: AlertEvent,
-        config: AgentConfig,
-    ) -> None:
-        """Update the OKF markdown file in the incident store path, preserving existing metadata."""
-        store_path = config.get_effective_store_path()
-        file_path = store_path / report.filename
-
-        existing_meta: dict[str, Any] = {}
-        if file_path.exists():
-            try:
-                content = file_path.read_text(encoding="utf-8")
-                parts = content.split("---")
-                if len(parts) >= 3:
-                    parsed = yaml.safe_load(parts[1])
-                    if isinstance(parsed, dict):
-                        existing_meta = parsed
-            except Exception as read_exc:
-                logger.warning("Failed to parse existing OKF frontmatter at %s: %s", file_path, read_exc)
-
-        # Preserve original group metadata, promoting origin to report.origin when it is upstream cause
-        timestamp = existing_meta.get("timestamp") or alert.started_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if not timestamp or not str(timestamp).strip():
-            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        origin = report.origin or existing_meta.get("origin") or alert.resource_name
-
-        # Enforce exact origin parity: report.origin MUST match the reconciled origin
-        if origin != report.origin:
-            logger.info("Reconciling report origin from %s to %s", report.origin, origin)
-            report.origin = origin
-            active_dossiers = getattr(self, "_last_dossiers", None) or []
-            if active_dossiers:
-                new_text, new_conf = self._determine_root_cause(
-                    dossiers=active_dossiers,
-                    origin=origin,
-                    alert=alert,
-                    blast_radius=report.blast_radius,
-                )
-                report.probable_root_cause.text = new_text
-                report.probable_root_cause.confidence = new_conf
-                report.summary = self._synthesize_problem(
-                    alert=alert,
-                    dossiers=active_dossiers,
-                    origin=origin,
-                    blast_radius=report.blast_radius,
-                )
-
-        group_id = existing_meta.get("group_id") or report.group_id
-        policy_name = existing_meta.get("policy_name") or alert.policy_name
-        resource_name = existing_meta.get("resource_name") or alert.resource_name
-        servicenow_sys_id = report.servicenow_sys_id or existing_meta.get("servicenow_sys_id", "")
-        servicenow_number = report.servicenow_number or existing_meta.get("servicenow_number", "")
-
-        # Merge blast radius and traverse full downstream topology
-        downstream = []
-        try:
-            downstream = get_blast_radius(origin)
-        except Exception as exc:
-            logger.error("Topology blast radius lookup in _update_okf_file failed for %s: %s", origin, exc)
-
-        merged_blast = [origin]
-        for d in downstream:
-            if d not in merged_blast:
-                merged_blast.append(d)
-        for b in report.blast_radius:
-            if b not in merged_blast:
-                merged_blast.append(b)
-        for b in existing_meta.get("blast_radius", []):
-            if b not in merged_blast:
-                merged_blast.append(b)
-
-        # Merge alerts list, updating if already present or appending if new
-        existing_alerts = existing_meta.get("alerts", [])
-        alerts_list = list(existing_alerts) if isinstance(existing_alerts, list) else []
-        alert_started_at = alert.started_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if not alert_started_at or not str(alert_started_at).strip():
-            alert_started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        builder = ConsoleLinkBuilder(project_id=config.project_id)
-        inc_url = alert.url or builder.build_incident_url(alert.incident_id)
-        pol_id = getattr(alert, "policy_id", None)
-        new_alert_entry = format_okf_alert_entry(alert, valid_ts=alert_started_at)
-        new_alert_entry["policy_url"] = builder.build_policy_url(pol_id or alert.policy_name)
-        new_alert_entry["resource_type"] = alert.resource_type
-        new_alert_entry["resource_url"] = builder.build_resource_url(alert.resource_name, alert.resource_type)
-        if not new_alert_entry.get("url"):
-            new_alert_entry["url"] = inc_url
-        new_alert_entry["console_url"] = inc_url
-
-        alert_updated = False
-        for i, a in enumerate(alerts_list):
-            if isinstance(a, dict) and a.get("incident_id") == alert.incident_id:
-                if not new_alert_entry.get("labels") and a.get("labels"):
-                    new_alert_entry["labels"] = a["labels"]
-                    new_alert_entry["policy_user_labels"] = a.get("policy_user_labels") or a["labels"]
-                if not new_alert_entry.get("component") and a.get("component"):
-                    new_alert_entry["component"] = a["component"]
-                if not new_alert_entry.get("signal") and a.get("signal"):
-                    new_alert_entry["signal"] = a["signal"]
-                alerts_list[i] = new_alert_entry
-                alert_updated = True
-                break
-        if not alert_updated:
-            alerts_list.append(new_alert_entry)
-
-        formatted_alerts = [format_okf_alert_entry(a, valid_ts=timestamp) for a in alerts_list]
-
-        frontmatter: dict[str, Any] = {
-            "type": "incident",
-            "group_id": group_id,
-            "project": config.project_id,
-            "policy_name": policy_name,
-            "resource_name": resource_name,
-            "status": existing_meta.get("status") or "mitigation-in-progress",
-            "timestamp": timestamp,
-            "origin": origin,
-            "blast_radius": merged_blast,
-            "priority": report.priority,
-            "confidence": report.probable_root_cause.confidence,
-            "servicenow_sys_id": servicenow_sys_id,
-            "servicenow_number": servicenow_number,
-            "alerts": formatted_alerts,
-        }
-
-        # Build Topology used section
+        policy_name: str,
+        origin: str,
+        merged_blast: list[str],
+    ) -> str:
+        """Render the synthesized report section of the OKF body."""
         try:
             topo_loader = get_loader()
             source_file = topo_loader.source_path.name
@@ -1575,11 +1503,7 @@ class SynthesizerAgent:
             edges_lines = "- Topology information unavailable"
 
         exec_bullets = "\n".join(report.build_executive_summary_bullets())
-        file_content = f"""---
-{yaml.dump(frontmatter, sort_keys=False).strip()}
----
-
-# Incident Report for {policy_name}
+        return f"""# Incident Report for {policy_name}
 
 ## Executive Summary
 {exec_bullets}
@@ -1596,18 +1520,118 @@ class SynthesizerAgent:
 - Relevant edges:
 {edges_lines}
 """
+
+    def _update_okf_file(
+        self,
+        report: InvestigationReport,
+        alert: AlertEvent,
+        config: AgentConfig,
+    ) -> None:
+        """Merge the synthesized findings into the incident OKF document.
+
+        The update is an optimistic-concurrency read-modify-write (``OKFStore.update_atomically``:
+        GCS generation precondition with 412 re-read/retry, or a file lock locally), so concurrent
+        writers (ticket linkage, duplicate appends, deadline changes) are re-read and preserved.
+
+        The mutation sets only the fields the synthesizer owns: ``project``, ``origin``,
+        ``blast_radius`` (merged), ``priority``, ``confidence``, this alert's entry, ticket
+        fields the report carries, and the delimited report section of the body.
+        ``policy_name``, ``resource_name``, ``timestamp`` and ``status`` are filled only when
+        missing. Every other field and the rest of the body are kept as read.
+
+        Raises:
+            Storage errors, including ``ConcurrencyLockError`` (precondition retries
+            exhausted), and parse errors of the stored document. Each is logged at ERROR
+            with the group id and object location first.
+        """
+        store = OKFStore(config=config)
+        identifier = report.filename
+        target = self._describe_okf_target(store, identifier)
+
+        # Computed once, outside the mutation, which is re-run on every precondition retry.
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        alert_started_at = alert.started_at if alert.started_at and str(alert.started_at).strip() else now_str
+        builder = ConsoleLinkBuilder(project_id=config.project_id)
+        inc_url = alert.url or builder.build_incident_url(alert.incident_id)
+        pol_id = getattr(alert, "policy_id", None)
+        base_entry = format_okf_alert_entry(alert, valid_ts=alert_started_at)
+        base_entry["policy_url"] = builder.build_policy_url(pol_id or alert.policy_name)
+        base_entry["resource_type"] = alert.resource_type
+        base_entry["resource_url"] = builder.build_resource_url(alert.resource_name, alert.resource_type)
+        if not base_entry.get("url"):
+            base_entry["url"] = inc_url
+        base_entry["console_url"] = inc_url
+
+        def _mutate(doc: OKFDocument) -> OKFDocument:
+            # Origin: the report's, else the stored one; keep the report consistent with it.
+            origin = report.origin or doc.origin or alert.resource_name
+            if origin != report.origin:
+                self._reconcile_report_origin(report, alert, origin)
+
+            # Group metadata owned by grouping: fill only when missing.
+            if not doc.policy_name:
+                doc.policy_name = alert.policy_name
+            if not doc.resource_name:
+                doc.resource_name = alert.resource_name
+            if "status" not in doc.model_fields_set or not doc.status:
+                doc.status = "mitigation-in-progress"
+            if not doc.timestamp or not str(doc.timestamp).strip():
+                doc.timestamp = alert_started_at
+
+            # Ticket linkage is owned by the timer path; only carry values the report has.
+            if report.servicenow_sys_id:
+                doc.servicenow_sys_id = report.servicenow_sys_id
+            if report.servicenow_number:
+                doc.servicenow_number = report.servicenow_number
+
+            # Merge blast radius and traverse full downstream topology
+            downstream: list[str] = []
+            try:
+                downstream = get_blast_radius(origin)
+            except Exception as exc:
+                logger.error("Topology blast radius lookup in _update_okf_file failed for %s: %s", origin, exc)
+            merged_blast = [origin]
+            for b in [*downstream, *report.blast_radius, *doc.blast_radius]:
+                if b not in merged_blast:
+                    merged_blast.append(b)
+
+            doc.project = config.project_id
+            doc.origin = origin
+            doc.blast_radius = merged_blast
+            doc.priority = report.priority
+            doc.confidence = report.probable_root_cause.confidence
+
+            # Upsert this alert by incident_id, keeping labels/component/signal already known.
+            new_alert_entry = dict(base_entry)
+            alerts_list = list(doc.alerts)
+            for i, a in enumerate(alerts_list):
+                if isinstance(a, dict) and a.get("incident_id") == alert.incident_id:
+                    if not new_alert_entry.get("labels") and a.get("labels"):
+                        new_alert_entry["labels"] = a["labels"]
+                        new_alert_entry["policy_user_labels"] = a.get("policy_user_labels") or a["labels"]
+                    if not new_alert_entry.get("component") and a.get("component"):
+                        new_alert_entry["component"] = a["component"]
+                    if not new_alert_entry.get("signal") and a.get("signal"):
+                        new_alert_entry["signal"] = a["signal"]
+                    alerts_list[i] = new_alert_entry
+                    break
+            else:
+                alerts_list.append(new_alert_entry)
+            doc.alerts = [format_okf_alert_entry(a, valid_ts=doc.timestamp) for a in alerts_list]
+
+            report_markdown = self._build_report_markdown(report, alert, doc.policy_name, origin, merged_blast)
+            doc.body = _merge_report_section(doc.body, report_markdown)
+            return doc
+
         try:
-            file_path.write_text(file_content, encoding="utf-8")
-            logger.info("Updated OKF file at %s", file_path)
+            store.update_atomically(identifier, _mutate)
         except Exception as exc:
-            logger.warning("Failed to update OKF file at %s: %s", file_path, exc)
-            if not config.is_local and config.incidents_bucket:
-                try:
-                    from google.cloud import storage
-                    gcs_client = storage.Client(project=config.project_id)
-                    b = gcs_client.bucket(config.effective_incidents_bucket)
-                    blob_path = f"knowledge/incident-manager/{file_path.name}"
-                    b.blob(blob_path).upload_from_string(file_content, content_type="text/markdown")
-                    logger.info("Saved updated OKF file directly to GCS via API fallback: gs://%s/%s", config.effective_incidents_bucket, blob_path)
-                except Exception as gcs_exc:
-                    logger.warning("GCS direct upload fallback also failed for %s: %s", file_path.name, gcs_exc)
+            # Exception text can quote file content, so only its type is logged.
+            logger.error(
+                "Failed to update OKF incident file %s (group %s): %s; propagating.",
+                target,
+                report.group_id,
+                type(exc).__name__,
+            )
+            raise
+        logger.info("Updated OKF incident file %s (group %s)", target, report.group_id)
