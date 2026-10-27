@@ -712,14 +712,6 @@ require_service_url() {
     echo "${url}"
 }
 
-# resolve_service_url <service> [<ignored>]: compatibility name for scripts outside this
-# lane that still call it (verify-demo-infra.sh until ata-fresh-scripts lands). It is
-# require_service_url: the second argument, once a fixed fallback URL, is ignored. No
-# fallback. Remove once no caller is left.
-resolve_service_url() {
-    require_service_url "$1"
-}
-
 # Resolve Bearer Token for Cloud Run IAM Invocation
 # Note: For user credentials (gcloud auth login), custom audiences are unsupported;
 # falls back to gcloud auth print-identity-token without audiences. Never mints tokens for service accounts.
