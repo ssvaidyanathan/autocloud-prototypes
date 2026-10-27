@@ -5,7 +5,7 @@ import json
 import logging
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 
 from .adapters.servicenow import ServiceNowAdapter
 from .auth import verify_agent_caller
@@ -92,26 +92,26 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def _verify_webhook_token(
-    request: Request,
-    token_param: Optional[str],
-    auth_token_param: Optional[str],
-    settings: BridgeConfig,
-) -> bool:
+# Query-string webhook tokens are refused: Cloud Run request logs record the full URL, so a
+# token in it is readable by anyone with logging.viewer on the project (sec M2). The
+# Cloud Monitoring channel is webhook_basicauth and sends the token in the Authorization header.
+QUERY_TOKEN_PARAMS = ("token", "auth_token")
+
+
+def _verify_webhook_token(request: Request, settings: BridgeConfig) -> bool:
     expected_token = settings.webhook_token
-    received_token = token_param or auth_token_param
-    if not received_token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(auth_header[6:].strip()).decode("utf-8")
-                if ":" in decoded:
-                    _, pwd = decoded.split(":", 1)
-                    received_token = pwd.strip()
-            except Exception:
-                pass
-        elif auth_header.startswith("Bearer "):
-            received_token = auth_header[7:].strip()
+    received_token: Optional[str] = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(auth_header[6:].strip()).decode("utf-8")
+            if ":" in decoded:
+                _, pwd = decoded.split(":", 1)
+                received_token = pwd.strip()
+        except Exception:
+            pass
+    elif auth_header.startswith("Bearer "):
+        received_token = auth_header[7:].strip()
 
     logger.info(
         "Verifying webhook token: has_expected=%s, has_received=%s",
@@ -137,14 +137,18 @@ def _verify_webhook_token(
 async def handle_monitoring_webhook(
     request: Request,
     response: Response,
-    token: Optional[str] = Query(None),
-    auth_token: Optional[str] = Query(None),
     settings: BridgeConfig = Depends(get_settings),
     dispatcher: TaskDispatcher = Depends(get_dispatcher),
 ) -> dict[str, Any]:
     """Ingest Cloud Monitoring alert notification webhook and dispatch raw alert."""
-    # 1. HMAC Token Verification
-    if not _verify_webhook_token(request, token, auth_token, settings):
+    # 1. HMAC Token Verification (Authorization header only)
+    if any(p in request.query_params for p in QUERY_TOKEN_PARAMS):
+        logger.warning("Rejecting webhook: token passed in the URL query string (value not logged)")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Webhook tokens in the URL are not accepted; send HTTP Basic auth (webhook_basicauth)",
+        )
+    if not _verify_webhook_token(request, settings):
         logger.warning("Monitoring webhook unauthorized token received")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

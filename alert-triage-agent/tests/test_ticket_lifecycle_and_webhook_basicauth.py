@@ -429,8 +429,9 @@ def test_bridge_webhook_rejects_invalid_basic_auth(bridge_client):
     assert resp3.status_code == 401
 
 
-def test_bridge_webhook_preserves_backwards_compatibility(bridge_client):
-    """Assert backwards compatibility with Bearer token and query param token."""
+def test_bridge_webhook_header_auth_only_no_query_tokens(bridge_client):
+    """Bearer header still works; query-string tokens (?token= / ?auth_token=) are refused even
+    when correct, because Cloud Run request logs record the URL (sec M2)."""
     payload = {
         "version": "1.2",
         "incident": {
@@ -443,9 +444,16 @@ def test_bridge_webhook_preserves_backwards_compatibility(bridge_client):
         },
     }
 
-    # Query param token
-    resp_query = bridge_client.post("/webhook/monitoring?token=secret-rotated-password", json=payload)
-    assert resp_query.status_code == 202
+    for param in ("token", "auth_token"):
+        resp_query = bridge_client.post(f"/webhook/monitoring?{param}=secret-rotated-password", json=payload)
+        assert resp_query.status_code == 401, param
+        assert "not accepted" in resp_query.json()["detail"]
+        assert "secret-rotated-password" not in resp_query.text
+        # A query token is refused even alongside a valid header: the URL already leaked it.
+        basic = base64.b64encode(b"x-monitoring:secret-rotated-password").decode()
+        resp_both = bridge_client.post(f"/webhook/monitoring?{param}=secret-rotated-password", json=payload,
+                                       headers={"Authorization": f"Basic {basic}"})
+        assert resp_both.status_code == 401, param
 
     # Bearer header
     resp_bearer = bridge_client.post(

@@ -9,7 +9,8 @@
 # Checks:
 #   1. /health of ${NAME_PREFIX}-{inventory-api,orders-api,agent,bridge,tools} (ID token): 200
 #   2. the bridge webhook rejects a wrong token: 401
-#   3. the bridge webhook accepts the real token (Secret Manager ${NAME_PREFIX}-webhook-token)
+#   3. the bridge webhook accepts the real token (Secret Manager ${NAME_PREFIX}-webhook-token,
+#      sent as HTTP Basic auth from a curl config on stdin, like the Monitoring channel)
 #      for an out-of-scope probe alert: 200 "ignored", nothing is enqueued
 #   4. the agent's config points at this stack (BRIDGE_URL, TOOLS_URL, SERVICE_ACCOUNT_EMAIL)
 #   5. the incidents bucket is readable; the newest OKF incident document, if any, has the
@@ -107,17 +108,30 @@ echo "--- 2-3. Bridge webhook authentication ---"
 WEBHOOK_TOKEN="$(gcloud secrets versions access latest --secret="${NAME_PREFIX}-webhook-token" --project="${PROJECT_ID}")" \
     || { echo "ERROR: cannot read secret ${NAME_PREFIX}-webhook-token." >&2; exit 1; }
 [ -n "${WEBHOOK_TOKEN}" ] || { echo "ERROR: secret ${NAME_PREFIX}-webhook-token is empty." >&2; exit 1; }
+case "${WEBHOOK_TOKEN}" in
+    *[!A-Za-z0-9._~-]*) echo "ERROR: secret ${NAME_PREFIX}-webhook-token has characters this script cannot quote in a curl config." >&2; exit 1 ;;
+esac
+# http_webhook <token> <curl args...>: the token goes the way Cloud Monitoring's webhook_basicauth
+# channel sends it, as HTTP Basic auth, from a curl config on stdin. Never in the URL (Cloud Run
+# request logs record it) and never on curl's argv (sec M2).
+http_webhook() {
+    local tok="$1"
+    shift
+    http --config - "$@" <<EOF_CURL_CONFIG
+user = "${NAME_PREFIX}-monitoring:${tok}"
+EOF_CURL_CONFIG
+}
 STAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 # Out of scope by design: no field names the stack or the app, so the bridge answers
 # "ignored" and enqueues nothing.
 PROBE_PAYLOAD="{\"version\": \"1.2\", \"incident\": {\"incident_id\": \"0.verify_probe_$(date +%s)\", \"policy_name\": \"verify-probe\", \"resource_name\": \"verify-probe\", \"state\": \"open\", \"started_at\": \"${STAMP}\", \"summary\": \"deploy verification probe\"}}"
-http -X POST -H "Content-Type: application/json" "${BRIDGE_URL}/webhook/monitoring?token=wrong-${RANDOM}" -d "${PROBE_PAYLOAD}"
+http_webhook "wrong-${RANDOM}" -X POST -H "Content-Type: application/json" "${BRIDGE_URL}/webhook/monitoring" -d "${PROBE_PAYLOAD}"
 if [ "${HTTP_CODE}" = "401" ]; then
     echo "    wrong token: 401"
 else
     fail "webhook with a wrong token: HTTP ${HTTP_CODE} (expected 401) ${HTTP_BODY}"
 fi
-http -X POST -H "Content-Type: application/json" "${BRIDGE_URL}/webhook/monitoring?token=${WEBHOOK_TOKEN}" -d "${PROBE_PAYLOAD}"
+http_webhook "${WEBHOOK_TOKEN}" -X POST -H "Content-Type: application/json" "${BRIDGE_URL}/webhook/monitoring" -d "${PROBE_PAYLOAD}"
 if [ "${HTTP_CODE}" = "200" ] && printf '%s' "${HTTP_BODY}" | grep -q '"ignored"'; then
     echo "    real token, out-of-scope probe: 200 ignored (nothing enqueued)"
 else
@@ -212,7 +226,7 @@ if [ "${WITH_TICKET}" = "true" ]; then
         printf '{"version": "1.2", "incident": {"incident_id": "%s", "policy_name": "%s-inventory-5xx", "condition_name": "Cloud Run 5xx rate high", "resource_name": "%s-inventory-api", "resource_type": "cloud_run_revision", "resource": {"type": "cloud_run_revision", "labels": {"service_name": "%s-inventory-api", "location": "%s", "project_id": "%s"}}, "state": "%s", "started_at": "%s", "summary": "%s-inventory-api deploy verification (verify-stage1.sh --with-ticket)"}}' \
             "${INCIDENT_ID}" "${NAME_PREFIX}" "${NAME_PREFIX}" "${NAME_PREFIX}" "${REGION}" "${PROJECT_ID}" "$1" "${STAMP}" "${NAME_PREFIX}"
     }
-    http -X POST -H "Content-Type: application/json" "${BRIDGE_URL}/webhook/monitoring?token=${WEBHOOK_TOKEN}" -d "$(e2e_payload open)"
+    http_webhook "${WEBHOOK_TOKEN}" -X POST -H "Content-Type: application/json" "${BRIDGE_URL}/webhook/monitoring" -d "$(e2e_payload open)"
     if [ "${HTTP_CODE}" = "202" ] || [ "${HTTP_CODE}" = "200" ]; then
         echo "    alert ${INCIDENT_ID}: HTTP ${HTTP_CODE} ${HTTP_BODY}"
         waited=0
@@ -239,7 +253,7 @@ if [ "${WITH_TICKET}" = "true" ]; then
         fail "webhook alert: HTTP ${HTTP_CODE} (expected 202) ${HTTP_BODY}"
     fi
     echo "    cleanup: sending the closed alert for ${INCIDENT_ID}..."
-    http -X POST -H "Content-Type: application/json" "${BRIDGE_URL}/webhook/monitoring?token=${WEBHOOK_TOKEN}" -d "$(e2e_payload closed)"
+    http_webhook "${WEBHOOK_TOKEN}" -X POST -H "Content-Type: application/json" "${BRIDGE_URL}/webhook/monitoring" -d "$(e2e_payload closed)"
     case "${HTTP_CODE}" in
         200|202) echo "    closed alert: HTTP ${HTTP_CODE}" ;;
         *) fail "closed alert: HTTP ${HTTP_CODE} ${HTTP_BODY}" ;;

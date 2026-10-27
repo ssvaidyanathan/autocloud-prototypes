@@ -149,7 +149,8 @@ code, body = 200, "{}"
 if "sqladmin.googleapis.com" in (url or ""):
     body = '{"kind": "sql#operation", "name": "op-1234abcd"}'
 if "/webhook/monitoring" in (url or ""):
-    if "token=wrong" in url:
+    users = [l for c in configs for l in c["text"].splitlines() if l.startswith("user = ")]
+    if "token=" in url or not users or ':wrong' in users[0]:
         code, body = 401, '{"detail": "Invalid or missing webhook token"}'
     elif "verify-probe" in (data or ""):
         code, body = 200, '{"status": "ignored", "reason": "non-ata alert policy"}'
@@ -625,6 +626,23 @@ def test_verify_checks_the_okf_schema(stack):
     res, _ = _verify(stack, STUB_OKF="---\ntype: incident\nstatus: mitigation-in-progress\n---\n")
     assert res.returncode == 1
     assert "unknown status 'mitigation-in-progress'" in res.stderr
+
+
+def test_verify_sends_the_webhook_token_as_basic_auth_never_in_url_or_argv(stack):
+    """sec M2: the real token only in a `user = "<prefix>-monitoring:<token>"` curl config on
+    stdin; no URL carries token=, and no curl argv carries the token."""
+    res, calls = _verify(stack, "--with-ticket", "--wait-secs", "0", STUB_SECRET_VALUE="RealTok123",
+                         STUB_OKF="")
+    hooks = [c for c in _curl_calls(stack) if "/webhook/monitoring" in json.dumps(c["argv"])]
+    assert len(hooks) == 4, hooks  # wrong token, probe, e2e open, e2e closed
+    for c in hooks:
+        assert "token=" not in json.dumps(c["argv"]) and "RealTok123" not in json.dumps(c["argv"])
+        assert [x["mode"] for x in c["configs"]] == ["stdin"]
+    users = [c["configs"][0]["text"].strip() for c in hooks]
+    assert users[0].startswith('user = "atat-monitoring:wrong-')
+    assert users[1:] == ['user = "atat-monitoring:RealTok123"'] * 3
+    assert "RealTok123" not in _out(res)
+    assert not [c for c in calls if c[0] == "curl" and "token=" in (c[1] or "")]
 
 
 def test_verify_with_ticket_accepts_202_and_cleans_up(stack):
