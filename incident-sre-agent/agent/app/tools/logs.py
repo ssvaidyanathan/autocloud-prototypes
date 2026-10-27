@@ -1036,10 +1036,18 @@ def get_gke_workload_events(
     client: Any = None,
 ) -> Dict[str, Any]:
     """Query Cloud Logging for Kubernetes events (logs/events) and audit activity."""
-    from .common import normalize_datetime
+    from .common import normalize_datetime, validate_k8s_identifier
     from .registry import get_pinned_project_id
 
     pinned_project = get_pinned_project_id(project_id)
+
+    validated_cluster = validate_k8s_identifier(cluster_name, "cluster_name")
+    if not validated_cluster:
+        raise ValueError("cluster_name is required and must be a valid identifier.")
+    validated_namespace = validate_k8s_identifier(namespace, "namespace") if namespace else None
+    validated_workload = (
+        validate_k8s_identifier(workload_name, "workload_name") if workload_name else None
+    )
 
     start_time_dt = normalize_datetime(start_time)
     end_time_dt = normalize_datetime(end_time)
@@ -1061,12 +1069,12 @@ def get_gke_workload_events(
     filter_parts = [
         f'timestamp >= "{start_time_dt.isoformat()}"',
         f'timestamp <= "{end_time_dt.isoformat()}"',
-        f'resource.labels.cluster_name = "{cluster_name}"',
+        f'resource.labels.cluster_name = "{validated_cluster}"',
     ]
-    if namespace:
+    if validated_namespace:
         filter_parts.append(
-            f'(resource.labels.namespace_name = "{namespace}" '
-            f'OR protoPayload.resourceName =~ "namespaces/{namespace}/")'
+            f'(resource.labels.namespace_name = "{validated_namespace}" '
+            f'OR protoPayload.resourceName =~ "namespaces/{validated_namespace}/")'
         )
 
     audit_cond = (
@@ -1075,15 +1083,15 @@ def get_gke_workload_events(
         'AND NOT protoPayload.methodName =~ "leases")'
     )
     if include_normal_events:
-        event_subclause = f'(logName =~ "logs%2Fevents" OR {audit_cond})'
+        event_subclause = f'(logName =~ "/logs/events" OR {audit_cond})'
     else:
         warn_reasons = (
-            '("Killing" OR "OOMKilled" OR "FailedScheduling" OR "Unhealthy" OR "BackOff" '
-            'OR "FailedMount" OR "FailedSync" OR "CrashLoopBackOff" OR "Evicted" '
-            'OR "NetworkNotReady" OR "Scheduled")'
+            '("Killing" OR "OOMKilling" OR "OOMKilled" OR "FailedScheduling" '
+            'OR "Unhealthy" OR "BackOff" OR "FailedMount" OR "FailedSync" '
+            'OR "CrashLoopBackOff" OR "Evicted" OR "NetworkNotReady" OR "Scheduled")'
         )
         warn_cond = (
-            f'((logName =~ "logs%2Fevents" AND (jsonPayload.type = "Warning" '
+            f'((logName =~ "/logs/events" AND (jsonPayload.type = "Warning" '
             f"OR jsonPayload.reason = {warn_reasons}))"
         )
         event_subclause = f"{warn_cond} OR {audit_cond})"
@@ -1097,11 +1105,12 @@ def get_gke_workload_events(
 
     if client is None and is_local_mode():
         return {
-            "cluster_name": cluster_name,
-            "namespace": namespace,
-            "workload_name": workload_name,
+            "cluster_name": validated_cluster,
+            "namespace": validated_namespace,
+            "workload_name": validated_workload,
             "total_events": 0,
             "events": [],
+            "truncated": False,
             "query_filter": final_filter,
             "console_url": console_url,
         }
@@ -1266,12 +1275,14 @@ def get_gke_workload_events(
                 }
             )
 
+    truncated = len(raw_entries) >= clamped_limit or len(events) > clamped_limit
     return {
-        "cluster_name": cluster_name,
-        "namespace": namespace,
-        "workload_name": workload_name,
+        "cluster_name": validated_cluster,
+        "namespace": validated_namespace,
+        "workload_name": validated_workload,
         "total_events": len(events),
         "events": events[:clamped_limit],
+        "truncated": truncated,
         "query_filter": final_filter,
         "console_url": console_url,
     }

@@ -1177,7 +1177,7 @@ def test_query_gke_metrics_autoscaler() -> None:
         client=mock_client,
     )
     assert res["metric_type"] == "autoscaler_pending_pods"
-    assert 'resource.type = "k8s_cluster"' in res["query_filter"]
+    assert 'resource.type = "k8s_entity"' in res["query_filter"]
 
 
 def test_query_gke_workload_status_mock_session() -> None:
@@ -1348,3 +1348,472 @@ def test_resolve_endpoint_to_gke_not_found() -> None:
 
     assert res["found"] is False
     assert "did not match" in res["message"]
+
+
+# ============================================================================
+# GKE Investigation Tools Comprehensive Regression & Security Tests (TEST-01)
+# ============================================================================
+
+
+def test_get_gke_workload_events_filter_regression_and_oom_killing() -> None:
+    """CORR-01 & CORR-05: Verify /logs/events and OOMKilling in generated filter."""
+    mock_client = MagicMock()
+    mock_client.list_entries.return_value = []
+
+    # 1. Warning events filter (default)
+    res_warn = get_gke_workload_events(
+        cluster_name="test-cluster",
+        namespace="test-ns",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    query_filter = res_warn["query_filter"]
+    assert 'logName =~ "/logs/events"' in query_filter
+    assert "logs%2Fevents" not in query_filter
+    assert '"OOMKilling"' in query_filter
+    assert '"OOMKilled"' in query_filter
+
+    # 2. include_normal_events filter
+    res_normal = get_gke_workload_events(
+        cluster_name="test-cluster",
+        namespace="test-ns",
+        include_normal_events=True,
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert 'logName =~ "/logs/events"' in res_normal["query_filter"]
+    assert "logs%2Fevents" not in res_normal["query_filter"]
+
+
+def test_get_gke_workload_events_input_validation_injection() -> None:
+    """SEC-02: Verify filter injection attempts are rejected."""
+    mock_client = MagicMock()
+    mock_client.list_entries.return_value = []
+
+    with pytest.raises(ValueError, match="Invalid cluster_name"):
+        get_gke_workload_events(
+            cluster_name='test-cluster"; DROP ALL',
+            project_id="test-proj",
+            client=mock_client,
+        )
+
+    with pytest.raises(ValueError, match="Invalid namespace"):
+        get_gke_workload_events(
+            cluster_name="test-cluster",
+            namespace="test-ns\nOR severity=ERROR",
+            project_id="test-proj",
+            client=mock_client,
+        )
+
+    with pytest.raises(ValueError, match="cluster_name is required"):
+        get_gke_workload_events(
+            cluster_name="   ",
+            project_id="test-proj",
+            client=mock_client,
+        )
+
+
+def test_get_gke_workload_events_client_error_handling() -> None:
+    """TEST-01: Verify error path when Cloud Logging API raises exception."""
+    mock_client = MagicMock()
+    mock_client.list_entries.side_effect = RuntimeError("Cloud Logging API unreachable")
+
+    res = get_gke_workload_events(
+        cluster_name="test-cluster",
+        namespace="test-ns",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert res["total_events"] == 0
+    assert res["events"] == []
+    assert res["cluster_name"] == "test-cluster"
+
+
+def test_get_gke_workload_events_truncation() -> None:
+    """PERF-01: Verify bounded events return and truncation flag."""
+    mock_client = MagicMock()
+    entries = []
+    for i in range(10):
+        entry = MagicMock()
+        entry.timestamp = datetime(2026, 10, 26, 21, 30, i, tzinfo=timezone.utc)
+        entry.log_name = "projects/test-proj/logs/events"
+        entry.json_payload = {
+            "reason": "Killing",
+            "message": f"Pod {i} killing",
+            "type": "Warning",
+            "involvedObject": {"name": f"pod-{i}", "kind": "Pod"},
+        }
+        entries.append(entry)
+    mock_client.list_entries.return_value = entries
+
+    res = get_gke_workload_events(
+        cluster_name="test-cluster",
+        namespace="test-ns",
+        max_events=5,
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert len(res["events"]) == 5
+    assert res["truncated"] is True
+
+
+def test_query_gke_metrics_filter_regression_and_entity_type() -> None:
+    """CORR-02: Verify resource.type = 'k8s_entity' for autoscaler metrics."""
+    mock_client = MagicMock()
+    mock_client.list_time_series.return_value = []
+
+    # 1. Autoscaler pending pods
+    res1 = query_gke_metrics(
+        metric_type="autoscaler_pending_pods",
+        cluster_name="test-cluster",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert 'resource.type = "k8s_entity"' in res1["query_filter"]
+    assert 'resource.type = "k8s_cluster"' not in res1["query_filter"]
+    assert 'resource.labels.cluster_name = "test-cluster"' in res1["query_filter"]
+
+    # 2. Autoscaler node provisioning failures
+    res2 = query_gke_metrics(
+        metric_type="autoscaler_failures",
+        cluster_name="test-cluster",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert 'resource.type = "k8s_entity"' in res2["query_filter"]
+
+    # 3. Container metric
+    res3 = query_gke_metrics(
+        metric_type="restart_count",
+        cluster_name="test-cluster",
+        namespace="test-ns",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert 'resource.type = "k8s_container"' in res3["query_filter"]
+
+
+def test_query_gke_metrics_input_validation_injection() -> None:
+    """SEC-02: Verify filter injection attempts are rejected in metrics."""
+    mock_client = MagicMock()
+
+    with pytest.raises(ValueError, match="Invalid metric_type"):
+        query_gke_metrics(metric_type='bad"type', client=mock_client)
+
+    with pytest.raises(ValueError, match="Invalid cluster_name"):
+        query_gke_metrics(cluster_name='cluster" OR 1=1', client=mock_client)
+
+    with pytest.raises(ValueError, match="Invalid pod_name"):
+        query_gke_metrics(pod_name="pod\nname", client=mock_client)
+
+
+def test_query_gke_metrics_error_handling() -> None:
+    """TEST-01: Verify graceful error capturing when Monitoring API raises."""
+    mock_client = MagicMock()
+    mock_client.list_time_series.side_effect = RuntimeError("400 Invalid metric filter")
+
+    res = query_gke_metrics(
+        metric_type="restart_count",
+        cluster_name="test-cluster",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert res["total_series"] == 0
+    assert "error" in res
+    assert "400 Invalid metric filter" in res["error"]
+
+
+def test_query_gke_metrics_max_series_truncation() -> None:
+    """PERF-01: Verify bounded series list and truncation flag."""
+    mock_client = MagicMock()
+    series_list = []
+    for i in range(10):
+        ts = MagicMock()
+        ts.resource.labels = {
+            "cluster_name": "test-cluster",
+            "namespace_name": "test-ns",
+            "pod_name": f"pod-{i}",
+            "container_name": "app",
+        }
+        pt = MagicMock()
+        pt.value.int64_value = 1
+        pt.interval.end_time = datetime(2026, 10, 26, 21, 30, 0, tzinfo=timezone.utc)
+        ts.points = [pt]
+        series_list.append(ts)
+    mock_client.list_time_series.return_value = series_list
+
+    res = query_gke_metrics(
+        metric_type="restart_count",
+        cluster_name="test-cluster",
+        max_series=3,
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert res["total_series"] == 3
+    assert len(res["series"]) == 3
+    assert res["truncated"] is True
+
+
+def test_query_gke_workload_status_tls_verification_enforced() -> None:
+    """SEC-01: Refuse connection when CA certificate is unavailable."""
+    mock_cluster_client = MagicMock()
+    cluster_obj = MagicMock()
+    cluster_obj.endpoint = "192.0.2.1"
+    cluster_obj.master_auth = None  # No CA certificate
+    mock_cluster_client.get_cluster.return_value = cluster_obj
+
+    res = query_gke_workload_status(
+        namespace="test-ns",
+        cluster_name="test-cluster",
+        location="us-central1",
+        project_id="test-proj",
+        client=mock_cluster_client,
+    )
+    assert res["status"] == "ERROR"
+    assert "Cluster CA certificate unavailable" in res["message"]
+
+
+def test_query_gke_workload_status_timeout_unreachable() -> None:
+    """CORR-03: Catch Timeout and return UNREACHABLE with diagnostics."""
+    import requests.exceptions
+
+    mock_session = MagicMock()
+    mock_session.get.side_effect = requests.exceptions.Timeout("Connection timed out after 10s")
+
+    res = query_gke_workload_status(
+        namespace="test-ns",
+        cluster_name="test-cluster",
+        location="us-central1",
+        project_id="test-proj",
+        client=mock_session,
+    )
+    assert res["status"] == "UNREACHABLE"
+    assert "timed out" in res["message"].lower()
+    assert "private cluster" in res["message"].lower()
+
+
+def test_query_gke_workload_status_connection_error_unreachable() -> None:
+    """CORR-03: Catch ConnectionError and return UNREACHABLE."""
+    import requests.exceptions
+
+    mock_session = MagicMock()
+    mock_session.get.side_effect = requests.exceptions.ConnectionError("Connection refused")
+
+    res = query_gke_workload_status(
+        namespace="test-ns",
+        cluster_name="test-cluster",
+        location="us-central1",
+        project_id="test-proj",
+        client=mock_session,
+    )
+    assert res["status"] == "UNREACHABLE"
+    assert "Failed to connect" in res["message"]
+
+
+def test_query_gke_workload_status_http_forbidden_and_unauthorized() -> None:
+    """CORR-03: Catch HTTP 403 (FORBIDDEN) and HTTP 401 (UNAUTHORIZED)."""
+    mock_session = MagicMock()
+
+    # 1. 403 Forbidden
+    resp_403 = MagicMock()
+    resp_403.status_code = 403
+    resp_403.text = "User cannot list resource deployments in API group apps"
+    mock_session.get.return_value = resp_403
+
+    res_403 = query_gke_workload_status(
+        namespace="test-ns",
+        cluster_name="test-cluster",
+        location="us-central1",
+        project_id="test-proj",
+        client=mock_session,
+    )
+    assert res_403["status"] == "FORBIDDEN"
+    assert "RBAC permissions" in res_403["message"]
+
+    # 2. 401 Unauthorized
+    resp_401 = MagicMock()
+    resp_401.status_code = 401
+    resp_401.text = "Unauthorized"
+    mock_session.get.return_value = resp_401
+
+    res_401 = query_gke_workload_status(
+        namespace="test-ns",
+        cluster_name="test-cluster",
+        location="us-central1",
+        project_id="test-proj",
+        client=mock_session,
+    )
+    assert res_401["status"] == "UNAUTHORIZED"
+
+    # 3. 500 Internal Error
+    resp_500 = MagicMock()
+    resp_500.status_code = 500
+    resp_500.text = "Internal Server Error"
+    mock_session.get.return_value = resp_500
+
+    res_500 = query_gke_workload_status(
+        namespace="test-ns",
+        cluster_name="test-cluster",
+        location="us-central1",
+        project_id="test-proj",
+        client=mock_session,
+    )
+    assert res_500["status"] == "ERROR"
+
+
+def test_query_gke_workload_status_max_pods_truncation() -> None:
+    """PERF-01: Verify max_pods truncation in query_gke_workload_status."""
+    mock_session = MagicMock()
+
+    pods_data = {
+        "items": [
+            {
+                "metadata": {"name": f"pod-{i}"},
+                "spec": {"nodeName": "node-1"},
+                "status": {"phase": "Running", "containerStatuses": []},
+            }
+            for i in range(10)
+        ]
+    }
+
+    def _mock_get(url: str, **kwargs: Any) -> Any:
+        resp = MagicMock()
+        resp.status_code = 200
+        if "deployments" in url or "statefulsets" in url:
+            resp.json.return_value = {"items": []}
+        elif "pods" in url:
+            resp.json.return_value = pods_data
+        return resp
+
+    mock_session.get.side_effect = _mock_get
+
+    res = query_gke_workload_status(
+        namespace="test-ns",
+        cluster_name="test-cluster",
+        max_pods=3,
+        project_id="test-proj",
+        client=mock_session,
+    )
+    assert res["status"] == "SUCCESS"
+    assert res["pods_count"] == 3
+    assert len(res["pods"]) == 3
+    assert res["truncated"] is True
+
+
+def test_query_gke_workload_status_input_validation() -> None:
+    """SEC-02: Verify invalid namespace input is rejected."""
+    mock_session = MagicMock()
+
+    with pytest.raises(ValueError, match="Invalid namespace"):
+        query_gke_workload_status(
+            namespace='bad"namespace',
+            client=mock_session,
+        )
+
+
+def test_resolve_endpoint_to_gke_regional_backend_service() -> None:
+    """CORR-04: Verify regional backend service resolution via RegionBackendServicesClient."""
+    mock_fw_client = MagicMock()
+    fw = MagicMock()
+    fw.name = "fw-regional-rule"
+    fw.IPAddress = "198.51.100.50"
+    fw.target = "https://www.googleapis.com/compute/v1/projects/test-proj/regions/us-west1/backendServices/regional-app-bs"
+    fw.region = "https://www.googleapis.com/compute/v1/projects/test-proj/regions/us-west1"
+
+    scoped_item = MagicMock()
+    scoped_item.forwarding_rules = [fw]
+    mock_fw_client.aggregated_list.return_value = [("regions/us-west1", scoped_item)]
+
+    mock_rbs_client = MagicMock()
+    bs = MagicMock()
+    bs.description = '{"networking.gke.io/service-name":"service-ns/frontend-web"}'
+    bs.backends = []
+    mock_rbs_client.get.return_value = bs
+
+    res = resolve_endpoint_to_gke(
+        endpoint="198.51.100.50",
+        project_id="test-proj",
+        client=mock_fw_client,
+        region_backend_services_client=mock_rbs_client,
+    )
+
+    assert res["found"] is True
+    assert res["region"] == "us-west1"
+    assert res["backend_service"] == "regional-app-bs"
+    assert res["is_kubernetes_service"] is True
+    assert res["kubernetes_service"] == "service-ns/frontend-web"
+    assert res["k8s_namespace"] == "service-ns"
+    assert res["k8s_service_name"] == "frontend-web"
+    mock_rbs_client.get.assert_called_once_with(
+        project="test-proj", region="us-west1", backend_service="regional-app-bs"
+    )
+
+
+def test_resolve_endpoint_to_gke_neg_cluster_resolution() -> None:
+    """CORR-04: Resolve cluster name and instances from backend NEGs."""
+    mock_fw_client = MagicMock()
+    fw = MagicMock()
+    fw.name = "fw-neg-rule"
+    fw.IPAddress = "198.51.100.75"
+    fw.target = "https://www.googleapis.com/compute/v1/projects/test-proj/regions/us-west1/backendServices/neg-bs"
+    fw.region = "https://www.googleapis.com/compute/v1/projects/test-proj/regions/us-west1"
+
+    scoped_item = MagicMock()
+    scoped_item.forwarding_rules = [fw]
+    mock_fw_client.aggregated_list.return_value = [("regions/us-west1", scoped_item)]
+
+    mock_rbs_client = MagicMock()
+    backend = MagicMock()
+    backend.group = "https://www.googleapis.com/compute/v1/projects/test-proj/zones/us-west1-b/networkEndpointGroups/k8s2-neg-789"
+    bs = MagicMock()
+    bs.description = '{"kubernetes.io/service-name":"test-ns/my-svc"}'
+    bs.backends = [backend]
+    mock_rbs_client.get.return_value = bs
+
+    mock_neg_client = MagicMock()
+    ep = MagicMock()
+    ep.network_endpoint.instance = "gk3-prod-cluster-nap-1234-abcd"
+    endpoints_result = MagicMock()
+    endpoints_result.items = [ep]
+    mock_neg_client.list_network_endpoints.return_value = endpoints_result
+
+    res = resolve_endpoint_to_gke(
+        endpoint="198.51.100.75",
+        project_id="test-proj",
+        client=mock_fw_client,
+        region_backend_services_client=mock_rbs_client,
+        network_endpoint_groups_client=mock_neg_client,
+    )
+
+    assert res["found"] is True
+    assert res["cluster_name"] == "prod-cluster"
+    assert "gk3-prod-cluster-nap-1234-abcd" in res["target_instances"]
+
+
+def test_describe_gke_clusters_human_readable_status_and_autopilot() -> None:
+    """STYLE-01: Verify human-readable cluster status and Autopilot status."""
+    from google.cloud import container_v1
+
+    mock_cluster_client = MagicMock()
+    c = MagicMock()
+    c.name = "my-cluster"
+    c.status = container_v1.Cluster.Status.RUNNING
+    c.current_node_count = 3
+    c.location = "us-west1"
+    c.autopilot.enabled = True
+
+    response = MagicMock()
+    response.clusters = [c]
+    mock_cluster_client.list_clusters.return_value = response
+
+    clusters = describe_gke_clusters(
+        project_id="test-proj",
+        location="-",
+        client=mock_cluster_client,
+    )
+
+    assert len(clusters) == 1
+    assert clusters[0]["name"] == "my-cluster"
+    assert clusters[0]["status"] == "RUNNING"
+    assert clusters[0]["autopilot"] is True
+    assert clusters[0]["location"] == "us-west1"

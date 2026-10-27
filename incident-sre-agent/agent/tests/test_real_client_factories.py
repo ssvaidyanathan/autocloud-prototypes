@@ -12,6 +12,8 @@ from agent.app.tools.clients import (
     get_compute_backend_services_client,
     get_compute_forwarding_rules_client,
     get_compute_instances_client,
+    get_compute_network_endpoint_groups_client,
+    get_compute_region_backend_services_client,
     get_compute_target_pools_client,
     get_genai_client,
     get_gke_cluster_client,
@@ -43,6 +45,8 @@ def test_client_factories_return_none_in_local_mode(monkeypatch: pytest.MonkeyPa
     assert get_compute_forwarding_rules_client() is None
     assert get_compute_target_pools_client() is None
     assert get_compute_backend_services_client() is None
+    assert get_compute_region_backend_services_client() is None
+    assert get_compute_network_endpoint_groups_client() is None
     assert get_gke_cluster_client() is None
     assert get_cloud_sql_admin_client() is None
     assert get_cloud_build_client() is None

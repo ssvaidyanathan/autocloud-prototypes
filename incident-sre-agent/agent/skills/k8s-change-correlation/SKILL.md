@@ -9,10 +9,10 @@ description: Correlating Kubernetes Engine incidents with k8s.io audit log chang
 Outages on Google Kubernetes Engine (GKE) standard and Autopilot clusters are predominantly triggered by recent configuration changes, deployment rollouts, automated or manual scaling patches, or cluster infrastructure adjustments. This playbook guides specialists in querying and correlating Kubernetes administrative operations with incident onset.
 
 ## Primary Telemetry Sources & Tools
-- **`get_gke_workload_events`** (`logs.py`): Query structured Kubernetes events and `k8s.io` Cloud Audit Logs (`cloudaudit.googleapis.com/activity`) filtered by cluster, namespace, and workload over the incident window.
-- **`query_audit_logs`** (`changes.py`): Search Cloud Audit Logs for administrative mutations across GCP and Kubernetes resources.
-- **`query_gke_workload_status`** (`resources.py`): Inspect current desired vs. ready replicas, active rollout state, and probe definitions.
-- **`query_gke_metrics`** (`metrics.py`): Correlate change timestamps with container restart counts, memory utilization spikes, and autoscaler actions.
+- **`query_audit_logs`** (`changes.py`): Search Cloud Audit Logs for administrative mutations across GCP and Kubernetes resources (`protoPayload.serviceName = "k8s.io"`). Primary audit tool for `ChangesSpecialist`.
+- **`get_gke_workload_events`** (`logs.py`): Query structured Kubernetes lifecycle events and `k8s.io` Cloud Audit Logs (used by `LogsSpecialist` in cross-specialist investigations).
+- **`query_gke_workload_status`** (`resources.py`): Inspect current desired vs. ready replicas, active rollout state, and probe definitions (used by `ResourcesSpecialist`).
+- **`query_gke_metrics`** (`metrics.py`): Correlate change timestamps with container restart counts, memory utilization spikes, and autoscaler actions (used by `MetricsSpecialist`).
 
 ---
 
@@ -59,7 +59,8 @@ Outages on Google Kubernetes Engine (GKE) standard and Autopilot clusters are pr
    - Establish symptom onset $T_0$ from the alert open timestamp or initial latency/error spike.
    - Set search window: $[T_0 - 60\text{ min}, T_0 + 15\text{ min}]$.
 2. **Execute Audit Query**:
-   - Query `get_gke_workload_events(cluster_name=..., namespace=..., start_time=..., end_time=...)`.
+   - For `ChangesSpecialist`, invoke `query_audit_logs(service_name=..., start_time=..., end_time=...)` to identify administrative mutations matching `protoPayload.serviceName = "k8s.io"`.
+   - In cross-specialist investigations, examine `get_gke_workload_events` results retrieved by `LogsSpecialist` for correlated Kubernetes lifecycle events.
    - Identify operations with `protoPayload.serviceName = "k8s.io"`.
 3. **Identify Principal & Rationale**:
    - Note `principal_email` to distinguish human operators from automated scaling service accounts.

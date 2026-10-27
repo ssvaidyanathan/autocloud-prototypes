@@ -1,4 +1,5 @@
 import math
+import re
 import urllib.parse
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
@@ -590,6 +591,7 @@ def query_gke_metrics(
     start_time: Optional[Union[datetime, str]] = None,
     end_time: Optional[Union[datetime, str]] = None,
     lookback_minutes: Optional[int] = None,
+    max_series: int = 50,
     project_id: Optional[str] = None,
     client: Any = None,
 ) -> Dict[str, Any]:
@@ -598,11 +600,23 @@ def query_gke_metrics(
 
     from google.protobuf import timestamp_pb2  # type: ignore[import-untyped]
 
-    from .common import normalize_datetime
+    from .common import normalize_datetime, validate_k8s_identifier
     from .registry import get_pinned_project_id
 
     pinned_project = get_pinned_project_id(project_id)
-    gcp_metric = GKE_METRIC_MAP.get(metric_type, metric_type)
+    if not metric_type or not re.match(r"^[a-zA-Z0-9_\-\./]+$", metric_type.strip()):
+        raise ValueError(f"Invalid metric_type '{metric_type}'.")
+    clean_metric_type = metric_type.strip()
+    gcp_metric = GKE_METRIC_MAP.get(clean_metric_type, clean_metric_type)
+
+    validated_cluster = (
+        validate_k8s_identifier(cluster_name, "cluster_name") if cluster_name else None
+    )
+    validated_namespace = validate_k8s_identifier(namespace, "namespace") if namespace else None
+    validated_container = (
+        validate_k8s_identifier(container_name, "container_name") if container_name else None
+    )
+    validated_pod = validate_k8s_identifier(pod_name, "pod_name") if pod_name else None
 
     start_time_dt = normalize_datetime(start_time)
     end_time_dt = normalize_datetime(end_time)
@@ -619,21 +633,23 @@ def query_gke_metrics(
     if not start_time_dt:
         start_time_dt = end_time_dt - timedelta(minutes=30)
 
+    clamped_max_series = max(1, min(200, int(max_series or 50)))
+
     is_autoscaler = "autoscaler" in gcp_metric
     filter_parts = [f'metric.type = "{gcp_metric}"']
     if is_autoscaler:
-        filter_parts.append('resource.type = "k8s_cluster"')
+        filter_parts.append('resource.type = "k8s_entity"')
     else:
         filter_parts.append('resource.type = "k8s_container"')
 
-    if cluster_name:
-        filter_parts.append(f'resource.labels.cluster_name = "{cluster_name}"')
-    if namespace and not is_autoscaler:
-        filter_parts.append(f'resource.labels.namespace_name = "{namespace}"')
-    if container_name and not is_autoscaler:
-        filter_parts.append(f'resource.labels.container_name = "{container_name}"')
-    if pod_name and not is_autoscaler:
-        filter_parts.append(f'resource.labels.pod_name = "{pod_name}"')
+    if validated_cluster:
+        filter_parts.append(f'resource.labels.cluster_name = "{validated_cluster}"')
+    if validated_namespace and not is_autoscaler:
+        filter_parts.append(f'resource.labels.namespace_name = "{validated_namespace}"')
+    if validated_container and not is_autoscaler:
+        filter_parts.append(f'resource.labels.container_name = "{validated_container}"')
+    if validated_pod and not is_autoscaler:
+        filter_parts.append(f'resource.labels.pod_name = "{validated_pod}"')
 
     filter_str = " AND ".join(filter_parts)
     console_url = (
@@ -643,12 +659,13 @@ def query_gke_metrics(
 
     if client is None and is_local_mode():
         return {
-            "metric_type": metric_type,
+            "metric_type": clean_metric_type,
             "gcp_metric": gcp_metric,
-            "cluster_name": cluster_name,
-            "namespace": namespace,
+            "cluster_name": validated_cluster,
+            "namespace": validated_namespace,
             "total_series": 0,
             "series": [],
+            "truncated": False,
             "query_filter": filter_str,
             "console_url": console_url,
         }
@@ -660,6 +677,7 @@ def query_gke_metrics(
         raise RuntimeError("GCP Monitoring client unavailable in production environment")
 
     series_data: List[Dict[str, Any]] = []
+    error_message: Optional[str] = None
     if client is not None:
         try:
             import google.cloud.monitoring_v3 as monitoring_v3
@@ -674,7 +692,8 @@ def query_gke_metrics(
                 interval=interval,
                 view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
             )
-        except Exception:
+        except Exception as exc:
+            error_message = str(exc)
             raw_series = []
 
         for ts in raw_series:
@@ -733,8 +752,8 @@ def query_gke_metrics(
 
             series_data.append(
                 {
-                    "cluster_name": labels_dict.get("cluster_name", cluster_name or ""),
-                    "namespace_name": labels_dict.get("namespace_name", namespace or ""),
+                    "cluster_name": labels_dict.get("cluster_name", validated_cluster or ""),
+                    "namespace_name": labels_dict.get("namespace_name", validated_namespace or ""),
                     "pod_name": labels_dict.get("pod_name", ""),
                     "container_name": labels_dict.get("container_name", ""),
                     "points_count": len(point_vals),
@@ -745,13 +764,19 @@ def query_gke_metrics(
                 }
             )
 
-    return {
-        "metric_type": metric_type,
+    truncated = len(series_data) > clamped_max_series
+    capped_series = series_data[:clamped_max_series]
+    result: Dict[str, Any] = {
+        "metric_type": clean_metric_type,
         "gcp_metric": gcp_metric,
-        "cluster_name": cluster_name,
-        "namespace": namespace,
-        "total_series": len(series_data),
-        "series": series_data,
+        "cluster_name": validated_cluster,
+        "namespace": validated_namespace,
+        "total_series": len(capped_series),
+        "series": capped_series,
+        "truncated": truncated,
         "query_filter": filter_str,
         "console_url": console_url,
     }
+    if error_message:
+        result["error"] = error_message
+    return result

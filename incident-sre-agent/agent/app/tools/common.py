@@ -20,6 +20,9 @@ VALID_SEVERITIES: Set[str] = {
 # Regex for safe identifier / service name (alphanumeric, hyphens, underscores)
 SAFE_SERVICE_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
+# Regex for safe Kubernetes / GCP identifier (alphanumeric, hyphens, underscores, dots)
+SAFE_K8S_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
+
 # Regex for status code or status code range (e.g. '500', '500-599')
 STATUS_CODE_PATTERN = re.compile(r"^([1-5][0-9]{2})(?:-([1-5][0-9]{2}))?$")
 
@@ -66,6 +69,28 @@ def validate_service(service: Optional[str]) -> Optional[str]:
         raise ValueError(
             f"Invalid service name '{service}'. "
             "Service names must only contain letters, numbers, hyphens, or underscores."
+        )
+    return cleaned
+
+
+def validate_k8s_identifier(
+    identifier: Optional[str], field_name: str = "identifier"
+) -> Optional[str]:
+    """Validate and sanitize a Kubernetes / GCP resource identifier to prevent filter injection."""
+    if identifier is None:
+        return None
+    cleaned = identifier.strip()
+    if not cleaned:
+        return None
+    if "\n" in cleaned or "\r" in cleaned or '"' in cleaned or "'" in cleaned:
+        raise ValueError(
+            f"Invalid {field_name} '{identifier}'. "
+            "Identifiers cannot contain newlines or quote characters."
+        )
+    if not SAFE_K8S_IDENTIFIER_PATTERN.match(cleaned):
+        raise ValueError(
+            f"Invalid {field_name} '{identifier}'. "
+            f"{field_name} must only contain letters, numbers, hyphens, underscores, or dots."
         )
     return cleaned
 
