@@ -155,6 +155,11 @@ class OKFDocument(BaseModel):
     recovered_at: Optional[str] = None
     recovery_note_posted_at: Optional[str] = None
 
+    # Stuck-investigation recovery (grouping/stuck_investigation.py): last wake attempt that
+    # (re)started the investigation, and one record per recovery.
+    investigation_started_at: Optional[str] = None
+    investigation_recoveries: list[dict[str, Any]] = Field(default_factory=list)
+
     # Degraded mode flags
     degraded: bool = False
     degraded_reason: Optional[str] = None

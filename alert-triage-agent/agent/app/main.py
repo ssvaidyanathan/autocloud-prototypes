@@ -32,6 +32,15 @@ from .grouping.manager import GroupingManager
 from .grouping.models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument
 from .grouping.store import OKFStore, read_okf, update_okf_atomically
 from .grouping.suppression import format_late_alert_work_note
+from .grouping.stuck_investigation import (
+    WATCHDOG_DEADLINE_TYPE,
+    apply_recovery_note,
+    investigation_started_epoch,
+    is_stuck_investigation,
+    mark_investigation_started,
+    recover_stuck_investigation,
+    schedule_watchdog,
+)
 from .recovery import recovery_note_for_group
 from .specialists.origin_selection import alert_event_from_entry
 from .specialists.synthesizer import SynthesizerAgent, apply_correlation_note, apply_group_alerts
@@ -320,11 +329,7 @@ async def timer_wake(
             now,
             doc.settle_deadline,
         )
-        investigating_doc = store.update_atomically(
-            doc.group_id,
-            lambda d: setattr(d, "status", IncidentGroupStatus.INVESTIGATING.value) or d,
-            create_if_missing=False,
-        )
+        investigating_doc = _start_investigation(store, doc.group_id, now, settings)
         if investigating_doc is None:
             return _group_file_gone(doc.group_id, f"{deadline_type} wake")
         doc = investigating_doc
@@ -430,11 +435,7 @@ async def timer_wake(
             now,
             doc.max_wait_deadline,
         )
-        investigating_doc = store.update_atomically(
-            doc.group_id,
-            lambda d: setattr(d, "status", IncidentGroupStatus.INVESTIGATING.value) or d,
-            create_if_missing=False,
-        )
+        investigating_doc = _start_investigation(store, doc.group_id, now, settings)
         if investigating_doc is None:
             return _group_file_gone(doc.group_id, f"{deadline_type} wake")
         doc = investigating_doc
@@ -603,11 +604,71 @@ async def timer_wake(
             )
         return TimerWakeResponse(status="executed", group_id=doc.group_id)
 
+    # 4. Stuck-investigation watchdog (grouping/stuck_investigation.py)
+    elif deadline_type == WATCHDOG_DEADLINE_TYPE:
+        return _investigation_watchdog(store, doc, now, settings, payload.scheduled_epoch)
+
     return TimerWakeResponse(
         status="ignored",
         group_id=doc.group_id,
         reason=f"unsupported_deadline_type_{payload.deadline_type}",
     )
+
+
+def _start_investigation(
+    store: OKFStore, group_id: str, now: float, settings: AgentConfig
+) -> Optional[OKFDocument]:
+    """Move the group to investigating and stamp this wake attempt; schedule the watchdog on first entry.
+
+    Returns None if the group file is gone. A watchdog scheduling failure is logged at ERROR
+    and does not block ticketing; the next alert ingest still detects a stuck group.
+    """
+    first_entry = False
+
+    def _mutate(d: OKFDocument) -> OKFDocument:
+        nonlocal first_entry
+        first_entry = mark_investigation_started(d, now)
+        return d
+
+    updated = store.update_atomically(group_id, _mutate, create_if_missing=False)
+    if updated is not None and first_entry:
+        try:
+            schedule_watchdog(settings, group_id, now + settings.investigation_stale_seconds)
+        except Exception as exc:
+            logger.error(
+                "Failed to schedule the investigation watchdog for group %s: %s; if this investigation "
+                "never tickets, only the next alert ingest detects it",
+                group_id,
+                exc,
+                exc_info=True,
+            )
+    return updated
+
+
+def _investigation_watchdog(
+    store: OKFStore, doc: OKFDocument, now: float, settings: AgentConfig, scheduled_epoch: int
+) -> TimerWakeResponse:
+    """Recover a group stuck in investigating, or re-arm the watchdog while its investigation is active.
+
+    Re-arming failures propagate (5xx) so Cloud Tasks retries this watchdog wake. The re-armed
+    wake is always later than this one: Cloud Tasks refuses a task name (which encodes the
+    epoch) reused soon after deletion, and the scheduler treats that as already scheduled.
+    """
+    curr_status = str(doc.status).lower()
+    if curr_status != IncidentGroupStatus.INVESTIGATING.value or doc.servicenow_sys_id:
+        return TimerWakeResponse(status="ignored", group_id=doc.group_id, reason=f"group_status_{doc.status}")
+
+    stale = settings.investigation_stale_seconds
+    if not is_stuck_investigation(doc, now, stale):
+        started = investigation_started_epoch(doc)
+        next_epoch = max((started if started is not None else now) + stale, float(scheduled_epoch) + 1.0)
+        schedule_watchdog(settings, doc.group_id, next_epoch)
+        return TimerWakeResponse(status="ignored", group_id=doc.group_id, reason="investigation_active")
+
+    result = recover_stuck_investigation(store, doc.group_id, now, settings, trigger="investigation watchdog")
+    if result.doc is None:
+        return _group_file_gone(doc.group_id, "investigation_watchdog wake")
+    return TimerWakeResponse(status="executed", group_id=doc.group_id, reason=f"stuck_investigation_{result.outcome}")
 
 
 def _group_file_gone(group_id: str, context: str) -> TimerWakeResponse:
@@ -760,6 +821,7 @@ def _apply_current_group_alerts(report: InvestigationReport, store: OKFStore, do
         )
     apply_group_alerts(report, list(current.alerts or []))
     apply_correlation_note(report, current.correlation)
+    apply_recovery_note(report, getattr(current, "investigation_recoveries", None))
 
 
 def _record_ticket_title(d: OKFDocument, report: InvestigationReport) -> None:

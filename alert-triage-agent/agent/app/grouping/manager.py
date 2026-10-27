@@ -35,6 +35,7 @@ from ..timers.scheduler import TimerScheduleError, schedule_delayed_timer
 from .late_alerts import exclude_late_new_signal_groups, refresh_ticket_for_late_alerts
 from .models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument, format_okf_alert_entry
 from .store import OKFStore
+from .stuck_investigation import is_stuck_investigation, recover_stuck_investigation
 from .suppression import (
     check_duplicate_alert,
     format_late_alert_work_note,
@@ -54,6 +55,11 @@ except ImportError:
 
 
 _global_ingest_lock = threading.RLock()
+
+# Statuses of groups a new alert can join (degraded, resolved, recovered and archived cannot).
+ACTIVE_GROUP_STATUSES = frozenset(
+    {"open", "investigating", "ticketed", "cooling_down", "mitigation-in-progress", "stable"}
+)
 
 
 class GroupingResult(BaseModel):
@@ -125,6 +131,25 @@ class GroupingManager:
 
         return self.store.update_atomically(group_id, _mutate)
 
+    def _recover_stuck_investigations(
+        self, active_docs: list[OKFDocument], now: float, alert: AlertEvent
+    ) -> list[OKFDocument]:
+        """Recover stuck investigating groups; drop the ones degraded (not attachable) from ``active_docs``."""
+        stale = self.config.investigation_stale_seconds
+        kept: list[OKFDocument] = []
+        for d in active_docs:
+            if not is_stuck_investigation(d, now, stale):
+                kept.append(d)
+                continue
+            result = recover_stuck_investigation(
+                self.store, d.group_id, now, self.config, trigger=f"alert {alert.incident_id} ingested"
+            )
+            if result.doc is None:
+                continue
+            if str(result.doc.status).lower() in ACTIVE_GROUP_STATUSES:
+                kept.append(result.doc)
+        return kept
+
     def ingest_alert(
         self,
         alert: AlertEvent,
@@ -155,8 +180,11 @@ class GroupingManager:
 
         # Discover active incident documents
         active_docs = self.store.list_documents(
-            status_filter={"open", "investigating", "ticketed", "cooling_down", "mitigation-in-progress", "stable"}
+            status_filter=set(ACTIVE_GROUP_STATUSES)
         )
+        # Groups stuck in 'investigating' (their wake exhausted its retries) are recovered or
+        # degraded before this alert can attach to them (see grouping/stuck_investigation.py).
+        active_docs = self._recover_stuck_investigations(active_docs, now, alert)
 
         # 1. Closed alert handling
         if alert.state and alert.state.lower() == "closed":

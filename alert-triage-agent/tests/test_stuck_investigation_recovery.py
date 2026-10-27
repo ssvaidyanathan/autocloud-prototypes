@@ -1,0 +1,579 @@
+"""Groups stuck in 'investigating' without a ticket are recovered loudly and boundedly.
+
+A settle wake moves a group to investigating and then tickets it. If that wake keeps failing
+until ata-timer-queue's retry window ends, Cloud Tasks deletes it silently. Before this fix the
+group then stayed investigating forever, with no ticket, and new alerts attached to it.
+
+Covered here (agent/app/grouping/stuck_investigation.py, manager.py, main.py):
+1. Stuck group + new alert: ERROR log, recovery recorded, a settle wake is re-enqueued, the
+   alert joins the group, and the ticket created by the recovery wake says so.
+2. Normal path unchanged: an investigation still within INVESTIGATION_STALE_SECONDS of its
+   last wake attempt is not recovered, no extra wake is scheduled, and tickets carry no note.
+3. Watchdog: armed once on entering investigating, re-arms while the wake is still retrying,
+   recovers when stuck, and is ignored after the group is ticketed.
+4. Bounded: after INVESTIGATION_MAX_RECOVERIES the group is degraded (ERROR) and new alerts
+   open a new group.
+5. Idempotent: two triggers in one stale period recover once.
+6. Config: env overrides, validation, and the stale default exceeds the timer queue backoff
+   plus the request timeout (drift guard against the Terraform default).
+"""
+
+import json
+import logging
+from pathlib import Path
+import re
+
+import pytest
+from pydantic import ValidationError
+from starlette.testclient import TestClient
+
+from agent.app import main as agent_main
+from agent.app.bridge_client import BridgeClient
+from agent.app.config import AgentConfig, get_agent_settings
+from agent.app.contracts.alert import AlertEvent
+from agent.app.contracts.instructions import TicketResponse
+from agent.app.contracts.report import InvestigationReport
+from agent.app.contracts.timers import TimerWakeRequest
+from agent.app.grouping.manager import GroupingManager
+from agent.app.grouping.store import OKFStore
+from agent.app.grouping.stuck_investigation import (
+    RECOVERY_OBSERVATION_PREFIX,
+    WATCHDOG_DEADLINE_TYPE,
+    apply_recovery_note,
+    is_stuck_investigation,
+    recovery_observation,
+)
+from agent.app.main import app, set_clock_func
+from agent.app.timers.scheduler import TimerScheduleError, set_timer_scheduler_hook
+
+STALE = 3600.0
+FOUNDATION_VARIABLES = Path(__file__).resolve().parents[1] / "infra" / "terraform" / "foundation" / "variables.tf"
+CLOUD_RUN_DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
+
+
+@pytest.fixture
+def agent_cfg(tmp_path: Path) -> AgentConfig:
+    store_dir = tmp_path / "knowledge" / "incident-manager"
+    store_dir.mkdir(parents=True, exist_ok=True)
+    return AgentConfig(
+        project_id="cloud-assist-fde-2",
+        name_prefix="ata",
+        incident_store_path=str(store_dir),
+        fallback_store_path=str(store_dir),
+        bridge_url="http://mock-bridge:8080",
+        agent_url="http://mock-agent:8000",
+        timer_queue_name="ata-timer-queue",
+        is_local=True,
+        INVESTIGATION_STALE_SECONDS=STALE,
+        INVESTIGATION_MAX_RECOVERIES=2,
+    )
+
+
+class TimerRecorder:
+    """Scheduler hook recording (deadline_type, epoch); can fail selected deadline types."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+        self.fail_types: set[str] = set()
+
+    def __call__(self, **kwargs):
+        dtype = kwargs["deadline_type"]
+        epoch = int(kwargs["deadline_dt"].timestamp())
+        if dtype in self.fail_types:
+            raise TimerScheduleError(f"cloud tasks unavailable ({dtype})")
+        self.calls.append((dtype, epoch))
+        return f"mock-task-{dtype}-{epoch}"
+
+    def of(self, dtype: str) -> list[int]:
+        return [e for t, e in self.calls if t == dtype]
+
+
+@pytest.fixture
+def clock():
+    state = {"now": 1_000_000.0}
+    timers = TimerRecorder()
+    set_clock_func(lambda: state["now"])
+    set_timer_scheduler_hook(timers)
+    state["timers"] = timers
+    yield state
+    set_clock_func(None)
+    set_timer_scheduler_hook(None)
+    app.dependency_overrides.pop(get_agent_settings, None)
+
+
+class FakeBridge:
+    """Bridge stand-in with group_id idempotency; ``down`` makes create_ticket fail."""
+
+    def __init__(self) -> None:
+        self.down = False
+        self.calls = 0
+        self.tickets: dict[str, TicketResponse] = {}
+        self.reports: dict[str, InvestigationReport] = {}
+
+    def create_ticket(self, bridge_url, request, config=None, http_client=None):
+        self.calls += 1
+        if self.down:
+            raise RuntimeError("bridge unavailable")
+        if request.group_id in self.tickets:
+            return self.tickets[request.group_id].model_copy(update={"status": "already_exists"})
+        n = len(self.tickets) + 1
+        ticket = TicketResponse(
+            status="created",
+            sys_id=f"sys_{n}",
+            number=f"INC{n:07d}",
+            url=f"https://mock.service-now.com/nav_to.do?uri=incident.do?sys_id=sys_{n}",
+            group_id=request.group_id,
+        )
+        self.tickets[request.group_id] = ticket
+        self.reports[request.group_id] = request.report
+        return ticket
+
+    def append_work_note(self, bridge_url, request, config=None, http_client=None):
+        return None
+
+
+async def _stub_investigation(primary_alert, group_id, filename, settings, group_alerts=None):
+    return InvestigationReport(group_id=group_id, summary="stub", observations="stub observation")
+
+
+def _alert(n: int) -> AlertEvent:
+    return AlertEvent(
+        incident_id=f"0.stuck-alert-{n}",
+        policy_name="projects/cloud-assist-fde-2/alertPolicies/ata-orders-5xx",
+        resource_name="ata-orders-api",
+        resource_type="cloud_run_revision",
+        state="open",
+        started_at="2026-10-24T00:16:40Z",
+    )
+
+
+def _setup(agent_cfg, monkeypatch, bridge: FakeBridge):
+    app.dependency_overrides[get_agent_settings] = lambda: agent_cfg
+    monkeypatch.setattr(BridgeClient, "create_ticket", bridge.create_ticket)
+    monkeypatch.setattr(BridgeClient, "append_work_note", bridge.append_work_note)
+    monkeypatch.setattr(agent_main, "execute_multi_agent_investigation", _stub_investigation)
+    return TestClient(app, raise_server_exceptions=False), OKFStore(config=agent_cfg)
+
+
+def _triage(client: TestClient, n: int):
+    return client.post("/triage", json=_alert(n).model_dump(mode="json"))
+
+
+def _wake(client: TestClient, group_id: str, deadline_type: str, epoch: float):
+    req = TimerWakeRequest(group_id=group_id, deadline_type=deadline_type, scheduled_epoch=int(epoch))
+    return client.post("/timer/wake", json=req.model_dump(mode="json"))
+
+
+def _stuck_group(client, store, clock, bridge) -> tuple[str, float]:
+    """Open a group, fail its settle wake (bridge down), return (group_id, last attempt epoch)."""
+    res = _triage(client, 1)
+    assert res.status_code == 200
+    group_id = res.json()["group_id"]
+    deadline = store.read(group_id).settle_deadline_epoch()
+    bridge.down = True
+    clock["now"] = deadline
+    assert _wake(client, group_id, "settle", deadline).status_code >= 500
+    doc = store.read(group_id)
+    assert doc.status == "investigating" and doc.servicenow_sys_id is None
+    return group_id, deadline
+
+
+def _stuck_logs(caplog) -> list[dict]:
+    out = []
+    for r in caplog.records:
+        if r.levelno == logging.ERROR and r.getMessage().startswith("STUCK_INVESTIGATION: "):
+            out.append(json.loads(r.getMessage().split(": ", 1)[1]))
+    return out
+
+
+# 1. Stuck group + new alert ---------------------------------------------------------------
+
+
+def test_new_alert_on_stuck_group_recovers_it_loudly_and_reenqueues_settle(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    timers = clock["timers"]
+    settles_before = len(timers.of("settle"))
+
+    clock["now"] = last_attempt + STALE + 10.0
+    with caplog.at_level(logging.ERROR):
+        res = _triage(client, 2)
+
+    assert res.status_code == 200
+    assert res.json()["group_id"] == group_id
+    doc = store.read(group_id)
+    assert doc.status == "investigating"
+    assert doc.has_alert("0.stuck-alert-2")
+    assert len(doc.investigation_recoveries) == 1
+    rec = doc.investigation_recoveries[0]
+    assert rec["trigger"] == "alert 0.stuck-alert-2 ingested"
+    assert rec["recovery_number"] == 1
+    assert timers.of("settle")[settles_before:] == [int(clock["now"])]
+    assert int(clock["now"] + STALE) in timers.of(WATCHDOG_DEADLINE_TYPE)
+    logs = _stuck_logs(caplog)
+    assert [(e["group_id"], e["action"]) for e in logs] == [(group_id, "recovered")]
+
+
+def test_recovery_settle_wake_tickets_the_group_with_the_late_alert_and_a_recovery_note(
+    agent_cfg, monkeypatch, clock
+):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    clock["now"] = last_attempt + STALE + 10.0
+    assert _triage(client, 2).status_code == 200
+    recovery_epoch = clock["timers"].of("settle")[-1]
+
+    bridge.down = False
+    clock["now"] = recovery_epoch + 1.0
+    res = _wake(client, group_id, "settle", recovery_epoch)
+
+    assert res.status_code == 200 and res.json()["status"] == "executed"
+    doc = store.read(group_id)
+    assert doc.servicenow_sys_id == "sys_1"
+    report = bridge.reports[group_id]
+    assert {"0.stuck-alert-1", "0.stuck-alert-2"} <= {a["incident_id"] for a in report.alerts}
+    notes = [o for o in report.observations.split(" | ") if o.startswith(RECOVERY_OBSERVATION_PREFIX)]
+    assert len(notes) == 1
+    assert "alert 0.stuck-alert-2 ingested" in notes[0]
+    assert f"{STALE:g}s" in notes[0]
+
+
+def test_legacy_investigating_group_without_attempt_stamp_is_treated_as_stuck(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    store.update_atomically(group_id, lambda d: setattr(d, "investigation_started_at", None) or d)
+
+    clock["now"] = last_attempt + 5.0
+    with caplog.at_level(logging.ERROR):
+        assert _triage(client, 2).status_code == 200
+
+    rec = store.read(group_id).investigation_recoveries
+    assert len(rec) == 1 and rec[0]["last_wake_attempt_at"] is None
+    assert _stuck_logs(caplog)
+
+
+def test_failed_recovery_settle_scheduling_degrades_group_and_retried_alert_opens_new_group(
+    agent_cfg, monkeypatch, clock, caplog
+):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    clock["now"] = last_attempt + STALE + 10.0
+    clock["timers"].fail_types = {"settle"}
+
+    first = _triage(client, 2)
+
+    assert first.status_code >= 500
+    stuck = store.read(group_id)
+    assert stuck.status == "degraded"
+    assert "could not schedule a settle wake" in stuck.degraded_reason
+
+    clock["timers"].fail_types = set()
+    retry = _triage(client, 2)
+    assert retry.status_code == 200
+    assert retry.json()["group_id"] != group_id
+    assert not store.read(group_id).has_alert("0.stuck-alert-2")
+
+
+# 2. Normal path unchanged -----------------------------------------------------------------
+
+
+def test_alert_on_active_investigation_attaches_without_recovery(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    calls_before = list(clock["timers"].calls)
+
+    clock["now"] = last_attempt + STALE - 10.0
+    with caplog.at_level(logging.ERROR):
+        res = _triage(client, 2)
+
+    assert res.status_code == 200 and res.json()["group_id"] == group_id
+    doc = store.read(group_id)
+    assert doc.has_alert("0.stuck-alert-2")
+    assert doc.investigation_recoveries == []
+    assert clock["timers"].calls == calls_before
+    assert _stuck_logs(caplog) == []
+
+
+def test_each_retry_of_a_failing_wake_restamps_the_attempt_so_it_is_not_stale(agent_cfg, monkeypatch, clock):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+
+    clock["now"] = last_attempt + STALE - 60.0
+    assert _wake(client, group_id, "settle", last_attempt).status_code >= 500
+    clock["now"] = last_attempt + STALE + 10.0
+
+    assert not is_stuck_investigation(store.read(group_id), clock["now"], STALE)
+    assert _triage(client, 2).status_code == 200
+    assert store.read(group_id).investigation_recoveries == []
+
+
+def test_normal_settle_ticket_has_no_recovery_note_and_arms_one_watchdog(agent_cfg, monkeypatch, clock):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id = _triage(client, 1).json()["group_id"]
+    deadline = store.read(group_id).settle_deadline_epoch()
+    clock["now"] = deadline
+
+    res = _wake(client, group_id, "settle", deadline)
+
+    assert res.json()["status"] == "executed"
+    doc = store.read(group_id)
+    assert doc.status == "ticketed" and doc.investigation_recoveries == []
+    assert RECOVERY_OBSERVATION_PREFIX not in (bridge.reports[group_id].observations or "")
+    assert clock["timers"].of(WATCHDOG_DEADLINE_TYPE) == [int(deadline + STALE)]
+
+
+def test_watchdog_scheduling_failure_does_not_block_ticketing(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id = _triage(client, 1).json()["group_id"]
+    deadline = store.read(group_id).settle_deadline_epoch()
+    clock["now"] = deadline
+    clock["timers"].fail_types = {WATCHDOG_DEADLINE_TYPE}
+
+    with caplog.at_level(logging.ERROR):
+        res = _wake(client, group_id, "settle", deadline)
+
+    assert res.status_code == 200 and res.json()["status"] == "executed"
+    assert store.read(group_id).servicenow_sys_id == "sys_1"
+    assert any("investigation watchdog" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
+
+
+# 3. Watchdog ------------------------------------------------------------------------------
+
+
+def test_retried_settle_wake_does_not_arm_another_watchdog(agent_cfg, monkeypatch, clock):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    clock["now"] = last_attempt + 60.0
+
+    _wake(client, group_id, "settle", last_attempt)
+
+    assert clock["timers"].of(WATCHDOG_DEADLINE_TYPE) == [int(last_attempt + STALE)]
+
+
+def test_watchdog_rearms_while_the_wake_is_still_retrying(agent_cfg, monkeypatch, clock):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    retry_at = last_attempt + 1800.0
+    clock["now"] = retry_at
+    _wake(client, group_id, "settle", last_attempt)
+    watchdog_epoch = clock["timers"].of(WATCHDOG_DEADLINE_TYPE)[0]
+
+    clock["now"] = watchdog_epoch
+    res = _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, watchdog_epoch)
+
+    assert res.json() == {"status": "ignored", "group_id": group_id, "reason": "investigation_active"}
+    assert clock["timers"].of(WATCHDOG_DEADLINE_TYPE)[-1] == int(retry_at + STALE)
+    assert store.read(group_id).investigation_recoveries == []
+
+
+def test_rearmed_watchdog_is_always_later_than_the_current_one(agent_cfg, monkeypatch, clock):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    watchdog_epoch = int(last_attempt + STALE)
+
+    clock["now"] = watchdog_epoch - 1.0  # delivered a moment early: not stale yet
+    res = _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, watchdog_epoch)
+
+    assert res.json()["reason"] == "investigation_active"
+    assert clock["timers"].of(WATCHDOG_DEADLINE_TYPE)[-1] > watchdog_epoch
+
+
+def test_watchdog_recovers_stuck_group_without_any_new_alert(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    watchdog_epoch = clock["timers"].of(WATCHDOG_DEADLINE_TYPE)[0]
+
+    clock["now"] = watchdog_epoch
+    with caplog.at_level(logging.ERROR):
+        res = _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, watchdog_epoch)
+
+    assert res.json()["status"] == "executed"
+    assert res.json()["reason"] == "stuck_investigation_recovered"
+    assert store.read(group_id).investigation_recoveries[0]["trigger"] == "investigation watchdog"
+    assert clock["timers"].of("settle")[-1] == int(watchdog_epoch)
+    assert _stuck_logs(caplog)[0]["action"] == "recovered"
+
+    bridge.down = False
+    clock["now"] = watchdog_epoch + 1.0
+    assert _wake(client, group_id, "settle", watchdog_epoch).json()["status"] == "executed"
+    assert len(bridge.tickets) == 1
+
+    next_watchdog = clock["timers"].of(WATCHDOG_DEADLINE_TYPE)[-1]
+    clock["now"] = next_watchdog
+    after = _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, next_watchdog)
+    assert after.json()["status"] == "ignored"
+    assert after.json()["reason"] == "group_status_ticketed"
+
+
+@pytest.mark.parametrize("status", ["open", "ticketed", "cooling_down", "degraded"])
+def test_watchdog_ignores_groups_not_investigating(agent_cfg, monkeypatch, clock, status):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id = _triage(client, 1).json()["group_id"]
+    store.update_atomically(group_id, lambda d: setattr(d, "status", status) or d)
+    calls_before = list(clock["timers"].calls)
+    clock["now"] += 10 * STALE
+
+    res = _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, clock["now"])
+
+    assert res.json() == {"status": "ignored", "group_id": group_id, "reason": f"group_status_{status}"}
+    assert clock["timers"].calls == calls_before
+    assert store.read(group_id).status == status
+
+
+# 4. Bounded -------------------------------------------------------------------------------
+
+
+def test_group_is_degraded_after_max_recoveries_and_new_alert_opens_new_group(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    t = last_attempt
+    for n in (2, 3):  # INVESTIGATION_MAX_RECOVERIES=2
+        t += STALE + 10.0
+        clock["now"] = t
+        assert _triage(client, n).json()["group_id"] == group_id
+    assert len(store.read(group_id).investigation_recoveries) == 2
+    settles_before = len(clock["timers"].of("settle"))
+
+    clock["now"] = t + STALE + 10.0
+    caplog.clear()
+    with caplog.at_level(logging.ERROR):
+        res = _triage(client, 4)
+
+    assert res.status_code == 200
+    assert res.json()["group_id"] != group_id
+    stuck = store.read(group_id)
+    assert stuck.status == "degraded" and stuck.degraded is True
+    assert "2 of 2 recoveries already used" in stuck.degraded_reason
+    assert not stuck.has_alert("0.stuck-alert-4")
+    assert len(stuck.investigation_recoveries) == 2
+    assert clock["timers"].of("settle")[settles_before:] == [int(clock["now"]) + 120]  # the new group's settle only
+    logs = _stuck_logs(caplog)
+    assert [e["action"] for e in logs] == ["degraded"]
+    assert logs[0]["recoveries_used"] == 2 and "recovery_number" not in logs[0]
+
+
+# 5. Idempotent ----------------------------------------------------------------------------
+
+
+def test_two_triggers_in_one_stale_period_recover_once(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    clock["now"] = last_attempt + STALE + 10.0
+    stale_view = store.read(group_id)
+
+    with caplog.at_level(logging.ERROR):
+        assert _triage(client, 2).status_code == 200
+        clock["now"] += 5.0
+        # A trigger holding the pre-recovery read (e.g. the watchdog) re-checks the fresh document.
+        res = agent_main._investigation_watchdog(store, stale_view, clock["now"], agent_cfg, int(clock["now"]))
+        assert _triage(client, 3).status_code == 200
+
+    assert res.reason == "stuck_investigation_not_stuck"
+    assert len(store.read(group_id).investigation_recoveries) == 1
+    assert len(_stuck_logs(caplog)) == 1
+
+
+def test_manager_ingest_with_injected_time_recovers_stuck_group(agent_cfg, clock):
+    store = OKFStore(config=agent_cfg)
+
+    class _Bridge:
+        def append_work_note(self, **kwargs):
+            return None
+
+    mgr = GroupingManager(config=agent_cfg, store=store, bridge_client=_Bridge())
+    created = mgr.ingest_alert(_alert(1), current_time=1000.0)
+    store.update_atomically(
+        created.group_id,
+        lambda d: (setattr(d, "status", "investigating"), setattr(d, "investigation_started_at", "1970-01-01T00:16:40Z"))
+        and d,
+    )
+
+    res = mgr.ingest_alert(_alert(2), current_time=1000.0 + STALE + 1.0)
+
+    assert res.group_id == created.group_id
+    assert len(store.read(created.group_id).investigation_recoveries) == 1
+
+
+# Observation text -------------------------------------------------------------------------
+
+
+def test_recovery_observation_states_each_recovery():
+    recs = [
+        {"at": "2026-10-28T01:00:00Z", "trigger": "investigation watchdog", "last_wake_attempt_at": "2026-10-28T00:00:00Z", "stale_seconds": 3600.0},
+        {"at": "2026-10-28T02:30:00Z", "trigger": "alert 0.x ingested", "last_wake_attempt_at": None, "stale_seconds": 3600.0},
+    ]
+    line = recovery_observation(recs)
+    assert line.startswith(RECOVERY_OBSERVATION_PREFIX)
+    assert "3600s" in line
+    assert "restarted at 2026-10-28T01:00:00Z (investigation watchdog; last wake attempt 2026-10-28T00:00:00Z)" in line
+    assert "restarted at 2026-10-28T02:30:00Z (alert 0.x ingested; last wake attempt not recorded)" in line
+    assert " | " not in line
+    assert recovery_observation([]) is None and recovery_observation(None) is None
+
+
+def test_apply_recovery_note_is_idempotent():
+    report = InvestigationReport(group_id="g", summary="s", observations="a | b")
+    recs = [{"at": "t1", "trigger": "investigation watchdog", "last_wake_attempt_at": "t0", "stale_seconds": 60}]
+    apply_recovery_note(report, recs)
+    apply_recovery_note(report, recs)
+    items = report.observations.split(" | ")
+    assert items[:2] == ["a", "b"]
+    assert sum(i.startswith(RECOVERY_OBSERVATION_PREFIX) for i in items) == 1
+
+
+# 6. Config --------------------------------------------------------------------------------
+
+
+def test_stuck_investigation_settings_read_from_env(monkeypatch):
+    monkeypatch.setenv("INVESTIGATION_STALE_SECONDS", "7200")
+    monkeypatch.setenv("INVESTIGATION_MAX_RECOVERIES", "5")
+    cfg = AgentConfig()
+    assert cfg.investigation_stale_seconds == 7200.0
+    assert cfg.investigation_max_recoveries == 5
+
+
+@pytest.mark.parametrize(
+    "env,value",
+    [
+        ("INVESTIGATION_STALE_SECONDS", "0"),
+        ("INVESTIGATION_STALE_SECONDS", "-1"),
+        ("INVESTIGATION_STALE_SECONDS", "soon"),
+        ("INVESTIGATION_MAX_RECOVERIES", "0"),
+        ("INVESTIGATION_MAX_RECOVERIES", "1.5"),
+    ],
+)
+def test_invalid_stuck_investigation_settings_are_rejected(monkeypatch, env, value):
+    monkeypatch.setenv(env, value)
+    with pytest.raises(ValidationError):
+        AgentConfig()
+
+
+def _tf_default_seconds(variable: str) -> float:
+    text = FOUNDATION_VARIABLES.read_text()
+    m = re.search(r'variable "%s"\s*\{[^}]*?default\s*=\s*"([0-9.]+)s"' % re.escape(variable), text, re.S)
+    assert m, f"{variable} default not found in {FOUNDATION_VARIABLES}"
+    return float(m.group(1))
+
+
+def test_default_stale_threshold_exceeds_timer_backoff_plus_request_timeout():
+    # Every retry of a failing wake re-stamps the attempt. Retries are at most
+    # timer_queue_max_backoff apart and an attempt can run up to the request timeout,
+    # so a smaller threshold could recover a group whose wake is still retrying.
+    max_backoff = _tf_default_seconds("timer_queue_max_backoff")
+    default = AgentConfig.model_fields["investigation_stale_seconds"].default
+    assert default > max_backoff + CLOUD_RUN_DEFAULT_REQUEST_TIMEOUT_SECONDS

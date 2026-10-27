@@ -93,6 +93,16 @@ class AgentConfig(BaseSettings):
         default=600.0, alias="LATE_NEW_SIGNAL_MAX_ONSET_GAP_SECONDS", ge=0
     )
 
+    # Stuck investigations: a group in 'investigating' with no ServiceNow sys_id whose last
+    # settle/max-wait wake attempt is more than this many seconds old is treated as stuck (its
+    # wake exhausted ata-timer-queue's retries). Every retry of a failing wake re-stamps the
+    # attempt, so this must exceed timer_queue_max_backoff plus the agent request timeout
+    # (Cloud Run default 300s), or a recovery can start a second investigation beside a live one.
+    investigation_stale_seconds: float = Field(default=3600.0, alias="INVESTIGATION_STALE_SECONDS", gt=0)
+    # Recoveries (re-enqueued settle wakes) per stuck group. When one more would be needed the
+    # group is marked degraded (ERROR) and new alerts open a new group instead of joining it.
+    investigation_max_recoveries: int = Field(default=3, alias="INVESTIGATION_MAX_RECOVERIES", ge=1)
+
     @property
     def effective_incidents_bucket(self) -> str:
         return self.incidents_bucket or f"{self.project_id}-{self.name_prefix}-incidents"
