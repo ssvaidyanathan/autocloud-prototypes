@@ -280,11 +280,11 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 | **ServiceNow URL**     | `SERVICENOW_INSTANCE_URL` | *None* | **Configuration (NOT a secret)**: Base URL of ServiceNow instance (e.g. `https://<instance>.service-now.com`). |
 | **ServiceNow Caller**  | `SERVICENOW_CALLER` | `ATA Integration` | Caller ID populated on created ServiceNow incident records. |
 | **Assignment Group**   | `SERVICENOW_ASSIGNMENT_GROUP` | `Cloud SRE Tier-2` | Assignment group for triage routing in ServiceNow. |
-| **IAM Database User**  | `DB_USER` | `${NAME_PREFIX}-inventory-sa@...` | IAM database user for Cloud SQL IAM authentication. |
-| **Database Name**      | `DB_NAME` | `inventory` | PostgreSQL database name on Cloud SQL. |
-| **DB Connection Name** | `INSTANCE_CONNECTION_NAME` | `${PROJECT_ID}:${REGION}:${NAME_PREFIX}-inventory-db` | Cloud SQL instance connection string. |
-| **IAM DB Auth Flag**   | `DB_IAM_AUTH` | `true` | Enables IAM database authentication via pg8000 connector. |
-| **Mock Database Flag** | `MOCK_DB` | `false` | Enables in-memory catalog fallback when Cloud SQL is unreachable. |
+| **IAM Database User**  | `ATA_INVENTORY_DB_USER` | `${NAME_PREFIX}-inventory-sa@...` | IAM database user for Cloud SQL IAM authentication. |
+| **Database Name**      | `ATA_INVENTORY_DB_NAME` | `inventory` | PostgreSQL database name on Cloud SQL. |
+| **DB Connection Name** | `ATA_INVENTORY_INSTANCE_CONNECTION_NAME` | `${PROJECT_ID}:${REGION}:${NAME_PREFIX}-inventory-db` | Cloud SQL instance connection string. |
+| **IAM DB Auth Flag**   | `ATA_INVENTORY_DB_IAM_AUTH` | `true` | Enables IAM database authentication via pg8000 connector. |
+| **Mock Database Flag** | `ATA_INVENTORY_MOCK_DB` | `false` | Serves the in-memory catalog instead of Cloud SQL. |
 | **Local Mode Flag**    | `IS_LOCAL` | `false` | Enables mock storage and local adapters for offline testing. |
 | **Auto-Resolve on Recovery** | `AUTO_RESOLVE_ON_RECOVERY` | `false` | When all alerts close and the 180s cool-down passes: `false` leaves the ServiceNow ticket In Progress and adds a work note stating that the alerts closed (with the measured traffic around the close) and that a human must verify the remediation before resolving it. `true` resolves the ticket. See "Cool-down and resolution" under [Sequence Flow](#sequence-flow-mermaid). |
 
@@ -704,7 +704,7 @@ pip install -e "./bridge[dev]" -e "./agent[dev]" -e "./tools[dev]" pytest ruff m
 Set `IS_LOCAL=true` to enable offline mock mode:
 - `ata-bridge` uses mock webhook verification and records ticket operations locally.
 - `ata-agent` reads and writes incident Open Knowledge Files (OKF) to local temporary storage (`/tmp/knowledge/incident-manager`) without requiring GCS bucket credentials.
-- `ata-inventory-api` falls back to in-memory catalog data without requiring a live Cloud SQL connection (`MOCK_DB=true`).
+- `ata-inventory-api` falls back to in-memory catalog data without requiring a live Cloud SQL connection (`ATA_INVENTORY_MOCK_DB=true`).
 
 ### Quality Gates & Presubmit Verification
 All pull requests must pass the following checks cleanly:
