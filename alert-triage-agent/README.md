@@ -231,8 +231,8 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 | Setting | Environment Variable | Default Value | Description & Rationale |
 | :--- | :--- | :--- | :--- |
 | **GCP Project** | `PROJECT_ID` | *Set by the deploy scripts* | Target Google Cloud project identifier. The deploy scripts require it (no default). |
-| **Resource Prefix** | `NAME_PREFIX` | `ata` | Namespace prefix for isolating resources (`${NAME_PREFIX}-${base_name}`). |
-| **Compute Region** | `REGION` | `us-west1` | Target GCP region hosting Cloud Run, Cloud Tasks, and Cloud SQL. |
+| **Resource Prefix** | `NAME_PREFIX` | required (no default; the live stack uses `ata`) | Namespace prefix for isolating resources (`${NAME_PREFIX}-${base_name}`). |
+| **Compute Region** | `REGION` | required (no default) | Target GCP region hosting Cloud Run, Cloud Tasks, and Cloud SQL. |
 | **Environment** | `ENVIRONMENT` | `prod` | Runtime environment name read by the service. The deploy scripts do not pass it to Cloud Run, so the default applies. Not the `env` resource label, which comes from the shell `ENVIRONMENT` used by the deploy scripts and the Terraform `environment` variable (live value: `demo`; see [CONFIGURATION.md §7.1](CONFIGURATION.md#71-label-scheme--value-requirements)). |
 | **Incidents Bucket** | `INCIDENTS_BUCKET` | `${PROJECT_ID}-${NAME_PREFIX}-incidents` | GCS bucket for persistent Open Knowledge File (OKF) storage. |
 | **Incident Store Path** | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` | Local or mounted directory path for active OKF incident files. |
