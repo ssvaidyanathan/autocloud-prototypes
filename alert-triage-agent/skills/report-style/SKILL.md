@@ -26,7 +26,7 @@ Every executive summary posted into the ServiceNow `work_notes` journal must be 
 [code]
 <p><b>Executive Summary:</b></p>
 <ul>
-  <li><b>Problem:</b> Elevated HTTP 5xx error rate (14.2% failure rate) on ata-inventory-api impacting upstream consumers (ata-orders-api, ata-apigee-orders-v1) since 2026-10-23T00:13:00Z (Severity: P1).</li>
+  <li><b>Problem:</b> Elevated HTTP 5xx error rate (14.2% failure rate) on ata-inventory-api impacting dependent services (ata-orders-api, ata-apigee-orders-v1) since 2026-10-23T00:13:00Z (Severity: P1).</li>
   <li><b>Systems:</b> Origin: <code>ata-inventory-api</code> [Cloud Run Service] (91% confidence) | Blast Radius: ata-inventory-api [Cloud Run Service], ata-orders-api [Cloud Run Service], ata-apigee-orders-v1 [Apigee API Proxy] | Dependency Path: Apigee (ata-apigee-orders-v1) -&gt; Cloud Run (ata-orders-api) -&gt; Cloud Run (ata-inventory-api) -&gt; Cloud SQL (ata-inventory-db).</li>
   <li><b>Probable Root Cause:</b> Service degradation on <code>ata-inventory-api</code> (HTTP 5xx error rate 14.2%) after revision ata-inventory-api-00004-abc.</li>
   <li><b>Observations:</b> Cloud Monitoring policy 'ata-inventory-5xx' fired at 2026-10-23T00:13:00Z; HTTP 5xx errors reached 14.2% of total traffic; Container restarts recorded: 2 instances; Log signature: 'Database query timeout after 5000ms'; Revision ata-inventory-api-00004-abc deployed 18m prior to alert trigger.</li>
@@ -58,7 +58,7 @@ Incident File: gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/
 Executive Summary:
 
 Problem:
-  - Elevated HTTP 5xx error rate (14.2% failure rate) on ata-inventory-api impacting upstream consumers (ata-orders-api, ata-apigee-orders-v1) since 2026-10-23T00:13:00Z (Severity: P1)
+  - Elevated HTTP 5xx error rate (14.2% failure rate) on ata-inventory-api impacting dependent services (ata-orders-api, ata-apigee-orders-v1) since 2026-10-23T00:13:00Z (Severity: P1)
 Systems:
   - Origin: ata-inventory-api [Cloud Run Service] (91% confidence)
   - Blast Radius: ata-inventory-api [Cloud Run Service], ata-orders-api [Cloud Run Service], ata-apigee-orders-v1 [Apigee API Proxy]

@@ -137,6 +137,26 @@ def has_db_auth_signature(text: str) -> bool:
     return any(p.search(lowered) for p in DB_AUTH_PATTERNS)
 
 
+def db_auth_search_term(text: str) -> Optional[str]:
+    """Literal text of a DB authentication signature in ``text``, usable as a log search term.
+
+    The span matched by DB_AUTH_PATTERNS, cut at single quotes (the term goes into a
+    single-quoted shell argument) and reduced to its longest piece. A Cloud Logging global
+    restriction ("<term>") is a case-insensitive substring match on any field, so a query
+    built from it finds the line the signature was detected in. None without a signature.
+    """
+    lowered = (text or "").lower()
+    for p in DB_AUTH_PATTERNS:
+        m = p.search(lowered)
+        if not m:
+            continue
+        pieces = [piece.strip() for piece in m.group(0).split("'")]
+        term = max(pieces, key=len)
+        if term:
+            return term
+    return None
+
+
 def is_excluded_endpoint(path: str) -> bool:
     """Check if an HTTP request path should be excluded from telemetry/logs."""
     for pattern in EXCLUDED_ENDPOINT_PATTERNS:
@@ -248,6 +268,8 @@ class CloudRunSpecialist(BaseSpecialist):
         service_describe_info: Optional[dict[str, Any]] = None
         error_logs_captured: list[dict[str, Any]] = []
         detected_db_auth_in_logs: bool = False
+        # Search term taken from the log line the DB auth signature was detected in.
+        db_auth_log_term: Optional[str] = None
         detected_db_connect_failure_in_logs: bool = False
         logs_unavailable = False
 
@@ -409,12 +431,19 @@ class CloudRunSpecialist(BaseSpecialist):
                 text_payload = getattr(entry, "text_payload", None)
                 if text_payload:
                     entry_text_parts.append(str(text_payload))
+                # The entry's own fields only (not the formatted excerpt): a log query
+                # searches these, so the search term must come from one of them.
+                raw_entry_parts = list(entry_text_parts)
                 if clean_line:
                     entry_text_parts.append(clean_line)
                 full_entry_text = " ".join(entry_text_parts).lower()
 
                 if has_db_auth_signature(full_entry_text):
                     detected_db_auth_in_logs = True
+                    if db_auth_log_term is None:
+                        db_auth_log_term = next(
+                            (t for t in (db_auth_search_term(part) for part in raw_entry_parts) if t), None
+                        )
                 elif has_db_connect_failure_signature(full_entry_text):
                     detected_db_connect_failure_in_logs = True
 
@@ -550,6 +579,8 @@ class CloudRunSpecialist(BaseSpecialist):
             has_db_auth_error = detected_db_auth_in_logs
             if has_db_auth_error:
                 metrics["has_db_auth_error"] = True
+                if db_auth_log_term:
+                    metrics["db_auth_log_term"] = db_auth_log_term
                 metrics["observed_symptom"] = "database authentication errors from application logs"
                 findings.append(f"Application error logs on `{target_service}` indicate database authentication failure.")
             elif detected_db_connect_failure_in_logs:

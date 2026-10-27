@@ -319,7 +319,6 @@ def generate_investigation_report(
             ),
             ActionItem(
                 title="Verify service capacity, instance scaling, and connection limits",
-                rollback="Revert latest service revision deployment if degradation persists.",
             ),
         ]
 
