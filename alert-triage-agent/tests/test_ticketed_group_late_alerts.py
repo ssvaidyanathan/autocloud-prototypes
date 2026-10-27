@@ -321,6 +321,54 @@ def test_failed_ticket_update_is_logged_and_not_recorded_as_applied(agent_cfg, c
     assert any("INC0010328" in r.getMessage() and r.levelname == "ERROR" for r in caplog.records)
 
 
+def test_failed_escalation_is_applied_by_the_next_late_alert(agent_cfg):
+    """predeploy3 R1: the P1 escalation failed (bridge error / rollback 404); the next, less
+    severe late alert must still escalate the ticket and title from the whole group."""
+    bridge = FakeBridge(fail_update=True)
+    manager, store = _manager(agent_cfg, _s1_group(), bridge)
+    manager.ingest_alert(_orders_5xx(), current_time=S1_5XX_EPOCH)
+    assert bridge.updates == [] and store.read(S1_GROUP_ID).ticket_priority is None
+
+    bridge.fail_update = False
+    later = _alert("0.later-latency", "ata-orders-latency", "ata-orders-api", "latency", "p2",
+                   started_at="2026-10-27T11:59:30Z")
+    manager.ingest_alert(later, current_time=S1_5XX_EPOCH + 40)
+
+    assert len(bridge.updates) == 1
+    update = bridge.updates[0]
+    assert update.priority == "P1"
+    assert update.short_description == "[P1] ata-inventory-api: Elevated HTTP 5xx error rate (3 alerts)"
+    assert "Priority unchanged" not in update.work_note
+    assert "P2 -&gt; P1" in update.work_note
+    assert "0.oebae2b4yuqz</code>, already in this group, has severity p1" in update.work_note
+    stored = store.read(S1_GROUP_ID)
+    assert stored.ticket_priority == "P1"
+    assert stored.priority == "P1"
+
+
+def test_plan_escalates_from_group_alert_when_ticket_priority_was_never_applied():
+    doc = _with_alerts(
+        _s1_group(with_ticket_fields=True),
+        _orders_5xx(),
+        _alert("0.later-latency", "ata-orders-latency", "ata-orders-api", "latency", "p2"),
+    )
+    # The 5xx escalation was never recorded: ticket fields still say P2 / latency.
+    plan = plan_ticket_refresh(doc, ["0.later-latency"])
+    assert plan.escalated is True
+    assert plan.priority == "P1"
+    assert plan.escalating_alert == "0.oebae2b4yuqz"
+    assert plan.escalating_alert_is_new is False
+    assert plan.title_problem == "Elevated HTTP 5xx error rate"
+    assert plan.short_description == "[P1] ata-inventory-api: Elevated HTTP 5xx error rate (3 alerts)"
+
+
+def test_plan_names_new_alert_on_severity_tie():
+    doc = _with_alerts(_s1_group(with_ticket_fields=True), _orders_5xx(), _inventory_5xx())
+    plan = plan_ticket_refresh(doc, ["0.oebae2b4yuqu"])
+    assert plan.escalating_alert == "0.oebae2b4yuqu" and plan.escalating_alert_is_new is True
+    assert "new alert <code>0.oebae2b4yuqu</code>" in plan.work_note
+
+
 def test_alert_attaching_to_unticketed_open_group_sends_no_ticket_update(agent_cfg):
     bridge = FakeBridge()
     doc = _s1_group(status="open")

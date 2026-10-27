@@ -4,7 +4,8 @@ Two rules (QA round 2, S1 / INC0010328):
 
 1. Ticket refresh. When alerts attach to a group that already has a ServiceNow ticket, the
    ticket's short description is rebuilt from the group (the alert count always equals the
-   group's alerts) and the priority is raised when a new alert's severity label is higher. The
+   group's alerts) and the priority is raised when any group alert's severity label is higher
+   than the priority recorded as applied to the ticket (so a failed escalation is retried). The
    priority is never lowered automatically. Every change goes out with a work note naming the
    new alerts, the old and new title and the escalation, and is logged.
 
@@ -79,6 +80,8 @@ class TicketRefresh:
     alert_count: int
     work_note: str = ""
     escalating_alert: Optional[str] = None
+    escalating_alert_is_new: bool = True
+    escalating_severity: Optional[str] = None
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -119,7 +122,13 @@ def plan_ticket_refresh(doc: OKFDocument, new_alert_ids: list[str]) -> Optional[
         doc, origin, prev_priority, prior_alerts, prev_problem
     ).build_short_description(max_length=TICKET_TITLE_MAX_LENGTH)
 
-    most_severe = min(new_entries, key=lambda a: _priority_rank(alert_priority(a)))
+    # Over ALL group alerts, against the priority recorded as applied to the ticket: an
+    # escalation whose update-fields call failed (bridge error, rollback 404) is not recorded,
+    # so the next refresh still sees the group's more severe alert and applies it. On a tie a
+    # new alert is named. Still only ever raised.
+    most_severe = min(
+        alerts, key=lambda a: (_priority_rank(alert_priority(a)), a.get("incident_id") not in new_ids)
+    )
     new_rank = _priority_rank(alert_priority(most_severe))
     escalated = new_rank < _priority_rank(prev_priority)
     if escalated:
@@ -146,6 +155,8 @@ def plan_ticket_refresh(doc: OKFDocument, new_alert_ids: list[str]) -> Optional[
         origin=origin,
         alert_count=report.alert_count(),
         escalating_alert=most_severe.get("incident_id") if escalated else None,
+        escalating_alert_is_new=most_severe.get("incident_id") in new_ids,
+        escalating_severity=alert_priority(most_severe),
     )
     plan.work_note = _work_note(plan, new_entries)
     return plan
@@ -165,15 +176,22 @@ def _work_note(plan: TicketRefresh, new_entries: list[dict[str, Any]]) -> str:
     prev_label = "Previous short description (reconstructed from the group file)" if plan.previous_title_reconstructed else "Previous short description"
     if plan.escalated:
         level = "1" if plan.priority.upper() == "P1" else "2"
+        if plan.escalating_alert_is_new:
+            why = f"new alert <code>{e(str(plan.escalating_alert))}</code> is more severe than the ticket"
+        else:
+            why = (
+                f"alert <code>{e(str(plan.escalating_alert))}</code>, already in this group, has severity "
+                f"{e(str(plan.escalating_severity or '').lower())}, above the ticket priority "
+                f"{e(plan.previous_priority)} recorded on the group file"
+            )
         prio = (
             f"<b>Priority escalated:</b> {e(plan.previous_priority)} -&gt; {e(plan.priority)} "
-            f"(new alert <code>{e(str(plan.escalating_alert))}</code> is more severe than the ticket); "
-            f"urgency/impact set to {level}."
+            f"({why}); urgency/impact set to {level}."
         )
     else:
         prio = (
-            f"<b>Priority unchanged:</b> {e(plan.priority)} (no new alert is more severe than the ticket; "
-            "priority is never lowered automatically)."
+            f"<b>Priority unchanged:</b> {e(plan.priority)} (no alert in the group is more severe than the "
+            "ticket; priority is never lowered automatically)."
         )
     return (
         f"[code]<b>Ticket Updated:</b> {n} correlated alert{'s' if n != 1 else ''} joined this incident after "
