@@ -69,16 +69,16 @@ TOKEN="$(resolve_apigee_token)"
 BASE_URL="https://apigee.googleapis.com/v1/organizations/${PROJECT_ID}"
 SA_EMAIL="ata-apigee-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 
-BUNDLE_SRC="${SCRIPT_DIR}/../../demo/apigee/ata-orders-v1"
-TMP_DIR="/tmp/ata-orders-s3-$$"
-ZIP_FILE="/tmp/ata-orders-v1-s3.zip"
+BUNDLE_RENDER="${SCRIPT_DIR}/../../demo/apigee/render-bundle.sh"
+TMP_DIR="/tmp/${NAME_PREFIX}-orders-s3-$$"
+ZIP_FILE="/tmp/${NAME_PREFIX}-orders-v1-s3.zip"
 
-if [ ! -d "${BUNDLE_SRC}/apiproxy/policies" ]; then
-    log_error "FATAL: Apigee bundle ${BUNDLE_SRC} (apiproxy/policies) not found; S3 not started, no fault injected." >&2
+# Render the prefix-neutral template (demo/apigee/orders-v1) for this stack's NAME_PREFIX.
+rm -rf "${TMP_DIR}"
+if ! "${BUNDLE_RENDER}" orders-v1 "${NAME_PREFIX}" "${TMP_DIR}" > /dev/null; then
+    log_error "FATAL: could not render Apigee bundle template orders-v1 for prefix ${NAME_PREFIX}; S3 not started, no fault injected." >&2
     exit 1
 fi
-mkdir -p "${TMP_DIR}"
-cp -r "${BUNDLE_SRC}"/* "${TMP_DIR}/"
 
 cat <<'EOF' > "${TMP_DIR}/apiproxy/policies/SA-SpikeArrest.xml"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
