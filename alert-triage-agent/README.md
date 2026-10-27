@@ -372,7 +372,7 @@ The Alert Triage Agent has been evaluated against live GCP infrastructure across
 1. **Cloud SQL `db-f1-micro` Connection Limits**: The test tier uses `db-f1-micro` with `max_connections = 25`. The alert threshold is calibrated at 20 connections (~80% capacity). Under heavy production traffic, production instances (`db-custom-*`) require recalibration.
 2. **Pre-Existing Apigee X Dependency**: Requires an existing Apigee X organization and environment group hostname (`8.233.247.52.nip.io`).
 3. **Local Mock Mode vs Live GCP**: While `IS_LOCAL=true` provides in-memory mock adapters for offline unit tests, full end-to-end evaluation requires live GCP credentials and APIs.
-4. **Serialized Triage Queue**: `ata-triage-queue` runs with `max_concurrent_dispatches = 1`, so alerts are processed one at a time. This keeps correlation and grouping deterministic and prevents one incident from being split across groups, at the cost of throughput during large alert bursts. Failed dispatches are retried for up to 2 hours (backoff `1s` to `300s`). An outage longer than that drops the queued alerts. See [CONFIGURATION.md §4](CONFIGURATION.md#4-cloud-tasks-queue-configuration).
+4. **Serialized Triage Queue**: `ata-triage-queue` runs with `max_concurrent_dispatches = 1`, so alerts are processed one at a time. This keeps correlation and grouping deterministic and prevents one incident from being split across groups, at the cost of throughput during large alert bursts. Failed dispatches are retried for a bounded window (`triage_queue_max_retry_duration`). The window is measured from each alert's first delivery attempt, so after a long outage the alerts whose first attempt was more than one window before recovery are dropped. Alerts that arrived later are still delivered. See [CONFIGURATION.md §4](CONFIGURATION.md#4-cloud-tasks-queue-configuration).
 
 ---
 
@@ -439,7 +439,7 @@ cd ../../..
 
 **Resources Created**:
 - GCS Bucket: `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents` (versioning enabled).
-- Cloud Tasks Queues: `ata-triage-queue` (max concurrent: 1, retried for up to 2h) and `ata-timer-queue` (max concurrent: 50, GCP default retries).
+- Cloud Tasks Queues: `ata-triage-queue` (max concurrent: 1, retried within `triage_queue_max_retry_duration`) and `ata-timer-queue` (max concurrent: 50, GCP default retries).
 - Service Accounts: `ata-orders-sa`, `ata-inventory-sa`, `ata-apigee-sa`, `ata-bridge-sa`, `ata-agent-sa`, `ata-tools-sa`.
 - Secret Placeholders: `ata-webhook-token`, `ata-servicenow-username`, `ata-servicenow-password`.
 

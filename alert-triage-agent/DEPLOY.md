@@ -115,7 +115,7 @@ terraform apply tfplan
 ### Resources Created
 - **GCS Bucket:** `gs://cloud-assist-fde-2-ata-incidents` (Object versioning enabled, mounted at `/knowledge/incident-manager` using `mount-options=only-dir=knowledge/incident-manager`). Active OKF files reside exclusively under `gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/`, while reset/historical files are moved to `gs://cloud-assist-fde-2-ata-incidents/archive/`.
 - **Cloud Tasks Queues:**
-  - `ata-triage-queue`: Serialized alert dispatch queue (`max_concurrent_dispatches: 1`, `max_dispatches_per_second: 10`). Failed dispatches are retried for up to 2 hours (`max_retry_duration: 7200s`, backoff `1s` to `300s`). For details, see [CONFIGURATION.md §4](CONFIGURATION.md#4-cloud-tasks-queue-configuration).
+  - `ata-triage-queue`: Serialized alert dispatch queue (`max_concurrent_dispatches: 1`, `max_dispatches_per_second: 10`). Failed dispatches are retried until the retry window `triage_queue_max_retry_duration` ends, with backoff from `triage_queue_min_backoff` to `triage_queue_max_backoff`. For the defaults and details, see [CONFIGURATION.md §4](CONFIGURATION.md#4-cloud-tasks-queue-configuration).
   - `ata-timer-queue`: Dedicated delayed timer queue for settle, max-wait, and cool-down deadlines (`max_concurrent_dispatches: 50`, `max_dispatches_per_second: 50`). No `retry_config` is set, so the GCP default retry policy applies.
 - **Service Accounts:**
   - `ata-orders-sa`: Identity for `ata-orders-api`
@@ -125,6 +125,20 @@ terraform apply tfplan
   - `ata-agent-sa`: Identity for `ata-agent` ADK runtime (granted `roles/cloudtasks.enqueuer` and `roles/iam.serviceAccountUser` on `ata-timer-queue`, and `roles/run.invoker` on `ata-agent` and `ata-bridge`)
   - `ata-tools-sa`: Identity for `ata-tools` FastMCP server
 - **Secret Manager Resources:** `ata-webhook-token`, `ata-servicenow-username`, `ata-servicenow-password`. (`servicenow_instance_url` is a Terraform configuration variable, not a secret).
+
+### Applying Queue-Only Changes
+When you change only the triage queue (for example its `retry_config` or the `triage_queue_*` variables), target the queue resource:
+
+```bash
+cd alert-triage-agent/infra/terraform/foundation
+terraform plan -target=google_cloud_tasks_queue.triage_queue -out=tfplan
+terraform apply tfplan
+```
+
+> [!WARNING]
+> Do not assume an untargeted `terraform apply` of the foundation module will change only the queue. The module may have other pending in-place changes that were never applied, such as label or service account description updates. Before any untargeted apply, run a full `terraform plan` and review every change it lists. In particular, check that `random_password.webhook_token` is not replaced, because a replacement rotates the webhook token.
+
+After the apply, confirm the live settings with `gcloud tasks queues describe ata-triage-queue --location=<region>`.
 
 ---
 

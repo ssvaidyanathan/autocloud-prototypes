@@ -194,19 +194,20 @@ resource "google_cloud_tasks_queue" "timer_queue" {
 }
 ```
 
-The triage queue retry values come from variables in `infra/terraform/foundation/variables.tf`:
+The triage queue retry values come from variables in `infra/terraform/foundation/variables.tf`. The defaults below are copied from that file, which is the source of truth. The rest of the documentation refers to the retry window as `triage_queue_max_retry_duration` and does not repeat its value. Terraform validation rejects `max_attempts` below 1, malformed or zero durations, and a `max_backoff` smaller than `min_backoff`.
 
 | Variable | Default | Effect |
 | :--- | :--- | :--- |
-| `triage_queue_max_retry_duration` | `"7200s"` (2h) | How long a failed task keeps being retried, measured from its first attempt. |
-| `triage_queue_min_backoff` | `"1s"` | First wait between retries. The wait doubles on each retry. |
+| `triage_queue_max_retry_duration` | `"86400s"` (24h) | Retry window: how long a failed task keeps being retried, measured from its first attempt. Must be greater than `0s`. With the default, alerts survive outages of up to about 24h, for example overnight. That is about 296 attempts per task if each failure returns quickly (fewer if requests hang until the dispatch deadline). |
+| `triage_queue_min_backoff` | `"1s"` | First wait between retries. The wait doubles on each retry, up to `max_backoff` (16 doublings by default). |
 | `triage_queue_max_backoff` | `"300s"` (5 min) | Longest wait between retries. |
-| `triage_queue_max_attempts` | `5` | Minimum attempts per task. Cloud Tasks stops retrying only when **both** this and the retry duration are satisfied. The value is kept low so that the 2-hour duration sets the limit (about 30 attempts in total). Do not set it to `-1`: unlimited attempts means tasks retry until the 31-day task retention limit. |
+| `triage_queue_max_attempts` | `5` | Minimum attempts per task. Cloud Tasks stops retrying only when **both** this and the retry duration are satisfied. It is kept at a small positive value so that the retry window sets the limit. `-1` is rejected by validation: the [Cloud Tasks `RetryConfig` reference](https://cloud.google.com/tasks/docs/reference/rest/v2/RetryConfig) describes `-1` only together with a `maxRetryDuration` of `0` (retry until the task retention limit), and [Configuring queues](https://cloud.google.com/tasks/docs/configuring-queues#retry) states that the retry duration still applies when attempts are set to `-1`. It would add nothing here. |
 
 - **Serialized `ata-triage-queue` (`max_concurrent_dispatches = 1`):** Alerts are processed one at a time, which keeps correlation and grouping deterministic and prevents one incident from being split across groups.
-- **Explicit triage retry window:** A failed `/triage` dispatch is retried for up to 2 hours, so alerts survive an agent or downstream outage of up to about 2h instead of being silently dropped. Alerts still failing after 2h are deleted by Cloud Tasks.
+- **Explicit triage retry window:** A failed `/triage` dispatch is retried until `triage_queue_max_retry_duration` has passed since its first attempt. With fast failures, the backoff runs 1s, 2s, 4s … 256s and then holds at 300s. The window is measured per task, so an alert is lost only if its first delivery attempt was more than one window before the agent recovered. Alerts that arrive later in a long outage are still delivered.
+- **Dropped alerts are silent:** When the window ends, Cloud Tasks deletes the task. Cloud Tasks has no dead-letter queue, and the foundation module does not enable queue logging (`stackdriver_logging_config`), so nothing records the drop.
 - **Timer queue retries:** `ata-timer-queue` sets no `retry_config`, so it uses the GCP default retry policy.
-- **Applying changes:** Queue settings change only when you apply the foundation module (`cd infra/terraform/foundation && terraform apply`). Editing `main.tf` or the variables does not affect the live queues until then.
+- **Applying changes:** Queue settings change only when you apply the foundation module. Editing `main.tf` or the variables does not affect the live queues until then. To change only the triage queue, use a targeted apply as described in [DEPLOY.md, Applying Queue-Only Changes](DEPLOY.md#applying-queue-only-changes).
 - **Dedicated `ata-timer-queue`:** Prevents delayed timers from being head-of-line blocked behind high-volume alert webhook bursts.
 - **OIDC Dispatch Authentication:** Cloud Tasks generates Google-signed ID tokens for both raw alert dispatch (`/triage`) and timer wakeups (`/timer/wake`), validated via `verify_agent_caller`.
 
