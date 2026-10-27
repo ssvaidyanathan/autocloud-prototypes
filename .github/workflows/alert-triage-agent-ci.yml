@@ -122,7 +122,7 @@ jobs:
         run: terraform -chdir=infra/terraform fmt -check -recursive
       - name: Validate each stack (no backend, no credentials)
         run: |
-          for stack in foundation database applications observability; do
+          for stack in foundation database applications observability triage-iam; do
             echo "Validating ${stack}..."
             terraform -chdir="infra/terraform/${stack}" init -backend=false -input=false
             terraform -chdir="infra/terraform/${stack}" validate
