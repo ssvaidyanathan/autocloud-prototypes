@@ -8,14 +8,16 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
 
+from tests.conftest import TEST_PIN_DIGEST, TEST_PIN_REVISION
+
 SCENARIOS_DIR = Path(__file__).parent.parent / "scripts" / "scenarios"
-PINNED_DIGEST = "sha256:24b07eaa50db6d226889607116f0dd43693df5e1f597867a79e0f86e3d7767ce"
-PINNED_REVISION = "ata-inventory-api-00073-9vb"
+# The suite's fixture pin (tests/conftest.py, ATA_INVENTORY_PIN_FILE), never the committed one.
+PINNED_DIGEST = TEST_PIN_DIGEST
+PINNED_REVISION = TEST_PIN_REVISION
 
 
 def _run_guard(tmp_path, guard, gcloud_stdout, mock_mode="false"):
@@ -120,14 +122,15 @@ def _committed_pin():
                 if line and not line.startswith("#"))
 
 
-def test_committed_pin_file_is_the_default_pin():
+@pytest.mark.reads_committed_pin  # validates the committed file's format, not its values
+def test_committed_pin_file_is_the_default_pin(tmp_path):
     pin = _committed_pin()
     assert set(pin) == {"PIN_INVENTORY_REVISION", "PIN_INVENTORY_DIGEST",
                         "PIN_INVENTORY_PREVIOUS_REVISION", "PIN_INVENTORY_PREVIOUS_DIGEST"}
     assert re.fullmatch(r"ata-inventory-api-[a-z0-9-]+", pin["PIN_INVENTORY_REVISION"])
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", pin["PIN_INVENTORY_DIGEST"])
     # It parses with the real loader (the strict checks are covered with temp pins below).
-    res = _source_default_pin(Path(tempfile.mkdtemp()), "ata", guard='echo "${PINNED_INVENTORY_REVISION} ${PINNED_INVENTORY_DIGEST}"')
+    res = _source_default_pin(tmp_path, "ata", guard='echo "${PINNED_INVENTORY_REVISION} ${PINNED_INVENTORY_DIGEST}"')
     assert res.returncode == 0, res.stderr
     assert res.stdout.strip() == f"{pin['PIN_INVENTORY_REVISION']} {pin['PIN_INVENTORY_DIGEST']}"
 
@@ -196,6 +199,7 @@ def _source_default_pin(tmp_path, prefix, guard="echo REACHED", scenarios_dir=SC
                           text=True, env=env, check=False, cwd=str(tmp_path))
 
 
+@pytest.mark.reads_committed_pin  # validates the committed file's format, not its values
 def test_pin_file_is_per_prefix():
     """The ata pin is stack data of stack 'ata' only; no prefix-neutral pin file remains."""
     assert PIN_FILE.is_file()
@@ -206,15 +210,20 @@ def test_pin_file_is_per_prefix():
 
 
 def test_default_pin_path_follows_the_prefix(tmp_path):
-    res = _source_default_pin(tmp_path, "ata", guard='echo "${INVENTORY_PIN_FILE} ${PINNED_INVENTORY_REVISION}"')
+    """With no ATA_INVENTORY_PIN_FILE, common.sh reads inventory-pin.<prefix>.env next to itself
+    (a copy under tmp_path holding a fixture pin; the committed pin is stack data)."""
+    scenarios = _isolated_scenarios_dir(tmp_path)
+    (scenarios / "inventory-pin.ata.env").write_text(GOOD_PIN)
+    res = _source_default_pin(tmp_path, "ata", guard='echo "${INVENTORY_PIN_FILE} ${PINNED_INVENTORY_REVISION}"',
+                              scenarios_dir=scenarios)
     assert res.returncode == 0, res.stderr
-    assert res.stdout.strip() == f"{PIN_FILE} {_committed_pin()['PIN_INVENTORY_REVISION']}"
+    assert res.stdout.strip() == f"{scenarios / 'inventory-pin.ata.env'} {PINNED_REVISION}"
 
 
 def test_new_prefix_without_pin_file_says_to_run_prepare_initial(tmp_path):
     """atat has no pin file: scenarios/preflight fail; the ata pin is never used for it."""
     scenarios = _isolated_scenarios_dir(tmp_path)
-    shutil.copy2(PIN_FILE, scenarios / PIN_FILE.name)  # the ata pin is right there, and not used
+    (scenarios / "inventory-pin.ata.env").write_text(GOOD_PIN)  # an ata pin is right there, and not used
     res = _source_default_pin(tmp_path, "atat", scenarios_dir=scenarios)
     assert res.returncode != 0 and "REACHED" not in res.stdout
     assert "no inventory pin for stack 'atat'" in res.stderr
@@ -270,9 +279,12 @@ def test_invalid_instance_cap_fails_loudly(tmp_path, value):
     assert "ATA_DEMO_MAX_INSTANCES" in res.stderr
 
 
+@pytest.mark.reads_committed_pin  # the committed values are search needles here, never expected values
 def test_no_other_file_hardcodes_the_pinned_digest_or_revision():
     """Re-pinning is one step: only the pin file (and tests/docs) name the pinned values."""
+    needles = [v for k, v in _committed_pin().items() if v and k != "PIN_INVENTORY_PREVIOUS_REVISION"]
+    needles.append(_committed_pin()["PIN_INVENTORY_PREVIOUS_REVISION"] or "-unused-")
     for path in [*(REPO / "scripts").rglob("*.sh"), REPO / "demo/ata-inventory-api/scripts/deploy.sh"]:
         text = path.read_text()
-        assert PINNED_DIGEST not in text, path
-        assert PINNED_REVISION not in text, path
+        for needle in needles:
+            assert needle not in text, (path, needle)

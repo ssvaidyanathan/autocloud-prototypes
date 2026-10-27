@@ -126,8 +126,8 @@ os.environ["ATA_STACK_DIR"] = TEST_STACK_DIR
 # script the suite starts reads this per-session test pin instead (ATA_INVENTORY_PIN_FILE).
 # Helpers that scrub ATA_* set their own pin file; tests of the default (committed) location
 # drop the variable and parse the committed file rather than hard-coding its values.
-TEST_PIN_REVISION = "ata-inventory-api-00073-9vb"
-TEST_PIN_DIGEST = "sha256:24b07eaa50db6d226889607116f0dd43693df5e1f597867a79e0f86e3d7767ce"
+TEST_PIN_REVISION = f"{TEST_NAME_PREFIX}-inventory-api-pin-tests"
+TEST_PIN_DIGEST = "sha256:" + "0123456789abcdef" * 4
 TEST_PIN_FILE = os.path.join(TEST_STACK_DIR, "inventory-pin.test.env")
 with open(TEST_PIN_FILE, "w") as _f:
     _f.write(f"# test pin (tests/conftest.py)\nPIN_INVENTORY_REVISION={TEST_PIN_REVISION}\n"
@@ -176,3 +176,105 @@ def _checkout_stack_files_untouched():
     after = _checkout_stack_files()
     changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
     assert not changed, f"the test run changed stack-local files in the checkout: {changed}"
+
+
+# --- The committed inventory pin files are stack data, not test data (fresh-rev-delta R1) ----
+# scripts/scenarios/inventory-pin.<prefix>.env changes on every re-pin. A test that reads it for
+# expected values (or runs a script that does) turns the suite red on every legitimate re-pin.
+# Tests write their own pin file and point ATA_INVENTORY_PIN_FILE at it (or run a copy of
+# scripts/ under tmp_path). This guard fails any test that
+#   - opens a committed pin file from Python (read_text, open, shutil.copy, ...), or
+#   - starts a process that would read one: ATA_INVENTORY_PIN_FILE naming a committed pin, or
+#     unset/empty while the process runs a script of this checkout (argv, or a script file that
+#     names this checkout's scripts/ directory) with a NAME_PREFIX that has a committed pin.
+# A test that deliberately validates the committed file's FORMAT is marked
+# @pytest.mark.reads_committed_pin and must not assert its values.
+import sys  # noqa: E402
+
+_SCRIPTS_DIR = os.path.join(_CHECKOUT, "scripts")
+_SCENARIOS_DIR = os.path.join(_SCRIPTS_DIR, "scenarios")
+_COMMITTED_PINS = {os.path.realpath(p) for p in glob.glob(os.path.join(_SCENARIOS_DIR, "inventory-pin.*.env"))}
+_COMMITTED_PIN_PREFIXES = {os.path.basename(p)[len("inventory-pin."):-len(".env")] for p in _COMMITTED_PINS}
+_CHECKOUT_SCRIPT_ROOTS = tuple(os.path.realpath(os.path.join(_CHECKOUT, d)) + os.sep
+                               for d in ("scripts", "demo", "agent", "bridge", "tools"))
+_pin_guard = {"active": False, "allowed": False, "busy": False, "violations": []}
+
+
+def _is_committed_pin(path) -> bool:
+    try:
+        p = os.fsdecode(os.fspath(path))
+    except TypeError:
+        return False
+    return os.path.basename(p).startswith("inventory-pin.") and os.path.realpath(p) in _COMMITTED_PINS
+
+
+def _names_checkout_script(arg: str) -> bool:
+    if not arg or "\0" in arg:
+        return False
+    real = os.path.realpath(arg) if os.path.isabs(arg) else None
+    if real and real.startswith(_CHECKOUT_SCRIPT_ROOTS):
+        return True
+    if real and os.path.isfile(real) and os.path.getsize(real) < 256 * 1024:
+        try:
+            with open(real, "rb") as f:
+                return os.fsencode(_SCRIPTS_DIR + os.sep) in f.read()
+        except OSError:
+            return False
+    return _SCRIPTS_DIR + os.sep in arg  # bash -c '... source <checkout>/scripts/...'
+
+
+def _popen_reads_committed_pin(args, env) -> str:
+    env = os.environ if env is None else {os.fsdecode(k): os.fsdecode(v) for k, v in env.items()}
+    pin_file = env.get("ATA_INVENTORY_PIN_FILE", "")
+    if pin_file:
+        return f"ATA_INVENTORY_PIN_FILE={pin_file}" if _is_committed_pin(pin_file) else ""
+    if env.get("NAME_PREFIX", "") not in _COMMITTED_PIN_PREFIXES:
+        return ""
+    argv = [args] if isinstance(args, (str, bytes, os.PathLike)) else list(args or ())
+    for a in argv:
+        try:
+            a = os.fsdecode(os.fspath(a))
+        except TypeError:
+            continue
+        if _names_checkout_script(a):
+            return f"runs {a} with NAME_PREFIX={env['NAME_PREFIX']} and no ATA_INVENTORY_PIN_FILE"
+    return ""
+
+
+def _pin_audit_hook(event, args):
+    g = _pin_guard
+    if not g["active"] or g["allowed"] or g["busy"] or event not in ("open", "subprocess.Popen"):
+        return
+    g["busy"] = True
+    try:
+        if event == "open":
+            if args and _is_committed_pin(args[0]):
+                g["violations"].append(f"opened {os.fsdecode(os.fspath(args[0]))}")
+        else:
+            why = _popen_reads_committed_pin(args[1], args[3])
+            if why:
+                g["violations"].append(f"subprocess {why}")
+    finally:
+        g["busy"] = False
+
+
+sys.addaudithook(_pin_audit_hook)
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "reads_committed_pin: the test validates the FORMAT of a committed "
+                                       "scripts/scenarios/inventory-pin.<prefix>.env (never its values).")
+
+
+@pytest.fixture(autouse=True)
+def _committed_pin_untouched(request):
+    """Fail a test that reads a committed inventory pin file (see the block comment above)."""
+    _pin_guard.update(active=True, allowed=request.node.get_closest_marker("reads_committed_pin") is not None,
+                      violations=[])
+    yield
+    violations = list(_pin_guard["violations"])
+    _pin_guard.update(active=False, allowed=False, violations=[])
+    assert not violations, (
+        "this test reads a committed inventory pin file (stack data that changes on every re-pin): "
+        f"{violations[:3]}. Write a fixture pin file and set ATA_INVENTORY_PIN_FILE, or mark a format-only "
+        "test @pytest.mark.reads_committed_pin (tests/conftest.py).")

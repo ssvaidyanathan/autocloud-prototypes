@@ -20,7 +20,7 @@ def pkg(tmp_path):
     """A copy of scripts/ under <tmp>/pkg/alert-triage-agent, so the stack files
     (.<prefix>-apigee.env, .<prefix>-api-key) are written next to it, not into the checkout."""
     root = tmp_path / "pkg" / "alert-triage-agent"
-    shutil.copytree(ROOT / "scripts", root / "scripts")
+    shutil.copytree(ROOT / "scripts", root / "scripts", ignore=shutil.ignore_patterns("inventory-pin.*.env"))
     for p in ("ata", "atat"):
         (root / "scripts" / "scenarios" / f"inventory-pin.{p}.env").write_text(PIN.format(p=p))
     return root

@@ -14,10 +14,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import TEST_PIN_DIGEST, TEST_PIN_REVISION
+
 SCENARIOS_DIR = Path(__file__).parent.parent / "scripts" / "scenarios"
 S5_SCRIPT = SCENARIOS_DIR / "s5_bad_deploy.sh"
-PINNED_DIGEST = "sha256:24b07eaa50db6d226889607116f0dd43693df5e1f597867a79e0f86e3d7767ce"
-PINNED_REVISION = "ata-inventory-api-00073-9vb"
+# The suite's fixture pin (tests/conftest.py, ATA_INVENTORY_PIN_FILE), never the committed one.
+PINNED_DIGEST = TEST_PIN_DIGEST
+PINNED_REVISION = TEST_PIN_REVISION
 PINNED_IMAGE = f"us-west1-docker.pkg.dev/cloud-assist-fde-2/ata-docker/ata-inventory-api@{PINNED_DIGEST}"
 GOOD_USER = "ata-inventory-sa@cloud-assist-fde-2.iam"
 BAD_USER = "invalid-iam-user@cloud-assist-fde-2.iam"

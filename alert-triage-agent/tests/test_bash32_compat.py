@@ -44,7 +44,7 @@ def stub_bin(tmp_path):
 def isolated_scripts(tmp_path):
     """Copy of scripts/ under tmp_path/pkg, so no real .ata-api-key is in the lookup path."""
     scripts = tmp_path / "pkg" / "alert-triage-agent" / "scripts"
-    shutil.copytree(SCRIPTS_DIR, scripts)
+    shutil.copytree(SCRIPTS_DIR, scripts, ignore=shutil.ignore_patterns("inventory-pin.*.env"))
     return scripts
 
 
@@ -240,7 +240,7 @@ STUB_SCENARIO = '#!/usr/bin/env bash\necho "{name}" >> "$ATA_TEST_RAN"\nexit {rc
 
 def make_driver(tmp_path, failing=()):
     scripts = tmp_path / "scripts"
-    shutil.copytree(SCRIPTS_DIR, scripts)
+    shutil.copytree(SCRIPTS_DIR, scripts, ignore=shutil.ignore_patterns("inventory-pin.*.env"))
     for script in (scripts / "scenarios").glob("s[1-5]_*.sh"):
         name = script.name.split("_")[0]
         script.write_text(STUB_SCENARIO.format(name=name, rc=1 if name in failing else 0))

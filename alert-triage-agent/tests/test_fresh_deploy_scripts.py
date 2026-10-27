@@ -172,7 +172,7 @@ RECORDER = '#!/bin/sh\npython3 -c \'import json,os,sys; open(os.path.join(os.env
 
 def _copy_tree(tmp_path):
     work = tmp_path / "ata"
-    shutil.copytree(ROOT / "scripts", work / "scripts")
+    shutil.copytree(ROOT / "scripts", work / "scripts", ignore=shutil.ignore_patterns("inventory-pin.*.env"))
     for component in ("agent", "bridge", "tools"):
         (work / component).mkdir()
         shutil.copytree(ROOT / component / "scripts", work / component / "scripts")

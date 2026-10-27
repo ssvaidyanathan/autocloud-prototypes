@@ -23,7 +23,7 @@ STUB_RESET = (
 
 def make_driver(tmp_path):
     scripts = tmp_path / "scripts"
-    shutil.copytree(SCRIPTS_DIR, scripts)
+    shutil.copytree(SCRIPTS_DIR, scripts, ignore=shutil.ignore_patterns("inventory-pin.*.env"))
     for script in (scripts / "scenarios").glob("s[1-5]_*.sh"):
         script.write_text(STUB_SCENARIO.format(name=script.name.split("_")[0]))
     (scripts / "reset-scenarios.sh").write_text(STUB_RESET)

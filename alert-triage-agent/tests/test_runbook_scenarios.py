@@ -110,7 +110,7 @@ def test_common_api_key_success_when_present(tmp_path):
     # A copy of scripts/, so the key file is not written into the checkout.
     import shutil
     pkg = tmp_path / "pkg" / "alert-triage-agent"
-    shutil.copytree(SCENARIOS_DIR.parent, pkg / "scripts")
+    shutil.copytree(SCENARIOS_DIR.parent, pkg / "scripts", ignore=shutil.ignore_patterns("inventory-pin.*.env"))
     key_file = pkg / ".ata-api-key"
     key_file.write_text("test-consumer-key-12345\n")
 

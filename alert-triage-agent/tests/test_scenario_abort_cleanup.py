@@ -183,7 +183,7 @@ def test_s3_unknown_previous_revision_is_reported_as_still_left(tmp_path, env):
 
 def test_s3_missing_bundle_stops_before_any_fault(tmp_path, env):
     scripts = tmp_path / "pkg" / "alert-triage-agent" / "scripts"
-    shutil.copytree(SCRIPTS_DIR, scripts)  # no demo/apigee bundle next to this copy
+    shutil.copytree(SCRIPTS_DIR, scripts, ignore=shutil.ignore_patterns("inventory-pin.*.env"))  # no demo/apigee bundle next to this copy
     res = _run(tmp_path, env, "s3_concurrent_disjoint.sh", "--hold", "0s", scripts_dir=scripts)
     assert res.returncode == 1
     assert "Apigee bundle" in res.stderr and "no fault injected" in res.stderr

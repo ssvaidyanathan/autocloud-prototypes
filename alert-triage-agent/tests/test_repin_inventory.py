@@ -541,8 +541,8 @@ def test_status_for_a_new_prefix_uses_its_own_default_pin_file_and_leaves_atas_u
     shutil.copytree(REPO_ROOT / "scripts", repo / "scripts",
                     ignore=shutil.ignore_patterns("__pycache__", "inventory-pin.*.env"))
     scenarios = repo / "scripts" / "scenarios"
-    shutil.copy2(REPO_ROOT / "scripts" / "scenarios" / "inventory-pin.ata.env", scenarios)
-    ata_pin = scenarios / "inventory-pin.ata.env"
+    ata_pin = scenarios / "inventory-pin.ata.env"  # a fixture ata pin, never the committed one
+    ata_pin.write_text(f"PIN_INVENTORY_REVISION=ata-inventory-api-pin-fixture\nPIN_INVENTORY_DIGEST=sha256:{'ab' * 32}\n")
     before = (hashlib.sha256(ata_pin.read_bytes()).hexdigest(), ata_pin.stat().st_mtime_ns)
     assert sorted(p.name for p in scenarios.glob("inventory-pin.*.env")) == ["inventory-pin.ata.env"]
 
