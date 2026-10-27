@@ -213,11 +213,14 @@ def test_apigee_origin_with_revisions_evaluated_and_no_switch_is_no():
 
 
 def test_change_specialist_records_the_timeline_as_checked(agent_cfg):
-    with patch("agent.app.specialists.change.fetch_change_timeline", return_value={"changes": []}):
+    full = {"changes": [], "apigee": {"org": "test-org", "environment": "test-env", "proxy_prefix": "ata-",
+                                      "deployments": []}}
+    with patch("agent.app.specialists.change.fetch_change_timeline", return_value=full):
         dossier = asyncio.run(ChangeSpecialist().investigate(_event(S2_ORDERS), agent_cfg))
     assert ", ".join(dossier.metrics[CHANGE_SOURCES_KEY]) == TIMELINE
     assert any("No Cloud Run revision deployments detected" in f for f in dossier.findings)
-    assert any(f.startswith("Apigee deployment history: no proxy deployments") for f in dossier.findings)
+    assert any(f.startswith("Apigee deployment history (org test-org, environment test-env, proxies ata-*): "
+                            "no proxy deployments") for f in dossier.findings)
 
 
 def test_change_specialist_with_no_source_makes_no_negative_finding(agent_cfg):
@@ -260,3 +263,25 @@ def test_contract_default_is_not_assessed_and_set_values_are_kept(report_cls):
     assert "Change-Induced: No (checked)\n" in make(change_induced="No (checked)").build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")
     old = make(raw_metadata={"change_induced": "Yes (rev 2)"})
     assert "Change-Induced: Yes (rev 2)\n" in old.build_structured_description(project_id="test-project", incidents_bucket="test-project-ata-incidents")
+
+
+@pytest.mark.parametrize("timeline,reason", [
+    # The old ata-tools (queries env prod, ignores non-200) returns exactly this shape.
+    ({"changes": []}, "no Apigee deployment summary (no 'apigee' block)"),
+    ({"changes": [], "apigee": "n/a"}, "malformed Apigee deployment summary"),
+    ({"changes": [], "apigee": {"proxy_prefix": "ata-", "deployments": []}}, "incomplete (missing org, environment)"),
+    ({"changes": [], "apigee": {"org": "o", "environment": "e"}}, "incomplete (missing deployments)"),
+])
+def test_missing_or_incomplete_apigee_block_is_not_assessed_never_no_deployments(agent_cfg, timeline, reason):
+    """crev R4: without the summary the ticket must not say "no proxy deployments"; it says the
+    Apigee deployment history was not assessed, with the reason."""
+    with patch("agent.app.specialists.change.fetch_change_timeline", return_value=timeline):
+        dossier = asyncio.run(ChangeSpecialist().investigate(_event(S2_ORDERS), agent_cfg))
+    joined = " ".join(dossier.findings)
+    assert "no proxy deployments" not in joined
+    assert not any(f.startswith("Apigee deployment history") for f in dossier.findings)
+    assert "Apigee proxy deployment history was not assessed" in joined
+    assert reason in joined
+    assert "apigee_deployments_in_window" not in dossier.metrics
+    # Cloud Run history still counts as checked; the Apigee half does not.
+    assert dossier.metrics[CHANGE_SOURCES_KEY] == ["ata-tools change timeline (Cloud Run revision history)"]

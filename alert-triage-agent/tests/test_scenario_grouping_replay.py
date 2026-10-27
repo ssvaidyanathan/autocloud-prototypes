@@ -398,7 +398,7 @@ def replay_live_sequence(
 
             # 2. Dispatch to bridge monitoring webhook
             alert_payload = alert.model_dump(mode="json")
-            bridge_resp = bridge_client.post(f"/webhook/monitoring?token={webhook_token}", json=alert_payload)
+            bridge_resp = bridge_client.post("/webhook/monitoring", headers={"Authorization": f"Bearer {webhook_token}"}, json=alert_payload)
             assert bridge_resp.status_code == 202, f"Bridge webhook rejected alert: {bridge_resp.status_code} {bridge_resp.text}"
 
             task_id = bridge_resp.json()["task_id"]
@@ -920,7 +920,7 @@ def test_edge_case_flapping_cooldown_linger(replay_env):
     clock.advance_to(base_ts + 140.0, agent_client)
     clock.current_time = base_ts + 140.0
 
-    bridge_resp = bridge_client.post(f"/webhook/monitoring?token={webhook_token}", json=alert_closed.model_dump(mode="json"))
+    bridge_resp = bridge_client.post("/webhook/monitoring", headers={"Authorization": f"Bearer {webhook_token}"}, json=alert_closed.model_dump(mode="json"))
     assert bridge_resp.status_code == 202
     task_id = bridge_resp.json()["task_id"]
     task_payload = dispatcher.local_payloads[dispatcher.get_task_name(task_id)]
@@ -944,7 +944,7 @@ def test_edge_case_flapping_cooldown_linger(replay_env):
     clock.advance_to(base_ts + 200.0, agent_client)
     clock.current_time = base_ts + 200.0
 
-    bridge_resp = bridge_client.post(f"/webhook/monitoring?token={webhook_token}", json=alert_retrigger.model_dump(mode="json"))
+    bridge_resp = bridge_client.post("/webhook/monitoring", headers={"Authorization": f"Bearer {webhook_token}"}, json=alert_retrigger.model_dump(mode="json"))
     assert bridge_resp.status_code == 202
     task_id = bridge_resp.json()["task_id"]
     task_payload = dispatcher.local_payloads[dispatcher.get_task_name(task_id)]
@@ -1000,7 +1000,7 @@ def test_edge_case_same_second_arrival(replay_env):
     )
 
     def process_alert(alert: AlertEvent):
-        resp = bridge_client.post(f"/webhook/monitoring?token={webhook_token}", json=alert.model_dump(mode="json"))
+        resp = bridge_client.post("/webhook/monitoring", headers={"Authorization": f"Bearer {webhook_token}"}, json=alert.model_dump(mode="json"))
         task_id = resp.json()["task_id"]
         task_name = dispatcher.get_task_name(task_id)
         task_payload = dispatcher.local_payloads[task_name]

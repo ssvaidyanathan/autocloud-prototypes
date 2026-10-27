@@ -126,9 +126,34 @@ def test_foundation_enables_apis_and_creates_all_runtime_sas():
         assert f'account_id   = "${{var.name_prefix}}-{sa}-sa"' in main_tf, sa
     # No tools SA: tools runs as the agent SA.
     assert "-tools-sa" not in main_tf
-    for role in ("roles/aiplatform.user", "roles/apigee.readOnlyAdmin", "roles/cloudsql.client",
-                 "roles/cloudsql.instanceUser"):
+    for role in ("roles/aiplatform.user", "roles/cloudsql.client", "roles/cloudsql.instanceUser"):
         assert role in main_tf
+
+
+def test_agent_apigee_access_is_a_narrow_custom_role_not_read_only_admin():
+    """sec M3: readOnlyAdmin reads every developer app key in the shared org. The agent SA (which
+    also runs tools) gets a per-stack custom role with exactly what ata-tools calls."""
+    main_tf = (TF_DIR / "foundation" / "main.tf").read_text()
+    variables_tf = (TF_DIR / "foundation" / "variables.tf").read_text()
+    assert not re.search(r'^\s*"roles/apigee\.', main_tf, re.M), "no predefined Apigee role grants"
+    block = re.search(r'resource "google_project_iam_custom_role" "apigee_deploy_reader" \{.*?\n\}', main_tf, re.S)
+    assert block, "custom role missing"
+    block = block.group(0)
+    assert 'role_id     = "${var.name_prefix}ApigeeDeployReader${var.apigee_reader_role_suffix}"' in block
+    perms = re.findall(r'"(apigee\.[a-z.]+)"', block)
+    assert sorted(perms) == ["apigee.deployments.list", "apigee.proxyrevisions.get"]
+    assert not [p for p in perms if "developer" in p or "app" in p.split(".")[1] or "keys" in p]
+    grant = re.search(r'resource "google_project_iam_member" "agent_apigee_deploy_reader" \{.*?\n\}', main_tf, re.S)
+    assert grant and "google_project_iam_custom_role.apigee_deploy_reader.name" in grant.group(0)
+    assert "agent_sa.email" in grant.group(0)
+    # The suffix keeps a stack redeployable while a torn-down role id is reserved; ids allow [a-zA-Z0-9_.].
+    assert 'variable "apigee_reader_role_suffix"' in variables_tf and 'default     = ""' in variables_tf
+    assert '"^[A-Za-z0-9_]{0,20}$"' in variables_tf
+    # The tools' Apigee management calls are the two endpoints the role covers.
+    server = (REPO_ROOT / "tools" / "app" / "server.py").read_text()
+    assert server.count("https://apigee.googleapis.com/v1/") == 2, "a new Apigee call needs the role updated"
+    assert "/apis/{api_name}/revisions/{revision}?format=bundle" in server  # proxyrevisions.get
+    assert '/environments/{cfg.apigee_env}/deployments"' in server  # deployments.list
 
 
 def test_bridge_and_agent_grants_are_scoped_to_the_stack():

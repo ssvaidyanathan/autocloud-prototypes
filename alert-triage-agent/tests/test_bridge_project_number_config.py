@@ -42,7 +42,8 @@ def _request(token: str = "real-token") -> Request:
 
 
 def _cfg(**overrides) -> BridgeConfig:
-    values = {"PROJECT_ID": "proj-x", "NAME_PREFIX": "ata", "REGION": "us-west1", "IS_LOCAL": False}
+    values = {"PROJECT_ID": "proj-x", "NAME_PREFIX": "ata", "REGION": "us-west1", "IS_LOCAL": False,
+              "AGENT_URL": "https://ata-agent-abcdefghij-uw.a.run.app"}
     values.update(overrides)
     return BridgeConfig(**values)
 
@@ -97,10 +98,16 @@ def test_other_project_number_audience_is_rejected(monkeypatch):
     assert exc.value.status_code == 403
 
 
-def test_request_base_url_audience_still_accepted(monkeypatch):
+def test_request_base_url_audience_is_rejected(monkeypatch):
+    """sec L5: the Host-derived base URL is not an accepted audience; only BRIDGE_URL and the
+    deterministic <prefix>-bridge-<number> URL are."""
     _patch_token(monkeypatch, {"email": _agent_email(), "aud": "https://internal.example"})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(bridge_auth.verify_agent_caller(_request(), _cfg(PROJECT_NUMBER=PROJECT_NUMBER, BRIDGE_URL=BRIDGE_URL)))
+    assert exc.value.status_code == 403
+    _patch_token(monkeypatch, {"email": _agent_email(), "aud": BRIDGE_URL})
     claims = asyncio.run(bridge_auth.verify_agent_caller(_request(), _cfg(PROJECT_NUMBER=PROJECT_NUMBER, BRIDGE_URL=BRIDGE_URL)))
-    assert claims["aud"] == "https://internal.example"
+    assert claims["aud"] == BRIDGE_URL
 
 
 def test_missing_project_number_non_local_fails_loudly_on_request(monkeypatch, caplog):

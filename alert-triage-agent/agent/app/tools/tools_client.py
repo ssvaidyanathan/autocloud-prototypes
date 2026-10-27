@@ -60,6 +60,10 @@ class ToolsNotConfigured(ToolsCallError):
     """TOOLS_URL is not set (allowed only in local mode, where nothing is queried)."""
 
 
+# One request per HTTP call (stateless MCP), so a fixed id; the response must carry it.
+JSONRPC_REQUEST_ID = 1
+
+
 def _short(text: Any) -> str:
     """One line, HTML tags removed (Cloud Run error pages are HTML), at most MAX_REASON_DETAIL."""
     text = " ".join(re.sub(r"<[^>]*>", " ", str(text)).split())
@@ -78,6 +82,11 @@ def _parse_body(resp: httpx.Response, service: str) -> dict[str, Any]:
         raise ToolsCallError(f"{service} returned a malformed response (not JSON)") from exc
     if not isinstance(body, dict):
         raise ToolsCallError(f"{service} returned a malformed response (not a JSON-RPC object)")
+    if body.get("id") != JSONRPC_REQUEST_ID:
+        raise ToolsCallError(
+            f"{service} returned a response for another request (JSON-RPC id {body.get('id')!r}, "
+            f"expected {JSONRPC_REQUEST_ID})"
+        )
     return body
 
 
@@ -129,7 +138,7 @@ async def call_tool(
     except Exception as exc:
         raise ToolsCallError(f"no ID token for {audience} ({type(exc).__name__}: {_short(exc)})") from exc
 
-    payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+    payload = {"jsonrpc": "2.0", "id": JSONRPC_REQUEST_ID, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
     attempts = config.tools_retry_attempts
     async with httpx.AsyncClient(transport=_default_transport, timeout=config.tools_timeout_seconds) as client:
         for attempt in range(1, attempts + 1):

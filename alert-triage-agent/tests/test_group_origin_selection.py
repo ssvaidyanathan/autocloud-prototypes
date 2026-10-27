@@ -111,6 +111,9 @@ def _select(alerts):
 # Fixtures: stubbed telemetry sources
 # ---------------------------------------------------------------------------
 
+APIGEE_SUMMARY = {"org": "test-org", "environment": "test-env", "proxy_prefix": "ata-", "deployments": []}
+
+
 @pytest.fixture
 def telemetry(monkeypatch):
     """Configure which services show degraded Cloud Run telemetry and which changes exist."""
@@ -164,7 +167,8 @@ def telemetry(monkeypatch):
 
     async def change_timeline(config, window_hours=2, **kwargs):
         # The ata-tools get_change_timeline result (remote MCP call stubbed at the client seam).
-        return {"changes": list(state["changes"])}
+        # Current ata-tools shape: the "apigee" summary is always present (crev R4).
+        return {"changes": list(state["changes"]), "apigee": dict(APIGEE_SUMMARY)}
 
     monkeypatch.setattr(CloudRunSpecialist, "investigate", cloud_run)
     monkeypatch.setattr(ApigeeSpecialist, "investigate", apigee)

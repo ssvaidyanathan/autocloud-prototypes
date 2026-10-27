@@ -190,27 +190,27 @@ apigee_api POST "${APP_URL}" -H "Content-Type: application/json" \
 if [ "${API_CODE}" = "409" ]; then
     echo "    App ${APP} exists; reading its credentials."
     apigee_api GET "${APP_URL}/${APP}"
-    apigee_ok || apigee_fail_call "Reading app ${APP}"
+    apigee_ok || apigee_fail_call_redacted "Reading app ${APP}"
     API_KEY="$(app_key)" || API_KEY=""
     if [ -z "${API_KEY}" ]; then
         FIRST_KEY="$(apigee_json 'd["credentials"][0]["consumerKey"] if d.get("name") == "'"${APP}"'" and d.get("credentials") else None')" \
-            || apigee_fail_call "App ${APP} has no credential to attach ${PRODUCT} to"
+            || apigee_fail_call_redacted "App ${APP} has no credential to attach ${PRODUCT} to"
         apigee_safe_token "${FIRST_KEY}" || apigee_die "unexpected consumer key format on ${APP}."
         echo "    Adding ${PRODUCT} to the existing key of ${APP}."
         apigee_api POST "${APP_URL}/${APP}/keys/${FIRST_KEY}" -H "Content-Type: application/json" \
             -d "{\"apiProducts\": [\"${PRODUCT}\"]}"
-        apigee_ok || apigee_fail_call "Adding ${PRODUCT} to the key of ${APP}"
+        apigee_ok || apigee_fail_call_redacted "Adding ${PRODUCT} to the key of ${APP}"
         apigee_api GET "${APP_URL}/${APP}"
-        apigee_ok || apigee_fail_call "Reading app ${APP}"
+        apigee_ok || apigee_fail_call_redacted "Reading app ${APP}"
         API_KEY="$(app_key)" || API_KEY=""
     fi
 elif apigee_ok; then
     echo "    App ${APP} created."
     API_KEY="$(app_key)" || API_KEY=""
 else
-    apigee_fail_call "Creating app ${APP}"
+    apigee_fail_call_redacted "Creating app ${APP}"
 fi
-[ -n "${API_KEY}" ] || apigee_fail_call "Finding an approved ${PRODUCT} consumer key on app ${APP}"
+[ -n "${API_KEY}" ] || apigee_fail_call_redacted "Finding an approved ${PRODUCT} consumer key on app ${APP}"
 
 (umask 077 && printf '%s\n' "${API_KEY}" > "${KEY_FILE}.tmp" && mv "${KEY_FILE}.tmp" "${KEY_FILE}")
 chmod 600 "${KEY_FILE}"

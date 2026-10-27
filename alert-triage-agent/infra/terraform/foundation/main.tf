@@ -333,17 +333,44 @@ resource "google_project_iam_member" "agent_viewer_roles" {
   member  = "serviceAccount:${google_service_account.agent_sa.email}"
 }
 
-# Agent SA runtime roles outside the viewer boundary above, both read-only or
-# inference-only: Vertex AI Gemini calls for gray-zone correlation scoring
-# (agent/app/correlation/engine.py), and reading Apigee proxy deployments in the
-# change specialist (agent/app/specialists/change.py).
+# Agent SA runtime role outside the viewer boundary above, inference-only: Vertex AI
+# Gemini calls for gray-zone correlation scoring (agent/app/correlation/engine.py).
 resource "google_project_iam_member" "agent_runtime_roles" {
   for_each = toset([
     "roles/aiplatform.user",
-    "roles/apigee.readOnlyAdmin",
   ])
   project = var.project_id
   role    = each.value
+  member  = "serviceAccount:${google_service_account.agent_sa.email}"
+}
+
+# Apigee reads of ata-tools (which runs as the agent SA), and nothing else. Not
+# roles/apigee.readOnlyAdmin: that role also reads every developer app's consumer key
+# and secret in the shared org, i.e. other stacks' credentials (sec M3).
+#   apigee.deployments.list   get_change_timeline: GET .../environments/<env>/deployments
+#   apigee.proxyrevisions.get get_proxy_bundle:    GET .../apis/<api>/revisions/<rev>?format=bundle
+# The change specialist reads Apigee only through those two tools; the Apigee
+# specialist reads Cloud Monitoring metrics (roles/monitoring.viewer).
+#
+# Teardown and redeploy: destroying a custom role only soft-deletes it, and its id
+# stays reserved (7 days undeletable, then up to 37 more days until it is purged).
+# Within the first 7 days the google provider undeletes and updates a soft-deleted
+# role of the same id on create, so a teardown/redeploy cycle just works. After that,
+# set apigee_reader_role_suffix (e.g. "v2") to use a fresh id.
+resource "google_project_iam_custom_role" "apigee_deploy_reader" {
+  project     = var.project_id
+  role_id     = "${var.name_prefix}ApigeeDeployReader${var.apigee_reader_role_suffix}"
+  title       = "${var.name_prefix} Apigee deployment reader"
+  description = "app=alert-triage-agent,stack=${var.name_prefix}: Apigee deployments list and proxy revision bundles for ${var.name_prefix}-tools (change timeline). No developer app or key reads."
+  permissions = [
+    "apigee.deployments.list",
+    "apigee.proxyrevisions.get",
+  ]
+}
+
+resource "google_project_iam_member" "agent_apigee_deploy_reader" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.apigee_deploy_reader.name
   member  = "serviceAccount:${google_service_account.agent_sa.email}"
 }
 

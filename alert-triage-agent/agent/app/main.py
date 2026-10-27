@@ -9,6 +9,7 @@ Implements:
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import asyncio
 import logging
 from pathlib import Path
 import time
@@ -244,7 +245,11 @@ async def triage_alert(
             }
 
     manager = GroupingManager(config=settings)
-    res = manager.ingest_alert(
+    # In a worker thread: ingest is blocking (OKF store I/O, the global ingest lock, and for a
+    # gray-zone score a Gemini call of up to GEMINI_TIMEOUT_SECONDS), and must not stall the
+    # event loop that serves timers, recovery and health checks (crev R3).
+    res = await asyncio.to_thread(
+        manager.ingest_alert,
         alert=alert,
         current_time=now,
         bridge_group_id=bridge_group_id,

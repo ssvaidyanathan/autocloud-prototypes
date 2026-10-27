@@ -85,7 +85,7 @@ The system integrates with ServiceNow via the Table and Attachment APIs:
 
 ## Prerequisites: deployer IAM roles
 
-The deployer is the principal that runs `scripts/deploy-stage1.sh`, the scenarios and `scripts/teardown-stack.sh`: a user, or a service account. `roles/owner` on the project covers everything. Without Owner, the deployer needs **all** of the roles below. Editor alone is not enough: it cannot set IAM policies on service accounts, Cloud Tasks queues, secrets or Artifact Registry repositories, and the foundation phase grants roles on all four. The Cloud Build step also needs nothing extra from you: the build SA's bucket access comes from the foundation. Without these roles, the foundation phase creates the resources but fails on their bindings with 403.
+The deployer is the principal that runs `scripts/deploy-stage1.sh`, the scenarios and `scripts/teardown-stack.sh`: a user, or a service account. `roles/owner` on the project covers everything. Without Owner, the deployer needs **all** of the roles below. Editor alone is not enough: it cannot set IAM policies on service accounts, Cloud Tasks queues, secrets or Artifact Registry repositories, or create custom roles, and the foundation phase needs all of these. The Cloud Build step also needs nothing extra from you: the build SA's bucket access comes from the foundation. Without these roles, the foundation phase creates the resources but fails on their bindings with 403.
 
 On the project `PROJECT_ID`:
 
@@ -94,6 +94,7 @@ On the project `PROJECT_ID`:
 | `roles/editor` (or equivalent) | Creating the resources in every phase |
 | `roles/resourcemanager.projectIamAdmin` | The project-level grants to the stack's SAs (foundation) |
 | `roles/run.admin` | Cloud Run deploys and service-level invoker bindings (`triage`, `triage-iam`, `applications`, `inventory-pin`) |
+| `roles/iam.roleAdmin` | `iam.roles.create` / `update` / `delete`: the per-stack custom role `<prefix>ApigeeDeployReader` (foundation, teardown) |
 | `roles/iam.serviceAccountAdmin` | `iam.serviceAccounts.setIamPolicy`: `serviceAccountUser` bindings on the stack's SAs (foundation) |
 | `roles/cloudtasks.admin` | `cloudtasks.queues.getIamPolicy` / `setIamPolicy`: enqueuer bindings on the two queues (foundation) |
 | `roles/artifactregistry.admin` | `artifactregistry.repositories.setIamPolicy`: the build SA's writer binding (foundation) |
@@ -112,7 +113,7 @@ Grant them in one command (someone with Owner or `projectIamAdmin` runs it). `DE
 
 ```bash
 DEPLOYER="user:you@example.com"
-for ROLE in roles/editor roles/resourcemanager.projectIamAdmin roles/run.admin \
+for ROLE in roles/editor roles/resourcemanager.projectIamAdmin roles/iam.roleAdmin roles/run.admin \
             roles/iam.serviceAccountAdmin roles/cloudtasks.admin roles/artifactregistry.admin \
             roles/secretmanager.admin roles/cloudsql.admin; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" --member="${DEPLOYER}" --role="${ROLE}" --condition=None --format=none \
@@ -364,7 +365,7 @@ In the current prototype, the agent's diagnostic pipeline is executed via **dete
 The Alert Triage Agent enforces zero-trust security and defense-in-depth across all tiers:
 
 - **Strictly Read-Only IAM Boundaries**:
-  - `ata-agent-sa` (which also runs `ata-tools`) holds read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer`, `roles/apigee.readOnlyAdmin`) and `roles/aiplatform.user` for the Gemini gray-zone calls.
+  - `ata-agent-sa` (which also runs `ata-tools`) holds read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer`, and the custom role `${NAME_PREFIX}ApigeeDeployReader` with only `apigee.deployments.list` and `apigee.proxyrevisions.get`) and `roles/aiplatform.user` for the Gemini gray-zone calls.
   - It has no mutating privileges on the monitored infrastructure. Its writes are confined to the incident GCS bucket (`roles/storage.objectUser` on `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents`) and to enqueueing its own timer tasks (`roles/cloudtasks.enqueuer` on `${NAME_PREFIX}-timer-queue`).
 - **Zero Secrets in Repository or Code**: All passwords and tokens reside in Google Secret Manager; the ServiceNow instance URL is configuration.
 - **Mutual Authentication & OIDC Verification**:
