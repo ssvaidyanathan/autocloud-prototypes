@@ -1,7 +1,7 @@
 """FastAPI Application for ata-inventory-api."""
 
 import logging
-from typing import Optional
+from typing import Dict, Optional
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -10,6 +10,8 @@ from .middleware import AdminLogSuppressionMiddleware, install_admin_log_filter
 from .db import (
     list_items,
     reserve_item_stock,
+    restock_items,
+    UnknownItemsError,
     leak_connections,
     reset_connections_and_faults,
     set_fault,
@@ -81,6 +83,13 @@ def reserve_item(req: ReserveRequest):
         )
 
 
+class RestockRequest(BaseModel):
+    items: Dict[str, int] = Field(
+        ..., min_length=1,
+        description="Item id -> absolute stock to set (>= 0). Every id must exist.",
+    )
+
+
 class LockTableRequest(BaseModel):
     duration_seconds: int = Field(180, ge=1, le=600, description="Duration in seconds to hold table lock")
 
@@ -114,6 +123,39 @@ def admin_reset_probe():
 def admin_reset():
     """Reset connection pools, close locked/leaked connections, and clear faults."""
     return reset_connections_and_faults()
+
+
+@app.get("/admin/restock")
+def admin_restock_probe():
+    """Health probe for the restock endpoint."""
+    return {"status": "ok", "endpoint": "/admin/restock"}
+
+
+@app.post("/admin/restock")
+def admin_restock(req: RestockRequest):
+    """Set demo item stock to absolute values (idempotent; used by reset-scenarios.sh).
+
+    400 names unknown item ids (nothing is changed); 500 on a database error.
+    """
+    negative = sorted(item_id for item_id, stock in req.items.items() if stock < 0)
+    if negative:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "negative stock", "items": negative},
+        )
+    try:
+        items = restock_items(req.items)
+    except UnknownItemsError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "unknown items", "missing": e.missing},
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Restock error: {str(e)}",
+        )
+    return {"status": "restocked", "items": items}
 
 
 @app.get("/admin/lock-table")

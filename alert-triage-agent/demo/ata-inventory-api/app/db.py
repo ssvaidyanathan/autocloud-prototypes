@@ -49,6 +49,9 @@ def get_db_connection(user_override: Optional[str] = None):
     if settings.effective_mock_db:
         return None
 
+    # Fails loudly (no built-in project values) instead of connecting as a guessed user.
+    settings.require_db_settings()
+
     connector = get_connector()
     if not connector:
         return None
@@ -145,6 +148,57 @@ def reserve_item_stock(item_id: str, quantity: int) -> Dict[str, Any]:
 
     item["stock"] -= quantity
     return {"success": True, "item_id": item_id, "remaining_stock": item["stock"]}
+
+
+class UnknownItemsError(ValueError):
+    """restock_items was asked for item ids that do not exist."""
+
+    def __init__(self, missing: List[str]):
+        super().__init__(f"Unknown item ids: {', '.join(missing)}")
+        self.missing = missing
+
+
+def restock_items(stock_by_id: Dict[str, int]) -> List[Dict[str, Any]]:
+    """Set the stock of each given item to the given absolute value (idempotent).
+
+    All or nothing: if any id does not exist, nothing is changed and UnknownItemsError
+    names the missing ids (items are never created: name and price are not known here).
+    Returns [{"id", "stock"}] for the given ids, as read back after the update.
+    Faults are not applied: this is an admin action for the demo reset.
+    """
+    ids = sorted(stock_by_id)
+    if not settings.effective_mock_db:
+        try:
+            with engine.connect() as conn:
+                with conn.begin():
+                    missing = []
+                    for item_id in ids:
+                        result = conn.exec_driver_sql(
+                            "UPDATE inventory_items SET stock = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s;",
+                            (stock_by_id[item_id], item_id),
+                        )
+                        if result.rowcount != 1:
+                            missing.append(item_id)
+                    if missing:
+                        # Raising inside conn.begin() rolls the whole restock back.
+                        raise UnknownItemsError(missing)
+                    rows = conn.exec_driver_sql(
+                        "SELECT id, stock FROM inventory_items ORDER BY id;"
+                    ).fetchall()
+        except UnknownItemsError:
+            raise
+        except Exception as e:
+            logger.error(f"DB error restocking items: {e}")
+            raise RuntimeError(f"Restock internal error: {e}") from e
+        wanted = set(ids)
+        return [{"id": r[0], "stock": r[1]} for r in rows if r[0] in wanted]
+
+    missing = [item_id for item_id in ids if item_id not in MOCK_STORE]
+    if missing:
+        raise UnknownItemsError(missing)
+    for item_id in ids:
+        MOCK_STORE[item_id]["stock"] = stock_by_id[item_id]
+    return [{"id": item_id, "stock": MOCK_STORE[item_id]["stock"]} for item_id in ids]
 
 
 def leak_connections(count: int = 10) -> Dict[str, Any]:
