@@ -86,11 +86,10 @@ def test_root_uses_partial_gcs_backend_and_aligned_versions(root):
 @pytest.mark.parametrize("root", ROOTS)
 def test_target_variables_have_no_default_and_prefix_is_validated(root):
     variables = (TF_DIR / root / "variables.tf").read_text()
-    for name in ("project_id", "region"):
+    for name in ("project_id", "region", "name_prefix"):
         assert not re.search(r"^\s*default\s*=", _variable_block(variables, name), re.M), \
             f"{root}: {name} must have no default"
     prefix = _variable_block(variables, "name_prefix")
-    assert 'default     = "ata"' in prefix
     assert 'regex("^[a-z][a-z0-9]{1,9}$", var.name_prefix)' in prefix
 
 
@@ -105,6 +104,7 @@ def test_examples_use_placeholders():
         example = (TF_DIR / root / "terraform.tfvars.example").read_text()
         assert 'project_id' in example and '"your-project-id"' in example, root
         assert '"your-region"' in example, root
+        assert re.search(r'^name_prefix\s*=\s*"your-prefix"$', example, re.M), root
 
 
 def test_webhook_channel_uses_deterministic_bridge_url():
@@ -253,3 +253,14 @@ def test_deploy_demo_infra_forwards_to_the_single_entrypoint():
     stage1 = (SCRIPTS / "deploy-stage1.sh").read_text()
     assert "terraform init -input=false -reconfigure -backend-config=backend.hcl" in stage1
     assert 'prefix = \\"${NAME_PREFIX}/${root}\\"' in stage1
+
+
+def test_every_terraform_caller_passes_name_prefix():
+    """name_prefix has no default in any root, so every scripted plan/apply/destroy must pass it."""
+    stage1 = (SCRIPTS / "deploy-stage1.sh").read_text()
+    assert 'TF_COMMON_VARS=(-var "project_id=${PROJECT_ID}" -var "region=${REGION}" -var "name_prefix=${NAME_PREFIX}")' in stage1
+    assert 'terraform apply -input=false -auto-approve ${TF_COMMON_VARS[@]+"${TF_COMMON_VARS[@]}"}' in stage1
+    teardown = (SCRIPTS / "teardown-stack.sh").read_text()
+    assert 'TF_VARS=(-var "project_id=${PROJECT_ID}" -var "region=${REGION}" -var "name_prefix=${P}")' in teardown
+    assert 'terraform destroy -input=false -auto-approve ${TF_VARS[@]+"${TF_VARS[@]}"}' in teardown
+    assert 'exec bash "${SCRIPT_DIR}/deploy-stage1.sh"' in (SCRIPTS / "deploy-demo-infra.sh").read_text()
