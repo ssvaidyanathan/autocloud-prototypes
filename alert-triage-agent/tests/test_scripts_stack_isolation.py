@@ -140,7 +140,8 @@ def iso(tmp_path):
     write_pin(pin, PIN_REV, PIN_DIGEST)
     calls = tmp_path / "calls.jsonl"
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("PINNED_INVENTORY_", "ATA_", "APIGEE_")) and k not in ("MOCK_MODE", "DRY_RUN")}
+           if (k == "ATA_STACK_DIR" or not k.startswith(("PINNED_INVENTORY_", "ATA_", "APIGEE_")))
+           and k not in ("MOCK_MODE", "DRY_RUN")}
     env.update(PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", NAME_PREFIX=PREFIX, PROJECT_ID="test-project",
                REGION="test-region1", ATA_INVENTORY_PIN_FILE=str(pin), ISO_CALLS=str(calls),
                ISO_PIN_REV=PIN_REV, ISO_PIN_DIGEST=PIN_DIGEST, ISO_BUILD_DIGEST=NEW_DIGEST,
