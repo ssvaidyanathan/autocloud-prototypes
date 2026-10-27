@@ -137,9 +137,15 @@ while i < len(args):
     if a == "-X": method = args[i + 1]; i += 2; continue
     if a == "-o": out = args[i + 1]; i += 2; continue
     if a in ("-w", "-H", "-F"): i += 2; continue
+    if a == "--config":
+        with open(os.environ["STUB_CALLS"] + ".config", "a") as f:
+            f.write(open(args[i + 1]).read())
+        i += 2; continue
     if a == "-d": data = args[i + 1]; i += 2; continue
     if a.startswith("-"): i += 1; continue
     url = a; i += 1
+with open(os.environ["STUB_CALLS"] + ".argv", "a") as f:
+    f.write(json.dumps(args) + "\n")
 state_file = os.environ["STUB_STATE"]
 state = json.load(open(state_file)) if os.path.exists(state_file) else {"deleted": [], "created": []}
 with open(os.environ["STUB_CALLS"], "a") as f:
@@ -425,6 +431,41 @@ def test_deploy_existing_app_key_gets_product(env):
     res = run(DEPLOY, env)
     assert res.returncode == 0, res.stderr
     assert (Path(env["ALERT_TRIAGE_DIR"]) / ".atat-api-key").read_text() == "oldkey\n"
+
+
+def test_bearer_token_is_in_a_curl_config_never_on_argv(env):
+    """sec L2: `ps` must not show the OAuth token."""
+    res = run(DEPLOY, env)
+    assert res.returncode == 0, res.stderr
+    argv = Path(env["STUB_CALLS"] + ".argv").read_text()
+    assert argv and "stub-token" not in argv and "Authorization" not in argv
+    configs = Path(env["STUB_CALLS"] + ".config").read_text().splitlines()
+    assert configs and set(configs) == {'header = "Authorization: Bearer stub-token"'}
+
+
+def test_credential_bearing_failures_withhold_body_and_key(env):
+    """sec L1: a failed read of the app (body = every consumerKey/Secret) or of its key URL
+    prints neither."""
+    secret_app = {"name": "atat-demo-app", "credentials": [
+        {"consumerKey": "oldkey-SECRET", "consumerSecret": "csecret-SECRET", "status": "approved", "apiProducts": []}]}
+    env["STUB_RULES"] = json.dumps([
+        {"method": "POST", "match": "/developers/atat-dev@example.com/apps", "code": 409, "body": {}},
+        {"method": "GET", "match": "/apps/atat-demo-app", "code": 500, "body": secret_app},
+    ])
+    res = run(DEPLOY, env)
+    assert res.returncode != 0
+    assert "Reading app atat-demo-app failed: HTTP 500" in res.stderr and "body withheld" in res.stderr
+    assert "SECRET" not in res.stderr + res.stdout
+    env["STUB_RULES"] = json.dumps([
+        {"method": "POST", "match": "/apps/atat-demo-app/keys/oldkey-SECRET", "code": 403,
+         "body": {"error": {"message": "denied for oldkey-SECRET"}}},
+        {"method": "POST", "match": "/developers/atat-dev@example.com/apps", "code": 409, "body": {}},
+        {"method": "GET", "match": "/apps/atat-demo-app", "code": 200, "body": secret_app},
+    ])
+    res = run(DEPLOY, env)
+    assert res.returncode != 0
+    assert "/apps/atat-demo-app/keys/<withheld>" in res.stderr
+    assert "SECRET" not in res.stderr + res.stdout
 
 
 def test_deploy_never_uses_a_key_from_another_app(env):

@@ -62,8 +62,8 @@ def test_webhook_valid_token_parses_payload(client, test_config):
         },
     }
 
-    # 1. Valid token in query param: thin webhook accepts raw alert with 202
-    resp = client.post("/webhook/monitoring?token=secret-webhook-token", json=payload)
+    # 1. Valid token in the Authorization header: thin webhook accepts raw alert with 202
+    resp = client.post("/webhook/monitoring", headers={"Authorization": "Bearer secret-webhook-token"}, json=payload)
     assert resp.status_code == 202
     data = resp.json()
     assert data["status"] == "accepted"
@@ -71,7 +71,7 @@ def test_webhook_valid_token_parses_payload(client, test_config):
     assert "ata-alert-" in data["task_id"]
 
     # 2. Subsequent alert delivery (zero bridge alert deduplication or windowing suppression)
-    dup_resp = client.post("/webhook/monitoring?token=secret-webhook-token", json=payload)
+    dup_resp = client.post("/webhook/monitoring", headers={"Authorization": "Bearer secret-webhook-token"}, json=payload)
     assert dup_resp.status_code == 202
     dup_data = dup_resp.json()
     assert dup_data["status"] == "accepted"
@@ -124,7 +124,7 @@ def test_real_webhook_payload_with_policy_user_labels_passes_bridge_and_reaches_
     }
 
     # 1. Post to bridge webhook -> 202 Accepted
-    resp = client.post("/webhook/monitoring?token=secret-webhook-token", json=real_payload)
+    resp = client.post("/webhook/monitoring", headers={"Authorization": "Bearer secret-webhook-token"}, json=real_payload)
     assert resp.status_code == 202
     data = resp.json()
     assert data["status"] == "accepted"
@@ -166,14 +166,14 @@ def test_webhook_drops_non_ata_alert(client):
             "summary": "Unrelated health check failure",
         },
     }
-    resp = client.post("/webhook/monitoring?token=secret-webhook-token", json=non_ata_payload)
+    resp = client.post("/webhook/monitoring", headers={"Authorization": "Bearer secret-webhook-token"}, json=non_ata_payload)
     assert resp.status_code == 200
     assert resp.json()["status"] == "ignored"
 
 
 def test_webhook_invalid_token_returns_401(client):
     payload = {"incident": {"incident_id": "0.999", "policy_name": "test", "resource_name": "test"}}
-    resp = client.post("/webhook/monitoring?token=wrong-token", json=payload)
+    resp = client.post("/webhook/monitoring", headers={"Authorization": "Bearer wrong-token"}, json=payload)
     assert resp.status_code == 401
     assert "Invalid or missing webhook token" in resp.json()["detail"]
 

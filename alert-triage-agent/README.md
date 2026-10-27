@@ -315,7 +315,7 @@ In the current prototype, the agent's diagnostic pipeline is executed via **dete
 The Alert Triage Agent enforces zero-trust security and defense-in-depth across all tiers:
 
 - **Strictly Read-Only IAM Boundaries**:
-  - `ata-agent-sa` (which also runs `ata-tools`) holds read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer`, `roles/apigee.readOnlyAdmin`) and `roles/aiplatform.user` for the Gemini gray-zone calls.
+  - `ata-agent-sa` (which also runs `ata-tools`) holds read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer`, and the custom role `${NAME_PREFIX}ApigeeDeployReader` with only `apigee.deployments.list` and `apigee.proxyrevisions.get`) and `roles/aiplatform.user` for the Gemini gray-zone calls.
   - It has no mutating privileges on the monitored infrastructure. Its writes are confined to the incident GCS bucket (`roles/storage.objectUser` on `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents`) and to enqueueing its own timer tasks (`roles/cloudtasks.enqueuer` on `${NAME_PREFIX}-timer-queue`).
 - **Zero Secrets in Repository or Code**: All passwords and tokens reside in Google Secret Manager; the ServiceNow instance URL is configuration.
 - **Mutual Authentication & OIDC Verification**:

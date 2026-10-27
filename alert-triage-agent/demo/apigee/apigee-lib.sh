@@ -96,8 +96,11 @@ apigee_api() {
     shift 2
     apigee_guard_url "${url}"
     out="$(mktemp "${TMPDIR:-/tmp}/apigee-resp.XXXXXX")"
+    # The bearer token goes in a curl config read from a process substitution (builtin printf,
+    # bash 3.2 safe), so it is never on curl's argv where `ps` would show it.
     API_CODE="$(curl -sS -o "${out}" -w '%{http_code}' -X "${method}" \
-        -H "Authorization: Bearer ${APIGEE_TOKEN}" "$@" "${url}")" || API_CODE="000"
+        --config <(printf 'header = "Authorization: Bearer %s"\n' "${APIGEE_TOKEN}") \
+        "$@" "${url}")" || API_CODE="000"
     API_BODY="$(cat "${out}")"
     rm -f "${out}"
     case "${API_CODE}" in
@@ -118,6 +121,19 @@ apigee_ok() {
 apigee_fail_call() {
     printf 'ERROR: %s failed: HTTP %s on %s\n' "$1" "${API_CODE}" "${API_LAST}" >&2
     printf '%s\n' "--- response body ---" "${API_BODY:-<empty>}" "---------------------" >&2
+    exit 1
+}
+
+# For calls whose response or URL carries app credentials (GET .../apps/<app> returns every
+# consumerKey and consumerSecret; POST .../keys/<key> has the key in the URL): no body, and the
+# key segment of the URL withheld.
+apigee_fail_call_redacted() {
+    local where="${API_LAST}"
+    case "${where}" in
+        */keys/*) where="${where%%/keys/*}/keys/<withheld>" ;;
+    esac
+    printf 'ERROR: %s failed: HTTP %s on %s (response body withheld: it can contain app credentials)\n' \
+        "$1" "${API_CODE}" "${where}" >&2
     exit 1
 }
 

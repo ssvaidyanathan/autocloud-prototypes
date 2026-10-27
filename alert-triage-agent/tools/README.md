@@ -11,6 +11,6 @@ FastMCP read-only telemetry and topology service for Google Cloud Platform incid
 2. `get_topology_graph`: Returns directed DAG nodes and caller -> callee edges.
 3. `get_blast_radius`: Computes downstream reachable nodes and hop distances.
 4. `get_apigee_metrics`: Queries Cloud Monitoring for proxy response counts and target latencies.
-5. `get_apigee_logs`: Queries Cloud Logging log `projects/{project}/logs/ata-apigee-access`.
+5. `get_apigee_logs`: Queries Cloud Logging log `projects/{project}/logs/<NAME_PREFIX>-apigee-access`.
 6. `get_proxy_bundle`: In-memory unpacker and XML policy parser for Apigee revision bundles.
 7. `get_change_timeline`: Queries recent Cloud Run service revisions and Apigee proxy deployments.

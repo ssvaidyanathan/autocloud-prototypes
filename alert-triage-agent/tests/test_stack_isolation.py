@@ -123,11 +123,11 @@ def test_bridge_webhook_ignores_an_alert_labelled_for_another_stack():
     set_dispatcher(TaskDispatcher(config=config))
     try:
         with TestClient(bridge_app) as client:
-            other = client.post("/webhook/monitoring?token=tok", json=webhook_payload("ata-inventory-5xx", {**APP, "stack": "atat"}))
+            other = client.post("/webhook/monitoring", headers={"Authorization": "Bearer tok"}, json=webhook_payload("ata-inventory-5xx", {**APP, "stack": "atat"}))
             assert other.status_code == 200 and other.json()["status"] == "ignored"
-            foreign = client.post("/webhook/monitoring?token=tok", json=webhook_payload("atat-inventory-5xx", APP))
+            foreign = client.post("/webhook/monitoring", headers={"Authorization": "Bearer tok"}, json=webhook_payload("atat-inventory-5xx", APP))
             assert foreign.status_code == 200 and foreign.json()["status"] == "ignored"
-            own = client.post("/webhook/monitoring?token=tok", json=webhook_payload("ata-inventory-5xx", {**APP, "stack": "ata"}))
+            own = client.post("/webhook/monitoring", headers={"Authorization": "Bearer tok"}, json=webhook_payload("ata-inventory-5xx", {**APP, "stack": "ata"}))
             assert own.status_code == 202
     finally:
         reset_settings(None)

@@ -124,12 +124,18 @@ args = sys.argv[1:]
 d = os.environ["STUB_DIR"]
 out = url = data = None
 has_w = "-w" in args
+configs = []
 i = 0
 while i < len(args):
     a = args[i]
-    if a in ("-o", "-w", "-H", "-d", "-X", "--connect-timeout", "--max-time"):
+    if a in ("-o", "-w", "-H", "-d", "-X", "--connect-timeout", "--max-time", "--config", "--data-binary"):
         if a == "-o": out = args[i + 1]
         if a == "-d": data = args[i + 1]
+        if a == "--data-binary": data = sys.stdin.read() if args[i + 1] == "@-" else args[i + 1]
+        if a == "--config":
+            p = args[i + 1]
+            configs.append({"path": p, "mode": oct(os.stat(p).st_mode & 0o777) if p != "-" else "stdin",
+                            "text": sys.stdin.read() if p == "-" else open(p).read()})
         i += 2
         continue
     if not a.startswith("-"):
@@ -137,9 +143,14 @@ while i < len(args):
     i += 1
 with open(os.path.join(d, "log"), "a") as f:
     f.write(json.dumps(["curl", url, data or ""]) + "\n")
+with open(os.path.join(d, "curl-argv"), "a") as f:
+    f.write(json.dumps({"argv": args, "configs": configs, "data": data or ""}) + "\n")
 code, body = 200, "{}"
+if "sqladmin.googleapis.com" in (url or ""):
+    body = '{"kind": "sql#operation", "name": "op-1234abcd"}'
 if "/webhook/monitoring" in (url or ""):
-    if "token=wrong" in url:
+    users = [l for c in configs for l in c["text"].splitlines() if l.startswith("user = ")]
+    if "token=" in url or not users or ':wrong' in users[0]:
         code, body = 401, '{"detail": "Invalid or missing webhook token"}'
     elif "verify-probe" in (data or ""):
         code, body = 200, '{"status": "ignored", "reason": "non-ata alert policy"}'
@@ -206,6 +217,7 @@ def stack(tmp_path):
     def run(script, *args, record_verify_stage1=True, **env_overrides):
         log = stub_dir / "log"
         log.write_text("")
+        (stub_dir / "curl-argv").unlink(missing_ok=True)
         if record_verify_stage1 and script != "verify-stage1.sh":
             _recorder(scripts / "verify-stage1.sh", "verify-stage1")
         env = {k: v for k, v in os.environ.items() if not re.match(
@@ -326,25 +338,69 @@ def test_triage_deploys_use_the_built_images(stack):
         assert re.fullmatch(rf"--image=us-central1-docker\.pkg\.dev/fresh-proj/atat-docker/{c[3]}@sha256:[0-9a-f]{{64}}", image)
 
 
+def _curl_calls(stack):
+    path = stack.stub_dir / "curl-argv"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
 def test_schema_uses_the_proxy_and_grants_the_iam_user(stack):
     res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema")
     assert res.returncode == 0, _out(res)
-    setpw = [c for c in calls if c[:4] == ["gcloud", "sql", "users", "set-password"]]
-    assert setpw and "--instance=atat-inventory-db" in setpw[0]
+    setpw = [c for c in _curl_calls(stack) if "sqladmin.googleapis.com" in json.dumps(c["argv"])]
+    assert len(setpw) == 1
+    assert setpw[0]["argv"][-1] == ("https://sqladmin.googleapis.com/v1/projects/fresh-proj/instances/"
+                                    "atat-inventory-db/users?name=postgres")
     proxy = [c for c in calls if c[0] == "cloud-sql-proxy"][0]
     assert proxy[1:] == ["--port", "54399", "fresh-proj:us-central1:atat-inventory-db"]
     psql = [c for c in calls if c[0] == "psql"][0]
     assert psql[1] == "PGPASSWORD=set"
     assert "iam_user=atat-inventory-sa@fresh-proj.iam" in psql and "ON_ERROR_STOP=1" in psql
     assert psql[-1].endswith("demo/db/schema.sql")
-    pw = [a for a in setpw[0] if a.startswith("--password=")][0]
-    assert pw.split("=", 1)[1] not in _out(res)
+    # The admin call finishes before the proxy starts.
+    wait = _idx(calls, lambda c: c[:4] == ["gcloud", "sql", "operations", "wait"], "operations wait")[0]
+    assert calls[wait][4] == "op-1234abcd"
+    assert wait < _idx(calls, lambda c: c[0] == "cloud-sql-proxy", "proxy")[0]
+
+
+def test_schema_password_and_token_stay_off_argv_and_out_of_the_output(stack, tmp_path):
+    """sec M1: no `--password=` on any argv; the password only in curl's stdin body; the bearer
+    token only in a 0600 curl config file that is gone after the run."""
+    (tmp_path / "t").mkdir()
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema", TMPDIR=str(tmp_path / "t"))
+    assert res.returncode == 0, _out(res)
+    flat = json.dumps(calls)
+    assert "--password" not in flat
+    assert not [c for c in calls if c[:4] == ["gcloud", "sql", "users", "set-password"]]
+    setpw = [c for c in _curl_calls(stack) if "sqladmin.googleapis.com" in json.dumps(c["argv"])][0]
+    body = json.loads(setpw["data"])
+    password = body["password"]
+    assert body["name"] == "postgres" and len(password) == 32
+    for c in calls:
+        assert not any(password in a for a in c[1:] if c[0] != "curl"), c
+    assert password not in json.dumps(setpw["argv"]) and password not in _out(res)
+    # The stub ran from the log: its "data" field is the stdin body, never an argv value.
+    assert "@-" in setpw["argv"]
+    assert "access-token" not in json.dumps(setpw["argv"])
+    assert [c["mode"] for c in setpw["configs"]] == ["0o600"]
+    assert setpw["configs"][0]["text"] == 'header = "Authorization: Bearer access-token"\n'
+    assert not Path(setpw["configs"][0]["path"]).exists(), "curl config left behind"
+    assert not list((tmp_path / "t").glob("atat-sqladmin.*")), "temp files left behind"
+
+
+def test_schema_fails_loudly_when_the_admin_call_fails(stack, tmp_path):
+    curl = tmp_path / "bin" / "curl"
+    curl.write_text("#!/bin/sh\ncat >/dev/null\necho 'curl: (22) The requested URL returned error: 403' >&2\nexit 22\n")
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema")
+    assert res.returncode == 1
+    assert "users.update (postgres on atat-inventory-db) failed" in res.stderr
+    assert not [c for c in calls if c[0] in ("cloud-sql-proxy", "psql")]
 
 
 def test_schema_with_pgpassword_does_not_reset_the_password(stack):
     res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema", PGPASSWORD="given")
     assert res.returncode == 0, _out(res)
     assert not [c for c in calls if c[:4] == ["gcloud", "sql", "users", "set-password"]]
+    assert not [c for c in _curl_calls(stack) if "sqladmin.googleapis.com" in json.dumps(c["argv"])]
 
 
 def test_schema_fails_loudly_without_psql(stack, tmp_path):
@@ -585,6 +641,23 @@ def test_verify_checks_the_okf_schema(stack):
     assert "unknown status 'mitigation-in-progress'" in res.stderr
 
 
+def test_verify_sends_the_webhook_token_as_basic_auth_never_in_url_or_argv(stack):
+    """sec M2: the real token only in a `user = "<prefix>-monitoring:<token>"` curl config on
+    stdin; no URL carries token=, and no curl argv carries the token."""
+    res, calls = _verify(stack, "--with-ticket", "--wait-secs", "0", STUB_SECRET_VALUE="RealTok123",
+                         STUB_OKF="")
+    hooks = [c for c in _curl_calls(stack) if "/webhook/monitoring" in json.dumps(c["argv"])]
+    assert len(hooks) == 4, hooks  # wrong token, probe, e2e open, e2e closed
+    for c in hooks:
+        assert "token=" not in json.dumps(c["argv"]) and "RealTok123" not in json.dumps(c["argv"])
+        assert [x["mode"] for x in c["configs"]] == ["stdin"]
+    users = [c["configs"][0]["text"].strip() for c in hooks]
+    assert users[0].startswith('user = "atat-monitoring:wrong-')
+    assert users[1:] == ['user = "atat-monitoring:RealTok123"'] * 3
+    assert "RealTok123" not in _out(res)
+    assert not [c for c in calls if c[0] == "curl" and "token=" in (c[1] or "")]
+
+
 def test_verify_with_ticket_accepts_202_and_cleans_up(stack):
     res, calls = _verify(stack, "--with-ticket", "--wait-secs", "0", STUB_OKF=OKF)
     assert res.returncode == 0, _out(res)
@@ -689,6 +762,103 @@ def test_teardown_nothing_left_passes_and_delete_state_is_last(stack):
     assert muts[-1][1:3] == ["storage", "rm"] and "gs://fresh-proj-atat-tfstate" in muts[-1] and "--all-versions" in muts[-1]
     tf_foundation = [i for i, c in enumerate(muts) if c[:3] == ["terraform", "foundation", "destroy"]][0]
     assert tf_foundation == len(muts) - 2
+
+
+def test_teardown_and_verify_keep_bearer_tokens_off_curl_argv(stack):
+    """sec L2: the access token (teardown monitoring listing) and the ID token (verify /health)
+    are in a curl config, never on argv."""
+    res, _ = _verify(stack)  # first: other scripts' runs replace verify-stage1.sh with a recorder
+    assert res.returncode == 0, _out(res)
+    health = [c for c in _curl_calls(stack) if c["argv"][-1].endswith("/health")]
+    assert len(health) == 5
+    for c in health:
+        assert "id-token" not in json.dumps(c["argv"]) and "Authorization" not in json.dumps(c["argv"])
+        assert [x["text"] for x in c["configs"]] == ['header = "Authorization: Bearer id-token"\n']
+    assert stack("bootstrap-tfstate.sh", "--write-backend-only")[0].returncode == 0
+    res, _ = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--delete-state")
+    assert res.returncode == 0, _out(res)
+    mon = [c for c in _curl_calls(stack) if "monitoring.googleapis.com" in json.dumps(c["argv"])]
+    assert mon
+    for c in mon:
+        assert "access-token" not in json.dumps(c["argv"]) and "Authorization" not in json.dumps(c["argv"])
+        assert [x["text"] for x in c["configs"]] == ['header = "Authorization: Bearer access-token"\n']
+
+
+def _write_backends(stack, bucket, prefix):
+    for root in ROOTS:
+        (stack.work / "infra" / "terraform" / root / "backend.hcl").write_text(
+            f'bucket = "{bucket}"\nprefix = "{prefix}/{root}"\n')
+
+
+@pytest.mark.parametrize("bucket,prefix,message", [
+    # The live adoption runbook writes ata's backend.hcl into the same checkout.
+    ("fresh-proj-ata-tfstate", "ata", "is not for NAME_PREFIX=atat"),
+    # Foreign state prefix alone (own bucket): the prefix check must catch it.
+    ("fresh-proj-atat-tfstate", "ata", "is not for NAME_PREFIX=atat"),
+    # Foreign bucket alone (own prefix): the bucket check must catch it.
+    ("fresh-proj-ata-tfstate", "atat", "does not use bucket fresh-proj-atat-tfstate"),
+])
+def test_teardown_refuses_another_stacks_backend_before_any_terraform_or_delete(stack, bucket, prefix, message):
+    """test review H1: the backend.hcl guard is the only thing between an atat teardown and a
+    terraform destroy of ata's state. Removing either check must fail this test."""
+    _write_backends(stack, bucket, prefix)
+    for args in (["--apply", "--confirm-prefix", "atat", "--skip-apigee"], ["--skip-apigee"]):
+        res, calls = stack("teardown-stack.sh", *args)
+        assert res.returncode == 1, _out(res)
+        assert message in res.stderr
+        assert "observability/backend.hcl" in res.stderr  # the first root, before anything else
+        assert not [c for c in calls if c[0] == "terraform"], calls
+        assert not _mutations(calls), calls
+        assert not [c for c in calls if c[0] == "gcloud" and "delete" in c], calls
+
+
+def test_teardown_with_its_own_backend_does_run_terraform(stack):
+    """Control for the guard test: with this stack's backend.hcl the destroy does happen."""
+    _write_backends(stack, "fresh-proj-atat-tfstate", "atat")
+    res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--skip-apigee")
+    destroys = [c[1] for c in calls if c[:3] == ["terraform", c[1], "destroy"]]
+    assert destroys[:2] == ["observability", "triage-iam"], (destroys, _out(res))
+
+
+def _teardown_functions(tmp_path):
+    """assert_owned and mut, extracted from teardown-stack.sh into a sourceable file."""
+    text = (ROOT / "scripts" / "teardown-stack.sh").read_text()
+    funcs = [re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", text, re.S | re.M) for name in ("die", "assert_owned", "mut")]
+    assert all(funcs), "teardown-stack.sh must define die, assert_owned and mut"
+    lib = tmp_path / "teardown-funcs.sh"
+    lib.write_text("".join(f.group(0) for f in funcs))
+    return lib
+
+
+@pytest.mark.parametrize("name,owned", [
+    ("atat-agent", True), ("fresh-proj-atat-incidents", True), ("fresh-proj-atat-tfstate", True),
+    ("ata-agent", False), ("fresh-proj-ata-incidents", False), ("fresh-proj-ata-tfstate", False),
+    ("atat", False), ("atat-", False), ("xatat-agent", False), ("", False),
+])
+def test_teardown_assert_owned_refuses_foreign_names_through_mut(tmp_path, name, owned):
+    """test review H1: `mut <name> <cmd>` must die before running cmd for any name that is not
+    <prefix>-* or <project>-<prefix>-*. Kills the 'assert_owned accepts anything' mutant and a
+    mut that skips assert_owned."""
+    lib = _teardown_functions(tmp_path)
+    marker = tmp_path / "ran"
+    script = (f'set -euo pipefail\nsource "{lib}"\nNAME_GUARD="atat-"\nBUCKET_GUARD="fresh-proj-atat-"\n'
+              f'APPLY=true\nunset TFSTATE_BUCKET\nmut "$1" touch "{marker}"\n')
+    res = subprocess.run([TEST_BASH, "-c", script, "x", name], capture_output=True, text=True, timeout=30)
+    if owned:
+        assert res.returncode == 0, res.stderr
+        assert marker.exists()
+    else:
+        assert res.returncode == 1
+        assert f"refusing to touch '{name}'" in res.stderr
+        assert not marker.exists(), "the mutating command ran for a foreign name"
+
+
+def test_teardown_assert_owned_allows_only_the_explicit_state_bucket(tmp_path):
+    lib = _teardown_functions(tmp_path)
+    script = (f'set -euo pipefail\nsource "{lib}"\nNAME_GUARD="atat-"\nBUCKET_GUARD="fresh-proj-atat-"\n'
+              f'APPLY=false\nTFSTATE_BUCKET=custom-state\nassert_owned custom-state\nassert_owned "$1"\n')
+    res = subprocess.run([TEST_BASH, "-c", script, "x", "other-state"], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 1 and "refusing to touch 'other-state'" in res.stderr
 
 
 @pytest.mark.parametrize("prefix", ["", "A", "ata-x", "toolongprefix1"])

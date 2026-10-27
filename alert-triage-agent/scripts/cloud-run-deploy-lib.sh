@@ -60,6 +60,29 @@ service_url_or_deterministic() {
     printf '%s\n' "${url}"
 }
 
+# assert_stack_url <VAR> <service suffix>: the URL in $VAR must be this stack's Cloud Run
+# service https://${NAME_PREFIX}-<suffix>-... or https://${NAME_PREFIX}-<suffix>.<...>.
+# Catches URLs exported for another stack in the same shell (an ata deploy, then atat), which
+# would otherwise fail only at runtime. ALLOW_CUSTOM_SERVICE_URLS=true accepts any https URL
+# (custom domains), said on stderr. Returns 1 with the reason otherwise.
+assert_stack_url() {
+    local var="$1" suffix="$2" url
+    url="${!var:-}"
+    case "${url}" in
+        https://"${NAME_PREFIX}-${suffix}"[-.]*) return 0 ;;
+    esac
+    if [ "${ALLOW_CUSTOM_SERVICE_URLS:-}" = "true" ]; then
+        case "${url}" in
+            https://?*)
+                echo "NOTE: ${var}=${url} is not a ${NAME_PREFIX}-${suffix} Cloud Run URL; accepted because ALLOW_CUSTOM_SERVICE_URLS=true." >&2
+                return 0 ;;
+        esac
+    fi
+    echo "ERROR: ${var}=${url} is not the ${NAME_PREFIX}-${suffix} Cloud Run URL (https://${NAME_PREFIX}-${suffix}-...)." >&2
+    echo "       Unset it to derive the URL, or set ALLOW_CUSTOM_SERVICE_URLS=true for a custom domain." >&2
+    return 1
+}
+
 # ------------------------------------------------------------------------------
 # Inputs, confirmation, labels and image builds (shared by the deploy scripts,
 # scripts/build-image.sh and scripts/deploy-stage1.sh).

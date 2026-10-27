@@ -68,6 +68,10 @@ fi
 if [ -z "${TOOLS_URL:-}" ]; then
     TOOLS_URL="$(service_url_or_deterministic "${NAME_PREFIX}-tools")"
 fi
+# Exported URLs from another stack's deploy in the same shell are refused (sec L9).
+assert_stack_url BRIDGE_URL bridge || exit 1
+assert_stack_url AGENT_URL agent || exit 1
+assert_stack_url TOOLS_URL tools || exit 1
 
 echo "==================================================================="
 echo "  Deploying ${SERVICE_NAME} to Cloud Run"
@@ -91,7 +95,7 @@ if [ -n "${AUTO_RESOLVE_ON_RECOVERY:-}" ]; then
 fi
 # Optional tuning, passed only when exported (else the service keeps its value or the app
 # default applies).
-for optional in MODEL_NAME GEMINI_LOCATION TOOLS_TIMEOUT_SECONDS TOOLS_RETRY_ATTEMPTS TOOLS_RETRY_BASE_SECONDS; do
+for optional in MODEL_NAME GEMINI_LOCATION GEMINI_TIMEOUT_SECONDS TOOLS_TIMEOUT_SECONDS TOOLS_RETRY_ATTEMPTS TOOLS_RETRY_BASE_SECONDS; do
     if [ -n "${!optional:-}" ]; then
         ENV_VARS="${ENV_VARS},${optional}=${!optional}"
     fi

@@ -135,3 +135,14 @@ variable "timer_queue_max_backoff" {
     error_message = "timer_queue_max_backoff must be >= timer_queue_min_backoff."
   }
 }
+
+variable "apigee_reader_role_suffix" {
+  type        = string
+  default     = ""
+  description = "Appended to the custom role id <name_prefix>ApigeeDeployReader. Leave empty; set it (e.g. \"v2\") only to redeploy a torn-down stack more than 7 days after teardown, while the old id is still reserved by the soft delete."
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_]{0,20}$", var.apigee_reader_role_suffix))
+    error_message = "apigee_reader_role_suffix must be 0-20 characters of [A-Za-z0-9_] (custom role ids allow [a-zA-Z0-9_.])."
+  }
+}

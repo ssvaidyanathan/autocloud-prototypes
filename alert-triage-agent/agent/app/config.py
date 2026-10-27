@@ -11,6 +11,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 logger = logging.getLogger(__name__)
 
 # Same rule as the Terraform name_prefix validation.
+LOCAL_BRIDGE_URL = "http://localhost:8080"
+LOCAL_AGENT_URL = "http://localhost:8000"
 NAME_PREFIX_PATTERN = r"[a-z][a-z0-9]{1,9}"
 
 
@@ -34,9 +36,12 @@ class AgentConfig(BaseSettings):
     incident_store_path: str = Field(default="/knowledge/incident-manager", alias="INCIDENT_STORE_PATH")
     fallback_store_path: str = Field(default="/tmp/knowledge/incident-manager", alias="FALLBACK_STORE_PATH")
 
-    # Bridge & Agent URLs
-    bridge_url: str = Field(default="http://localhost:8080", alias="BRIDGE_URL")
-    agent_url: str = Field(default="http://localhost:8000", alias="AGENT_URL")
+    # Bridge & Agent URLs. No defaults when not local: a non-local agent without them would post
+    # ticket instructions and timer wakes to localhost and fail far from the cause, so they are
+    # required like TOOLS_URL (startup fails; agent/scripts/deploy.sh sets both). IS_LOCAL=true
+    # falls back to the local dev ports below.
+    bridge_url: Optional[str] = Field(default=None, alias="BRIDGE_URL")
+    agent_url: Optional[str] = Field(default=None, alias="AGENT_URL")
 
     # Cloud Tasks timers. Derived when unset: LOCATION = REGION,
     # TIMER_QUEUE_NAME = {NAME_PREFIX}-timer-queue,
@@ -48,6 +53,9 @@ class AgentConfig(BaseSettings):
     # Gemini gray-zone correlation (Vertex AI). Model tuning values, overridable per deploy.
     model_name: str = Field(default="gemini-3.8-flash", alias="MODEL_NAME")
     gemini_location: str = Field(default="global", alias="GEMINI_LOCATION")
+    # Bound of one gray-zone Gemini call; on timeout the deterministic fallback decides (WARNING).
+    # The call runs outside the global ingest lock (grouping/manager.py), so this bounds one alert.
+    gemini_timeout_seconds: float = Field(default=20.0, alias="GEMINI_TIMEOUT_SECONDS", gt=0, le=120)
 
     is_local: bool = Field(default=False, alias="IS_LOCAL")
 
@@ -146,7 +154,8 @@ class AgentConfig(BaseSettings):
         """Settings without which a non-local agent cannot run a complete investigation."""
         if self.is_local:
             return []
-        return ["TOOLS_URL"] if self.tools_url is None else []
+        required = {"TOOLS_URL": self.tools_url, "BRIDGE_URL": self.bridge_url, "AGENT_URL": self.agent_url}
+        return [name for name, value in required.items() if value is None]
 
     @field_validator("name_prefix")
     @classmethod
@@ -171,13 +180,21 @@ class AgentConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _require_and_derive(self) -> "AgentConfig":
-        for field_name in ("project_id", "region", "location", "timer_queue_name", "service_account_email"):
+        # IS_LOCAL turns on mock tokens and local fallbacks; never on Cloud Run (K_SERVICE is set there).
+        if self.is_local and os.getenv("K_SERVICE"):
+            raise ValueError("IS_LOCAL=true is not allowed on Cloud Run (K_SERVICE is set)")
+        for field_name in ("project_id", "region", "location", "timer_queue_name", "service_account_email",
+                           "bridge_url", "agent_url"):
             value = getattr(self, field_name)
             if isinstance(value, str) and not value.strip():
                 setattr(self, field_name, None)
         missing = [env for env, value in (("PROJECT_ID", self.project_id), ("REGION", self.region)) if not value]
         if missing and not self.is_local:
             raise ValueError(f"required setting(s) not set: {', '.join(missing)} (only IS_LOCAL=true may omit them)")
+        if self.is_local:
+            # Local development only (uvicorn on the default ports).
+            self.bridge_url = self.bridge_url or LOCAL_BRIDGE_URL
+            self.agent_url = self.agent_url or LOCAL_AGENT_URL
         if self.location is None:
             self.location = self.region
         if self.timer_queue_name is None:

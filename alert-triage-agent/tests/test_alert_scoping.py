@@ -197,7 +197,7 @@ def test_bridge_webhook_defensively_ignores_foreign_alerts():
                 },
             }
         }
-        resp = client.post("/webhook/monitoring?token=test-secret", json=payload_suite)
+        resp = client.post("/webhook/monitoring", headers={"Authorization": "Bearer test-secret"}, json=payload_suite)
         assert resp.status_code == 200
         assert resp.json() == {"status": "ignored", "reason": "non-ata alert policy"}
 
@@ -212,7 +212,7 @@ def test_bridge_webhook_defensively_ignores_foreign_alerts():
                 },
             }
         }
-        resp_ima = client.post("/webhook/monitoring?token=test-secret", json=payload_ima)
+        resp_ima = client.post("/webhook/monitoring", headers={"Authorization": "Bearer test-secret"}, json=payload_ima)
         assert resp_ima.status_code == 200
         assert resp_ima.json() == {"status": "ignored", "reason": "non-ata alert policy"}
 
@@ -230,7 +230,7 @@ def test_bridge_webhook_defensively_ignores_foreign_alerts():
                 "started_at": 1729631700,
             }
         }
-        resp_ata = client.post("/webhook/monitoring?token=test-secret", json=payload_ata)
+        resp_ata = client.post("/webhook/monitoring", headers={"Authorization": "Bearer test-secret"}, json=payload_ata)
         assert resp_ata.status_code == 202
         data_ata = resp_ata.json()
         assert data_ata["status"] == "accepted"

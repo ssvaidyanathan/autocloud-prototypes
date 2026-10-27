@@ -286,6 +286,40 @@ stop_schema_proxy() {
         SCHEMA_PROXY_PID=""
     fi
 }
+# Sets the built-in postgres user's password through the Cloud SQL Admin API (users.update).
+# Not `gcloud sql users set-password --password=...`: that puts the password on argv (`ps`) and
+# gcloud writes its arguments, password included, to its local debug log. Here the password
+# is passed to this function (a shell function argument, not a process argv) and only ever
+# leaves the shell through a builtin printf into a pipe: python3 JSON-encodes it from stdin and
+# curl reads the body from stdin. The bearer token goes in a 0600 curl config file that a trap
+# deletes. Runs in a subshell so its traps do not replace the caller's. Every step has its own
+# `|| die`: the caller's `|| die` turns off set -e in here.
+set_postgres_password() (
+    local instance="$1" pw="$2" token cfg resp op url
+    [ -n "${pw}" ] || die "set_postgres_password: no password given."
+    command -v curl >/dev/null 2>&1 || die "curl not on PATH."
+    token="$(gcloud auth print-access-token 2>/dev/null)" && [ -n "${token}" ] \
+        || die "gcloud auth print-access-token failed (run gcloud auth login)."
+    cfg="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-sqladmin.XXXXXX")" || die "mktemp failed."
+    resp="${cfg}.resp"
+    trap 'rm -f "${cfg}" "${resp}"' EXIT
+    trap 'rm -f "${cfg}" "${resp}"; exit 130' INT TERM HUP
+    chmod 600 "${cfg}" || die "chmod 600 ${cfg} failed."
+    printf 'header = "Authorization: Bearer %s"\n' "${token}" > "${cfg}" || die "could not write ${cfg}."
+    token=""
+    url="https://sqladmin.googleapis.com/v1/projects/${PROJECT_ID}/instances/${instance}/users?name=postgres"
+    printf '%s' "${pw}" \
+        | python3 -c 'import json, sys; sys.stdout.write(json.dumps({"name": "postgres", "password": sys.stdin.read()}))' \
+        | curl -sS -f -X PUT --config "${cfg}" -H "Content-Type: application/json" --data-binary @- \
+            -o "${resp}" "${url}" \
+        || die "Cloud SQL Admin users.update (postgres on ${instance}) failed (curl error above; the password is not shown)."
+    op="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("name", ""))' "${resp}" 2>/dev/null)" || op=""
+    case "${op}" in
+        ""|*[!A-Za-z0-9_-]*) die "Cloud SQL Admin users.update returned no operation name." ;;
+    esac
+    gcloud sql operations wait "${op}" --project="${PROJECT_ID}" --timeout=300 >/dev/null \
+        || die "Cloud SQL operation ${op} (set postgres password) did not finish."
+)
 phase_schema() {
     local instance="${NAME_PREFIX}-inventory-db"
     local connection="${PROJECT_ID}:${REGION}:${instance}"
@@ -302,8 +336,7 @@ phase_schema() {
         password="$(python3 -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(32)))')"
         [ "${#password}" -eq 32 ] || die "could not generate a postgres password."
         echo "    setting a new random password for the built-in postgres user of ${instance} (not printed)..."
-        gcloud sql users set-password postgres --instance="${instance}" --project="${PROJECT_ID}" \
-            --password="${password}" >/dev/null || die "gcloud sql users set-password postgres failed."
+        set_postgres_password "${instance}" "${password}" || die "setting the postgres password failed (above)."
     fi
     proxy_log="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-sql-proxy.XXXXXX")"
     echo "    starting cloud-sql-proxy for ${connection} on 127.0.0.1:${port}..."
