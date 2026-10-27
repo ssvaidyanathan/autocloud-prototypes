@@ -283,7 +283,7 @@ def low_traffic_facts(dossier: Optional[EvidenceDossier], threshold_rpm: float) 
 
 
 def low_traffic_sentence(facts: dict[str, Any]) -> str:
-    """'low traffic: ...' clause for latency text (no ';': descriptions split on it)."""
+    """'low traffic: ...' clause for latency text."""
     return (
         f"low traffic: {facts['volume']} on {facts['service']}, so the latency may come from a few "
         "slow requests (such as a cold start) rather than a service-wide degradation"
@@ -1827,8 +1827,6 @@ class SynthesizerAgent:
                         line += f" ({rpm} rpm)"
                     line += f" on {d.target_resource}"
                     if isinstance(restarts, (int, float)):
-                        # No ';': the description splits observations on it, which would leave
-                        # an orphan "container restarts" bullet without the service name.
                         line += f", with {restarts} container restarts"
                     obs_items.append(line)
                 if _is_latency_alert(alert):

@@ -145,6 +145,10 @@ DEFAULT_TITLE_PROBLEM = "Anomalous telemetry breach detected"
 
 # Work note: at most this many observation sub-bullets, then '...and N more (see attached report)'.
 WORK_NOTE_MAX_OBSERVATIONS = 6
+# Work note: the probable root cause is cut at this many characters (on a word boundary), with a
+# pointer to the attached report, which carries the full text.
+WORK_NOTE_ROOT_CAUSE_MAX_LENGTH = 600
+WORK_NOTE_ROOT_CAUSE_CUT_SUFFIX = "... (full text in the attached report)"
 
 
 def split_observations(observations: Optional[str]) -> list[str]:
@@ -165,6 +169,19 @@ def _html_text(text: str) -> str:
     """
     escaped = str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return _CODE_TAG_RE.sub(lambda m: f"&#91;{m.group(1)}&#93;", escaped)
+
+
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
+
+
+def work_note_root_cause_html(text: str) -> str:
+    """One-line, escaped probable root cause for the work note; `x` spans become <code>x</code>."""
+    flat = " ".join(str(text).replace("**", "").replace("*", "").split())
+    cut = len(flat) > WORK_NOTE_ROOT_CAUSE_MAX_LENGTH
+    if cut:
+        flat = _truncate_at_word(flat, WORK_NOTE_ROOT_CAUSE_MAX_LENGTH)
+    html = _BACKTICK_RE.sub(r"<code>\1</code>", _html_text(flat))
+    return html + WORK_NOTE_ROOT_CAUSE_CUT_SUFFIX if cut else html
 
 
 _PLACEHOLDER_TITLE_PROBLEMS = ("none", "n/a", "unknown", "under investigation")
@@ -439,6 +456,7 @@ class InvestigationReport(BaseModel):
             "<ul>\n"
             f"  <li><b>Problem:</b> {prob_text}</li>\n"
             f"  <li><b>Systems:</b>{_sub_list(sys_items)}</li>\n"
+            f"  <li><b>Probable Root Cause:</b> {work_note_root_cause_html(self.probable_root_cause.text)}</li>\n"
             f"  <li><b>Observations:</b>{_sub_list(obs_items)}</li>\n"
             f"  <li><b>Recommended Actions:</b>{recs_inner}</li>\n"
             "</ul>\n"
@@ -624,8 +642,9 @@ class InvestigationReport(BaseModel):
         # Parse observations into clean bullet items
         obs_lines = []
         if self.observations:
-            raw_obs = [o.strip() for o in re.split(r"\s*\|\s*|\s*;\s*", self.observations) if o.strip()]
-            for o in raw_obs:
+            # Same items as the work note: split on the ' | ' join separator only. A ';' is
+            # part of an observation's sentence, not a separator.
+            for o in split_observations(self.observations):
                 # Drop bracketed tags, but keep redaction tokens and log timestamps: removing
                 # them garbled log excerpts ('[REDACTED_IP]:50318' became ':50318').
                 cleaned_o = re.sub(r"\[(?!REDACTED_)(?!\d{4}-\d{2}-\d{2}T)[^\]]*\]\s*", "", o).strip()
