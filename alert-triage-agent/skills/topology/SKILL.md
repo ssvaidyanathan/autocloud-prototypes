@@ -5,6 +5,8 @@ description: Explains TOPOLOGY.md single-source-of-truth format, dependency spec
 
 # Application Topology Skill
 
+> Resource names below use the default prefix `ata`. A stack deployed with another `NAME_PREFIX` uses `<prefix>-` instead of `ata-` (and `/<prefix>/...` base paths).
+
 ## Overview
 
 The Alert Triage Agent relies on `TOPOLOGY.md` as its single source of truth for the application dependency graph. No service names, proxy names, or dependency edges are hardcoded in agent or bridge Python code.

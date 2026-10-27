@@ -2,6 +2,8 @@
 
 This guide is for SRE operators, site leads, and evaluators demonstrating the capabilities of the **Alert Triage Agent (ATA)** across 5 realistic failure scenarios (**S1 through S5**).
 
+Resource names in this guide use the default prefix `ata` (`ata-inventory-api`, `ata-orders-v1`, `/ata/inventory/v1`, ...). For a stack deployed with another `NAME_PREFIX`, read `<prefix>-` for `ata-`. Commands use `${PROJECT_ID}`, `${REGION}`, `${NAME_PREFIX}`, `${APIGEE_ORG}` and `${APIGEE_HOST}`: load the stack's inputs first ([DEPLOY.md §2.2](DEPLOY.md#22-inputs)). To deploy a stack, see [DEPLOY.md](DEPLOY.md).
+
 ---
 
 ## 1. Run It Yourself (Operator Runbook)
@@ -14,7 +16,7 @@ Follow this section to execute scenarios directly from your laptop.
    ```bash
    gcloud auth login
    gcloud auth application-default login
-   gcloud config set project cloud-assist-fde-2
+   gcloud config set project "${PROJECT_ID}"
    ```
    `gcloud auth application-default login` is needed because `reset-scenarios.sh` queries the Cloud Monitoring Alerts API with an Application Default Credentials token: federated gcloud user tokens are rejected there with `401 ACCESS_TOKEN_TYPE_UNSUPPORTED`.
    > [!IMPORTANT]
@@ -26,22 +28,22 @@ Follow this section to execute scenarios directly from your laptop.
    cd alert-triage-agent
    ```
 
-3. **Verify Required IAM Roles on `cloud-assist-fde-2`:**
+3. **Verify Required IAM Roles on `${PROJECT_ID}`:**
    Ensure your GCP user account has the following roles:
    - `roles/run.invoker` (Cloud Run Invoker) on `ata-inventory-api` and `ata-orders-api` (to trigger demo endpoints `/admin/fault/inject` and `/admin/leak-connections`)
    - `roles/apigee.admin` or `roles/apigee.readOnly` (to read developer app consumer keys)
-   - `roles/storage.objectViewer` on `gs://cloud-assist-fde-2-ata-incidents` (to read OKF incident files via `check-result.sh`)
+   - `roles/storage.objectViewer` on `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents` (to read OKF incident files via `check-result.sh`)
    - `roles/monitoring.viewer` (to query Cloud Monitoring alert states during resets)
 
 4. **Acquire Apigee Consumer API Key:**
-   Retrieve the consumer key for `ata-demo-app` using your gcloud user credentials:
+   `scripts/deploy-apigee-proxies.sh` writes the key to `.${NAME_PREFIX}-api-key` in the checkout that deployed the stack. From another checkout, retrieve the consumer key for `${NAME_PREFIX}-demo-app` using your gcloud user credentials:
    ```bash
    curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-     "https://apigee.googleapis.com/v1/organizations/cloud-assist-fde-2/developers/ata-dev@example.com/apps/ata-demo-app" \
-     | python3 -c "import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])" > .ata-api-key
-   chmod 600 .ata-api-key
+     "https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG}/developers/${NAME_PREFIX}-dev@example.com/apps/${NAME_PREFIX}-demo-app" \
+     | python3 -c "import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])" > ".${NAME_PREFIX}-api-key"
+   chmod 600 ".${NAME_PREFIX}-api-key"
    ```
-   *(Alternatively: `export ATA_API_KEY="..."`). The `.ata-api-key` file is gitignored.*
+   The scenario scripts read `.${NAME_PREFIX}-api-key` and the Apigee values in `.${NAME_PREFIX}-apigee.env` (written by `deploy-apigee-proxies.sh`); `ATA_API_KEY` overrides the key file. TODO(scen-lane): confirm when the scenario lane lands. The key files are gitignored.
 
 5. **Verify Baseline Health:**
    ```bash
@@ -382,13 +384,13 @@ Run the automated result checker to inspect OKF incident files in GCS and valida
 ### 2. View Raw GCS OKF Incident Files
 Inspect active incident Markdown files stored in Cloud Storage under `knowledge/incident-manager/`:
 ```bash
-gcloud storage ls -l gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/
-gcloud storage cat gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/<incident-filename>.md
+gcloud storage ls -l "gs://${PROJECT_ID}-${NAME_PREFIX}-incidents/knowledge/incident-manager/"
+gcloud storage cat "gs://${PROJECT_ID}-${NAME_PREFIX}-incidents/knowledge/incident-manager/<incident-filename>.md"
 ```
 
 Archived incidents from scenario resets are moved to:
 ```bash
-gcloud storage ls -l gs://cloud-assist-fde-2-ata-incidents/archive/
+gcloud storage ls -l "gs://${PROJECT_ID}-${NAME_PREFIX}-incidents/archive/"
 ```
 
 Each file contains YAML frontmatter:
@@ -396,7 +398,7 @@ Each file contains YAML frontmatter:
 ---
 type: incident
 group_id: grp_20261022t220216z_ata-inventory-api
-project: cloud-assist-fde-2
+project: <project-id>
 policy_name: ata-inventory-5xx
 resource_name: ata-inventory-api
 status: mitigation-in-progress

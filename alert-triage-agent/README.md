@@ -2,7 +2,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](../LICENSE)
 [![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/)
-[![Terraform: >=1.5.0](https://img.shields.io/badge/Terraform-%3E%3D1.5.0-623ce4.svg)](https://www.terraform.io/)
+[![Terraform: >=1.9.0](https://img.shields.io/badge/Terraform-%3E%3D1.9.0-623ce4.svg)](https://www.terraform.io/)
 
 An autonomous Site Reliability Engineering (SRE) diagnostic and incident triage platform for Google Cloud Platform environments. When Google Cloud Monitoring fires alerts across multi-tier topologies, the Alert Triage Agent (ATA) ingests events via a thin, stateless webhook bridge, correlates related alerts into unified incident groups, orchestrates deterministic telemetry specialists across Cloud Run, Cloud SQL, Apigee X, and recent changes/deployments, synthesizes evidence-grounded root cause findings, and creates and updates ServiceNow incident records with structured executive summaries and standalone responsive HTML dossiers.
 
@@ -20,16 +20,6 @@ An autonomous Site Reliability Engineering (SRE) diagnostic and incident triage 
 - [7. Security Model & Production Guardrails](#7-security-model--production-guardrails)
 - [8. Prototype Status & Known Limitations](#8-prototype-status--known-limitations)
 - [9. Full Step-by-Step GCP Deployment Walkthrough](#9-full-step-by-step-gcp-deployment-walkthrough)
-  - [Prerequisites & IAM Requirements](#prerequisites--iam-requirements)
-  - [Step 0: Bootstrap GCS Remote State](#step-0-bootstrap-gcs-remote-state)
-  - [Step 1: Foundation Module](#step-1-foundation-module)
-  - [Step 2: Database Module](#step-2-database-module)
-  - [Step 3: Applications Module](#step-3-applications-module)
-  - [Step 4: Apigee API Proxies & Products](#step-4-apigee-api-proxies--products)
-  - [Step 5: Observability Module](#step-5-observability-module)
-  - [Step 6: Triage Tier Services Deployment](#step-6-triage-tier-services-deployment)
-  - [Step 7: Secret Manager Configuration](#step-7-secret-manager-configuration)
-  - [Step 8: End-to-End Verification](#step-8-end-to-end-verification)
 - [10. Master Automated Deployment Script](#10-master-automated-deployment-script)
 - [11. Terraform Remote State & GCS Backend](#11-terraform-remote-state--gcs-backend)
 - [12. Enterprise Organization Policy Considerations](#12-enterprise-organization-policy-considerations)
@@ -63,54 +53,32 @@ The **Alert Triage Agent (ATA)** automates early-stage alert ingestion, intellig
 
 ## 2. Quick Start
 
+The complete procedure, from an empty project to a verified stack and back to nothing, is **[DEPLOY.md](DEPLOY.md)**. It is the only deployment guide: this README does not repeat its commands.
+
 ### Prerequisites
-- **Google Cloud SDK (`gcloud >= 480.0.0`)** installed and authenticated:
-  ```bash
-  gcloud auth login
-  gcloud auth application-default login
-  ```
-- **Terraform** (`>= 1.5.0`): `terraform version`
-- **Docker** daemon active locally OR Google Cloud Build enabled in the target project.
-- **Python 3.12+** with `pip` and virtual environment support (`uv` or `python3 -m venv`).
-- **Target GCP Project with Billing Enabled**:
-  ```bash
-  export PROJECT_ID="your-target-project-id"
-  export REGION="us-west1"
-  export NAME_PREFIX="ata"
-  export ENVIRONMENT="demo"
-  gcloud config set project "${PROJECT_ID}"
-  ```
-- **Apigee X Organization & Environment**: Pre-existing Apigee organization with environment `prod` bound to an environment group hostname (e.g. `8.233.247.52.nip.io`).
+- Operator tools: bash 3.2 or later (the macOS `/bin/bash` works), a recent Google Cloud SDK, **Terraform >= 1.9.0**, python3, curl, the `psql` client and `cloud-sql-proxy` v2. Docker is **not** needed: every image is built with Cloud Build. The full table, with the deployer IAM roles and the organization-policy checks, is in [DEPLOY.md §2.1](DEPLOY.md#21-operator-prerequisites).
+- A Google Cloud project with billing enabled, and Owner on it.
+- An Apigee X organization with an environment attached to an instance and to an environment group hostname (`APIGEE_ORG`, `APIGEE_ENV`, `APIGEE_HOST`). A second stack can reuse an existing organization with a new `NAME_PREFIX` ([DEPLOY.md §2.3](DEPLOY.md#23-second-stack-in-an-existing-project-and-apigee-organization)).
+- A ServiceNow instance and an integration user.
 
-### Fast Deployment Overview
+### Deployment Overview
 
-Deployment is sequenced into automated vertical slices and tier automation (see [Section 9](#9-full-step-by-step-gcp-deployment-walkthrough) for the complete step-by-step walkthrough):
+The deployment is one script, `scripts/deploy-stage1.sh`, with 14 phases. Run them all at once, or one at a time with `--only <phase>` and check each phase as [DEPLOY.md §3](DEPLOY.md#3-deployment) describes:
 
 ```bash
-# 1. Clone repository and enter directory
-git clone https://github.com/ssvaidyanathan/autocloud-prototypes.git
-cd autocloud-prototypes/alert-triage-agent
-
-# 2. Deploy Stage 1 core triage vertical slice
-# (Bootstraps GCS remote state, applies foundation Terraform, deploys inventory API, ata-agent, and ata-bridge)
-./scripts/deploy-stage1.sh
-
-# 3. Deploy demo microservices, database, observability, and Apigee proxies
-./scripts/deploy-demo-infra.sh
-
-# 4. Deploy FastMCP tools server
-(cd tools && ./scripts/deploy.sh)
-
-# 5. Populate ServiceNow credentials in Secret Manager
-./scripts/set-secrets.sh
+./scripts/deploy-stage1.sh --list-phases   # preflight bootstrap foundation secrets images database schema
+                                           # applications inventory-pin triage triage-iam apigee observability verify
+./scripts/deploy-stage1.sh                 # all phases; resume after a failure with --from <phase>
 ```
+
+Before the first run, load the inputs ([DEPLOY.md §2.2](DEPLOY.md#22-inputs)) and do the project and Apigee checks (DEPLOY.md Steps 0-1). After it, run scenarios S1 and S2 and check their ServiceNow tickets (Step 16). `scripts/teardown-stack.sh` removes a stack ([DEPLOY.md §5](DEPLOY.md#5-teardown)), and [§6](DEPLOY.md#6-verify-that-nothing-is-left) confirms that nothing is left.
 
 ### ServiceNow Integration Guide Pointer
 The system integrates with ServiceNow via the Table and Attachment APIs:
 - **ServiceNow Configuration**: Detailed configuration settings, field mappings, and assignment groups are documented in the [Configuration Guide (`CONFIGURATION.md`)](CONFIGURATION.md) and [Deployment Guide (`DEPLOY.md`)](DEPLOY.md).
 - **Credentials & Instance URL**:
-  - The ServiceNow instance URL is **configuration**, not a secret. It is configured via the Terraform variable `servicenow_instance_url` in `terraform.tfvars` or the environment variable `SERVICENOW_INSTANCE_URL`.
-  - ServiceNow API user credentials (`ata-servicenow-username` and `ata-servicenow-password`) reside securely in Google Secret Manager, populated via `./scripts/set-secrets.sh`.
+  - The ServiceNow instance URL is **configuration**, not a secret. `bridge/scripts/deploy.sh` reads it from the environment variable `SERVICENOW_INSTANCE_URL`.
+  - ServiceNow API user credentials (`<prefix>-servicenow-username` and `<prefix>-servicenow-password`) reside in Google Secret Manager, populated via `./scripts/set-secrets.sh`.
 
 ---
 
@@ -266,7 +234,7 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 
 | Setting | Environment Variable | Default Value | Description & Rationale |
 | :--- | :--- | :--- | :--- |
-| **GCP Project** | `PROJECT_ID` | `cloud-assist-fde-2` | Target Google Cloud project identifier. |
+| **GCP Project** | `PROJECT_ID` | *Set by the deploy scripts* | Target Google Cloud project identifier. The deploy scripts require it (no default). |
 | **Resource Prefix** | `NAME_PREFIX` | `ata` | Namespace prefix for isolating resources (`${NAME_PREFIX}-${base_name}`). |
 | **Compute Region** | `REGION` | `us-west1` | Target GCP region hosting Cloud Run, Cloud Tasks, and Cloud SQL. |
 | **Environment** | `ENVIRONMENT` | `prod` | Runtime environment name read by the service. The deploy scripts do not pass it to Cloud Run, so the default applies. Not the `env` resource label, which comes from the shell `ENVIRONMENT` used by the deploy scripts and the Terraform `environment` variable (live value: `demo`; see [CONFIGURATION.md §7.1](CONFIGURATION.md#71-label-scheme--value-requirements)). |
@@ -275,8 +243,9 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 | **Fallback Store Path**| `FALLBACK_STORE_PATH` | `/tmp/knowledge/incident-manager` | Fallback path when primary mount is unavailable. |
 | **Bridge Service URL** | `BRIDGE_URL` | `http://localhost:8080` | On `ata-agent`: URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`). On `ata-bridge`: its own `status.url`, an accepted ID-token audience (required unless `IS_LOCAL=true`; see [CONFIGURATION.md §1.1](CONFIGURATION.md#11-bridge-service-ata-bridge)). |
 | **Agent Service URL**  | `AGENT_URL` | `http://localhost:8080` | URL of `ata-agent` called by Cloud Tasks at `POST /triage`. |
-| **Triage Queue Name**  | `TASKS_QUEUE` | `ata-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |
-| **Timer Queue Name**   | `TIMER_QUEUE_NAME` | `ata-timer-queue` | Dedicated Cloud Tasks queue for delayed settle/cool-down timers. |
+| **Tools Service URL**  | `TOOLS_URL` | *None (required unless `IS_LOCAL=true`)* | On `ata-agent`: URL of `ata-tools` (https, no path) for the change timeline over MCP. A non-local agent does not start without it. |
+| **Triage Queue Name**  | `TASKS_QUEUE` | `${NAME_PREFIX}-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |
+| **Timer Queue Name**   | `TIMER_QUEUE_NAME` | `${NAME_PREFIX}-timer-queue` (set by `agent/scripts/deploy.sh`) | Dedicated Cloud Tasks queue for delayed settle/cool-down timers. |
 | **Gemini Reasoning**   | `MODEL_NAME` | `gemini-3.8-flash` | Gemini model used strictly for gray-zone correlation (scores 35–65). |
 | **ServiceNow URL**     | `SERVICENOW_INSTANCE_URL` | *None* | **Configuration (NOT a secret)**: Base URL of ServiceNow instance (e.g. `https://<instance>.service-now.com`). |
 | **ServiceNow Caller**  | `SERVICENOW_CALLER` | `ATA Integration` | Caller ID populated on created ServiceNow incident records. |
@@ -290,13 +259,13 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 | **Auto-Resolve on Recovery** | `AUTO_RESOLVE_ON_RECOVERY` | `false` | When all alerts close and the 180s cool-down passes: `false` leaves the ServiceNow ticket In Progress and adds a work note stating that the alerts closed (with the measured traffic around the close) and that a human must verify the remediation before resolving it. `true` resolves the ticket. See "Cool-down and resolution" under [Sequence Flow](#sequence-flow-mermaid). |
 
 ### Secret Manager Secret Names
-Sensitive credentials reside exclusively in Google Secret Manager:
+Sensitive credentials reside exclusively in Google Secret Manager (names shown with the live stack's prefix `ata`):
 - `ata-webhook-token`: HTTP Basic Auth password for Cloud Monitoring alert webhook channel.
 - `ata-servicenow-username`: API integration username for ServiceNow Table & Attachment APIs.
 - `ata-servicenow-password`: Password for ServiceNow integration user.
 
 > [!NOTE]
-> **ServiceNow Instance URL is CONFIG, not a secret.** It is managed as the Terraform variable `servicenow_instance_url` in `terraform.tfvars` and passed as the environment variable `SERVICENOW_INSTANCE_URL` to `ata-bridge`. It is not stored in Secret Manager.
+> **ServiceNow Instance URL is CONFIG, not a secret.** It is passed to `ata-bridge` as the environment variable `SERVICENOW_INSTANCE_URL` by `bridge/scripts/deploy.sh`, which reads it from the environment. It is not stored in Secret Manager.
 
 For complete variable lists and schema details, see the [Configuration Guide (`CONFIGURATION.md`)](CONFIGURATION.md).
 
@@ -346,12 +315,13 @@ In the current prototype, the agent's diagnostic pipeline is executed via **dete
 The Alert Triage Agent enforces zero-trust security and defense-in-depth across all tiers:
 
 - **Strictly Read-Only IAM Boundaries**:
-  - `ata-agent-sa` and `ata-tools-sa` possess strictly read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer`).
-  - Neither service account possesses any mutating privileges on production cloud infrastructure. Write permissions are strictly confined to the incident GCS bucket (`roles/storage.objectUser` on `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents`).
+  - `ata-agent-sa` (which also runs `ata-tools`) holds read-only viewer roles (`roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer`, `roles/apigee.readOnlyAdmin`) and `roles/aiplatform.user` for the Gemini gray-zone calls.
+  - It has no mutating privileges on the monitored infrastructure. Its writes are confined to the incident GCS bucket (`roles/storage.objectUser` on `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents`) and to enqueueing its own timer tasks (`roles/cloudtasks.enqueuer` on `${NAME_PREFIX}-timer-queue`).
 - **Zero Secrets in Repository or Code**: All passwords and tokens reside in Google Secret Manager; the ServiceNow instance URL is configuration.
 - **Mutual Authentication & OIDC Verification**:
   - Inbound alert webhooks require HTTP Basic Auth validation against Secret Manager credentials.
-  - Cloud Tasks invokes `ata-agent` (`POST /triage`, `POST /timer/wake`) using Google-signed OIDC ID tokens validated by `verify_agent_caller`.
+  - Cloud Tasks invokes `ata-agent` (`POST /triage`, `POST /timer/wake`) with Google-signed OIDC ID tokens (as `ata-bridge-sa` and `ata-agent-sa`). Cloud Run IAM checks them: only those two SAs hold `roles/run.invoker` on the agent (`triage-iam` root). The agent application does not check the caller again.
+  - `ata-agent` calls `ata-tools` (`/mcp`) with a Google ID token; only `ata-agent-sa` may invoke the tools service.
   - `ata-agent` calls `ata-bridge` (`POST /instructions/ticket/*`) using Google ID tokens verified against `ata-agent-sa`.
   - Apigee proxies invoke Cloud Run demo services using Google ID tokens.
 - **IAM Database Authentication**: `ata-inventory-api` connects to Cloud SQL PostgreSQL using IAM database authentication via `pg8000` (zero static database passwords).
@@ -377,7 +347,7 @@ The Alert Triage Agent has been evaluated against live GCP infrastructure across
 
 ### Known Limitations
 1. **Cloud SQL `db-f1-micro` Connection Limits**: The test tier uses `db-f1-micro` with `max_connections = 25`. The alert threshold is calibrated at 20 connections (~80% capacity). Under heavy production traffic, production instances (`db-custom-*`) require recalibration.
-2. **Pre-Existing Apigee X Dependency**: Requires an existing Apigee X organization and environment group hostname (`8.233.247.52.nip.io`).
+2. **Pre-Existing Apigee X Dependency**: Requires an existing Apigee X organization, environment and environment group hostname (`APIGEE_ORG`, `APIGEE_ENV`, `APIGEE_HOST`). The repository does not provision them; see [DEPLOY.md Step 1](DEPLOY.md#step-1-apigee-organization-environment-and-hostname).
 3. **Local Mock Mode vs Live GCP**: While `IS_LOCAL=true` provides in-memory mock adapters for offline unit tests, full end-to-end evaluation requires live GCP credentials and APIs.
 4. **Serialized Triage Queue**: `ata-triage-queue` runs with `max_concurrent_dispatches = 1`, so alerts are processed one at a time. This keeps correlation and grouping deterministic and prevents one incident from being split across groups, at the cost of throughput during large alert bursts. Failed dispatches are retried for a bounded window (`triage_queue_max_retry_duration`). The window is measured from each alert's first delivery attempt, so after a long outage the alerts whose first attempt was more than one window before recovery are dropped. Alerts that arrived later are still delivered. See [CONFIGURATION.md §4](CONFIGURATION.md#4-cloud-tasks-queue-configuration).
 
@@ -385,276 +355,52 @@ The Alert Triage Agent has been evaluated against live GCP infrastructure across
 
 ## 9. Full Step-by-Step GCP Deployment Walkthrough
 
-The following walkthrough follows the staged deployment sequence documented in [DEPLOY.md](DEPLOY.md).
-
-### Prerequisites & IAM Requirements
-
-Before deploying, ensure you have:
-1. **Google Cloud SDK (`gcloud`)** authenticated:
-   ```bash
-   gcloud auth login
-   gcloud auth application-default login
-   ```
-2. **Terraform CLI** (`>= 1.5.0`): `terraform version`
-3. **Target Project Configuration**:
-   ```bash
-   export PROJECT_ID="your-target-project-id"
-   export REGION="us-west1"
-   export NAME_PREFIX="ata"
-   export ENVIRONMENT="demo"
-   gcloud config set project "${PROJECT_ID}"
-   ```
-4. **Deployer Permissions**: Your deploying account requires `roles/owner` or `roles/editor` plus `roles/resourcemanager.projectIamAdmin`.
-
----
-
-### Step 0: Bootstrap GCS Remote State
-
-Bootstrap the Google Cloud Storage backend for Terraform state storage with uniform bucket-level access and versioning:
-
-```bash
-cd alert-triage-agent
-./scripts/bootstrap-tfstate.sh \
-  --project-id "${PROJECT_ID}" \
-  --region "${REGION}" \
-  --name-prefix "${NAME_PREFIX}" \
-  --env "${ENVIRONMENT}"
-```
-
-This ensures `gs://${PROJECT_ID}-${NAME_PREFIX}-tfstate` exists with encryption and object versioning enabled.
-
----
-
-### Step 1: Foundation Module
-
-The foundation module provisions the GCS incidents bucket, creates 6 dedicated service accounts, configures Secret Manager placeholders, and provisions Cloud Tasks queues:
-
-```bash
-cd alert-triage-agent/infra/terraform/foundation
-terraform init -reconfigure -backend-config=backend.hcl
-
-terraform plan \
-  -var="project_id=${PROJECT_ID}" \
-  -var="region=${REGION}" \
-  -var="name_prefix=${NAME_PREFIX}" \
-  -var="environment=${ENVIRONMENT}" \
-  -out=tfplan-foundation
-
-terraform apply tfplan-foundation
-cd ../../..
-```
-
-**Resources Created**:
-- GCS Bucket: `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents` (versioning enabled).
-- Cloud Tasks Queues: `ata-triage-queue` (max concurrent: 1, retried within `triage_queue_max_retry_duration`) and `ata-timer-queue` (max concurrent: 50, retried within `timer_queue_max_retry_duration`).
-- Service Accounts: `ata-orders-sa`, `ata-inventory-sa`, `ata-apigee-sa`, `ata-bridge-sa`, `ata-agent-sa`, `ata-tools-sa`.
-- Secret Placeholders: `ata-webhook-token`, `ata-servicenow-username`, `ata-servicenow-password`.
-
----
-
-### Step 2: Database Module
-
-Provisions a Cloud SQL PostgreSQL 15 instance with IAM database authentication enabled:
-
-```bash
-cd alert-triage-agent/infra/terraform/database
-terraform init -reconfigure -backend-config=backend.hcl
-
-terraform plan \
-  -var="project_id=${PROJECT_ID}" \
-  -var="region=${REGION}" \
-  -var="name_prefix=${NAME_PREFIX}" \
-  -out=tfplan-database
-
-terraform apply tfplan-database
-cd ../../..
-```
-
-**Database Initialization**:
-Apply the schema and seed mock inventory catalog items:
-```bash
-gcloud sql connect "${NAME_PREFIX}-inventory-db" --user=postgres --database=inventory < demo/db/schema.sql
-```
-
----
-
-### Step 3: Applications Module
-
-Deploys internal demo microservices on Cloud Run with IAM service account identities:
-
-```bash
-cd alert-triage-agent/infra/terraform/applications
-terraform init -reconfigure -backend-config=backend.hcl
-
-terraform plan \
-  -var="project_id=${PROJECT_ID}" \
-  -var="region=${REGION}" \
-  -var="name_prefix=${NAME_PREFIX}" \
-  -out=tfplan-apps
-
-terraform apply tfplan-apps
-cd ../../..
-```
-
-**Services Deployed**:
-- `ata-inventory-api`: Backed by Cloud SQL IAM authentication and mock fallback.
-- `ata-orders-api`: Securely invokes `ata-inventory-api` using ambient Google ID tokens.
-- Apigee TargetServers: `ata-orders-target` and `ata-inventory-target`.
-
----
-
-### Step 4: Apigee API Proxies & Products
-
-Package and deploy the Apigee API proxies to environment `prod`, configure developer credentials, and obtain an API consumer key:
-
-```bash
-cd alert-triage-agent
-./scripts/deploy-apigee-proxies.sh
-```
-
-**Outputs**:
-- Proxies deployed: `ata-orders-v1` (`/ata/orders/v1`) and `ata-inventory-v1` (`/ata/inventory/v1`).
-- Enforces API key verification, SpikeArrest rate limiting, and structured Cloud Logging.
-- Consumer API key saved to `.ata-api-key`.
-
----
-
-### Step 5: Observability Module
-
-Deploys Cloud Monitoring alert policies and links them to the `ata-bridge` notification channel:
-
-```bash
-cd alert-triage-agent/infra/terraform/observability
-terraform init -reconfigure -backend-config=backend.hcl
-
-terraform plan \
-  -var="project_id=${PROJECT_ID}" \
-  -var="region=${REGION}" \
-  -var="name_prefix=${NAME_PREFIX}" \
-  -out=tfplan-observability
-
-terraform apply tfplan-observability
-cd ../../..
-```
-
-**Alert Policies Configured**:
-1. `ata-orders-5xx`: Cloud Run `ata-orders-api` 5xx rate > 5% over 60s.
-2. `ata-orders-latency`: Cloud Run `ata-orders-api` p99 latency > 2000ms (60s windows, all revisions and response codes merged per service) sustained for the `latency_duration_secs` retest window (default 240s), so a single cold-start burst does not open an alert.
-3. `ata-inventory-5xx`: Cloud Run `ata-inventory-api` 5xx rate > 5% over 60s.
-4. `ata-inventory-latency`: Cloud Run `ata-inventory-api` p99 latency > 2000ms (60s windows, all revisions and response codes merged per service) sustained for the `latency_duration_secs` retest window (default 240s), so a single cold-start burst does not open an alert.
-5. `ata-apigee-orders-5xx`: Apigee proxy `ata-orders-v1` HTTP 500 error count > 1.
-6. `ata-apigee-orders-429`: Apigee proxy `ata-orders-v1` HTTP 429 SpikeArrest rate count > 1.
-7. `ata-cloudsql-connections-critical`: Cloud SQL `ata-inventory-db` connection count > 20 backends.
-8. `ata-cloudsql-cpu-high`: Cloud SQL `ata-inventory-db` CPU utilization > 85%.
-
-Every policy closes an open incident whose condition has received no data for `alert_auto_close_secs` (Terraform variable, default 1800 s, at least 1800: Cloud Monitoring's 30-minute minimum).
-
----
-
-### Step 6: Triage Tier Services Deployment
-
-Deploy the custom FastMCP tools server, the multi-agent ADK runtime, and the bridge webhook service:
-
-```bash
-# 1. Deploy FastMCP tools server
-cd alert-triage-agent/tools
-./scripts/deploy.sh
-cd ../..
-
-# 2. Deploy multi-agent ADK runtime
-cd alert-triage-agent/agent
-./scripts/deploy.sh
-cd ../..
-
-# 3. Deploy bridge webhook service
-cd alert-triage-agent/bridge
-./scripts/deploy.sh
-cd ../..
-```
-
----
-
-### Step 7: Secret Manager Configuration
-
-Store ServiceNow credentials safely in Google Secret Manager without echoing passwords:
-
-```bash
-cd alert-triage-agent
-./scripts/set-secrets.sh
-```
-
-When prompted:
-- **ServiceNow Username**: API integration user (`ata-servicenow-username`).
-- **ServiceNow Password**: Password for ServiceNow integration user (`ata-servicenow-password`).
-
----
-
-### Step 8: End-to-End Verification
-
-Verify the deployed infrastructure and services using automated verification scripts:
-
-```bash
-# 1. Verify demo microservices and Apigee routing
-./scripts/verify-demo-infra.sh
-
-# 2. Verify bridge webhook ingestion and GCS OKF generation
-./scripts/verify-stage1.sh
-
-# 3. Run full end-to-end scenario verification harness
-./scripts/verify-scenarios.sh
-```
+The step-by-step walkthrough is [DEPLOY.md](DEPLOY.md): inputs, operator prerequisites, one step per `deploy-stage1.sh` phase with the expected output, verification and failure handling of each, the scenario check, teardown and the final checks. It also covers a second stack in an existing project and Apigee organization.
 
 ---
 
 ## 10. Master Automated Deployment Script
 
-Unlike monolithic prototypes that rely on a single script, deployment in the Alert Triage Agent is organized into **tier automation scripts** matching the system architecture:
+`scripts/deploy-stage1.sh` is the single deploy entrypoint, for any project, region and prefix:
 
-### 1. Core Triage Vertical Slice (`deploy-stage1.sh`)
-Automates the bootstrapping and deployment of the core triage engine:
-```bash
-./scripts/deploy-stage1.sh
 ```
-This script sequentially:
-1. Bootstraps the GCS Terraform remote state bucket (`scripts/bootstrap-tfstate.sh`).
-2. Applies the foundation Terraform module (`infra/terraform/foundation`).
-3. Builds and deploys the demo inventory API (`demo/ata-inventory-api/scripts/deploy.sh`).
-4. Builds and deploys the agent service (`agent/scripts/deploy.sh`).
-5. Builds and deploys the bridge service (`bridge/scripts/deploy.sh`).
-
-### 2. Demo Infrastructure & Observability (`deploy-demo-infra.sh`)
-Automates the deployment of the remaining microservices, database, and telemetry:
-```bash
-./scripts/deploy-demo-infra.sh
+scripts/deploy-stage1.sh [--yes] [--from <phase>] [--to <phase>] [--only <phase>]
+scripts/deploy-stage1.sh --list-phases
 ```
-This script sequentially:
-1. Applies the database Terraform module (`infra/terraform/database`).
-2. Applies the applications Terraform module (`infra/terraform/applications`).
-3. Applies the observability Terraform module (`infra/terraform/observability`).
-4. Packages and deploys Apigee proxies (`scripts/deploy-apigee-proxies.sh`).
 
-### 3. Full Deployment Execution Sequence
-To deploy the entire stack from clean repository state:
-```bash
-# Set configuration
-export PROJECT_ID="your-target-project-id"
-export REGION="us-west1"
-export NAME_PREFIX="ata"
-export ENVIRONMENT="demo"
+| Phase | Runs |
+| :--- | :--- |
+| `preflight` | Tool, credential and project checks (read-only) |
+| `bootstrap` | `scripts/bootstrap-tfstate.sh`: bootstrap APIs, state bucket `${PROJECT_ID}-${NAME_PREFIX}-tfstate`, `backend.hcl` for the five roots |
+| `foundation` | Terraform foundation |
+| `secrets` | `scripts/set-secrets.sh --yes --skip-if-set` (before the bridge) |
+| `images` | `scripts/build-image.sh` for inventory, orders, agent, bridge and tools (as `<prefix>-build-sa`); refs by digest in `.deploy-state/` |
+| `database` | Terraform database |
+| `schema` | `demo/db/schema.sql` with the GRANT, via `cloud-sql-proxy` and `psql` |
+| `applications` | Terraform applications |
+| `inventory-pin` | `scripts/repin-inventory.sh prepare --initial`, `write-pin --initial`, `switch` |
+| `triage` | `tools/`, `bridge/`, `agent/scripts/deploy.sh` |
+| `triage-iam` | Terraform triage-iam |
+| `apigee` | `scripts/deploy-apigee-proxies.sh` |
+| `observability` | Terraform observability |
+| `verify` | `scripts/verify-stage1.sh`, then `scripts/verify-demo-infra.sh` |
 
-# Execute staged deployment sequence
-./scripts/deploy-stage1.sh
-./scripts/deploy-demo-infra.sh
-(cd tools && ./scripts/deploy.sh)
-./scripts/set-secrets.sh
-./scripts/verify-stage1.sh
-```
+Other operator scripts:
+
+| Script | Purpose |
+| :--- | :--- |
+| `scripts/teardown-stack.sh` | Removes one stack (dry run unless `--apply`; `--delete-state` also deletes the state bucket) |
+| `scripts/teardown-apigee.sh` | Removes one stack's `<prefix>-*` Apigee resources (part of the teardown) |
+| `scripts/build-image.sh` | Builds one image and prints `IMAGE=<repo>/<name>@sha256:<hex>` |
+| `scripts/repin-inventory.sh`, `scripts/prune-revisions.sh`, `scripts/set-demo-instance-caps.sh` | Inventory re-pin, revision pruning and instance caps ([DEPLOY.md §4](DEPLOY.md#4-operations-reference)) |
+| `scripts/deploy-demo-infra.sh` | Kept for compatibility: runs `deploy-stage1.sh --from database` |
+| `scripts/scenarios/preflight.sh`, `scripts/run-all-scenarios.sh`, `scripts/reset-scenarios.sh` | Scenarios and reset ([DEMO.md](DEMO.md)) |
 
 ---
 
 ## 11. Terraform Remote State & GCS Backend
 
-All four Terraform stacks in `infra/terraform/` define a partial Google Cloud Storage backend:
+All five Terraform roots in `infra/terraform/` (foundation, database, applications, observability, triage-iam) define a partial Google Cloud Storage backend:
 
 ```hcl
 terraform {
@@ -668,6 +414,8 @@ terraform {
   - Database: `prefix = "${NAME_PREFIX}/database"`
   - Applications: `prefix = "${NAME_PREFIX}/applications"`
   - Observability: `prefix = "${NAME_PREFIX}/observability"`
+  - Triage IAM: `prefix = "${NAME_PREFIX}/triage-iam"`
+- **One clone per stack**: each root has one `backend.hcl` and one `.terraform/` per checkout. Use a separate clone for each `NAME_PREFIX`, and always `terraform init -reconfigure -backend-config=backend.hcl`.
 - **CI & Pre-deployment Validation**: Quality gates and local linters use `terraform init -backend=false && terraform validate`, validating syntax and structure without requiring cloud credentials or remote backend access.
 
 ---
@@ -680,12 +428,11 @@ In enterprise Google Cloud organizations, standard Organization Policies may req
    - May prevent binding `allUsers` on public ingress services such as `ata-bridge`.
    - *Remediation*: Deploy an external Google Cloud Load Balancer with Cloud Armor in front of `ata-bridge` and set Cloud Run ingress to `internal-and-cloud-load-balancing`, or request a project-level policy exemption.
 2. **Cloud Run Ingress Controls (`constraints/run.allowedIngress`)**:
-   - `ata-bridge`: Requires `all` (or `internal-and-cloud-load-balancing`) to receive Cloud Monitoring webhook notifications.
-   - `ata-agent`: Requires `internal` (`INGRESS_TRAFFIC_INTERNAL_ONLY`), accessible exclusively by Cloud Tasks and authorized internal service accounts within the project.
-   - `ata-tools`: Requires `internal` (`INGRESS_TRAFFIC_INTERNAL_ONLY`), accessible exclusively by `ata-agent`.
+   - Every service is deployed with ingress `all`: the deploy scripts do not set `--ingress`, and the applications root sets `INGRESS_TRAFFIC_ALL`. Access is controlled by Cloud Run IAM. Only `ata-bridge` allows unauthenticated calls (the webhook authenticates with HTTP Basic Auth); `ata-agent`, `ata-tools` and the demo services require an ID token from an SA holding `roles/run.invoker`.
+   - A policy that restricts ingress to `internal` or `internal-and-cloud-load-balancing` blocks the deployment as it is.
 3. **Public IP Restriction on Cloud SQL (`constraints/sql.restrictPublicIp`)**:
    - Enterprise policies frequently block public IP assignments on Cloud SQL.
-   - The database module supports Private IP with Google Private Service Connect (PSC) or VPC peering, connecting securely via the Cloud SQL Auth Proxy with IAM database authentication.
+   - The database root creates an instance **with a public IP** (`ipv4_enabled = true`); the inventory API connects through the Cloud SQL connector with IAM database authentication. There is no private IP or Private Service Connect option in this repository, so this policy blocks the deployment unless the project has an exception.
 
 ---
 
@@ -728,7 +475,7 @@ ruff check bridge agent tools
 ruff format --check bridge agent tools
 
 # 4. Terraform validation across all modules
-for dir in foundation database applications observability; do
+for dir in foundation database applications observability triage-iam; do
   (cd "infra/terraform/$dir" && terraform init -backend=false && terraform validate)
 done
 ```
@@ -824,43 +571,7 @@ Reset injected faults, clear database sleep connections, restore Apigee proxies,
 
 ## 15. Teardown & Clean Up
 
-To avoid ongoing GCP charges, destroy infrastructure in reverse order:
-
-```bash
-# 1. Reset all active scenario faults and clean storage
-./scripts/reset-scenarios.sh
-
-# 2. Teardown Observability alert policies
-cd infra/terraform/observability
-terraform destroy -auto-approve -var="project_id=${PROJECT_ID}" -var="region=${REGION}" -var="name_prefix=${NAME_PREFIX}"
-cd ../../..
-
-# 3. Teardown Applications stack
-cd infra/terraform/applications
-terraform destroy -auto-approve -var="project_id=${PROJECT_ID}" -var="region=${REGION}" -var="name_prefix=${NAME_PREFIX}"
-cd ../../..
-
-# 4. Teardown Database stack
-cd infra/terraform/database
-terraform destroy -auto-approve -var="project_id=${PROJECT_ID}" -var="region=${REGION}" -var="name_prefix=${NAME_PREFIX}"
-cd ../../..
-
-# 5. Delete Cloud Run triage services
-gcloud run services delete "${NAME_PREFIX}-bridge" --region="${REGION}" --project="${PROJECT_ID}" --quiet || true
-gcloud run services delete "${NAME_PREFIX}-agent" --region="${REGION}" --project="${PROJECT_ID}" --quiet || true
-gcloud run services delete "${NAME_PREFIX}-tools" --region="${REGION}" --project="${PROJECT_ID}" --quiet || true
-
-# 6. Teardown Foundation stack (Cloud Tasks queues, Service Accounts, Secrets)
-cd infra/terraform/foundation
-terraform destroy -auto-approve -var="project_id=${PROJECT_ID}" -var="region=${REGION}" -var="name_prefix=${NAME_PREFIX}" -var="environment=${ENVIRONMENT}"
-cd ../../..
-
-# 7. Remove Cloud Storage Buckets
-gcloud storage rm --recursive "gs://${PROJECT_ID}-${NAME_PREFIX}-incidents/**" || true
-gcloud storage rm "gs://${PROJECT_ID}-${NAME_PREFIX}-incidents" || true
-gcloud storage rm --recursive "gs://${PROJECT_ID}-${NAME_PREFIX}-tfstate/**" || true
-gcloud storage rm "gs://${PROJECT_ID}-${NAME_PREFIX}-tfstate" || true
-```
+The teardown is [DEPLOY.md §5](DEPLOY.md#5-teardown), in the order that completes: the Apigee resources (`scripts/teardown-apigee.sh`), then the observability, triage-iam, applications, database and foundation roots (emptying the incidents bucket first), and the state bucket last. [DEPLOY.md §6](DEPLOY.md#6-verify-that-nothing-is-left) lists the commands that confirm nothing of the stack is left.
 
 ---
 
@@ -892,15 +603,16 @@ alert-triage-agent/
 │   ├── Dockerfile                 # Container build specification for ata-bridge
 │   └── scripts/deploy.sh          # Cloud Run deployment script for ata-bridge
 ├── demo/                          # Realistic e-commerce microservices & fault injection
-│   ├── apigee/                    # Apigee X API proxies (ata-orders-v1, ata-inventory-v1)
+│   ├── apigee/                    # Apigee X proxy bundles, deployed as <prefix>-orders-v1, <prefix>-inventory-v1
 │   ├── ata-inventory-api/         # Cloud Run inventory service (Cloud SQL IAM DB auth)
 │   ├── ata-orders-api/            # Cloud Run orders service (calls inventory via Google ID token)
 │   └── db/schema.sql              # Cloud SQL PostgreSQL schema & catalog seed data
 ├── infra/terraform/               # Infrastructure as Code (Terraform)
-│   ├── applications/              # Cloud Run demo microservices & Apigee TargetServers
+│   ├── applications/              # Cloud Run demo microservices and their invoker IAM
 │   ├── database/                  # Cloud SQL PostgreSQL 15 instance with IAM DB auth
-│   ├── foundation/                # GCS incidents bucket, Cloud Tasks queues, IAM, Secrets
-│   └── observability/             # Cloud Monitoring alert policies & notification channels
+│   ├── foundation/                # APIs, SAs, IAM, buckets, queues, registry, secrets, webhook channel
+│   ├── observability/             # Cloud Monitoring alert policies
+│   └── triage-iam/                # run.invoker bindings between agent, bridge and tools (after their deploy)
 ├── scripts/                       # Deployment, verification, and scenario scripts
 │   ├── scenarios/                 # Realistic failure scenario scripts (S1 through S5)
 │   │   ├── common.sh              # Shared logging, token resolution, and utility functions
@@ -913,14 +625,20 @@ alert-triage-agent/
 │   │   └── s5_bad_deploy.sh       # Scenario 5: Bad deploy / config failure
 │   ├── bootstrap-tfstate.sh       # Bootstraps GCS remote state bucket
 │   ├── deploy-apigee-proxies.sh   # Deploys Apigee X proxies, products, and developer app
-│   ├── deploy-demo-infra.sh       # Staged deployer for database, apps, observability, Apigee
-│   ├── deploy-stage1.sh           # Core vertical slice deployment (tfstate, foundation, apps)
+│   ├── deploy-demo-infra.sh       # Compatibility wrapper: deploy-stage1.sh --from database
+│   ├── build-image.sh             # Builds one image with the build SA; prints IMAGE=<repo>@sha256:...
+│   ├── deploy-stage1.sh           # The deploy entrypoint: 14 phases (--only/--from/--to/--list-phases)
+│   ├── prune-revisions.sh         # Deletes unpinned, untagged demo revisions (dry run unless --apply)
+│   ├── repin-inventory.sh         # Inventory pin: prepare/write-pin (--initial), switch, rollback, status
+│   ├── set-demo-instance-caps.sh  # Service-level instance caps of the demo services
+│   ├── teardown-apigee.sh         # Removes one stack's <prefix>-* Apigee resources
+│   ├── teardown-stack.sh          # Removes one stack (dry run unless --apply)
 │   ├── reset-scenarios.sh         # Clears faults, waits for alerts/quiet period, archives incident files
 │   ├── run-all-scenarios.sh       # Master scenario driver (--all, --priority, --scenario)
 │   ├── set-secrets.sh             # Interactive Secret Manager configuration for ServiceNow
 │   ├── verify-demo-infra.sh       # Verifies demo microservices and Apigee routing
 │   ├── verify-scenarios.sh        # Automated scenario verification test harness
-│   └── verify-stage1.sh           # Verifies webhook ingestion, agent triage, and OKF generation
+│   └── verify-stage1.sh           # Read-only triage-tier check (health, webhook auth, agent config, OKF schema); --with-ticket for end to end
 ├── skills/                        # SRE diagnostic runbooks and architectural specifications
 │   ├── alert-triage/              # Incident grouping, settle deadlines, and stale-wake rules
 │   ├── apigee-troubleshooting/    # Apigee X proxy diagnostics and SpikeArrest patterns
@@ -940,7 +658,7 @@ alert-triage-agent/
 ├── AGENTS.md                      # Developer and AI assistant architecture reference
 ├── CONFIGURATION.md               # Complete configuration, environment variables, secrets reference
 ├── DEMO.md                        # Operator demonstration guide for scenarios S1 through S5
-├── DEPLOY.md                      # Step-by-step production deployment guide
+├── DEPLOY.md                      # The deployment guide: from scratch, any prefix, teardown
 └── README.md                      # Primary project documentation
 ```
 

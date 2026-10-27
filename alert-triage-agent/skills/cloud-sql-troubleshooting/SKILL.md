@@ -20,11 +20,11 @@ This skill provides structured procedures for diagnosing database-tier incidents
 
 ### Telemetry Queries & Verification
 1. **Connection Metric**:
-   Query `cloudsql.googleapis.com/database/network/connections` for `resource.labels.database_id = "cloud-assist-fde-2:ata-inventory-db"`.
+   Query `cloudsql.googleapis.com/database/network/connections` for `resource.labels.database_id = "<project-id>:<prefix>-inventory-db"` (`<prefix>` is the stack's `NAME_PREFIX`, default `ata`).
 2. **Database Log Inspection**:
    ```
    resource.type = "cloudsql_database"
-   resource.labels.database_id = "cloud-assist-fde-2:ata-inventory-db"
+   resource.labels.database_id = "<project-id>:<prefix>-inventory-db"
    textPayload =~ "FATAL: too many connections"
    ```
 
