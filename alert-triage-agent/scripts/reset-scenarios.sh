@@ -17,6 +17,8 @@
 # 5b. Warm up the demo services, check health (direct and via Apigee) and the admin fault
 #    injection endpoints. Every request the reset sends to the demo services runs before
 #    step 6, and each is timed (see "Alert window" below).
+# 5c. Verify on the database side (Cloud SQL num_backends gauge, read-only) that no leaked
+#    connections remain: the fault reset frees only the Cloud Run instance it reaches.
 # 6. Wait for open ATA alerts to close, then, concurrently, for the quiet period (Apigee
 #    metric lag), for every incident group to reach a terminal state (recovery note posted)
 #    and for the alert window to pass
@@ -64,6 +66,13 @@ QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-1
 # (up to ~15 min idle), so the S4 worst case is ~15 + 7.5 + 4 = ~26.5 min. See DEMO.md, S4.
 WAIT_TIMEOUT_SECS="$(parse_duration "${ATA_RESET_TIMEOUT:-${WAIT_TIMEOUT:-1800}}")"
 POLL_INTERVAL_SECS="$(parse_duration "${ATA_RESET_POLL_INTERVAL:-${POLL_INTERVAL:-15}}")"
+# Step 5c: the leak is released only when num_backends of the inventory database, sampled
+# after the fault reset, is at most this many (baseline 0-2; S4 leaks showed 10-22).
+DB_MAX_BACKENDS="${ATA_RESET_DB_MAX_BACKENDS:-5}"
+# How long step 5c waits for such a sample: up to ~15 min until Cloud Run scales in an
+# instance whose leak the fault reset did not reach, plus up to ~4.5 min of Cloud SQL
+# sampling (60 s) and visibility (210 s) lag.
+DB_RELEASE_TIMEOUT_SECS="$(parse_duration "${ATA_RESET_DB_RELEASE_TIMEOUT:-1200}")"
 MAX_ALERT_AGE_SECS="$(parse_duration "${ATA_RESET_MAX_ALERT_AGE:-${MAX_ALERT_AGE:-3600}}")"
 # Consecutive failed Cloud Monitoring queries tolerated before the reset fails.
 MAX_QUERY_ATTEMPTS="${ATA_RESET_MAX_QUERY_ATTEMPTS:-3}"
@@ -300,6 +309,72 @@ for t in (json.load(sys.stdin).get("status") or {}).get("traffic") or []:
 
 # Cloud Monitoring query helper (CA bundle resolution, scoping, fail-loud errors).
 OPEN_ALERTS_PY="${SCRIPT_DIR}/scenarios/open_alerts.py"
+DB_BACKENDS_PY="${SCRIPT_DIR}/scenarios/db_backends.py"
+
+# Step 5c: confirm on the database side that the fault reset released S4's leaked
+# connections. POST /admin/fault/reset frees only the connections of the Cloud Run instance
+# it reaches (QA round 2: it reached another instance, and the leak lasted until the leaking
+# instance scaled in). Polls Cloud Monitoring (read-only) for the num_backends gauge of the
+# inventory database until a sample taken at or after $1 (epoch of the fault reset) is at
+# most DB_MAX_BACKENDS. Fails loudly, naming what remains, after DB_RELEASE_TIMEOUT_SECS.
+verify_db_backends_released() {
+    local since="$1" deadline now token json rc parsed value at epoch last="" err_file failures=0
+    local db="${NAME_PREFIX}-inventory-db"
+    deadline=$(( $(date +%s) + DB_RELEASE_TIMEOUT_SECS ))
+    err_file="$(mktemp "${TMPDIR:-/tmp}/ata-db-backends.XXXXXX")"
+    while true; do
+        rc=0
+        if ! token="$(resolve_monitoring_token 2>"${err_file}")" || [ -z "${token}" ]; then
+            log_error "FATAL: could not get a Cloud Monitoring token from source '${ATA_MONITORING_TOKEN_SOURCE}' to check ${db} connections. Run: $(monitoring_token_login_hint "${ATA_MONITORING_TOKEN_SOURCE}")" >&2
+            rm -f "${err_file}"
+            return 1
+        fi
+        json="$(python3 "${DB_BACKENDS_PY}" "${PROJECT_ID}" "${token}" "${db}" inventory 2>"${err_file}")" || rc=$?
+        now="$(date +%s)"
+        if [ "${rc}" -ne 0 ]; then
+            failures=$((failures + 1))
+            if [ "${rc}" -ne 3 ] || [ "${failures}" -ge "${MAX_QUERY_ATTEMPTS}" ] || [ "${now}" -ge "${deadline}" ]; then
+                log_error "FATAL: cannot read the num_backends gauge of ${db} (Cloud Monitoring); the release of S4's leaked connections is NOT verified." >&2
+                log_error "Cause: $(tail -n 2 "${err_file}" | tr '\n' ' ')" >&2
+                rm -f "${err_file}"
+                return 1
+            fi
+            log_warn "    num_backends query failed (attempt ${failures}, retrying): $(tail -n 1 "${err_file}")" >&2
+            sleep "${POLL_INTERVAL_SECS}"
+            continue
+        fi
+        failures=0
+        if ! parsed="$(printf '%s' "${json}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print("" if d.get("value") is None else "%s %s %s" % (d["value"], d["epoch"], d["at"]))
+')"; then
+            log_error "FATAL: unparseable num_backends output: ${json:0:200}" >&2
+            rm -f "${err_file}"
+            return 1
+        fi
+        if [ -n "${parsed}" ]; then
+            # shellcheck disable=SC2086
+            set -- ${parsed}
+            value="$1" epoch="$2" at="$3"
+            last="${value} at ${at}"
+            if [ "${epoch}" -ge "${since}" ] && [ "${value}" -le "${DB_MAX_BACKENDS}" ]; then
+                log_success "    ${db}: ${value} backend(s) on database inventory at ${at} (<= ${DB_MAX_BACKENDS}); leaked connections released."
+                rm -f "${err_file}"
+                return 0
+            fi
+        fi
+        if [ "${now}" -ge "${deadline}" ]; then
+            log_error "FATAL: ${db} still has leaked connections ${DB_RELEASE_TIMEOUT_SECS}s after the fault reset: num_backends on database inventory is ${last:-not reported} (released means <= ${DB_MAX_BACKENDS} in a sample taken after the reset)." >&2
+            log_error "STILL LEFT: S4's leaked connections, held by an ${NAME_PREFIX}-inventory-api instance that POST /admin/fault/reset did not reach; ata-cloudsql-connections-critical stays open until they are released." >&2
+            log_error "Rerun ./scripts/reset-scenarios.sh once Cloud Run has scaled that instance in, or raise ATA_RESET_DB_RELEASE_TIMEOUT. With max_instance_count = 1 (Terraform demo_max_instance_count) the reset always reaches it." >&2
+            rm -f "${err_file}"
+            return 1
+        fi
+        log_info "    [Progress] ${db} num_backends (database inventory): ${last:-no sample yet}; waiting for a sample taken after the fault reset that is <= ${DB_MAX_BACKENDS} ($((deadline - now))s left)."
+        sleep "${POLL_INTERVAL_SECS}"
+    done
+}
 
 # Print {"active": [...], "ignored": [...]} for OPEN ata-* alerts. Exits non-zero, with
 # the cause on stderr, when the Alerts API cannot be queried.
@@ -901,6 +976,7 @@ log_info "--> 1. Resetting demo applications via /admin/fault/reset..."
 if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
     reset_app_faults "${NAME_PREFIX}-inventory-api" "${INV_URL}" || exit 1
     reset_app_faults "${NAME_PREFIX}-orders-api" "${ORD_URL}" || exit 1
+    FAULT_RESET_EPOCH="$(date +%s)"
     log_success "    Demo application fault states cleared."
 else
     log_info "    [MOCK/DRY-RUN] Simulating demo application fault reset."
@@ -961,6 +1037,16 @@ if [ "${ALERT_WINDOW_UNTIL}" -gt "$(date +%s)" ]; then
     fi
 else
     log_info "    No slow, 5xx or failed demo request: no alert window needed."
+fi
+
+# 5c. The fault reset clears only the instance it reached: confirm on the database side.
+log_info "--> 5c. Verifying on ${NAME_PREFIX}-inventory-db (num_backends gauge) that no leaked connections remain..."
+if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
+    log_info "    [MOCK/DRY-RUN] Simulating the num_backends check."
+elif [ "${NO_WAIT}" = "true" ]; then
+    log_warn "    --no-wait: the release of leaked DB connections is NOT verified."
+else
+    verify_db_backends_released "${FAULT_RESET_EPOCH}" || exit 1
 fi
 
 # 6. Wait for Open ATA Alerts to Close, Terminal Incident Groups & Quiet Period

@@ -114,7 +114,8 @@ def test_error_after_the_leak_releases_it_loudly(tmp_path, env):
     assert leak is not None and reset is not None and leak < reset
     assert "-X POST" in calls[reset]
     assert "S4 aborted (exit 3) after leaking DB connections" in res.stderr
-    assert "Leaked connections released" in res.stderr
+    assert "Leaked connections released on the instance the reset reached" in res.stderr
+    assert "./scripts/reset-scenarios.sh, which verifies the release" in res.stderr
     assert any(c.startswith("pkill -f pg_sleep") for c in calls)
     assert "unbound variable" not in res.stderr
 

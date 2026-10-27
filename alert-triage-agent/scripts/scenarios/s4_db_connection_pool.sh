@@ -104,7 +104,7 @@ release_leak_on_error() {
             ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} "${INV_URL}/admin/fault/reset" 2>/dev/null) || code="000"
         case "${code}" in
             2??)
-                log_warn "Leaked connections released (POST ${INV_URL}/admin/fault/reset -> HTTP ${code})." >&2
+                log_warn "Leaked connections released on the instance the reset reached (POST ${INV_URL}/admin/fault/reset -> HTTP ${code}). With more than one ${NAME_PREFIX}-inventory-api instance the leak can be on another one: run ./scripts/reset-scenarios.sh, which verifies the release on ${NAME_PREFIX}-inventory-db." >&2
                 ;;
             *)
                 log_error "FATAL: POST ${INV_URL}/admin/fault/reset returned HTTP ${code}; the DB connections are STILL LEAKED. Run ./scripts/reset-scenarios.sh now." >&2
