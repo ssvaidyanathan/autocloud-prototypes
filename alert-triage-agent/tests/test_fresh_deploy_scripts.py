@@ -591,6 +591,30 @@ def test_applications_honours_ata_inventory_pin_file_and_rejects_an_invalid_pin(
     assert "cannot read the inventory pin of stack 'atat'" in res.stderr
 
 
+@pytest.mark.parametrize("pinned", [True, False], ids=["pinned-stack", "first-run"])
+def test_applications_restores_the_instance_caps_after_the_apply(stack, pinned):
+    """Provider 6.x resets the service-level max to 100 on any service update (live G13)."""
+    if pinned:
+        _write_stack_pin(stack)
+    _write_images(stack, PIN_DIGEST)
+    assert stack("bootstrap-tfstate.sh", "--write-backend-only")[0].returncode == 0
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "applications")
+    assert res.returncode == 0, _out(res)
+    apply = _idx(calls, _tf("applications", "apply"), "applications apply")[-1]
+    caps = _idx(calls, lambda c: c[0] == "caps", "caps")
+    assert [calls[i] for i in caps] == [["caps", "--apply"]] and caps[0] > apply
+    assert "scripts/set-demo-instance-caps.sh   # dry run" in res.stdout
+
+
+def test_applications_fails_loudly_when_the_caps_cannot_be_restored(stack):
+    _recorder(stack.work / "scripts" / "set-demo-instance-caps.sh", "caps", extra="exit 3")
+    _write_images(stack, PIN_DIGEST)
+    assert stack("bootstrap-tfstate.sh", "--write-backend-only")[0].returncode == 0
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "applications")
+    assert res.returncode == 1
+    assert "set-demo-instance-caps.sh --apply failed" in res.stderr and "may now be 100" in res.stderr
+
+
 def test_applications_never_passes_an_inventory_image_other_than_the_pin(stack):
     """Review R2.3: across every way the image can be given, a pinned stack's apply gets the pin or nothing."""
     _write_stack_pin(stack)

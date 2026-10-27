@@ -15,7 +15,9 @@
 #   images         scripts/build-image.sh for inventory, orders, agent, bridge, tools
 #   database       Terraform database
 #   schema         demo/db/schema.sql with the GRANT to the IAM DB user, via cloud-sql-proxy
-#   applications   Terraform applications (inventory and orders with the built images)
+#   applications   Terraform applications (orders with the built image; inventory with the
+#                  pinned image once the stack has a pin, else the built one), then
+#                  scripts/set-demo-instance-caps.sh --apply (provider 6.x resets the caps)
 #   inventory-pin  scripts/repin-inventory.sh prepare --initial / write-pin --initial / switch,
 #                  then scripts/set-demo-instance-caps.sh --apply (service-level instance caps)
 #   triage         tools, bridge, agent deploy.sh with the built images
@@ -50,7 +52,7 @@ source "${SCRIPT_DIR}/cloud-run-deploy-lib.sh"
 
 PHASES="preflight bootstrap foundation secrets images database schema applications inventory-pin triage triage-iam apigee observability verify"
 
-usage() { sed -n '2,42p' "$0"; }
+usage() { sed -n '2,44p' "$0"; }
 
 die() {
     echo "ERROR: $*" >&2
@@ -415,6 +417,12 @@ phase_applications() {
     fi
     tf_apply applications ${TF_LABEL_VARS[@]+"${TF_LABEL_VARS[@]}"} \
         -var "inventory_image=${inventory_image}" -var "orders_image=${ORDERS_IMAGE}"
+    # Provider 6.x rewrites the service-level scaling of a service it updates, which drops the
+    # service-level max instance count to the default 100 (live ata, G13, 2026-10-27). Terraform
+    # cannot set it, so restore it after every apply (no-op when nothing changed; creates no
+    # inventory revision). On a first run the inventory-pin phase runs it again after the pin.
+    bash "${SCRIPT_DIR}/set-demo-instance-caps.sh" --apply \
+        || die "set-demo-instance-caps.sh --apply failed (output above). Terraform applied; the service-level instance caps may now be 100. Fix the cause and re-run scripts/set-demo-instance-caps.sh --apply."
 }
 
 # The stack's inventory pin file: the path common.sh reads (ATA_INVENTORY_PIN_FILE overrides it).
@@ -505,7 +513,9 @@ phase_hints() {
             echo "    gcloud artifacts docker images list ${R}-docker.pkg.dev/${P}/${N}-docker --include-tags" ;;
         database) echo "    gcloud sql instances describe ${N}-inventory-db --project=${P} --format=\"value(state)\"   # RUNNABLE" ;;
         schema) echo "    gcloud sql users list --instance=${N}-inventory-db --project=${P}   # ${N}-inventory-sa@${P}.iam (CLOUD_IAM_SERVICE_ACCOUNT)" ;;
-        applications) echo "    gcloud run services list --project=${P} --region=${R} --filter=\"metadata.name~^${N}-\"" ;;
+        applications)
+            echo "    gcloud run services list --project=${P} --region=${R} --filter=\"metadata.name~^${N}-\""
+            echo "    scripts/set-demo-instance-caps.sh   # dry run: caps already applied" ;;
         inventory-pin)
             echo "    scripts/repin-inventory.sh status"
             echo "    scripts/set-demo-instance-caps.sh   # dry run: caps already applied"

@@ -560,6 +560,8 @@ It lists the user `<prefix>-inventory-sa@<project>.iam` of type `CLOUD_IAM_SERVI
 
 **Expected:** `Apply complete! Resources: 5 added` (two Cloud Run services and three invoker bindings).
 
+After the apply, the phase runs `scripts/set-demo-instance-caps.sh --apply`. Google provider 6.x resets the service-level max instance count of a service it updates to 100, and Terraform cannot set that limit. The script restores it, makes no change when the caps are in place, and creates no inventory revision. It runs after every applications apply, including on a stack that is already pinned.
+
 **Verify:**
 
 ```bash
@@ -573,6 +575,7 @@ It lists `<prefix>-inventory-api` and `<prefix>-orders-api` with URLs.
 **If it fails:**
 - `Run the images phase (--only images) or export them`: the images file is missing, for example because the images were built in another clone. Run Step 6.
 - `INVENTORY_IMAGE disagrees with the inventory pin`: nothing was applied. To keep the current pin, unset `INVENTORY_IMAGE`, and set the `INVENTORY_IMAGE=` line of `.deploy-state/${PROJECT_ID}-${NAME_PREFIX}-images.env` to the pinned image the message prints, or delete that line. To serve the new image, re-pin ([§4.3](#43-re-pinning-the-inventory-baseline-and-pruning-revisions)).
+- `set-demo-instance-caps.sh --apply failed`: Terraform has applied, and the service-level caps may now be 100. Fix the cause, then run `scripts/set-demo-instance-caps.sh --apply` (its dry run without `--apply` shows what it would change).
 - `revision ... with different configuration` on `<prefix>-inventory-api`: a Terraform change to the inventory template while a pin serves (see above). Re-pin instead, or revert the variable.
 - `service account ... does not exist`: Step 4 did not complete for this prefix.
 
