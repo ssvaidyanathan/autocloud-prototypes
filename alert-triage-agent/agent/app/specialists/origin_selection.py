@@ -9,7 +9,8 @@ Rule (deterministic, computed from the group's alerts and TOPOLOGY.md):
 
 1. Every service with an alert in the group is *degraded* (the alert is the evidence).
 2. Service S is *explained* by degraded service U when S depends on U (U is upstream of S in
-   the topology, following "From depends on To" edges transitively). Gateway-enforced
+   the topology, following "From depends on To" edges transitively) and U's onset is not
+   later than S's onset plus the onset tolerance (when both onsets are known). Gateway-enforced
    rejections (rate limiting, client auth) are raised by the gateway itself and are never
    explained by a backend.
 3. Candidates are ranked: unexplained services first; then the number of other degraded
@@ -23,6 +24,7 @@ the origin further upstream (e.g. to the database) through the synthesizer's exi
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import logging
 from typing import Any, Callable, Optional
 
@@ -36,6 +38,33 @@ GATEWAY_ENFORCED_CATEGORIES = frozenset({"client_429", "client_auth"})
 
 # At most this many candidates are investigated (the origin plus one runner-up).
 MAX_INVESTIGATED_CANDIDATES = 2
+
+
+def parse_onset(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 onset (``...Z`` or with offset) to an aware UTC datetime; None if unusable."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def onset_allows_explanation(
+    upstream_onset: Any, downstream_onset: Any, tolerance_seconds: Optional[float]
+) -> bool:
+    """False only when both onsets are known and the downstream degraded more than
+    ``tolerance_seconds`` before the upstream (so the upstream cannot have caused it)."""
+    if tolerance_seconds is None:
+        return True
+    up = parse_onset(upstream_onset)
+    down = parse_onset(downstream_onset)
+    if up is None or down is None:
+        return True
+    return (up - down).total_seconds() <= tolerance_seconds
 
 
 def _field(alert: dict[str, Any], *keys: str) -> Optional[str]:
@@ -78,6 +107,8 @@ class OriginCandidate:
     explained_by: list[str] = field(default_factory=list)
     explains: list[str] = field(default_factory=list)
     gateway_enforced: bool = False
+    # Upstream degraded services ruled out as explanations because this service degraded first.
+    preceded: list[str] = field(default_factory=list)
 
     @property
     def score(self) -> int:
@@ -90,6 +121,7 @@ class OriginCandidate:
             "score": self.score,
             "explains": list(self.explains),
             "explained_by": list(self.explained_by),
+            "preceded": list(self.preceded),
             "onset": self.onset,
             "signals": list(self.signals),
             "alerts": len(self.alerts),
@@ -129,11 +161,14 @@ def select_origin(
     *,
     canonicalize: Callable[[Optional[str]], Optional[str]],
     upstream_of: Callable[[str], list[str]],
+    onset_tolerance_seconds: Optional[float] = None,
 ) -> Optional[OriginSelection]:
     """Choose the origin among the services alerting in the group.
 
     ``upstream_of(s)`` returns every component ``s`` depends on (transitively). Returns None
     when the group holds no usable alert. Logs the decision at INFO with every candidate.
+    ``onset_tolerance_seconds`` (None disables the check): an upstream service whose onset is
+    later than this service's onset plus the tolerance does not explain it.
     """
     by_service: dict[str, OriginCandidate] = {}
     for idx, alert in enumerate(a for a in (group_alerts or []) if isinstance(a, dict)):
@@ -174,6 +209,14 @@ def select_origin(
             continue
         for other in services:
             if other != service and other in deps:
+                if not onset_allows_explanation(by_service[other].onset, cand.onset, onset_tolerance_seconds):
+                    logger.info(
+                        "Origin selection: %s (onset %s) degraded before upstream %s (onset %s) beyond %ss tolerance;"
+                        " not explained by it",
+                        service, cand.onset, other, by_service[other].onset, onset_tolerance_seconds,
+                    )
+                    cand.preceded.append(other)
+                    continue
                 cand.explained_by.append(other)
                 by_service[other].explains.append(service)
 
@@ -215,11 +258,18 @@ def _build_reasons(origin: OriginCandidate, ranked: list[OriginCandidate], first
             f"{origin.service} is upstream of {', '.join(origin.explains)} in the topology and shows its own"
             f" alert ({', '.join(origin.signals) or 'unlabelled signal'}), so its degradation explains theirs."
         )
+    elif origin.preceded:
+        reasons.append(
+            f"{origin.service} degraded (onset {origin.onset}) before upstream {', '.join(origin.preceded)}"
+            " by more than the onset tolerance, so that upstream does not explain it;"
+            f" {origin.service} chosen by earliest onset."
+        )
     else:
         reasons.append(
             f"No alerting service depends on another; {origin.service} chosen by"
             f" {'earliest onset' if origin.onset else 'alert arrival order'}."
         )
+    preceded_upstreams = {u for c in ranked for u in c.preceded}
     for cand in ranked[1:]:
         if cand.explained_by:
             reasons.append(
@@ -228,6 +278,16 @@ def _build_reasons(origin: OriginCandidate, ranked: list[OriginCandidate], first
             )
         elif cand.gateway_enforced:
             reasons.append(f"{cand.service} rejections are enforced at the gateway; not attributed to a backend.")
+        elif cand.preceded:
+            reasons.append(
+                f"{cand.service} degraded (onset {cand.onset}) before upstream {', '.join(cand.preceded)};"
+                " its degradation is not attributed to that upstream."
+            )
+        elif cand.service in preceded_upstreams:
+            downstream = ", ".join(c.service for c in ranked if cand.service in c.preceded)
+            reasons.append(
+                f"{cand.service} (onset {cand.onset}) degraded after {downstream}; treated as a separate degradation."
+            )
         else:
             reasons.append(f"{cand.service} has no topology relationship to {origin.service}; not cross-attributed.")
     if first.service != origin.service:
@@ -238,9 +298,11 @@ def _build_reasons(origin: OriginCandidate, ranked: list[OriginCandidate], first
 def alert_event_from_entry(entry: dict[str, Any], fallback: AlertEvent) -> AlertEvent:
     """Build the investigation AlertEvent for a group alert entry (OKF ``alerts`` item).
 
-    Fields the entry lacks are taken from ``fallback`` (the alert the wake started from).
-    The entry is what was stored at ingest, so resource labels and the condition name are only
-    carried over when the entry is the fallback alert itself.
+    Fields the entry lacks are taken from ``fallback`` (the alert the wake started from, or an
+    AlertEvent built from the group document). The entry is what was stored at ingest, so
+    resource labels, the condition name and the resource type are only carried over when the
+    entry is the fallback alert itself: another service's resource type would be wrong (e.g. a
+    Cloud Run type on an Apigee proxy), so it is left unset unless the entry records one.
     """
     if entry.get("incident_id") == fallback.incident_id:
         return fallback
@@ -250,7 +312,7 @@ def alert_event_from_entry(entry: dict[str, Any], fallback: AlertEvent) -> Alert
         policy_name=_field(entry, "policy_name", "policy") or fallback.policy_name,
         policy_id=_field(entry, "policy_id"),
         resource_name=_field(entry, "resource_name", "resource") or alert_component(entry) or fallback.resource_name,
-        resource_type=_field(entry, "resource_type") or fallback.resource_type,
+        resource_type=_field(entry, "resource_type"),
         state=_field(entry, "state") or "open",
         started_at=_field(entry, "started_at") or fallback.started_at,
         url=_field(entry, "url"),

@@ -43,6 +43,12 @@ class AgentConfig(BaseSettings):
 
     is_local: bool = Field(default=False, alias="IS_LOCAL")
 
+    # Origin selection: an upstream service explains a downstream one only if its alert or
+    # telemetry onset is no later than the downstream onset plus this tolerance. Alert policies
+    # use 60s duration + 60s alignment, so alert open times skew by up to ~2 min; the extra
+    # margin allows a gradual upstream ramp to push the downstream over its threshold first.
+    origin_onset_tolerance_seconds: float = Field(default=300.0, alias="ORIGIN_ONSET_TOLERANCE_SECONDS", ge=0)
+
     @property
     def effective_incidents_bucket(self) -> str:
         return self.incidents_bucket or f"{self.project_id}-{self.name_prefix}-incidents"

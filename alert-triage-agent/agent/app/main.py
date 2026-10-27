@@ -332,7 +332,7 @@ async def timer_wake(
             )
         except Exception as exc:
             report = _fallback_report(
-                _origin_alert(doc, primary_alert), doc.group_id, filename, settings, exc, "settle wake"
+                _origin_alert(doc, primary_alert, settings), doc.group_id, filename, settings, exc, "settle wake"
             )
 
         report.group_id = doc.group_id
@@ -429,7 +429,7 @@ async def timer_wake(
             )
         except Exception as exc:
             report = _fallback_report(
-                _origin_alert(doc, primary_alert), doc.group_id, filename, settings, exc, "max_wait wake"
+                _origin_alert(doc, primary_alert, settings), doc.group_id, filename, settings, exc, "max_wait wake"
             )
 
         report.group_id = doc.group_id
@@ -634,25 +634,29 @@ def _note_alerts_missed_by_ticket(
             )
 
 
-def _alert_event_from_entry(first_a: dict[str, Any], doc: OKFDocument) -> AlertEvent:
-    """Build an AlertEvent from one OKF ``alerts`` entry (group fields fill the gaps)."""
-    a_labels = first_a.get("labels") or first_a.get("policy_user_labels") or {}
+def _group_fallback_alert(doc: OKFDocument) -> AlertEvent:
+    """AlertEvent built from the group document alone (used when an entry lacks a field)."""
     return AlertEvent(
-        incident_id=first_a.get("incident_id", "0.unknown"),
-        policy_name=first_a.get("policy_name") or first_a.get("policy", doc.policy_name or "unknown"),
-        policy_id=first_a.get("policy_id"),
-        resource_name=first_a.get("resource_name") or first_a.get("resource", doc.resource_name or "unknown"),
-        state=first_a.get("state", "open"),
-        started_at=first_a.get("started_at", doc.created_at),
-        url=first_a.get("url"),
-        policy_user_labels=a_labels,
-        labels=a_labels,
+        incident_id="0.unknown",
+        policy_name=doc.policy_name or "unknown",
+        resource_name=doc.resource_name or "unknown",
+        state="open",
+        started_at=doc.created_at,
     )
 
 
-def _origin_alert(doc: OKFDocument, primary_alert: AlertEvent) -> AlertEvent:
+def _alert_event_from_entry(entry: dict[str, Any], doc: OKFDocument) -> AlertEvent:
+    """Build an AlertEvent from one OKF ``alerts`` entry (group fields fill the gaps)."""
+    return alert_event_from_entry(entry, _group_fallback_alert(doc))
+
+
+def _origin_alert(doc: OKFDocument, primary_alert: AlertEvent, settings: Optional[AgentConfig] = None) -> AlertEvent:
     """Alert on the group's topology-selected origin (the first alert when only one service alerts)."""
-    selection = SynthesizerAgent._select_group_origin(primary_alert, list(doc.alerts or []))
+    selection = SynthesizerAgent._select_group_origin(
+        primary_alert,
+        list(doc.alerts or []),
+        onset_tolerance_seconds=settings.origin_onset_tolerance_seconds if settings is not None else None,
+    )
     if selection is None or not selection.is_multi_service:
         return primary_alert
     return alert_event_from_entry(selection.primary_alert, primary_alert)
@@ -662,13 +666,7 @@ def _extract_primary_alert(doc: OKFDocument) -> AlertEvent:
     """Extract primary alert from OKFDocument for investigation synthesizers."""
     if doc.alerts:
         return _alert_event_from_entry(doc.alerts[0], doc)
-    return AlertEvent(
-        incident_id="0.unknown",
-        policy_name=doc.policy_name or "unknown",
-        resource_name=doc.resource_name or "unknown",
-        state="open",
-        started_at=doc.created_at,
-    )
+    return _group_fallback_alert(doc)
 
 
 @app.post("/investigate")

@@ -31,11 +31,11 @@ from ..contracts.links import ConsoleLinkBuilder
 from ..grouping.models import OKFDocument, format_okf_alert_entry
 from ..grouping.store import OKFStore, get_canonical_blob_name, resolve_local_target_file
 from .base import EvidenceDossier
-from .cloud_run import CloudRunSpecialist
+from .cloud_run import CloudRunSpecialist, measured_breaches
 from .apigee import ApigeeSpecialist
 from .cloud_sql import CloudSQLSpecialist
 from .change import ChangeSpecialist, is_genuine_change
-from .origin_selection import OriginSelection, alert_event_from_entry, select_origin
+from .origin_selection import OriginSelection, alert_event_from_entry, onset_allows_explanation, select_origin
 
 try:
     from topology.topology_graph import (
@@ -52,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 
 _DB_AUTH_PHRASE = "database authentication"
+
+# Sentinel: _determine_probable_origin computes the change verdict itself when none is passed.
+_VERDICT_NOT_COMPUTED: Any = object()
 
 
 def _dossier_has_db_auth_error(dossier: Optional[EvidenceDossier]) -> bool:
@@ -190,7 +193,8 @@ class SynthesizerAgent:
         than from ``alert`` (the group's first alert); see origin_selection.
         """
         start_time = time.monotonic()
-        selection = self._select_group_origin(alert, group_alerts)
+        onset_tolerance = config.origin_onset_tolerance_seconds
+        selection = self._select_group_origin(alert, group_alerts, onset_tolerance_seconds=onset_tolerance)
         if selection is not None and selection.is_multi_service:
             trigger_alert = alert
             alert = alert_event_from_entry(selection.primary_alert, trigger_alert)
@@ -240,11 +244,16 @@ class SynthesizerAgent:
         dossier_map = dict(zip(all_keys, all_results))
         dossiers: list[EvidenceDossier] = list(all_results)
 
-        # Determine probable origin and blast radius
-        origin = self._determine_probable_origin(alert, dossier_map, upstream_deps, group_selection=selection)
+        # Determine probable origin and blast radius. The change verdict is computed once and
+        # shared with the origin rules.
+        verdict = self._assess_change(
+            alert, dossier_map, upstream_deps, selection, onset_tolerance_seconds=onset_tolerance
+        )
+        origin = self._determine_probable_origin(
+            alert, dossier_map, upstream_deps, group_selection=selection, change_verdict=verdict
+        )
 
         # A recent change that is not implicated must not drive the narrative or the actions.
-        verdict = self._assess_change(alert, dossier_map, upstream_deps, selection)
         if verdict is not None and (not verdict["implicated"] or not self._same_node(verdict["service"], origin)):
             if verdict["implicated"]:
                 verdict = dict(verdict, implicated=False, reason=(
@@ -308,9 +317,10 @@ class SynthesizerAgent:
             region=config.region, project_id=config.project_id,
         )
         if origin_notes:
-            observations = self._insert_origin_observation(observations, origin_notes["explanation"])
+            label = origin_notes["label"]
+            observations = self._insert_origin_observation(observations, origin_notes["explanation"], label)
             root_cause_analysis["origin_selection"] = origin_notes
-            root_cause_analysis["supporting_evidence"].append(f"Origin selection: {origin_notes['explanation']}")
+            root_cause_analysis["supporting_evidence"].append(f"{label}: {origin_notes['explanation']}")
             root_cause_analysis["alternatives_ruled_out"].extend(origin_notes["ruled_out"])
         longer_term_fixes = self._build_longer_term_fixes(origin, alert)
         execution_duration = time.monotonic() - start_time
@@ -390,6 +400,7 @@ class SynthesizerAgent:
         dossiers: dict[str, EvidenceDossier],
         upstream_deps: Optional[list[str]] = None,
         group_selection: Optional[OriginSelection] = None,
+        change_verdict: Any = _VERDICT_NOT_COMPUTED,
     ) -> str:
         """Identify probable origin node using DAG hierarchy, change correlation, and telemetry metric onset.
 
@@ -412,7 +423,10 @@ class SynthesizerAgent:
         # directly to that service where the revision was deployed, NEVER to downstream database.
         # The change is weighed only when the changed service shows its own degradation that no
         # degraded upstream dependency explains (see _assess_change).
-        verdict = self._assess_change(alert, dossiers, upstream_deps, group_selection)
+        if change_verdict is _VERDICT_NOT_COMPUTED:
+            verdict = self._assess_change(alert, dossiers, upstream_deps, group_selection)
+        else:
+            verdict = change_verdict
         if verdict is not None:
             if verdict["implicated"]:
                 logger.info(
@@ -425,27 +439,10 @@ class SynthesizerAgent:
 
         # 3. Cloud SQL check: database is the deepest backend layer in the topology DAG
         # Origin must ONLY attribute to database when database telemetry is actually anomalous in the window
+        # (Thresholds and the caller DB-auth exclusion live in _db_telemetry_anomalous.)
         sql_dossier = dossiers.get("CloudSQLSpecialist")
         if sql_dossier and sql_dossier.anomaly_detected:
-            db_conns = sql_dossier.metrics.get("active_connections")
-            db_max = sql_dossier.metrics.get("max_connections")
-            db_locks = sql_dossier.metrics.get("active_lock_waits")
-            db_cpu = sql_dossier.metrics.get("cpu_utilization_pct")
-
-            is_conn_anomalous = isinstance(db_conns, (int, float)) and (
-                db_conns >= 20 or (isinstance(db_max, (int, float)) and db_max > 0 and db_conns / db_max >= 0.8)
-            )
-            is_lock_anomalous = isinstance(db_locks, (int, float)) and db_locks > 0
-            is_cpu_anomalous = isinstance(db_cpu, (int, float)) and db_cpu >= 80.0
-            is_explicit_db_alert = any(k in alert.policy_name.lower() for k in ["cloudsql", "max_connections", "lock_wait", "db_lock", "row_lock"])
-
-            # Check if caller has DB auth errors from bad credentials (not a database instance fault)
-            cr_dossier = dossiers.get("CloudRunSpecialist")
-            has_db_auth_error = _dossier_has_db_auth_error(cr_dossier)
-
-            db_telemetry_anomalous = (is_conn_anomalous or is_lock_anomalous or is_cpu_anomalous or is_explicit_db_alert) and not has_db_auth_error
-
-            if db_telemetry_anomalous:
+            if self._db_telemetry_anomalous(alert, dossiers):
                 db_origin = sql_dossier.target_resource
                 if not db_origin and upstream_deps:
                     db_candidates = [d for d in upstream_deps if "db" in d or "sql" in d]
@@ -467,7 +464,10 @@ class SynthesizerAgent:
             else:
                 logger.info(
                     "Cloud SQL metrics are normal or caller auth error (conns=%s, max=%s, locks=%s, cpu=%s); not attributing origin to DB",
-                    db_conns, db_max, db_locks, db_cpu,
+                    sql_dossier.metrics.get("active_connections"),
+                    sql_dossier.metrics.get("max_connections"),
+                    sql_dossier.metrics.get("active_lock_waits"),
+                    sql_dossier.metrics.get("cpu_utilization_pct"),
                 )
 
         # 4. Check upstream Cloud Run dependencies in topology DAG
@@ -513,14 +513,26 @@ class SynthesizerAgent:
 
     @staticmethod
     def _select_group_origin(
-        alert: AlertEvent, group_alerts: Optional[list[dict[str, Any]]]
+        alert: AlertEvent,
+        group_alerts: Optional[list[dict[str, Any]]],
+        onset_tolerance_seconds: Optional[float] = None,
     ) -> Optional[OriginSelection]:
-        """Topology-aware origin selection over the group's alerts (None without group alerts)."""
+        """Topology-aware origin selection over the group's alerts (None without group alerts).
+
+        ``onset_tolerance_seconds`` defaults to the agent settings' ORIGIN_ONSET_TOLERANCE_SECONDS.
+        """
         if not group_alerts:
             return None
+        if onset_tolerance_seconds is None:
+            onset_tolerance_seconds = get_agent_settings().origin_onset_tolerance_seconds
         try:
             topo = get_loader()
-            return select_origin(group_alerts, canonicalize=topo.canonicalize, upstream_of=topo.upstream)
+            return select_origin(
+                group_alerts,
+                canonicalize=topo.canonicalize,
+                upstream_of=topo.upstream,
+                onset_tolerance_seconds=onset_tolerance_seconds,
+            )
         except Exception as exc:
             logger.error(
                 "Origin selection failed for group of %d alerts (%s); investigating from the first alert %s on %s",
@@ -540,6 +552,19 @@ class SynthesizerAgent:
 
     def _same_node(self, a: Optional[str], b: Optional[str]) -> bool:
         return bool(a) and bool(b) and self._canonical(a) == self._canonical(b)
+
+    @staticmethod
+    def _url_resource_type(alert: AlertEvent) -> Optional[str]:
+        """Resource type for console links: the alert's, else the topology component type
+        (e.g. "Apigee proxy"), so a proxy origin does not get a Cloud Run link."""
+        if alert.resource_type:
+            return alert.resource_type
+        try:
+            comp = get_loader().components.get(SynthesizerAgent._canonical(alert.resource_name))
+        except Exception as exc:
+            logger.warning("Topology component lookup failed for %s: %s", alert.resource_name, type(exc).__name__)
+            return None
+        return str(comp.type) if comp else None
 
     @staticmethod
     def _is_cloud_run(service: str) -> bool:
@@ -579,12 +604,18 @@ class SynthesizerAgent:
         dossiers: dict[str, EvidenceDossier],
         upstream_deps: Optional[list[str]],
         group_selection: Optional[OriginSelection],
+        onset_tolerance_seconds: Optional[float] = None,
     ) -> Optional[dict[str, Any]]:
         """Decide whether the ChangeSpecialist's recent change is implicated.
 
         A recent revision on service X is implicated only when X shows degradation of its own
         (an alert on X, or anomalous Cloud Run telemetry for X) AND no degraded upstream
         dependency of X explains it. Returns None when no recent change was detected.
+
+        An upstream dependency U explains X when U has its own alert in the group, or, without
+        an alert, when U's Cloud Run telemetry shows a *measured* 5xx/latency breach. A dossier
+        that is anomalous only from log signals (e.g. ``has_db_auth_error``) does not explain X.
+        In both cases U's onset must not be later than X's onset plus the configured tolerance.
         """
         chg = dossiers.get("ChangeSpecialist")
         if not (chg and chg.anomaly_detected):
@@ -613,11 +644,40 @@ class SynthesizerAgent:
         except Exception as exc:
             logger.error("Topology upstream lookup failed for %s: %s", node, type(exc).__name__)
             node_deps = []
+        tolerance = (
+            onset_tolerance_seconds
+            if onset_tolerance_seconds is not None
+            else get_agent_settings().origin_onset_tolerance_seconds
+        )
+        node_onset = self._service_onset(node, alert, group_selection, svc_dossier)
         explaining: list[str] = []
         for dep in node_deps:
             dep_dossier = dossiers.get(dep)
-            if dep in degraded or (dep_dossier is not None and dep_dossier.anomaly_detected):
-                explaining.append(dep)
+            if dep in degraded:
+                cand = group_selection.candidate(dep) if group_selection is not None else None
+                dep_onset = cand.onset if cand is not None else None
+            elif dep_dossier is not None and dep_dossier.anomaly_detected:
+                breaches = measured_breaches(dep_dossier.metrics)
+                if not breaches:
+                    logger.info(
+                        "Change assessment: upstream %s has no alert and no measured 5xx/latency breach"
+                        " (anomaly from log signals only, has_db_auth_error=%s); it does not explain %s",
+                        dep,
+                        bool(dep_dossier.metrics.get("has_db_auth_error")),
+                        node,
+                    )
+                    continue
+                dep_onset = dep_dossier.metrics.get("metric_onset")
+            else:
+                continue
+            if not onset_allows_explanation(dep_onset, node_onset, tolerance):
+                logger.info(
+                    "Change assessment: %s (onset %s) degraded before upstream %s (onset %s) beyond %ss tolerance;"
+                    " it does not explain %s",
+                    node, node_onset, dep, dep_onset, tolerance, node,
+                )
+                continue
+            explaining.append(dep)
         sql = dossiers.get("CloudSQLSpecialist")
         if sql is not None and self._db_telemetry_anomalous(alert, dossiers):
             sql_node = self._canonical(sql.target_resource)
@@ -649,6 +709,23 @@ class SynthesizerAgent:
             explaining,
         )
         return {"service": service, "revision": revision, "implicated": implicated, "reason": reason}
+
+    def _service_onset(
+        self,
+        node: str,
+        alert: AlertEvent,
+        group_selection: Optional[OriginSelection],
+        svc_dossier: Optional[EvidenceDossier],
+    ) -> Optional[str]:
+        """Earliest known onset of ``node``: its group alerts, the trigger alert, else its telemetry."""
+        cand = group_selection.candidate(node) if group_selection is not None else None
+        if cand is not None and cand.onset:
+            return cand.onset
+        if self._same_node(node, alert.resource_name) and alert.started_at:
+            return alert.started_at
+        if svc_dossier is not None:
+            return svc_dossier.metrics.get("metric_onset")
+        return None
 
     @staticmethod
     def _service_signal(group_selection: Optional[OriginSelection], alert: Optional[AlertEvent]):
@@ -730,7 +807,11 @@ class SynthesizerAgent:
             return None
         explanation = " ".join(statements)
         logger.info("Origin selection explanation for origin %s: %s", origin, explanation)
+        multi = selection is not None and selection.is_multi_service
         return {
+            # "Origin selection" only when a multi-service selection took place; otherwise the
+            # notes only explain why a recent change was not implicated.
+            "label": "Origin selection" if multi else "Change assessment",
             "origin": origin,
             "topology_origin": selection.origin if selection is not None else None,
             "explanation": explanation,
@@ -739,10 +820,10 @@ class SynthesizerAgent:
         }
 
     @staticmethod
-    def _insert_origin_observation(observations: str, explanation: str) -> str:
-        """Put 'Origin selection: ...' directly after the first observation (the alert trigger)."""
+    def _insert_origin_observation(observations: str, explanation: str, label: str = "Origin selection") -> str:
+        """Put '<label>: ...' directly after the first observation (the alert trigger)."""
         items = split_observations(observations)
-        line = f"Origin selection: {explanation}"
+        line = f"{label}: {explanation}"
         if line in items:
             return observations
         items[1:1] = [line]
@@ -1511,7 +1592,7 @@ class SynthesizerAgent:
         pol_id = entry.get("policy_id")
         entry["policy_url"] = builder.build_policy_url(pol_id or alert.policy_name)
         entry["resource_type"] = alert.resource_type
-        entry["resource_url"] = builder.build_resource_url(alert.resource_name, alert.resource_type)
+        entry["resource_url"] = builder.build_resource_url(alert.resource_name, self._url_resource_type(alert))
         inc_url = entry.get("url") or builder.build_incident_url(alert.incident_id)
         entry["url"] = inc_url
         entry["console_url"] = inc_url
@@ -1826,11 +1907,9 @@ class SynthesizerAgent:
         chg_dossier = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist"), None)
         if chg_dossier:
             has_chg_check = bool(chg_dossier.queries_executed) or bool(chg_dossier.metrics)
+            # A not-implicated change is stated by the origin selection notes (alternatives_ruled_out).
             not_implicated = chg_dossier.metrics.get("change_not_implicated_reason")
-            if not_implicated:
-                # Stated by the origin selection notes (alternatives_ruled_out) instead.
-                pass
-            elif has_chg_check and not chg_dossier.anomaly_detected:
+            if has_chg_check and not chg_dossier.anomaly_detected and not not_implicated:
                 rev = chg_dossier.metrics.get("recent_revision", "N/A")
                 alternatives.append({
                     "alternative": "Recent Application Deployment Regression",
@@ -2043,7 +2122,7 @@ class SynthesizerAgent:
         notes = (report.root_cause_analysis or {}).get("origin_selection") or {}
         if not notes.get("explanation"):
             return ""
-        lines = ["", "## Origin selection", notes["explanation"]]
+        lines = ["", f"## {notes.get('label') or 'Origin selection'}", notes["explanation"]]
         for cand in notes.get("candidates") or []:
             lines.append(
                 f"- `{cand.get('service')}`: score {cand.get('score')}, explains {cand.get('explains') or []},"
@@ -2103,7 +2182,7 @@ class SynthesizerAgent:
         base_entry = format_okf_alert_entry(alert, valid_ts=alert_started_at)
         base_entry["policy_url"] = builder.build_policy_url(pol_id or alert.policy_name)
         base_entry["resource_type"] = alert.resource_type
-        base_entry["resource_url"] = builder.build_resource_url(alert.resource_name, alert.resource_type)
+        base_entry["resource_url"] = builder.build_resource_url(alert.resource_name, self._url_resource_type(alert))
         if not base_entry.get("url"):
             base_entry["url"] = inc_url
         base_entry["console_url"] = inc_url

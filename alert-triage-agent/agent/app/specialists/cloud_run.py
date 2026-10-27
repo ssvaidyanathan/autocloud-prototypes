@@ -51,6 +51,42 @@ DB_AUTH_PATTERNS = [
 ]
 
 
+# Measured breach thresholds for Cloud Run telemetry (5xx share of requests, P95 latency).
+ERROR_RATE_5XX_BREACH_PCT = 5.0
+LATENCY_P95_BREACH_MS = 2000.0
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.replace("%", "").replace("ms", "").strip())
+        except ValueError:
+            return None
+    return None
+
+
+def measured_breaches(metrics: dict[str, Any]) -> list[str]:
+    """Measured 5xx / latency threshold breaches recorded in a Cloud Run dossier's metrics.
+
+    Only telemetry values count; log-derived signals (e.g. ``has_db_auth_error``) do not.
+    Returns human-readable breach descriptions (empty when nothing was measured over threshold).
+    """
+    breaches: list[str] = []
+    metrics = metrics or {}
+    rate_raw = metrics.get("error_rate_5xx")
+    rate = _as_float(rate_raw) if not isinstance(rate_raw, str) or "%" in rate_raw else None
+    if rate is not None and rate >= ERROR_RATE_5XX_BREACH_PCT:
+        breaches.append(f"HTTP 5xx error rate {rate_raw}")
+    latency = _as_float(metrics.get("latency_p95_ms"))
+    if latency is not None and latency >= LATENCY_P95_BREACH_MS:
+        breaches.append(f"P95 latency {latency:g}ms")
+    return breaches
+
+
 def has_db_auth_signature(text: str) -> bool:
     """Return True if log text contains a specific database authentication failure."""
     lowered = (text or "").lower()
@@ -406,8 +442,8 @@ class CloudRunSpecialist(BaseSpecialist):
                 rate_val = float(error_rate_5xx_val.replace("%", "").strip())
             except ValueError:
                 rate_val = 0.0
-        has_real_5xx_breach = rate_val >= 5.0
-        has_latency_breach = latency_p95_ms_val is not None and latency_p95_ms_val >= 2000.0
+        has_real_5xx_breach = rate_val >= ERROR_RATE_5XX_BREACH_PCT
+        has_latency_breach = latency_p95_ms_val is not None and latency_p95_ms_val >= LATENCY_P95_BREACH_MS
         is_target_of_alert = (target_service == (alert.resource_labels.get("service_name") or alert.resource_name))
         is_alert_policy_5xx = is_target_of_alert and ("5xx" in alert.policy_name.lower() or "500" in (alert.condition_name or ""))
         is_alert_policy_lat = is_target_of_alert and ("latency" in alert.policy_name.lower() or "timeout" in alert.policy_name.lower() or "slow" in alert.policy_name.lower())

@@ -49,6 +49,7 @@ The agent owns all incident grouping, atomic Open Knowledge File (OKF) storage w
 | `TIMER_QUEUE_LOCATION` | `us-west1` | GCP region where the timer queue is hosted. |
 | `SERVICE_ACCOUNT_EMAIL`| `ata-agent-sa@...` | Service account used by the agent to schedule delayed tasks with OIDC tokens. |
 | `IS_LOCAL` | `false` | Enables local offline mock mode. |
+| `ORIGIN_ONSET_TOLERANCE_SECONDS` | `300` | Origin selection: an upstream service explains a downstream service only when its onset is at most this many seconds after the downstream onset. A downstream service that degraded earlier than that is not attributed to the upstream service, and a recent deploy on it stays implicated. |
 
 ---
 
