@@ -61,6 +61,10 @@ class AgentConfig(BaseSettings):
     # seconds before the last alert closed until the note is written, to state whether the
     # close coincided with traffic stopping (missing data).
     recovery_traffic_lookback_seconds: int = Field(default=300, alias="RECOVERY_TRAFFIC_LOOKBACK_SECONDS", ge=0)
+    # Apigee access-log entries read per investigation (oldest first). Live S3 had 634
+    # entries in the -15/+5 min window. When the cap is hit, the report says so, no revision
+    # switch is evaluated and log-derived counts are stated as lower bounds.
+    apigee_access_log_max_entries: int = Field(default=5000, alias="APIGEE_ACCESS_LOG_MAX_ENTRIES", ge=1)
 
     @property
     def effective_incidents_bucket(self) -> str:

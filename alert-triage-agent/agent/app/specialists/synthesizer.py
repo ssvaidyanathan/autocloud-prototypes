@@ -32,7 +32,7 @@ from ..grouping.models import OKFDocument, format_okf_alert_entry
 from ..grouping.store import OKFStore, get_canonical_blob_name, resolve_local_target_file
 from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist, measured_breaches
-from .apigee import ApigeeSpecialist
+from .apigee import ACCESS_LOG_NAME, SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_name
 from .cloud_sql import CloudSQLSpecialist
 from .change import ChangeSpecialist, is_genuine_change
 from .origin_selection import OriginSelection, alert_event_from_entry, onset_allows_explanation, select_origin
@@ -99,6 +99,37 @@ def dependency_path_for(origin: str) -> Optional[str]:
     if path is None:
         logger.warning("No topology dependency path for %s: not a component of TOPOLOGY.md", origin)
     return path
+
+
+def db_caller_actions(origin: str, project_id: str) -> list[ActionItem]:
+    """Connection-release review on the Cloud Run services that call the database directly.
+
+    The callers come from TOPOLOGY.md; the pool and its release logic live in them, not in
+    the database. Without a known caller, no action is given.
+    """
+    try:
+        loader = get_loader()
+        callers = [
+            e.from_node for e in loader.edges
+            if e.to_node == loader.canonicalize(origin) and SynthesizerAgent._is_cloud_run(e.from_node)
+        ]
+    except Exception as exc:
+        logger.error("Topology caller lookup failed for %s: %s", origin, type(exc).__name__)
+        return []
+    if not callers:
+        logger.warning("No Cloud Run caller of %s in TOPOLOGY.md; no connection-release review suggested", origin)
+    return [
+        ActionItem(
+            title=f"Inspect connection pool release logic and pool size in {caller}, which calls {origin}",
+            command=(
+                f"gcloud logging read 'resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"{caller}\" "
+                f"AND textPayload=~\"connection leak|pool exhausted|get_db_connection\"' "
+                f"--project={project_id} --limit=30"
+            ),
+            verification=f"Confirm {caller} releases database connections (no leak in its logs)",
+        )
+        for caller in callers
+    ]
 
 
 def _alert_field(a: dict[str, Any], *keys: str) -> Optional[str]:
@@ -357,10 +388,8 @@ class SynthesizerAgent:
         root_cause_analysis = self._build_root_cause_analysis(
             root_cause_text, confidence, dossiers, origin, alert,
         )
-        gateway_fact = self._gateway_timeout_fact(dossiers, origin)
-        if gateway_fact:
-            observations = " | ".join([*split_observations(observations), gateway_fact.replace("`", "")])
-            root_cause_analysis["supporting_evidence"].append(gateway_fact)
+        # The Apigee GatewayTimeout fact is stated once, in the root cause (see _determine_root_cause);
+        # it is not repeated as an observation or as RCA supporting evidence.
         if origin_notes:
             label = origin_notes["label"]
             observations = self._insert_origin_observation(observations, origin_notes["explanation"], label)
@@ -1193,11 +1222,10 @@ class SynthesizerAgent:
                 f" Request rate: {prev_rpm}/min on revision {ev['previous_revision']}, "
                 f"{new_rpm}/min on revision {ev['new_revision']}."
             )
-        else:
+        elif prev_rpm is None:
             text += (
                 f" The request rate before the switch was not measured (revision {ev['previous_revision']} "
                 "served for less than a minute in the query window)."
-                if prev_rpm is None else ""
             )
         return text
 
@@ -1211,10 +1239,10 @@ class SynthesizerAgent:
         need the org and environment Apigee reported; without them no command is given.
         """
         apigee = next((d for d in dossiers if d.specialist_name == "ApigeeSpecialist"), None)
-        access_log = f"projects/{project_id}/logs/ata-apigee-access"
+        access_log = access_log_name(project_id)
         log_cmd = (
             f"gcloud logging read 'logName=\"{access_log}\" AND jsonPayload.proxy=\"{origin}\" "
-            f"AND jsonPayload.fault_source=\"SpikeArrestViolation\"' --project={project_id} --limit=20"
+            f"AND jsonPayload.fault_source=\"{SPIKE_ARREST_FAULT}\"' --project={project_id} --limit=20"
         )
         change = self._proxy_change_evidence(dossiers, origin)
         if change:
@@ -1240,8 +1268,8 @@ class SynthesizerAgent:
                     ),
                     command=rollback_cmd,
                     verification=(
-                        f"Confirm the ata-apigee-access log shows revision {prev} serving and no new "
-                        f"SpikeArrestViolation faults"
+                        f"Confirm the {ACCESS_LOG_NAME} log shows revision {prev} serving and no new "
+                        f"{SPIKE_ARREST_FAULT} faults"
                     ),
                     rollback=undo,
                 ),
@@ -1262,34 +1290,7 @@ class SynthesizerAgent:
         ]
 
     def _db_caller_actions(self, origin: str, project_id: str) -> list[ActionItem]:
-        """Connection-release review on the Cloud Run services that call the database directly.
-
-        The callers come from TOPOLOGY.md; the pool and its release logic live in them, not in
-        the database. Without a known caller, no action is given.
-        """
-        try:
-            loader = get_loader()
-            callers = [
-                e.from_node for e in loader.edges
-                if e.to_node == loader.canonicalize(origin) and self._is_cloud_run(e.from_node)
-            ]
-        except Exception as exc:
-            logger.error("Topology caller lookup failed for %s: %s", origin, type(exc).__name__)
-            return []
-        if not callers:
-            logger.warning("No Cloud Run caller of %s in TOPOLOGY.md; no connection-release review suggested", origin)
-        return [
-            ActionItem(
-                title=f"Inspect connection pool release logic and pool size in {caller}, which calls {origin}",
-                command=(
-                    f"gcloud logging read 'resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"{caller}\" "
-                    f"AND textPayload=~\"connection leak|pool exhausted|get_db_connection\"' "
-                    f"--project={project_id} --limit=30"
-                ),
-                verification=f"Confirm {caller} releases database connections (no leak in its logs)",
-            )
-            for caller in callers
-        ]
+        return db_caller_actions(origin, project_id)
 
     def _gateway_timeout_fact(self, dossiers: list[EvidenceDossier], origin: str) -> Optional[str]:
         """Sentence stating the Apigee GatewayTimeout evidence for ``origin``, or None.
@@ -1645,12 +1646,21 @@ class SynthesizerAgent:
                         line += f" ({rpm} rpm)"
                     line += f" on {d.target_resource}"
                     if isinstance(restarts, (int, float)):
-                        line += f"; container restarts: {restarts}"
+                        # No ';': the description splits observations on it, which would leave
+                        # an orphan "container restarts" bullet without the service name.
+                        line += f", with {restarts} container restarts"
                     obs_items.append(line)
                 has_db_auth = _dossier_has_db_auth_error(d)
                 if has_db_auth:
                     obs_items.append(f"Database authentication failure observed in application logs on {d.target_resource}")
             elif d.specialist_name == "ApigeeSpecialist" and d.metrics:
+                cap = d.metrics.get("access_log_cap_hit")
+                if isinstance(cap, dict):
+                    obs_items.append(
+                        f"Apigee access log for {d.target_resource} hit the {cap.get('cap')}-entry read cap in "
+                        f"[{cap.get('window_start')}, {cap.get('window_end')}]; log-derived counts are lower bounds "
+                        "and no proxy revision switch was evaluated"
+                    )
                 if "proxy_response_code_429" in d.metrics and d.metrics["proxy_response_code_429"] != "N/A (not captured)":
                     obs_items.append(f"Apigee proxy {d.target_resource} recorded {d.metrics['proxy_response_code_429']} HTTP 429 rate limit responses")
                 elif "status_429_rate" in d.metrics:

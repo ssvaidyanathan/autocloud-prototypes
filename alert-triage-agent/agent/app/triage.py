@@ -21,7 +21,8 @@ from .contracts.report import (
 )
 from .contracts.links import ConsoleLinkBuilder
 from .grouping.models import format_okf_alert_entry
-from .specialists.synthesizer import SynthesizerAgent, dependency_path_for
+from .specialists.apigee import access_log_name
+from .specialists.synthesizer import SynthesizerAgent, db_caller_actions, dependency_path_for
 
 try:
     from topology.topology_graph import get_blast_radius, get_upstream_dependencies
@@ -279,7 +280,7 @@ def generate_investigation_report(
                 command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
                 verification="Confirm active connections drop below 80% capacity via Cloud Monitoring",
             ),
-            *SynthesizerAgent()._db_caller_actions(canonical_res, config.project_id),
+            *db_caller_actions(canonical_res, config.project_id),
             ActionItem(
                 title=(
                     f"Review the tier and database flags of {canonical_res} before any max_connections change "
@@ -293,7 +294,7 @@ def generate_investigation_report(
     elif is_apigee:
         # Single-pass report: no Apigee telemetry was gathered, so only a read-only look at the
         # proxy's access log is suggested (no change against unverified resources).
-        access_log = f"projects/{config.project_id}/logs/ata-apigee-access"
+        access_log = access_log_name(config.project_id)
         recommended_actions = [
             ActionItem(
                 title=f"Review HTTP 429 / SpikeArrest faults and the serving revision of {canonical_res} in its access log",

@@ -516,7 +516,7 @@ def _s3_series():
     return [sa]
 
 
-async def _s3_apigee_dossier(prev_faults: int = 0):
+async def _s3_apigee_dossier(prev_faults: int = 0, **config_kwargs):
     from agent.app.config import AgentConfig
     from agent.app.specialists.apigee import ApigeeSpecialist
 
@@ -524,7 +524,7 @@ async def _s3_apigee_dossier(prev_faults: int = 0):
         incident_id="0.oeb5qvfcvh5r", policy_name="ata-apigee-orders-429",
         resource_name="ata-orders-v1", started_at="2026-10-27T08:35:28Z",
     )
-    config = AgentConfig(project_id="cloud-assist-fde-2", region="us-west1", is_local=True)
+    config = AgentConfig(project_id="cloud-assist-fde-2", region="us-west1", is_local=True, **config_kwargs)
     with _patch("google.cloud.monitoring_v3.MetricServiceClient") as mon_cls, \
          _patch("google.cloud.logging.Client") as log_cls:
         series = _s3_series()
@@ -812,10 +812,8 @@ async def test_org_and_env_read_from_real_monitoring_time_series_labels():
 
 @pytest.mark.asyncio
 async def test_truncated_access_log_reports_no_revision_switch(caplog):
-    from agent.app.specialists import apigee as apigee_mod
-
-    with _patch.object(apigee_mod, "ACCESS_LOG_MAX_ENTRIES", 100), caplog.at_level("WARNING"):
-        dossier, alert = await _s3_apigee_dossier()
+    with caplog.at_level("WARNING"):
+        dossier, alert = await _s3_apigee_dossier(apigee_access_log_max_entries=100)
     assert "proxy_revision_change" not in dossier.metrics
     assert "hit the 100-entry cap" in caplog.text
     text, _ = SynthesizerAgent()._determine_root_cause([dossier], "ata-orders-v1", alert)

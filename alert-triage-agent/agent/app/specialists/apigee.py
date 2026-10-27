@@ -22,8 +22,13 @@ logger = logging.getLogger(__name__)
 GATEWAY_TIMEOUT_FAULT = "GatewayTimeout"
 # Apigee fault raised by a SpikeArrest policy (metric fault_code ends with it, access-log fault_source equals it).
 SPIKE_ARREST_FAULT = "SpikeArrestViolation"
-# Access-log entries read per investigation, oldest first so a revision switch in the window is seen.
-ACCESS_LOG_MAX_ENTRIES = 1000
+# Access log written by the Apigee proxies' MessageLogging policy.
+ACCESS_LOG_NAME = "ata-apigee-access"
+
+
+def access_log_name(project_id: str) -> str:
+    """Full Cloud Logging log name of the Apigee access log in `project_id`."""
+    return f"projects/{project_id}/logs/{ACCESS_LOG_NAME}"
 
 
 def _entry_time(entry: Any) -> Optional[datetime]:
@@ -135,7 +140,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 f'fetch apigee.googleapis.com/target/latencies | filter resource.proxy_name == "{target_proxy}"',
             ],
             "cloud_logging": [
-                f'logName="projects/{config.project_id}/logs/ata-apigee-access" AND jsonPayload.proxy="{target_proxy}"'
+                f'logName="{access_log_name(config.project_id)}" AND jsonPayload.proxy="{target_proxy}"'
             ],
         }
 
@@ -263,31 +268,40 @@ class ApigeeSpecialist(BaseSpecialist):
             start_ts = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
             end_ts = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
             log_filter = (
-                f'logName="projects/{config.project_id}/logs/ata-apigee-access" AND '
+                f'logName="{access_log_name(config.project_id)}" AND '
                 f'jsonPayload.proxy="{target_proxy}" AND '
                 f'timestamp>="{start_ts}" AND timestamp<="{end_ts}"'
             )
+            log_cap = config.apigee_access_log_max_entries
             entries = list(logging_client.list_entries(
-                filter_=log_filter, max_results=ACCESS_LOG_MAX_ENTRIES, order_by=google.cloud.logging.ASCENDING
+                filter_=log_filter, max_results=log_cap, order_by=google.cloud.logging.ASCENDING
             ))
             if not entries:
                 alt_filter = (
-                    f'logName="projects/{config.project_id}/logs/ata-apigee-access" AND '
+                    f'logName="{access_log_name(config.project_id)}" AND '
                     f'(jsonPayload.proxy_name="{target_proxy}" OR textPayload:"{target_proxy}") AND '
                     f'timestamp>="{start_ts}" AND timestamp<="{end_ts}"'
                 )
                 entries = list(logging_client.list_entries(
-                    filter_=alt_filter, max_results=ACCESS_LOG_MAX_ENTRIES, order_by=google.cloud.logging.ASCENDING
+                    filter_=alt_filter, max_results=log_cap, order_by=google.cloud.logging.ASCENDING
                 ))
 
-            if len(entries) >= ACCESS_LOG_MAX_ENTRIES:
+            if len(entries) >= log_cap:
                 # Oldest-first and capped: the newest entries were not read, so per-revision
                 # counts are partial and the current revision is unknown.
                 access_log_truncated = True
+                metrics["access_log_cap_hit"] = {"cap": log_cap, "window_start": start_ts, "window_end": end_ts}
+                cap_text = (
+                    f"Apigee access log for `{target_proxy}` hit the {log_cap}-entry read cap "
+                    f"(APIGEE_ACCESS_LOG_MAX_ENTRIES) in [{start_ts}, {end_ts}]: entries after the cap were "
+                    "not read, so no proxy revision switch was evaluated and log-derived counts are lower bounds."
+                )
+                findings.append(cap_text)
+                evidence_items.append(EvidenceItem(headline=f"Apigee access log truncated: {target_proxy}", content=cap_text))
                 logger.warning(
                     "Access log for %s hit the %d-entry cap in [%s, %s]; revision switch not evaluated, "
                     "log-derived counts are lower bounds",
-                    target_proxy, ACCESS_LOG_MAX_ENTRIES, start_ts, end_ts,
+                    target_proxy, log_cap, start_ts, end_ts,
                 )
             client_counter: Counter[str] = Counter()
             for entry in entries:
@@ -384,7 +398,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 "count": sa_metric_count or sa_log_count,
                 "count_source": (
                     "apigee.googleapis.com/proxy/response_count" if sa_metric_count
-                    else "ata-apigee-access log entries"
+                    else f"{ACCESS_LOG_NAME} log entries"
                 ),
                 "count_is_lower_bound": bool(not sa_metric_count and lower_bound),
                 "response_code": sa_response_code,
@@ -410,7 +424,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 "count": gt_metric_count or gt_log_count,
                 "count_source": (
                     "apigee.googleapis.com/proxy/response_count" if gt_metric_count
-                    else "ata-apigee-access log entries"
+                    else f"{ACCESS_LOG_NAME} log entries"
                 ),
                 "response_code": gt_response_code,
                 "fault_code": gt_fault_code or GATEWAY_TIMEOUT_FAULT,

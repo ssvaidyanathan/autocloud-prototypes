@@ -375,3 +375,88 @@ def test_recovery_lookback_is_configurable(monkeypatch):
     assert AgentConfig().recovery_traffic_lookback_seconds == 300
     monkeypatch.setenv("RECOVERY_TRAFFIC_LOOKBACK_SECONDS", "600")
     assert AgentConfig().recovery_traffic_lookback_seconds == 600
+
+
+# ---------------------------------------------------------------------------------------
+# Bug 4: review follow-ups (access-log cap, GatewayTimeout stated once, nits)
+# ---------------------------------------------------------------------------------------
+
+from tests.test_qafix1_quality import S2_GT, _s2_dossiers, _s3_apigee_dossier  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_gateway_timeout_fact_is_stated_once_in_the_report(tmp_path):
+    cr, ap = _s2_dossiers(S2_GT)
+    empty = lambda name: EvidenceDossier(specialist_name=name, target_resource=SERVICE)  # noqa: E731
+    synth = SynthesizerAgent()
+
+    async def _ret(d):
+        return d
+
+    synth.cloud_run_specialist.investigate = lambda alert, config, target_service=None: _ret(
+        cr if target_service in (None, SERVICE) else empty("CloudRunSpecialist")
+    )
+    synth.apigee_specialist.investigate = lambda alert, config: _ret(ap)
+    synth.cloud_sql_specialist.investigate = lambda alert, config: _ret(empty("CloudSQLSpecialist"))
+    synth.change_specialist.investigate = lambda alert, config: _ret(empty("ChangeSpecialist"))
+    alert = AlertEvent(incident_id="0.oeb4hxzrsiqu", policy_name="ata-inventory-latency",
+                       resource_name=SERVICE, started_at="2026-10-27T07:40:49Z")
+    cfg = AgentConfig(project_id=PROJECT, region=REGION, is_local=True,
+                      incident_store_path=str(tmp_path), fallback_store_path=str(tmp_path))
+
+    report = await synth.execute_investigation(alert, "g", "incident-g.md", cfg)
+
+    marker = "did not complete within the proxy's target timeout"
+    assert marker in report.probable_root_cause.text
+    assert marker not in report.observations
+    assert not any(marker in str(e) for e in report.root_cause_analysis.get("supporting_evidence", []))
+
+
+@pytest.mark.asyncio
+async def test_access_log_cap_hit_is_stated_in_findings_evidence_and_observations():
+    dossier, alert = await _s3_apigee_dossier(apigee_access_log_max_entries=100)
+    cap = dossier.metrics["access_log_cap_hit"]
+    assert cap["cap"] == 100
+    assert any("hit the 100-entry read cap (APIGEE_ACCESS_LOG_MAX_ENTRIES)" in f for f in dossier.findings)
+    assert any(e.headline == "Apigee access log truncated: ata-orders-v1" for e in dossier.evidence_items)
+    obs = SynthesizerAgent()._synthesize_observations([dossier], alert)
+    assert "Apigee access log for ata-orders-v1 hit the 100-entry read cap" in obs
+    assert "lower bounds" in obs
+
+
+@pytest.mark.asyncio
+async def test_default_cap_covers_the_s3_log_with_margin():
+    assert AgentConfig().apigee_access_log_max_entries == 5000
+    dossier, _ = await _s3_apigee_dossier()
+    assert "access_log_cap_hit" not in dossier.metrics
+    assert dossier.metrics["proxy_revision_change"]["new_revision"] == "162"
+
+
+def test_spike_arrest_commands_use_the_shared_constants():
+    from agent.app.specialists import apigee
+
+    dossier = EvidenceDossier(specialist_name="ApigeeSpecialist", target_resource="ata-orders-v1", metrics={})
+    actions = SynthesizerAgent()._apigee_recommendations([dossier], "ata-orders-v1", PROJECT)
+    cmd = actions[-1].command
+    assert apigee.access_log_name(PROJECT) in cmd
+    assert f'jsonPayload.fault_source="{apigee.SPIKE_ARREST_FAULT}"' in cmd
+
+
+def test_measured_restarts_stay_in_the_service_bullet():
+    from agent.app.contracts.report import split_observations
+
+    cr = EvidenceDossier(specialist_name="CloudRunSpecialist", target_resource=SERVICE,
+                         metrics={"error_rate_5xx": "84.0%", "request_count_rpm": 42, "container_restarts": 2})
+    obs = SynthesizerAgent()._synthesize_observations([cr], _alert())
+    line = next(o for o in split_observations(obs) if "HTTP 5xx error rate" in o)
+    assert line == "HTTP 5xx error rate 84.0% (42 rpm) on ata-inventory-api, with 2 container restarts"
+    assert ";" not in line
+
+
+def test_triage_uses_the_module_level_db_caller_helper():
+    from agent.app import triage
+    from agent.app.specialists.synthesizer import db_caller_actions
+
+    assert triage.db_caller_actions is db_caller_actions
+    titles = [a.title for a in db_caller_actions("ata-inventory-db", PROJECT)]
+    assert titles == ["Inspect connection pool release logic and pool size in ata-inventory-api, which calls ata-inventory-db"]
