@@ -318,7 +318,7 @@ URLs are never hardcoded. An exported `AGENT_URL` or `BRIDGE_URL` wins. Otherwis
 | | `AGENT_URL` | `ata-agent` URL (the `/triage` target of the dispatched tasks). |
 | | `BRIDGE_URL` | The bridge's own `status.url`. Required. On a first deploy the script deploys with the deterministic URL, then sets `status.url` with `gcloud run services update` if it differs. |
 | | `SERVICENOW_INSTANCE_URL` | Environment, else `servicenow_instance_url` in `infra/terraform/foundation/terraform.tfvars`, else the value on the service. Required. |
-| | `VERIFIER_SA` | Only when exported. The list is passed with gcloud's `^\|^` delimiter, so commas in it are kept. |
+| | `VERIFIER_SA` | Only when exported. The list is passed with gcloud's `^\|^` delimiter, so commas in it are kept. `VERIFIER_SA=none` removes it from the service (`--remove-env-vars=VERIFIER_SA`). Entries must be email addresses; the bridge lowercases them and refuses to start on any other entry. |
 | | `WEBHOOK_TOKEN`, `SERVICENOW_USERNAME`, `SERVICENOW_PASSWORD` | Secret Manager `${NAME_PREFIX}-webhook-token`, `${NAME_PREFIX}-servicenow-username`, `${NAME_PREFIX}-servicenow-password` (`:latest`). |
 | `ata-tools` | `PROJECT_ID`, `NAME_PREFIX`, `REGION` | From the environment. Runs as `${NAME_PREFIX}-agent-sa`. |
 | | `APIGEE_ORG` | `${APIGEE_ORG}`, default `${PROJECT_ID}` |
@@ -331,7 +331,7 @@ The bridge exposes a read-only endpoint for verifying incident tickets without d
 ```bash
 # Verify ticket status via the bridge (requires a Google OIDC Bearer token from ata-agent-sa, ata-bridge-sa or an email in VERIFIER_SA)
 BRIDGE_URL="$(gcloud run services describe "${NAME_PREFIX}-bridge" --region="${REGION}" --format="value(status.url)")"
-curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+curl -H "Authorization: Bearer $(gcloud auth print-identity-token --impersonate-service-account=<VERIFIER_SA email> --audiences="${BRIDGE_URL}" --include-email)" \
      "${BRIDGE_URL}/instructions/ticket/view/${GROUP_ID_OR_SYS_ID}"
 ```
 

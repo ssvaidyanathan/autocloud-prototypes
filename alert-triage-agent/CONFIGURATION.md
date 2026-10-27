@@ -29,7 +29,7 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 | `SERVICENOW_CALLER` | `ATA Integration` | Caller ID / name populated on incident records. |
 | `SERVICENOW_ASSIGNMENT_GROUP` | `Cloud SRE Tier-2` | Assignment group for triage routing. |
 | `IS_LOCAL` | `false` | When `true`, enables mock storage and local adapters. |
-| `VERIFIER_SA` | *None* | Comma-separated emails allowed to call `/instructions/*` besides `<NAME_PREFIX>-agent-sa` and `<NAME_PREFIX>-bridge-sa` (e.g. operators using the read-only view endpoint, §3.1). No other caller is built in. `bridge/scripts/deploy.sh` passes it only when it is exported, so a redeploy without it keeps the value on the service. |
+| `VERIFIER_SA` | *None* | Comma-separated emails allowed to call `/instructions/*` besides `<NAME_PREFIX>-agent-sa` and `<NAME_PREFIX>-bridge-sa` (e.g. operators using the read-only view endpoint, §3.1). No other caller is built in. `bridge/scripts/deploy.sh` passes it only when it is exported, so a redeploy without it keeps the value on the service; `VERIFIER_SA=none` removes it. Entries must be email addresses (lowercased; any other entry stops the bridge at startup). |
 | `ADAPTER_TIMEOUT_SECONDS` | `30.0` | HTTP timeout for outbound ServiceNow API calls. |
 
 ---
