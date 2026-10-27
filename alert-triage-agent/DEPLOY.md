@@ -264,7 +264,7 @@ cd "${ATA_DIR}"
 gcloud auth login
 gcloud auth application-default login
 
-gcloud billing projects describe "${PROJECT_ID}" --format='value(billingEnabled)'
+gcloud billing projects describe "${PROJECT_ID}" --billing-project="${PROJECT_ID}" --format='value(billingEnabled)'
 gcloud projects get-iam-policy "${PROJECT_ID}" --flatten='bindings[].members' \
   --filter="bindings.members:$(gcloud config get-value account 2>/dev/null)" --format='value(bindings.role)'
 
@@ -287,6 +287,7 @@ done
 | `iam.automaticIamGrantsForDefaultServiceAccounts` | either | Builds run as the stack's own build SA (`<prefix>-build-sa`), not the default Cloud Build SA. |
 
 **If it fails:**
+- The billing command fails with `Cloud Billing API has not been used in project <number>`: gcloud bills the call to your account's own project. Keep `--billing-project="${PROJECT_ID}"` as above (the target project has the API enabled), or enable `cloudbilling.googleapis.com` there.
 - Billing `False`: link a billing account (`gcloud billing projects link "${PROJECT_ID}" --billing-account=<id>`).
 - A blocking policy: ask the organization admin for a project-level exception. The repository has no workaround for `sql.restrictPublicIp` or `iam.allowedPolicyMemberDomains`.
 
