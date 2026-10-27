@@ -85,6 +85,22 @@ OKF_DEGRADED_NOTE = "DEGRADED MODE: incident OKF file update failed"
 CORRELATED_ALERT_PREFIX = "Correlated alert:"
 
 
+def dependency_path_for(origin: str) -> Optional[str]:
+    """Topology path(s) from each impacted entry point to ``origin``, or None when unknown.
+
+    Example: 'proxy-a -> service-a -> origin; proxy-b -> origin'.
+    Arrows follow TOPOLOGY.md (caller -> callee). A failed lookup is logged and yields None.
+    """
+    try:
+        path = get_loader().format_dependency_paths(origin)
+    except Exception as exc:
+        logger.error("Topology dependency path lookup failed for %s: %s", origin, exc)
+        return None
+    if path is None:
+        logger.warning("No topology dependency path for %s: not a component of TOPOLOGY.md", origin)
+    return path
+
+
 def _alert_field(a: dict[str, Any], *keys: str) -> Optional[str]:
     for k in keys:
         v = a.get(k)
@@ -828,11 +844,14 @@ class SynthesizerAgent:
         items[1:1] = [line]
         return " | ".join(items)
 
-    def _determine_dependency_path(self, origin: str, blast_radius: list[str]) -> str:
-        """Determine topological dependency path from ingress callers to origin callee."""
-        if blast_radius and len(blast_radius) > 1:
-            return " -> ".join(reversed(blast_radius))
-        return f"Client Ingress -> {origin}"
+    def _determine_dependency_path(self, origin: str, blast_radius: list[str]) -> Optional[str]:
+        """Topology path(s) from each impacted entry point to the origin (TOPOLOGY.md edges).
+
+        Returns None when the origin is not a topology component; the description then omits
+        the line rather than showing a guessed path. ``blast_radius`` is not used to build the
+        path: it is a set of impacted services, not an ordered chain.
+        """
+        return dependency_path_for(origin)
 
     def _synthesize_problem(
         self,

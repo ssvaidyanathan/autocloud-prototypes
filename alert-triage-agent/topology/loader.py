@@ -368,6 +368,41 @@ class TopologyLoader:
         """
         return sorted(self.downstream(origin_node))
 
+    def dependency_paths(self, origin_node: str) -> List[List[str]]:
+        """Returns every topology path from an impacted entry point to origin_node.
+
+        Each path follows the caller -> callee edges of TOPOLOGY.md and ends at the origin,
+        e.g. ['proxy-a', 'service-a', 'origin']. An entry point is a
+        caller of the origin that has no callers itself. Returns [[origin]] when nothing
+        depends on the origin, and [] when the origin is not a topology component.
+        """
+        node = self.canonicalize(origin_node)
+        if node not in self.components:
+            return []
+        callers: Dict[str, List[str]] = {n: [] for n in self.components}
+        for edge in self.edges:
+            callers[edge.to_node].append(edge.from_node)
+
+        paths: List[List[str]] = []
+
+        def walk(curr: str, chain: List[str]) -> None:
+            nexts = [c for c in callers.get(curr, []) if c not in chain]
+            if not nexts:
+                paths.append(list(reversed(chain)))
+                return
+            for caller in nexts:
+                walk(caller, chain + [caller])
+
+        walk(node, [node])
+        return sorted(paths)
+
+    def format_dependency_paths(self, origin_node: str) -> Optional[str]:
+        """Renders dependency_paths as 'a -> b -> origin; c -> origin', or None when unknown."""
+        paths = self.dependency_paths(origin_node)
+        if not paths:
+            return None
+        return "; ".join(" -> ".join(p) for p in paths)
+
     def hop_distance(self, node_a: str, node_b: str) -> Optional[int]:
         """Calculates shortest undirected hop distance between node_a and node_b.
         

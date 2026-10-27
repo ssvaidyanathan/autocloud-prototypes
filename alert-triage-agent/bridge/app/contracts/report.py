@@ -639,13 +639,10 @@ class InvestigationReport(BaseModel):
 
         recs_str = "\n".join(action_lines) + "\n" + "\n".join(rollback_lines)
 
-        # Determine dependency path if available
-        dep_path = self.raw_metadata.get("dependency_path") or self.dependency_path
-        if not dep_path:
-            if self.blast_radius and len(self.blast_radius) > 1:
-                dep_path = " -> ".join(reversed(self.blast_radius))
-            else:
-                dep_path = f"Client -> Ingress -> {self.origin}"
+        # Topology path(s) computed by the agent from TOPOLOGY.md. Without one the line is
+        # omitted: the blast radius is an unordered set and cannot stand in for a path.
+        dep_path = self.dependency_path or self.raw_metadata.get("dependency_path")
+        dep_path_line = f"  - Dependency Path: {dep_path}\n" if dep_path else ""
 
         origin_type = "Cloud SQL PostgreSQL Instance" if "db" in self.origin else ("Apigee API Proxy" if "v1" in self.origin or "apigee" in self.origin else "Cloud Run Service")
 
@@ -670,7 +667,7 @@ class InvestigationReport(BaseModel):
             f"Systems:\n"
             f"  - Origin: {self.origin} [{origin_type}]\n"
             f"  - Blast Radius: {blast_str}\n"
-            f"  - Dependency Path: {dep_path}\n"
+            f"{dep_path_line}"
             f"Observations:\n"
             f"{obs_str}\n"
             f"Recommended Actions:\n"

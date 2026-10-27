@@ -78,7 +78,8 @@ def test_structured_description_plain_text_zero_markdown(sample_report):
     assert "Executive Summary:" in desc
     assert "Problem:\n  - Cloud SQL database connection exhaustion" in desc
     assert "Systems:\n  - Origin: ata-inventory-db [Cloud SQL PostgreSQL Instance]" in desc
-    assert "Dependency Path:" in desc
+    # The fixture carries no topology path, so the line is omitted rather than guessed.
+    assert "Dependency Path:" not in desc
     assert "Observations:" in desc
     assert "Recommended Actions:" in desc
     assert "Rollback:" in desc

@@ -273,7 +273,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div style="margin-bottom: 16px;">
         <h4 style="margin: 0 0 8px 0; font-size: 14px; color: #24292f;">Topological Dependency Path</h4>
         <div style="padding: 12px 16px; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; font-family: monospace; font-size: 13px; color: #0969da;">
-          {{ report.dependency_path or report.raw_metadata.dependency_path or 'Client Ingress &rarr; Apigee &rarr; Cloud Run &rarr; Cloud SQL' }}
+          {{ report.dependency_path or report.raw_metadata.dependency_path or 'Not available' }}
         </div>
       </div>
 

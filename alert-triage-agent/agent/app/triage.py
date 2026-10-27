@@ -21,7 +21,7 @@ from .contracts.report import (
 )
 from .contracts.links import ConsoleLinkBuilder
 from .grouping.models import format_okf_alert_entry
-from .specialists.synthesizer import SynthesizerAgent
+from .specialists.synthesizer import SynthesizerAgent, dependency_path_for
 
 try:
     from topology.topology_graph import get_blast_radius, get_upstream_dependencies
@@ -342,7 +342,7 @@ def generate_investigation_report(
     if canonical_res not in blast_radius:
         blast_radius.append(canonical_res)
 
-    dep_path = f"Client Ingress -> Apigee -> {origin}"
+    dep_path = dependency_path_for(origin)
     now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if origin != canonical_res:
