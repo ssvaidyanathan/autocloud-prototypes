@@ -28,7 +28,7 @@ usage() { sed -n '2,19p' "$0"; }
 POSITIONAL=()
 for arg in "$@"; do
     case "${arg}" in
-        --yes|-y) ;;  # accepted (deploy-stage1.sh passes it); this script never prompts
+        --yes|-y) ASSUME_YES=true ;;
         -h|--help) usage; exit 0 ;;
         -*) echo "Unknown option: ${arg}" >&2; usage >&2; exit 1 ;;
         *) POSITIONAL=(${POSITIONAL[@]+"${POSITIONAL[@]}"} "${arg}") ;;
