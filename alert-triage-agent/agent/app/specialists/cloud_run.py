@@ -23,15 +23,38 @@ EXCLUDED_ENDPOINT_PATTERNS = [
     re.compile(r"/admin(/.*)?"),
 ]
 
-DB_AUTH_KEYWORDS = [
-    "password",
-    "authentication",
-    "auth",
-    "denied",
-    "failed to connect to cloud sql",
-    "access denied",
-    "handshake failed",
+# Database authentication failure signatures. Each pattern names a specific DB login
+# failure (PostgreSQL/MySQL server message, SQLSTATE class 28 code, or the Cloud SQL
+# connector's IAM login failure). Generic words such as "auth", "denied" or "password"
+# are deliberately absent: they match HTTP Authorization headers, OAuth and IAM text in
+# ordinary request logs and produced false DB-auth findings.
+DB_AUTH_PATTERNS = [
+    # PostgreSQL: FATAL: password authentication failed for user "..."
+    re.compile(r"\bpassword authentication failed\b"),
+    re.compile(r"\bpam authentication failed\b"),
+    re.compile(r"\bfatal:\s*password\b"),
+    # Cloud SQL IAM database authentication:
+    # FATAL: Cloud SQL IAM user|service account authentication failed for user "..."
+    re.compile(r"\biam (?:user |service account |database |db )?authentication failed\b"),
+    # PostgreSQL: FATAL: role "..." does not exist (unknown DB user)
+    re.compile(r"\brole \"[^\"]+\" does not exist\b"),
+    re.compile(r"\bpermission denied for database\b"),
+    # MySQL: Access denied for user 'x'@'host'
+    re.compile(r"\baccess denied for user\b"),
+    # SQLSTATE 28000 (invalid_authorization_specification) / 28P01 (invalid_password),
+    # only as an explicit code field, e.g. pg8000 "'C': '28P01'" or "SQLSTATE 28000".
+    re.compile(r"(?:\bsqlstate|\bcode|'c')\W{0,4}28(?:000|p01)\b"),
+    # Cloud SQL connector + pg8000 IAM login rejection as logged by the inventory app
+    # (S5: invalid IAM DB user): "Failed to connect to Cloud SQL: 'NoneType' object has
+    # no attribute 'decode'". Matched in full; a bare "failed to connect" is not auth.
+    re.compile(r"\bfailed to connect to cloud sql:.*'nonetype' object has no attribute 'decode'"),
 ]
+
+
+def has_db_auth_signature(text: str) -> bool:
+    """Return True if log text contains a specific database authentication failure."""
+    lowered = (text or "").lower()
+    return any(p.search(lowered) for p in DB_AUTH_PATTERNS)
 
 
 def is_excluded_endpoint(path: str) -> bool:
@@ -293,7 +316,7 @@ class CloudRunSpecialist(BaseSpecialist):
                     entry_text_parts.append(clean_line)
                 full_entry_text = " ".join(entry_text_parts).lower()
 
-                if any(k in full_entry_text for k in DB_AUTH_KEYWORDS):
+                if has_db_auth_signature(full_entry_text):
                     detected_db_auth_in_logs = True
 
                 if req_path and is_excluded_endpoint(req_path):

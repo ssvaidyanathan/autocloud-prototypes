@@ -50,6 +50,25 @@ except ImportError as err:
 
 logger = logging.getLogger(__name__)
 
+
+_DB_AUTH_PHRASE = "database authentication"
+
+
+def _dossier_has_db_auth_error(dossier: Optional[EvidenceDossier]) -> bool:
+    """True when a Cloud Run dossier reports a database authentication failure.
+
+    Relies on the specialist's ``has_db_auth_error`` metric (set from precise log
+    signatures) or its explicit "database authentication" finding/symptom. A bare
+    "auth" substring is not enough: it matches "Authorization", "OAuth" and similar
+    text in unrelated findings.
+    """
+    if not dossier:
+        return False
+    if dossier.metrics.get("has_db_auth_error"):
+        return True
+    texts = [str(dossier.metrics.get("observed_symptom", ""))] + [str(f) for f in dossier.findings]
+    return any(_DB_AUTH_PHRASE in t.lower() for t in texts)
+
 # Delimits the synthesizer-owned part of the OKF body; content outside it belongs to other
 # writers (e.g. duplicate-alert notes) and is preserved across synthesizer updates.
 REPORT_SECTION_BEGIN = "<!-- ata:synthesizer-report:begin -->"
@@ -284,7 +303,10 @@ class SynthesizerAgent:
         top_log_signatures = self._build_top_log_signatures(dossiers)
         apigee_analytics = self._build_apigee_analytics(dossiers, blast_radius)
         revision_diffs = self._build_revision_diffs(dossiers, origin)
-        root_cause_analysis = self._build_root_cause_analysis(root_cause_text, confidence, dossiers, origin, alert)
+        root_cause_analysis = self._build_root_cause_analysis(
+            root_cause_text, confidence, dossiers, origin, alert,
+            region=config.region, project_id=config.project_id,
+        )
         if origin_notes:
             observations = self._insert_origin_observation(observations, origin_notes["explanation"])
             root_cause_analysis["origin_selection"] = origin_notes
@@ -419,9 +441,7 @@ class SynthesizerAgent:
 
             # Check if caller has DB auth errors from bad credentials (not a database instance fault)
             cr_dossier = dossiers.get("CloudRunSpecialist")
-            has_db_auth_error = (cr_dossier and cr_dossier.metrics.get("has_db_auth_error")) or any(
-                "auth" in str(f).lower() for f in (cr_dossier.findings if cr_dossier else [])
-            )
+            has_db_auth_error = _dossier_has_db_auth_error(cr_dossier)
 
             db_telemetry_anomalous = (is_conn_anomalous or is_lock_anomalous or is_cpu_anomalous or is_explicit_db_alert) and not has_db_auth_error
 
@@ -548,9 +568,7 @@ class SynthesizerAgent:
             k in alert.policy_name.lower() for k in ["cloudsql", "max_connections", "lock_wait", "db_lock", "row_lock"]
         )
         cr_dossier = dossiers.get("CloudRunSpecialist")
-        has_db_auth_error = (cr_dossier and cr_dossier.metrics.get("has_db_auth_error")) or any(
-            "auth" in str(f).lower() for f in (cr_dossier.findings if cr_dossier else [])
-        )
+        has_db_auth_error = _dossier_has_db_auth_error(cr_dossier)
         return bool(
             (is_conn_anomalous or is_lock_anomalous or is_cpu_anomalous or is_explicit_db_alert) and not has_db_auth_error
         )
@@ -982,11 +1000,7 @@ class SynthesizerAgent:
             return ""
 
         # Check for DB auth errors first
-        if (
-            dossier.metrics.get("has_db_auth_error")
-            or "auth" in str(dossier.metrics.get("observed_symptom", "")).lower()
-            or any("auth" in str(f).lower() for f in dossier.findings)
-        ):
+        if _dossier_has_db_auth_error(dossier):
             err_rate = dossier.metrics.get("error_rate_5xx")
             err_str = f" (HTTP 5xx error rate: {err_rate})" if err_rate and err_rate != "0.1%" and err_rate != "N/A (not captured)" else ""
             return f" (database authentication failures in application logs{err_str})"
@@ -1095,9 +1109,7 @@ class SynthesizerAgent:
                 cr_spec = next((d for d in dossiers if d.specialist_name == "CloudRunSpecialist"), None)
 
             # Check observed symptom: DB auth errors from app logs vs latency vs 5xx
-            has_db_auth = (cr_spec and cr_spec.metrics.get("has_db_auth_error")) or any(
-                "auth" in str(f).lower() for f in (cr_spec.findings if cr_spec else [])
-            )
+            has_db_auth = _dossier_has_db_auth_error(cr_spec)
             if has_db_auth:
                 err_rate = cr_spec.metrics.get("error_rate_5xx") if cr_spec else None
                 err_str = f" (HTTP 5xx error rate: {err_rate})" if err_rate and err_rate != "0.1%" and err_rate != "N/A (not captured)" else ""
@@ -1269,7 +1281,7 @@ class SynthesizerAgent:
                 rpm = d.metrics.get("request_count_rpm")
                 if err_rate and err_rate != "0.1%":
                     obs_items.append(f"HTTP 5xx error rate reached {err_rate} ({rpm or 320} rpm) on {d.target_resource}; container restarts: {restarts or 0}")
-                has_db_auth = d.metrics.get("has_db_auth_error") or any("auth" in str(f).lower() for f in d.findings)
+                has_db_auth = _dossier_has_db_auth_error(d)
                 if has_db_auth:
                     obs_items.append(f"Database authentication failure observed in application logs on {d.target_resource}")
             elif d.specialist_name == "ApigeeSpecialist" and d.metrics:
@@ -1374,9 +1386,7 @@ class SynthesizerAgent:
         # 1. Change-induced failure takes precedence (e.g. S5 bad deploy)
         # Suppress generic Cloud SQL connection-pool actions when the fault is caused by a bad deployment.
         if recent_rev:
-            has_db_auth = (cr_dossier and cr_dossier.metrics.get("has_db_auth_error")) or any(
-                "auth" in str(f).lower() for f in (cr_dossier.findings if cr_dossier else [])
-            )
+            has_db_auth = _dossier_has_db_auth_error(cr_dossier)
             config_check_cmd = f"gcloud run revisions describe {recent_rev} --region={region} --format=\"yaml(spec.containers[0].env)\""
             config_check_title = f"Verify database connection credentials and environment variables in {recent_rev}" if has_db_auth else f"Verify revision configuration and environment variables in {recent_rev}"
 
@@ -1764,7 +1774,13 @@ class SynthesizerAgent:
         dossiers: list[EvidenceDossier],
         origin: str,
         alert: AlertEvent,
+        region: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> dict[str, Any]:
+        if not region or not project_id:
+            settings = get_agent_settings()
+            region = region or settings.region
+            project_id = project_id or settings.project_id
         supporting: list[str] = [
             f"Telemetric breach on '{origin}' coincides with alert trigger timestamp.",
             f"Multi-service correlation confirms causal failure propagation across {len(dossiers)} specialist domains.",
@@ -1776,8 +1792,8 @@ class SynthesizerAgent:
             else:
                 supporting.append(f"Supporting hint: Alert policy user label signal '{sig_label}' provides supporting evidence for observed {sig_label} telemetry.")
         contradicting: list[str] = [
-            "Zero host-level compute/hypervisor hyperthreading faults reported in us-west1.",
-            "No upstream Google Cloud infrastructure service outages affecting project cloud-assist-fde-2.",
+            f"Zero host-level compute/hypervisor hyperthreading faults reported in {region}.",
+            f"No upstream Google Cloud infrastructure service outages affecting project {project_id}.",
         ]
         alternatives: list[dict[str, str]] = []
         all_queries_flat = [q for d in dossiers for q_list in d.queries_executed.values() for q in q_list]

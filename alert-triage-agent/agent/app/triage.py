@@ -465,7 +465,7 @@ def generate_investigation_report(
                 f"Condition {alert.condition_name or alert.policy_name} active.",
             ],
             "contradicting_evidence": [
-                "Zero compute host faults detected in us-west1.",
+                f"Zero compute host faults detected in {config.region}.",
             ],
             "confidence": 0.91,
             "confidence_rationale": "Direct alert condition match against telemetry signals.",
