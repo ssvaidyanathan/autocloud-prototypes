@@ -1,5 +1,5 @@
 project_id  = "cloud-assist-fde-2"
 region      = "us-west1"
 name_prefix = "ata"
-environment = "prod"
+environment = "demo"
 servicenow_instance_url = "https://instance.service-now.com"

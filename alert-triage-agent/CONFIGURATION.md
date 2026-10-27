@@ -15,7 +15,7 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 | `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
 | `NAME_PREFIX` | `ata` | Resource namespace prefix. |
 | `REGION` | `us-west1` | GCP region for Cloud Tasks and Cloud Run. |
-| `ENVIRONMENT` | `prod` | Deployment environment name. |
+| `ENVIRONMENT` | `prod` | Runtime environment name read by the service. The deploy scripts do not set it, so the default applies. Not the `env` resource label (see [§7.1](#71-label-scheme--value-requirements)). |
 | `AGENT_URL` | `http://localhost:8080` | URL of the `ata-agent` Cloud Run service. |
 | `TASKS_QUEUE` | `ata-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |
 | `TASKS_LOCATION` | `us-west1` | GCP region where the Cloud Tasks queue is hosted. |
@@ -301,7 +301,7 @@ All GCP resource labels adhere to Google Cloud's labeling rules: lowercase alpha
 | `component` | Component ID matching `TOPOLOGY.md` (`ata-orders-api`, `ata-inventory-api`, `ata-inventory-db`, `ata-orders-v1`, `ata-inventory-v1`) or system parts (`ata-agent`, `ata-bridge`, `ata-tools`). | Topology mapping identifier. |
 | `role` | `demo-workload` \| `triage-system` | Distinguishes monitored workloads from triage control-plane components. |
 | `tier` | `edge` \| `service` \| `data` \| `platform` | Architectural tier in the topology hierarchy. |
-| `env` | `demo` \| `staging` \| `prod` | Deployment environment (default: `demo`). |
+| `env` | `demo` \| `staging` \| `prod` | Deployment environment (default: `demo`; the live deployment uses `demo`). Terraform modules take it from the `environment` variable (`-var="environment=..."`); the deploy and bootstrap scripts take it from the shell `ENVIRONMENT` variable. |
 | `managed-by` | `terraform` \| `script` | Identifies provisioning authority. |
 | `owner` | Configurable variable (default: `sre-prototypes`) | Owning engineering team or proto lead. |
 

@@ -122,7 +122,7 @@ All configuration in `alert-triage-agent` is managed through typed Pydantic mode
 - **Agent Configuration**: Defined in typed Pydantic model `AgentConfig` in [`agent/app/config.py`](agent/app/config.py):
   - `PROJECT_ID`: Target Google Cloud project identifier.
   - `REGION`: GCP region (e.g., `us-west1`).
-  - `ENVIRONMENT`: Deployment environment (`prod`, `staging`, `dev`).
+  - `ENVIRONMENT`: Runtime environment name (default `prod`; not set by the deploy scripts). Distinct from the `env` resource label, which the deploy scripts and the Terraform `environment` variable set (live value: `demo`).
   - `INCIDENTS_BUCKET`: Cloud Storage bucket for persistent incident records.
   - `INCIDENT_STORE_PATH`: Local mount or directory for incident files (default: `/knowledge/incident-manager`).
   - `BRIDGE_URL`: Base URL of the `ata-bridge` service for instruction endpoints (`/instructions/ticket/*`).

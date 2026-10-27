@@ -13,7 +13,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-cloud-assist-fde-2}}"
 REGION="${REGION:-${GCP_REGION:-us-west1}}"
 NAME_PREFIX="${NAME_PREFIX:-ata}"
-ENVIRONMENT="${ENVIRONMENT:-prod}"
+ENVIRONMENT="${ENVIRONMENT:-demo}"
 
 echo "==================================================================="
 echo "  Deploying Stage 1 Vertical Slice Tracer Bullet"

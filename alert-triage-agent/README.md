@@ -77,7 +77,7 @@ The **Alert Triage Agent (ATA)** automates early-stage alert ingestion, intellig
   export PROJECT_ID="your-target-project-id"
   export REGION="us-west1"
   export NAME_PREFIX="ata"
-  export ENVIRONMENT="prod"
+  export ENVIRONMENT="demo"
   gcloud config set project "${PROJECT_ID}"
   ```
 - **Apigee X Organization & Environment**: Pre-existing Apigee organization with environment `prod` bound to an environment group hostname (e.g. `8.233.247.52.nip.io`).
@@ -263,7 +263,7 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 | **GCP Project** | `PROJECT_ID` | `cloud-assist-fde-2` | Target Google Cloud project identifier. |
 | **Resource Prefix** | `NAME_PREFIX` | `ata` | Namespace prefix for isolating resources (`${NAME_PREFIX}-${base_name}`). |
 | **Compute Region** | `REGION` | `us-west1` | Target GCP region hosting Cloud Run, Cloud Tasks, and Cloud SQL. |
-| **Environment** | `ENVIRONMENT` | `prod` | Deployment environment name (`prod`, `staging`, `dev`). |
+| **Environment** | `ENVIRONMENT` | `prod` | Runtime environment name read by the service. The deploy scripts do not pass it to Cloud Run, so the default applies. Not the `env` resource label, which comes from the shell `ENVIRONMENT` used by the deploy scripts and the Terraform `environment` variable (live value: `demo`; see [CONFIGURATION.md §7.1](CONFIGURATION.md#71-label-scheme--value-requirements)). |
 | **Incidents Bucket** | `INCIDENTS_BUCKET` | `${PROJECT_ID}-${NAME_PREFIX}-incidents` | GCS bucket for persistent Open Knowledge File (OKF) storage. |
 | **Incident Store Path** | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` | Local or mounted directory path for active OKF incident files. |
 | **Fallback Store Path**| `FALLBACK_STORE_PATH` | `/tmp/knowledge/incident-manager` | Fallback path when primary mount is unavailable. |
@@ -394,7 +394,7 @@ Before deploying, ensure you have:
    export PROJECT_ID="your-target-project-id"
    export REGION="us-west1"
    export NAME_PREFIX="ata"
-   export ENVIRONMENT="prod"
+   export ENVIRONMENT="demo"
    gcloud config set project "${PROJECT_ID}"
    ```
 4. **Deployer Permissions**: Your deploying account requires `roles/owner` or `roles/editor` plus `roles/resourcemanager.projectIamAdmin`.
@@ -631,7 +631,7 @@ To deploy the entire stack from clean repository state:
 export PROJECT_ID="your-target-project-id"
 export REGION="us-west1"
 export NAME_PREFIX="ata"
-export ENVIRONMENT="prod"
+export ENVIRONMENT="demo"
 
 # Execute staged deployment sequence
 ./scripts/deploy-stage1.sh
