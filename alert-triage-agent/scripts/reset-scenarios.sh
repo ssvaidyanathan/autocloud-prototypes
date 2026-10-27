@@ -58,7 +58,11 @@ IGNORE_GROUPS="${ATA_RESET_IGNORE_GROUPS:-}"
 # 180s covers Apigee's 1-3 min metric lag. The agent's recovery note is not covered by
 # time: step 6 also waits (concurrently) for every incident group to reach a terminal state.
 QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-180}}")"
-WAIT_TIMEOUT_SECS="$(parse_duration "${ATA_RESET_TIMEOUT:-${WAIT_TIMEOUT:-900}}")"
+# 30 min: QA's S4 reset took 896s (the connections alert closed ~7 min after the leak was
+# released, the recovery note ~4 min after that). When the fault reset reaches a Cloud Run
+# instance other than the one holding the leak, the leak lasts until that instance scales in
+# (up to ~15 min idle), so the S4 worst case is ~15 + 7.5 + 4 = ~26.5 min. See DEMO.md, S4.
+WAIT_TIMEOUT_SECS="$(parse_duration "${ATA_RESET_TIMEOUT:-${WAIT_TIMEOUT:-1800}}")"
 POLL_INTERVAL_SECS="$(parse_duration "${ATA_RESET_POLL_INTERVAL:-${POLL_INTERVAL:-15}}")"
 MAX_ALERT_AGE_SECS="$(parse_duration "${ATA_RESET_MAX_ALERT_AGE:-${MAX_ALERT_AGE:-3600}}")"
 # Consecutive failed Cloud Monitoring queries tolerated before the reset fails.
@@ -191,7 +195,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --quiet-period <duration>  Quiet period after alerts close, run alongside the wait for terminal"
             echo "                             incident groups (default: 180s / 3m)"
             echo "  --timeout <duration>       Max timeout waiting for alerts to close and groups to reach"
-            echo "                             a terminal state (default: 900s / 15m)"
+            echo "                             a terminal state (default: 1800s / 30m)"
             echo "  --poll-interval <duration> Polling interval for alert and incident group queries (default: 15s)"
             echo "  --max-alert-age <duration> Max age of open alerts before reset start (default: 60m / 3600s)"
             echo "  --alert-lag <duration>     How long after a slow (>= ATA_RESET_SLOW_REQUEST_MS, default 2000 ms), HTTP 5xx"
