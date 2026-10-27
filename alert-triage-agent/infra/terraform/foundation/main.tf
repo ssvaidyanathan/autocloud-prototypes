@@ -209,6 +209,15 @@ resource "google_storage_bucket_iam_member" "build_bucket_admin" {
   member = "serviceAccount:${google_service_account.build_sa.email}"
 }
 
+# Cloud Build with a user-specified SA and a custom source/logs bucket requires
+# storage.buckets.get on that bucket, which objectAdmin lacks ("invalid bucket ...;
+# service account ... does not have access to the bucket"). Bucket-scoped.
+resource "google_storage_bucket_iam_member" "build_bucket_reader" {
+  bucket = google_storage_bucket.build.name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.build_sa.email}"
+}
+
 resource "google_artifact_registry_repository_iam_member" "build_repo_writer" {
   project    = var.project_id
   location   = google_artifact_registry_repository.docker_repo.location
