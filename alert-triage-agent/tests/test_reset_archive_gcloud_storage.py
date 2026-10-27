@@ -347,3 +347,88 @@ def test_verify_scenarios_gcs_step(tmp_path, gcs, fail, rc, text):
 
     assert res.returncode == rc, res.stdout + res.stderr
     assert text in res.stdout + res.stderr
+
+
+# --- check-result.sh without PyYAML (D9 of the atat proof) ----------------------------
+# The operator scripts need only the standard library. Without PyYAML, check-result.sh used
+# to fall back silently to a line parser that dropped every list: "Alert Count: 0", no
+# labels, no blast radius. Its built-in parser must read what the agent writes.
+
+AGENT_STYLE_MD = """---
+type: incident
+group_id: stk-inventory-5xx-stk-inventory-api-20261027t202220z
+status: recovered
+origin: stk-inventory-api
+blast_radius:
+- stk-inventory-api
+- stk-orders-api
+priority: P1
+servicenow_number: INC0010999
+ticket_short_description: '[P1] stk-inventory-api: Elevated HTTP 5xx error rate (2
+  alerts)'
+timestamp: '2026-10-27T20:22:20Z'
+confidence: 0.81
+alerts:
+- incident_id: 0.aaa
+  policy_name: stk-inventory-5xx
+  resource_name: stk-inventory-api
+  signal: 5xx
+  labels: &id001
+    component: stk-inventory-api
+    severity: p1
+  policy_user_labels: *id001
+- incident_id: 0.bbb
+  policy_name: stk-orders-5xx
+  resource_name: stk-orders-api
+  signal: 5xx
+  labels:
+    component: stk-orders-api
+    severity: p1
+---
+body
+"""
+
+
+def test_check_result_without_pyyaml_reads_alerts_labels_and_blast_radius(tmp_path, gcs):
+    _, root = gcs
+    put(root, "archive/incident-stk.md", AGENT_STYLE_MD)
+    # `python3 -` puts the working directory first on sys.path: this hides PyYAML.
+    (tmp_path / "yaml.py").write_text("raise ImportError('test: PyYAML not installed')\n")
+
+    res = run_script(tmp_path, gcs, [SCRIPTS_DIR / "scenarios" / "check-result.sh"])
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "PyYAML is not installed" in res.stderr  # stated, not silent
+    assert "Alert Count:    2" in res.stdout
+    assert "* stk-inventory-5xx (resource: stk-inventory-api, signal: 5xx)" in res.stdout
+    assert "Labels: component=stk-inventory-api, severity=p1" in res.stdout
+    assert "* stk-orders-5xx (resource: stk-orders-api, signal: 5xx)" in res.stdout
+    assert "Blast Radius:   stk-inventory-api, stk-orders-api" in res.stdout
+    assert "INC0010999" in res.stdout
+
+
+def _stdlib_parser():
+    src = (SCRIPTS_DIR / "scenarios" / "check-result.sh").read_text()
+    py = src.split("<< 'PYEOF'\n", 1)[1].split("\nPYEOF", 1)[0]
+    ns = {"re": re}
+    exec(py[py.index("_FM_KEY ="):py.index("_YAML_WARNED = []")], ns)
+    return ns["parse_frontmatter_stdlib"]
+
+
+def test_stdlib_frontmatter_parser_matches_pyyaml_on_safe_dump_output():
+    yaml = pytest.importorskip("yaml")
+    labels = {"app": "alert-triage-agent", "component": "stk-orders-api", "severity": "p1"}
+    doc = {
+        "type": "incident", "status": "recovered", "priority": "P1", "confidence": 0.81,
+        "open_groups_compared": 0, "degraded": False, "cooling_deadline": None, "empty": [],
+        "policy_id": "17930029511410848304",
+        "ticket_short_description": "[P1] stk-inventory-api: Elevated HTTP 5xx error rate (2 alerts) " * 2,
+        "blast_radius": ["stk-inventory-api", "a long resource name {project_id=p, resource_container=1, "
+                         "proxy_name=stk-orders-v1} that wraps"],
+        "correlation": {"decision": "new_group", "best_score": 0.0, "rationale": "it's new: no groups"},
+        "alerts": [{"policy_name": "stk-orders-5xx", "labels": labels, "policy_user_labels": labels},
+                   {"policy_name": "stk-inventory-5xx", "labels": {}, "url": "https://x/y?a=b&c=d"}],
+    }
+    text = yaml.safe_dump(doc, sort_keys=False)
+    assert "&id001" in text and "*id001" in text  # the alias path is exercised
+    assert _stdlib_parser()(text) == yaml.safe_load(text) == doc
