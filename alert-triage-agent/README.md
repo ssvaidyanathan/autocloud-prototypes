@@ -12,6 +12,7 @@ An autonomous Site Reliability Engineering (SRE) diagnostic and incident triage 
 
 - [1. System Overview & Problem Statement](#1-system-overview--problem-statement)
 - [2. Quick Start](#2-quick-start)
+- [Prerequisites: deployer IAM roles](#prerequisites-deployer-iam-roles)
 - [3. System Architecture & Request Lifecycle](#3-system-architecture--request-lifecycle)
   - [Topology as Single Source of Truth (TOPOLOGY.md)](#topology-as-single-source-of-truth-topologymd)
 - [4. Component Breakdown](#4-component-breakdown)
@@ -57,7 +58,7 @@ The complete procedure, from an empty project to a verified stack and back to no
 
 ### Prerequisites
 - Operator tools: bash 3.2 or later (the macOS `/bin/bash` works), a recent Google Cloud SDK, **Terraform >= 1.9.0**, python3, curl, the `psql` client and `cloud-sql-proxy` v2. Docker is **not** needed: every image is built with Cloud Build. The full table, with the deployer IAM roles and the organization-policy checks, is in [DEPLOY.md §2.1](DEPLOY.md#21-operator-prerequisites).
-- A Google Cloud project with billing enabled, and Owner on it.
+- A Google Cloud project with billing enabled, and Owner on it, or the complete role set in [Prerequisites: deployer IAM roles](#prerequisites-deployer-iam-roles).
 - An Apigee X organization with an environment attached to an instance and to an environment group hostname (`APIGEE_ORG`, `APIGEE_ENV`, `APIGEE_HOST`). A second stack can reuse an existing organization with a new `NAME_PREFIX` ([DEPLOY.md §2.3](DEPLOY.md#23-second-stack-in-an-existing-project-and-apigee-organization)).
 - A ServiceNow instance and an integration user.
 
@@ -79,6 +80,54 @@ The system integrates with ServiceNow via the Table and Attachment APIs:
 - **Credentials & Instance URL**:
   - The ServiceNow instance URL is **configuration**, not a secret. `bridge/scripts/deploy.sh` reads it from the environment variable `SERVICENOW_INSTANCE_URL`.
   - ServiceNow API user credentials (`<prefix>-servicenow-username` and `<prefix>-servicenow-password`) reside in Google Secret Manager, populated via `./scripts/set-secrets.sh`.
+
+---
+
+## Prerequisites: deployer IAM roles
+
+The deployer is the principal that runs `scripts/deploy-stage1.sh`, the scenarios and `scripts/teardown-stack.sh`: a user, or a service account. `roles/owner` on the project covers everything. Without Owner, the deployer needs **all** of the roles below. Editor alone is not enough: it cannot set IAM policies on service accounts, Cloud Tasks queues, secrets or Artifact Registry repositories, and the foundation phase grants roles on all four. Without these roles, the foundation phase creates the resources but fails on their bindings with 403.
+
+On the project `PROJECT_ID`:
+
+| Role | Needed for |
+| :--- | :--- |
+| `roles/editor` (or equivalent) | Creating the resources in every phase |
+| `roles/resourcemanager.projectIamAdmin` | The project-level grants to the stack's SAs (foundation) |
+| `roles/run.admin` | Cloud Run deploys and service-level invoker bindings (`triage`, `triage-iam`, `applications`, `inventory-pin`) |
+| `roles/iam.serviceAccountAdmin` | `iam.serviceAccounts.setIamPolicy`: `serviceAccountUser` bindings on the stack's SAs (foundation) |
+| `roles/cloudtasks.admin` | `cloudtasks.queues.getIamPolicy` / `setIamPolicy`: enqueuer bindings on the two queues (foundation) |
+| `roles/artifactregistry.admin` | `artifactregistry.repositories.setIamPolicy`: the build SA's writer binding (foundation) |
+| `roles/secretmanager.admin` | `secretmanager.secrets.setIamPolicy`: the bridge SA's accessor bindings (foundation) |
+| `roles/cloudsql.admin` | The Cloud SQL instance, IAM database user and postgres password (`database`, `schema`) |
+
+On the Apigee organization's project `APIGEE_ORG` (often the same project):
+
+| Role | Needed for |
+| :--- | :--- |
+| `roles/apigee.admin` | TargetServers, proxies, product, developer and app (`apigee`, teardown) |
+
+Also list the deployer in the foundation variable `deployer_members` (`infra/terraform/foundation/terraform.tfvars`), which grants it `roles/iam.serviceAccountUser` on the build and Apigee SAs ([DEPLOY.md Step 4](DEPLOY.md#step-4-foundation)).
+
+Grant them in one command (someone with Owner or `projectIamAdmin` runs it). `DEPLOYER` is `user:<email>` or `serviceAccount:<email>`:
+
+```bash
+DEPLOYER="user:you@example.com"
+for ROLE in roles/editor roles/resourcemanager.projectIamAdmin roles/run.admin \
+            roles/iam.serviceAccountAdmin roles/cloudtasks.admin roles/artifactregistry.admin \
+            roles/secretmanager.admin roles/cloudsql.admin; do
+  gcloud projects add-iam-policy-binding "${PROJECT_ID}" --member="${DEPLOYER}" --role="${ROLE}" --condition=None --format=none \
+    && echo "granted ${ROLE}"
+done
+gcloud projects add-iam-policy-binding "${APIGEE_ORG}" --member="${DEPLOYER}" --role=roles/apigee.admin --condition=None --format=none \
+  && echo "granted roles/apigee.admin on ${APIGEE_ORG}"
+```
+
+Check what the deployer has:
+
+```bash
+gcloud projects get-iam-policy "${PROJECT_ID}" --flatten='bindings[].members' \
+  --filter="bindings.members:${DEPLOYER#*:}" --format='value(bindings.role)'
+```
 
 ---
 
