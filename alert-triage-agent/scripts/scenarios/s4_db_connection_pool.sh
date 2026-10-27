@@ -141,6 +141,14 @@ LAST_REPORT=${START_EPOCH}
 LAST_LEAK_PULSE=${START_EPOCH}
 
 if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ] || [ "${HOLD_SECS}" -le 0 ]; then
+    ORDER_ITEM="item-101"
+else
+    # One order per second of hold.
+    ORDER_ITEM="$(select_order_item "${API_KEY}" "${HOLD_SECS}")" || exit 1
+    log_info "    Order traffic uses ${ORDER_ITEM} (the in-stock item with the most stock)."
+fi
+
+if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ] || [ "${HOLD_SECS}" -le 0 ]; then
     log_info "    [MOCK/DRY-RUN] Simulating DB starvation traffic wave (0s hold)..."
     log_info "    Requests completed: 6, simulated connection errors / 500 responses: 4"
 else
@@ -169,7 +177,7 @@ else
             ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
             -H "Content-Type: application/json" -X POST \
             "https://${APIGEE_HOST}/ata/orders/v1/orders" \
-            -d '{"item_id":"item-101","quantity":1}' || echo "000")
+            -d "{\"item_id\":\"${ORDER_ITEM}\",\"quantity\":1}" || echo "000")
 
         TOTAL_REQUESTS=$((TOTAL_REQUESTS + 2))
         if [ "${STATUS_INV}" = "500" ] || [ "${STATUS_INV}" = "503" ]; then

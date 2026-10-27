@@ -312,6 +312,43 @@ resolve_id_token() {
     echo "${token}"
 }
 
+# Order item for scenario traffic: the in-stock item with the most stock (GET /items
+# through Apigee), so POST /orders reaches the inventory reservation instead of the
+# inventory's "Insufficient stock" HTTP 400 for an item earlier runs used up (QA S4: item-101
+# returned 400 on every order). Usage: select_order_item <api_key> <expected_orders>.
+# Prints the item id. Warns on stderr, naming the consequence, when stock is short; exits
+# non-zero when no in-stock item can be read.
+select_order_item() {
+    local api_key="$1" expected="${2:-0}" body picked item stock
+    local key_header=()
+    if [ -n "${api_key}" ]; then
+        key_header=(-H "x-api-key: ${api_key}")
+    fi
+    body="$(curl -k -s --connect-timeout 5 --max-time 10 ${key_header[@]+"${key_header[@]}"} \
+        "https://${APIGEE_HOST}/ata/inventory/v1/items" 2>/dev/null)" || body=""
+    if ! picked="$(printf '%s' "${body}" | python3 -c '
+import json, sys
+try:
+    items = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+stocked = [i for i in items if isinstance(i, dict) and i.get("id") and (i.get("stock") or 0) > 0]
+if not stocked:
+    sys.exit(2)
+best = max(stocked, key=lambda i: i.get("stock") or 0)
+print(best["id"], best.get("stock"))
+' 2>/dev/null)"; then
+        log_error "Could not find an in-stock item via GET https://${APIGEE_HOST}/ata/inventory/v1/items; every POST /orders would return HTTP 400 and never exercise the inventory path." >&2
+        return 1
+    fi
+    item="${picked%% *}"
+    stock="${picked##* }"
+    if [ "${expected}" -gt "${stock}" ] 2>/dev/null; then
+        log_warn "Order item ${item} has stock ${stock}, below the ~${expected} orders this run sends; orders return HTTP 400 once it runs out." >&2
+    fi
+    echo "${item}"
+}
+
 # Verify authorization for Cloud Run response codes
 check_cloud_run_auth() {
     local status="$1"
