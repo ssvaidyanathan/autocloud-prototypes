@@ -10,6 +10,7 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import os
+from pathlib import Path
 import re
 import time
 from typing import Any, Optional
@@ -25,7 +26,7 @@ from ..contracts.report import (
 )
 from ..contracts.links import ConsoleLinkBuilder
 from ..grouping.models import OKFDocument, format_okf_alert_entry
-from ..grouping.store import OKFStore, get_canonical_blob_name, get_canonical_file_path
+from ..grouping.store import OKFStore, get_canonical_blob_name, resolve_local_target_file
 from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist
 from .apigee import ApigeeSpecialist
@@ -49,6 +50,10 @@ logger = logging.getLogger(__name__)
 # writers (e.g. duplicate-alert notes) and is preserved across synthesizer updates.
 REPORT_SECTION_BEGIN = "<!-- ata:synthesizer-report:begin -->"
 REPORT_SECTION_END = "<!-- ata:synthesizer-report:end -->"
+
+# Leads the report's observations when the investigation completed but the incident OKF file
+# could not be updated; observations are rendered into the ServiceNow work note and description.
+OKF_DEGRADED_NOTE = "DEGRADED MODE: incident OKF file update failed"
 
 
 def _merge_report_section(body: str, report_markdown: str) -> str:
@@ -208,8 +213,14 @@ class SynthesizerAgent:
             raw_metadata={"dependency_path": dep_path, "status": "In Progress"},
         )
 
-        # Update OKF file with synthesized findings
-        self._update_okf_file(report, alert, config)
+        # Update OKF file with synthesized findings. Only persistence can fail here; the
+        # investigation is complete, so a failure must not discard the synthesized report.
+        store = OKFStore(config=config)
+        try:
+            self._update_okf_file(report, alert, config, store=store)
+        except Exception as exc:
+            # _update_okf_file has already logged it at ERROR (group, location, type).
+            self._mark_okf_persistence_degraded(report, self._describe_okf_target(store, filename), exc)
 
         return report
 
@@ -1473,20 +1484,42 @@ class SynthesizerAgent:
 
     @staticmethod
     def _describe_okf_target(store: OKFStore, identifier: str) -> str:
-        """Return a log-safe location for the incident object (no content)."""
+        """Return a log-safe location for the incident object (no content).
+
+        Locally this is the file the store actually writes, including its fallback directory.
+        """
         if store.storage_client is not None or (store.bucket_name and not store.is_local):
             return f"gs://{store.bucket_name}/{get_canonical_blob_name(identifier)}"
-        return str(get_canonical_file_path(store.storage_path, identifier))
+        try:
+            return str(resolve_local_target_file(store.storage_path, identifier))
+        except OSError:
+            # Neither directory can be created; the update fails too and is logged with this path.
+            return str(store.storage_path / Path(identifier).name)
 
-    def _build_report_markdown(
-        self,
-        report: InvestigationReport,
-        alert: AlertEvent,
-        policy_name: str,
-        origin: str,
-        merged_blast: list[str],
-    ) -> str:
-        """Render the synthesized report section of the OKF body."""
+    @staticmethod
+    def _mark_okf_persistence_degraded(report: InvestigationReport, target: str, exc: Exception) -> None:
+        """Stamp the report so the ServiceNow ticket shows that the incident file is stale.
+
+        ``observations`` is rendered into the ticket's work note and description. Only the
+        exception type is included; its text can quote file content.
+        """
+        note = (
+            f"{OKF_DEGRADED_NOTE} ({type(exc).__name__}). {target} does not contain this report, "
+            "ticket created from the synthesized report"
+        )
+        report.observations = f"{note} | {report.observations}" if report.observations else note
+
+    @staticmethod
+    def _lookup_downstream(origin: str) -> list[str]:
+        try:
+            return get_blast_radius(origin)
+        except Exception as exc:
+            logger.error("Topology blast radius lookup in _update_okf_file failed for %s: %s", origin, exc)
+            return []
+
+    @staticmethod
+    def _topology_section(origin: str, alert: AlertEvent) -> tuple[str, str]:
+        """Return the topology source file name and the relevant-edges lines for the report."""
         try:
             topo_loader = get_loader()
             source_file = topo_loader.source_path.name
@@ -1501,7 +1534,18 @@ class SynthesizerAgent:
             logger.warning("Failed to extract topology edges for report: %s", topo_err)
             source_file = "TOPOLOGY.md"
             edges_lines = "- Topology information unavailable"
+        return source_file, edges_lines
 
+    def _build_report_markdown(
+        self,
+        report: InvestigationReport,
+        policy_name: str,
+        origin: str,
+        merged_blast: list[str],
+        topology: tuple[str, str],
+    ) -> str:
+        """Render the synthesized report section of the OKF body."""
+        source_file, edges_lines = topology
         exec_bullets = "\n".join(report.build_executive_summary_bullets())
         return f"""# Incident Report for {policy_name}
 
@@ -1526,6 +1570,7 @@ class SynthesizerAgent:
         report: InvestigationReport,
         alert: AlertEvent,
         config: AgentConfig,
+        store: Optional[OKFStore] = None,
     ) -> None:
         """Merge the synthesized findings into the incident OKF document.
 
@@ -1539,16 +1584,31 @@ class SynthesizerAgent:
         ``policy_name``, ``resource_name``, ``timestamp`` and ``status`` are filled only when
         missing. Every other field and the rest of the body are kept as read.
 
+        Topology lookups (blast radius, report edges) run before the retry loop, so the
+        mutation, which is re-run on every precondition retry and runs under the file lock
+        locally, does no I/O. The exception is a report without an origin: the stored origin
+        is then re-read on every attempt and looked up inside the mutation.
+
         Raises:
             Storage errors, including ``ConcurrencyLockError`` (precondition retries
             exhausted), and parse errors of the stored document. Each is logged at ERROR
             with the group id and object location first.
         """
-        store = OKFStore(config=config)
+        store = store or OKFStore(config=config)
         identifier = report.filename
-        target = self._describe_okf_target(store, identifier)
 
         # Computed once, outside the mutation, which is re-run on every precondition retry.
+        # _reconcile_report_origin rewrites report.origin, so the report's own origin is captured.
+        report_origin = report.origin
+        topology_by_origin: dict[str, tuple[list[str], tuple[str, str]]] = {}
+
+        def _topology_for(origin: str) -> tuple[list[str], tuple[str, str]]:
+            if origin not in topology_by_origin:
+                topology_by_origin[origin] = (self._lookup_downstream(origin), self._topology_section(origin, alert))
+            return topology_by_origin[origin]
+
+        if report_origin:
+            _topology_for(report_origin)
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         alert_started_at = alert.started_at if alert.started_at and str(alert.started_at).strip() else now_str
         builder = ConsoleLinkBuilder(project_id=config.project_id)
@@ -1564,7 +1624,7 @@ class SynthesizerAgent:
 
         def _mutate(doc: OKFDocument) -> OKFDocument:
             # Origin: the report's, else the stored one; keep the report consistent with it.
-            origin = report.origin or doc.origin or alert.resource_name
+            origin = report_origin or doc.origin or alert.resource_name
             if origin != report.origin:
                 self._reconcile_report_origin(report, alert, origin)
 
@@ -1585,11 +1645,7 @@ class SynthesizerAgent:
                 doc.servicenow_number = report.servicenow_number
 
             # Merge blast radius and traverse full downstream topology
-            downstream: list[str] = []
-            try:
-                downstream = get_blast_radius(origin)
-            except Exception as exc:
-                logger.error("Topology blast radius lookup in _update_okf_file failed for %s: %s", origin, exc)
+            downstream, topology = _topology_for(origin)
             merged_blast = [origin]
             for b in [*downstream, *report.blast_radius, *doc.blast_radius]:
                 if b not in merged_blast:
@@ -1619,7 +1675,7 @@ class SynthesizerAgent:
                 alerts_list.append(new_alert_entry)
             doc.alerts = [format_okf_alert_entry(a, valid_ts=doc.timestamp) for a in alerts_list]
 
-            report_markdown = self._build_report_markdown(report, alert, doc.policy_name, origin, merged_blast)
+            report_markdown = self._build_report_markdown(report, doc.policy_name, origin, merged_blast, topology)
             doc.body = _merge_report_section(doc.body, report_markdown)
             return doc
 
@@ -1628,10 +1684,10 @@ class SynthesizerAgent:
         except Exception as exc:
             # Exception text can quote file content, so only its type is logged.
             logger.error(
-                "Failed to update OKF incident file %s (group %s): %s; propagating.",
-                target,
+                "Failed to update OKF incident file %s (group %s): %s",
+                self._describe_okf_target(store, identifier),
                 report.group_id,
                 type(exc).__name__,
             )
             raise
-        logger.info("Updated OKF incident file %s (group %s)", target, report.group_id)
+        logger.info("Updated OKF incident file %s (group %s)", self._describe_okf_target(store, identifier), report.group_id)

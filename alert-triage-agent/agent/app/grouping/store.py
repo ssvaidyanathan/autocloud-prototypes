@@ -142,6 +142,24 @@ def _update_gcs_atomically(
     raise ConcurrencyLockError(f"Failed to update OKF {canonical_blob_name} after {max_retries} retries")
 
 
+# Directory used when the configured local store directory cannot be created.
+LOCAL_FALLBACK_DIR = Path("/tmp/knowledge/incident-manager")
+
+
+def resolve_local_target_file(storage_path: Path, identifier: str) -> Path:
+    """Return the local file that a local atomic update writes, creating its directory.
+
+    Falls back to ``LOCAL_FALLBACK_DIR`` when the primary directory cannot be created.
+    """
+    target_file = get_canonical_file_path(storage_path, identifier)
+    try:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        target_file = LOCAL_FALLBACK_DIR / target_file.name
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+    return target_file
+
+
 def _update_local_atomically(
     storage_path: Path,
     identifier: str,
@@ -149,12 +167,7 @@ def _update_local_atomically(
     max_retries: int = 5,
 ) -> OKFDocument:
     """Execute atomic read-modify-write on local filesystem using file lock and atomic rename."""
-    target_file = get_canonical_file_path(storage_path, identifier)
-    try:
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        target_file = Path("/tmp/knowledge/incident-manager") / target_file.name
-        target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file = resolve_local_target_file(storage_path, identifier)
 
     lock_file = target_file.parent / f".{target_file.name}.lock"
     inferred_group_id = _extract_group_id_from_path(identifier)

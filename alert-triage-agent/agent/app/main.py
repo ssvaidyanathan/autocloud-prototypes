@@ -19,6 +19,7 @@ from .bridge_client import BridgeClient
 from .config import AgentConfig, get_agent_settings
 from .contracts.alert import AlertEvent, is_ata_alert
 from .contracts.instructions import CreateTicketRequest, ResolveTicketRequest
+from .contracts.report import InvestigationReport
 from .contracts.timers import TimerWakeRequest, TimerWakeResponse
 from .duplicate_checker import (
     DuplicateTargetMissingError,
@@ -81,6 +82,35 @@ def _unpack_request(payload: dict[str, Any]) -> tuple[AlertEvent, Optional[str],
     else:
         alert = AlertEvent.model_validate(payload)
         return alert, payload.get("group_id"), payload.get("filename"), payload.get("member_alerts")
+
+
+def _fallback_report(
+    alert: AlertEvent,
+    group_id: str,
+    filename: str,
+    settings: AgentConfig,
+    exc: Exception,
+    caller: str,
+) -> InvestigationReport:
+    """Build the single-pass fallback report after a failed multi-agent investigation.
+
+    The report is marked degraded so the ticket shows it is not the synthesized report. Only
+    the exception type is logged and recorded; its text can quote incident file content.
+    """
+    exc_type = type(exc).__name__
+    logger.error(
+        "Multi-agent investigation failed on %s for group %s: %s; using the fallback report.",
+        caller,
+        group_id,
+        exc_type,
+    )
+    return generate_investigation_report(
+        alert,
+        group_id,
+        filename,
+        settings,
+        degraded_reason=f"multi-agent investigation failed ({exc_type}), single-pass fallback report",
+    )
 
 
 @app.post("/triage")
@@ -281,8 +311,7 @@ async def timer_wake(
         try:
             report = await execute_multi_agent_investigation(primary_alert, doc.group_id, filename, settings)
         except Exception as exc:
-            logger.warning("Multi-agent investigation fallback on timer wake: %s", exc)
-            report = generate_investigation_report(primary_alert, doc.group_id, filename, settings)
+            report = _fallback_report(primary_alert, doc.group_id, filename, settings, exc, "settle wake")
 
         report.group_id = doc.group_id
         report.filename = filename
@@ -373,8 +402,7 @@ async def timer_wake(
         try:
             report = await execute_multi_agent_investigation(primary_alert, doc.group_id, filename, settings)
         except Exception as exc:
-            logger.warning("Multi-agent investigation fallback on max_wait wake: %s", exc)
-            report = generate_investigation_report(primary_alert, doc.group_id, filename, settings)
+            report = _fallback_report(primary_alert, doc.group_id, filename, settings, exc, "max_wait wake")
 
         report.group_id = doc.group_id
         report.filename = filename
@@ -560,8 +588,7 @@ async def investigate_alert(
     try:
         report = await execute_multi_agent_investigation(alert, group_id, filename, settings)
     except Exception as exc:
-        logger.warning("Multi-agent investigation fallback: %s", exc)
-        report = generate_investigation_report(alert, group_id, filename, settings)
+        report = _fallback_report(alert, group_id, filename, settings, exc, "/investigate")
 
     callback_res: dict[str, Any] = {}
     try:
