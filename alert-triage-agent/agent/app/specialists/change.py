@@ -6,7 +6,7 @@ and correlates deployment timestamps with alert onset curves.
 
 from datetime import datetime, timezone, timedelta
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from ..config import AgentConfig
 from ..contracts.alert import AlertEvent
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Evaluate genuine changes within the 2-hour window:
 # A revision is a genuine change ONLY when:
 # 1. Created within lookback window (<= 120m) before anomaly onset.
-# 2. Image digest or env/config differs from previous serving revision.
+# 2. Image digest or env/config differs from the previously created revision.
 # 3. Traffic shifts to older revisions or without digest/env diff are NOT changes (is_traffic_shift: True).
 def is_genuine_change(c: dict[str, Any]) -> bool:
     """True when a change record is a genuine deployment within the lookback window."""
@@ -40,7 +40,7 @@ def is_genuine_change(c: dict[str, Any]) -> bool:
     if c.get("is_serving") is False or c.get("details", {}).get("is_serving") is False:
         return False
 
-    # 4. Must differ from previous serving revision (digest or env/config)
+    # 4. Must differ from the previously created revision (digest or env/config)
     if c.get("differs_from_previous") is False or c.get("details", {}).get("differs_from_previous") is False:
         return False
 
@@ -55,11 +55,144 @@ def is_genuine_change(c: dict[str, Any]) -> bool:
     return True
 
 
+REQUEST_COUNT_METRIC = "run.googleapis.com/request_count"
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def requests_by_revision(
+    metric_client: Any, project_id: str, service: str, start: datetime, end: datetime
+) -> dict[str, int]:
+    """Sum Cloud Run request_count per revision of `service` over [start, end]."""
+    from google.cloud import monitoring_v3
+
+    req = monitoring_v3.ListTimeSeriesRequest(
+        name=f"projects/{project_id}",
+        filter=f'metric.type = "{REQUEST_COUNT_METRIC}" AND resource.labels.service_name = "{service}"',
+        interval=monitoring_v3.TimeInterval(
+            start_time={"seconds": int(start.timestamp())},
+            end_time={"seconds": int(end.timestamp())},
+        ),
+        view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+    )
+    totals: dict[str, int] = {}
+    for ts in metric_client.list_time_series(request=req):
+        rev = ts.resource.labels.get("revision_name", "")
+        if not rev:
+            continue
+        count = sum(int(pt.value.int64_value) for pt in ts.points)
+        totals[rev] = totals.get(rev, 0) + count
+    return totals
+
+
+def previous_serving_revision(
+    metric_client: Any,
+    project_id: str,
+    service: str,
+    new_revision: str,
+    deploy_timestamp: Any,
+    lookback_minutes: int,
+) -> dict[str, Any]:
+    """Identify the revision that served `service` before `new_revision` was created.
+
+    The answer comes from traffic history (Cloud Monitoring request_count per revision in the
+    `lookback_minutes` before the deploy), never from revision creation order: a newer revision
+    can be a retired 0%-traffic one while traffic stays pinned to an older revision. A revision
+    is named only when it is the single revision that received requests in that window;
+    otherwise "revision" is None and "evidence" says why.
+    """
+    result: dict[str, Any] = {"revision": None, "evidence": "", "requests_by_revision": {}}
+    deploy_dt = _parse_ts(deploy_timestamp)
+    if deploy_dt is None:
+        result["evidence"] = (
+            f"Previous serving revision of {service} not determined: the creation time of {new_revision} is unknown."
+        )
+        return result
+    start = deploy_dt - timedelta(minutes=lookback_minutes)
+    window = f"between {_iso(start)} and {_iso(deploy_dt)}"
+    try:
+        totals = requests_by_revision(metric_client, project_id, service, start, deploy_dt)
+    except Exception as exc:
+        logger.warning("Traffic history query for %s failed: %s", service, exc)
+        result["evidence"] = (
+            f"Previous serving revision of {service} not determined: the Cloud Monitoring "
+            f"{REQUEST_COUNT_METRIC} query for {window} failed ({type(exc).__name__})."
+        )
+        return result
+
+    served = {rev: n for rev, n in totals.items() if n > 0 and rev != new_revision}
+    result["requests_by_revision"] = served
+    result["window_start"] = _iso(start)
+    result["window_end"] = _iso(deploy_dt)
+    if len(served) == 1:
+        rev, n = next(iter(served.items()))
+        result["revision"] = rev
+        result["evidence"] = (
+            f"Cloud Monitoring {REQUEST_COUNT_METRIC}: {rev} was the only revision of {service} that "
+            f"received requests {window} ({n} requests), before {new_revision} was created."
+        )
+    elif not served:
+        result["evidence"] = (
+            f"Previous serving revision of {service} not determined: Cloud Monitoring "
+            f"{REQUEST_COUNT_METRIC} recorded no requests on any other revision {window}."
+        )
+    else:
+        split = ", ".join(f"{rev} ({n} requests)" for rev, n in sorted(served.items(), key=lambda kv: (-kv[1], kv[0])))
+        result["evidence"] = (
+            f"Previous serving revision of {service} not determined as a single revision: Cloud Monitoring "
+            f"{REQUEST_COUNT_METRIC} shows requests on {len(served)} revisions {window}: {split}."
+        )
+    if result["revision"] is None:
+        logger.warning("%s", result["evidence"])
+    return result
+
+
 class ChangeSpecialist(BaseSpecialist):
     """Specialist agent correlating recent infrastructure and code changes."""
 
-    def __init__(self, **kwargs: Any):
+    def __init__(self, metric_client: Any = None, **kwargs: Any):
         super().__init__("ChangeSpecialist")
+        self._metric_client = metric_client
+
+    def _get_metric_client(self, config: AgentConfig) -> Any:
+        if self._metric_client is not None:
+            return self._metric_client
+        if config.is_local:
+            return None
+        from google.cloud import monitoring_v3
+
+        return monitoring_v3.MetricServiceClient()
+
+    def _previous_serving(self, chg: dict[str, Any], config: AgentConfig) -> dict[str, Any]:
+        service, revision = chg.get("service") or "", chg.get("revision") or ""
+        try:
+            client = self._get_metric_client(config)
+        except Exception as exc:
+            logger.warning("Cloud Monitoring client unavailable for traffic history of %s: %s", service, exc)
+            client = None
+        if client is None:
+            evidence = (
+                f"Previous serving revision of {service} not determined: traffic history "
+                "(Cloud Monitoring request_count) was not queried."
+            )
+            logger.warning("%s", evidence)
+            return {"revision": None, "evidence": evidence, "requests_by_revision": {}}
+        return previous_serving_revision(
+            client, config.project_id, service, revision, chg.get("timestamp"),
+            config.rollback_traffic_lookback_minutes,
+        )
 
     async def investigate(
         self,
@@ -124,12 +257,14 @@ class ChangeSpecialist(BaseSpecialist):
                 is_serving = chg.get("is_serving")
                 if is_serving is None:
                     is_serving = chg.get("details", {}).get("is_serving")
+                # The timeline's previous_revision is the previously *created* revision, which is
+                # not necessarily the one that served traffic (see previous_serving_revision).
                 prev_rev = chg.get("previous_revision") or chg.get("details", {}).get("previous_revision")
 
                 recent_changes.append({
                     "service": svc,
                     "revision": rev,
-                    "previous_revision": prev_rev,
+                    "previous_created_revision": prev_rev,
                     "timestamp": ts_str,
                     "deployed_minutes_ago": deployed_min,
                     "change_type": "traffic_shift" if is_traffic_shift else ("service_update" if chg.get("source") == "cloud_run_service" else "revision_deploy"),
@@ -213,7 +348,8 @@ class ChangeSpecialist(BaseSpecialist):
                                         pass
                                 is_serving = rev_short in serving_rev_names
 
-                                # Identify previous revision
+                                # Previously created revision (used only for the image/env diff;
+                                # it is not necessarily the revision that served traffic)
                                 prev_rev_name = None
                                 prev_img = None
                                 prev_env = []
@@ -234,7 +370,7 @@ class ChangeSpecialist(BaseSpecialist):
                                     recent_changes.append({
                                         "service": svc_short,
                                         "revision": rev_short,
-                                        "previous_revision": prev_rev_name,
+                                        "previous_created_revision": prev_rev_name,
                                         "timestamp": ctime_str,
                                         "deployed_minutes_ago": dep_min,
                                         "change_type": "traffic_shift" if is_traffic_shift else "revision_deploy",
@@ -250,7 +386,7 @@ class ChangeSpecialist(BaseSpecialist):
                                             "is_serving": is_serving,
                                             "is_traffic_shift": is_traffic_shift,
                                             "differs_from_previous": differs,
-                                            "previous_revision": prev_rev_name,
+                                            "previous_created_revision": prev_rev_name,
                                         },
                                         "status": "Ready",
                                     })
@@ -361,10 +497,23 @@ class ChangeSpecialist(BaseSpecialist):
             )
             findings.append("Deployment timing aligns with alert onset curve.")
             metrics["recent_revision"] = chg["revision"]
-            metrics["previous_revision"] = chg.get("previous_revision") or chg.get("details", {}).get("previous_revision")
+            metrics["previous_created_revision"] = chg.get("previous_created_revision") or chg.get(
+                "details", {}
+            ).get("previous_created_revision")
             metrics["minutes_since_deploy"] = chg["deployed_minutes_ago"]
             metrics["deploy_timestamp"] = chg.get("timestamp")
             metrics["change_service"] = chg.get("service")
+            serving = self._previous_serving(chg, config)
+            metrics["previous_serving_revision"] = serving["revision"]
+            metrics["previous_serving_evidence"] = serving["evidence"]
+            metrics["previous_serving_requests"] = serving["requests_by_revision"]
+            if serving["evidence"]:
+                findings.append(serving["evidence"])
+                queries_executed.setdefault("cloud_monitoring", []).append(
+                    f'metric.type="{REQUEST_COUNT_METRIC}" AND resource.labels.service_name="{chg.get("service")}" '
+                    f'grouped by resource.labels.revision_name, {config.rollback_traffic_lookback_minutes} min '
+                    f'before {chg.get("timestamp")}'
+                )
             evidence_items.append(
                 EvidenceItem(
                     headline=f"Recent Deployment Correlation: {chg['service']}",

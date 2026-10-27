@@ -53,6 +53,10 @@ class AgentConfig(BaseSettings):
     # In Progress with a "please verify and resolve" work note (false, default).
     # Monitoring recovery is not proof of a fix (low traffic can mask a live fault).
     auto_resolve_on_recovery: bool = Field(default=False, alias="AUTO_RESOLVE_ON_RECOVERY")
+    # Rollback target: the revision(s) that received requests on the changed service in this
+    # many minutes before the new revision was created (Cloud Monitoring request_count by
+    # revision). A rollback target is named only when exactly one revision served.
+    rollback_traffic_lookback_minutes: int = Field(default=30, alias="ROLLBACK_TRAFFIC_LOOKBACK_MINUTES", ge=1)
 
     @property
     def effective_incidents_bucket(self) -> str:

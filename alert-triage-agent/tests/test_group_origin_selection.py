@@ -28,6 +28,7 @@ from agent.app.grouping.store import OKFStore
 from agent.app.main import app, set_clock_func
 from agent.app.specialists.apigee import ApigeeSpecialist
 from agent.app.specialists.base import EvidenceDossier
+from agent.app.specialists.change import ChangeSpecialist
 from agent.app.specialists.cloud_run import CloudRunSpecialist
 from agent.app.specialists.cloud_sql import CloudSQLSpecialist
 from agent.app.specialists.origin_selection import select_origin
@@ -35,6 +36,8 @@ from agent.app.specialists.synthesizer import SynthesizerAgent
 from agent.app.timers.scheduler import set_timer_scheduler_hook
 from bridge.app.contracts.report import InvestigationReport as BridgeReport
 from topology.topology_graph import get_loader
+
+from tests.traffic_fakes import FakeRequestCountClient, serving_dossier_metrics
 
 ONSET = "2026-10-27T06:01:52Z"
 ONSET_EPOCH = datetime(2026, 10, 27, 6, 1, 52, tzinfo=timezone.utc).timestamp()
@@ -111,7 +114,8 @@ def _select(alerts):
 @pytest.fixture
 def telemetry(monkeypatch):
     """Configure which services show degraded Cloud Run telemetry and which changes exist."""
-    state = {"degraded": {}, "changes": []}
+    # "traffic": service -> {revision -> per-minute request counts before the deploy}
+    state = {"degraded": {}, "changes": [], "traffic": {}}
 
     async def cloud_run(self, alert, config, target_service=None):
         target = target_service or alert.resource_name
@@ -165,6 +169,9 @@ def telemetry(monkeypatch):
     monkeypatch.setattr(ApigeeSpecialist, "investigate", apigee)
     monkeypatch.setattr(CloudSQLSpecialist, "investigate", cloud_sql)
     monkeypatch.setattr(tools_server, "get_change_timeline", change_timeline)
+    monkeypatch.setattr(
+        ChangeSpecialist, "_get_metric_client", lambda self, config: FakeRequestCountClient(state["traffic"])
+    )
     return state
 
 
@@ -328,6 +335,7 @@ def test_recent_bad_revision_on_degraded_upstream_is_implicated_and_rolled_back(
         _change("ata-inventory-api", INVENTORY_BAD_REV, INVENTORY_GOOD_REV, "2026-10-27T05:55:00Z"),
         ORDERS_REDEPLOY,
     ]
+    telemetry["traffic"] = {"ata-inventory-api": {INVENTORY_GOOD_REV: [8, 8, 3]}}
 
     report, _, _ = _ticket_report_for_group([orders, inventory], agent_cfg, clock, monkeypatch)
     rollback = report.get_normalized_actions()[0]
@@ -366,6 +374,7 @@ def test_single_alert_bad_deploy_still_attributed_to_the_deploy(agent_cfg, clock
     inventory = _entry("0.s5", "ata-inventory-5xx", "ata-inventory-api", "5xx")
     telemetry["degraded"] = {"ata-inventory-api": "5xx"}
     telemetry["changes"] = [_change("ata-inventory-api", INVENTORY_BAD_REV, INVENTORY_GOOD_REV, "2026-10-27T05:55:00Z")]
+    telemetry["traffic"] = {"ata-inventory-api": {INVENTORY_GOOD_REV: [8, 8, 3]}}
 
     report, _, _ = _ticket_report_for_group([inventory], agent_cfg, clock, monkeypatch)
 
@@ -478,7 +487,10 @@ def _change_dossier(service: str, revision: str, previous: str) -> EvidenceDossi
         specialist_name="ChangeSpecialist",
         target_resource=service,
         findings=[f"Recent revision deployment detected on `{service}` (5m ago): `{revision}`."],
-        metrics={"recent_revision": revision, "previous_revision": previous, "change_service": service, "minutes_since_deploy": 5},
+        metrics={
+            "recent_revision": revision, "change_service": service, "minutes_since_deploy": 5,
+            **serving_dossier_metrics(previous, service),
+        },
         anomaly_detected=True,
     )
 

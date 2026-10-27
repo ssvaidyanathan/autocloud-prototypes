@@ -455,7 +455,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <tr style="background: #f6f8fa;">
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Resource</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Active Revision</th>
-            <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Previous Stable</th>
+            <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Previous Serving</th>
             <th style="padding: 8px 12px; border: 1px solid #d0d7de;">Change / Diff Summary</th>
           </tr>
         </thead>

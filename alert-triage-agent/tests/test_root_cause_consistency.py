@@ -190,7 +190,11 @@ def test_s5_bad_deploy_consistency(synthesizer):
             metrics={
                 "recent_revision": "ata-inventory-api-00101-vw6",
                 "change_service": "ata-inventory-api",
-                "previous_revision": "ata-inventory-api-00070-6nq",
+                "previous_serving_revision": "ata-inventory-api-00070-6nq",
+                "previous_serving_evidence": (
+                    "Cloud Monitoring run.googleapis.com/request_count: ata-inventory-api-00070-6nq was the only "
+                    "revision of ata-inventory-api that received requests before the deploy (120 requests)."
+                ),
                 "deploy_timestamp": "2026-10-23T13:40:00Z",
                 "minutes_since_deploy": 2,
                 "all_changes": [{

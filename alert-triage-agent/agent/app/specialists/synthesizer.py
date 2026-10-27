@@ -1727,6 +1727,7 @@ class SynthesizerAgent:
 
         recent_rev = None
         prev_rev = None
+        prev_evidence = ""
         change_svc = None
         if change_dossier and change_dossier.anomaly_detected:
             change_svc = change_dossier.metrics.get("change_service") or change_dossier.target_resource
@@ -1736,17 +1737,15 @@ class SynthesizerAgent:
             )
         elif change_dossier and change_dossier.anomaly_detected:
             recent_rev = change_dossier.metrics.get("recent_revision")
-            prev_rev = change_dossier.metrics.get("previous_revision")
+            # Only a revision verified from traffic history is a rollback target; the previously
+            # created revision can be a retired 0%-traffic one while traffic is pinned elsewhere.
+            prev_rev = change_dossier.metrics.get("previous_serving_revision")
+            prev_evidence = str(change_dossier.metrics.get("previous_serving_evidence") or "").strip()
             if not recent_rev:
                 for f in change_dossier.findings:
                     m = re.search(r"revision deployment detected on [`']?([^`'\s]+)[`']?.*?: [`']?([^`'\s]+)[`']?", f)
                     if m:
                         recent_rev = m.group(2)
-                        break
-            if not prev_rev and change_dossier.metrics.get("all_changes"):
-                for ch in change_dossier.metrics.get("all_changes", []):
-                    if ch.get("revision") == recent_rev and ch.get("previous_revision"):
-                        prev_rev = ch.get("previous_revision")
                         break
 
         # 1. Change-induced failure takes precedence (e.g. S5 bad deploy)
@@ -1758,18 +1757,31 @@ class SynthesizerAgent:
 
             has_valid_prev = bool(
                 prev_rev
+                and prev_evidence
                 and str(prev_rev).strip()
                 and str(prev_rev).strip().lower() not in ("none", "unknown", "previous_revision", "unspecified")
             )
             if has_valid_prev:
                 rollback_title = (
-                    f"Roll back Cloud Run traffic on {origin} to previous serving revision {prev_rev}"
-                    f" (it served before {recent_rev} was deployed)"
+                    f"Roll back Cloud Run traffic on {origin} to {prev_rev}, the revision that served before"
+                    f" {recent_rev} was deployed. Evidence: {prev_evidence}"
                 )
                 rollback_cmd = f"gcloud run services update-traffic {origin} --to-revisions={prev_rev}=100 --region={region}"
             else:
-                rollback_title = f"Roll back Cloud Run traffic on {origin} (previous serving revision could not be identified)"
-                rollback_cmd = f"# previous serving revision could not be identified; inspect revision history to select rollback target: gcloud run revisions list --service={origin} --region={region}"
+                if prev_rev and not prev_evidence:
+                    logger.warning(
+                        "Previous serving revision %s for %s has no traffic evidence; not naming it", prev_rev, origin
+                    )
+                reason = prev_evidence or "no traffic history evidence was gathered."
+                rollback_title = (
+                    f"Roll back Cloud Run traffic on {origin} (previous serving revision could not be identified;"
+                    f" {reason} Do not pick the previously created revision: it may never have served.)"
+                )
+                rollback_cmd = (
+                    "# previous serving revision could not be identified; check which revision served before"
+                    f" {recent_rev} (request_count by revision_name in Cloud Monitoring), then route to it explicitly:"
+                    f" gcloud run revisions list --service={origin} --region={region}"
+                )
 
             return [
                 ActionItem(
@@ -2104,7 +2116,7 @@ class SynthesizerAgent:
             diffs.append({
                 "resource": chg_dossier.target_resource,
                 "current_revision": rev,
-                "previous_revision": chg_dossier.metrics.get("previous_revision") or "previous serving revision could not be identified",
+                "previous_revision": chg_dossier.metrics.get("previous_serving_revision") or "previous serving revision could not be identified",
                 "diff_summary": f"Recent revision deployed: {rev}",
             })
         return diffs

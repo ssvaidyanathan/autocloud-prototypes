@@ -332,7 +332,11 @@ def replay_live_sequence(
                 findings=[f"Recent revision deployment detected on `ata-inventory-api`: `{mock_change_revision}`."],
                 metrics={
                     "recent_revision": mock_change_revision,
-                    "previous_revision": mock_previous_revision,
+                    "previous_serving_revision": mock_previous_revision,
+                    "previous_serving_evidence": (
+                        f"Cloud Monitoring run.googleapis.com/request_count: {mock_previous_revision} was the only "
+                        "revision of ata-inventory-api that received requests before the deploy."
+                    ) if mock_previous_revision else "",
                     "change_service": "ata-inventory-api",
                     "minutes_since_deploy": 5,
                     "deploy_timestamp": alert.started_at or "2026-10-23T13:42:56Z",

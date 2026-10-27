@@ -91,6 +91,7 @@ def test_unalerted_db_auth_only_upstream_does_not_neutralize_downstream_bad_depl
     orders = _entry("0.r1-orders", "ata-orders-5xx", "ata-orders-api", "5xx")
     telemetry["degraded"] = {"ata-orders-api": "5xx"}
     telemetry["changes"] = [ORDERS_BAD_DEPLOY]
+    telemetry["traffic"] = {"ata-orders-api": {ORDERS_PREV_REV: [5, 5]}}
     _with_db_auth_only_upstream(monkeypatch, "ata-inventory-api")
 
     report, _, _ = _ticket_report_for_group([orders], agent_cfg, clock, monkeypatch)
@@ -229,6 +230,7 @@ def test_deploy_on_service_that_degraded_well_before_upstream_stays_implicated(
     inventory = _entry("0.on-inv-e2e", "ata-inventory-latency", "ata-inventory-api", "latency", ONSET)
     telemetry["degraded"] = {"ata-orders-api": "5xx", "ata-inventory-api": "latency"}
     telemetry["changes"] = [_change("ata-orders-api", ORDERS_BAD_REV, ORDERS_PREV_REV, "2026-10-27T05:48:00Z")]
+    telemetry["traffic"] = {"ata-orders-api": {ORDERS_PREV_REV: [5, 5]}}
 
     report, _, _ = _ticket_report_for_group([orders, inventory], agent_cfg, clock, monkeypatch)
 

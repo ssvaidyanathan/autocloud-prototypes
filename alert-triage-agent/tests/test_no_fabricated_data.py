@@ -662,7 +662,10 @@ async def test_generic_genuine_change_detection():
         dossier = await specialist.investigate(alert, config)
     assert dossier.anomaly_detected is True
     assert dossier.metrics.get("recent_revision") == "ata-inventory-api-00099-new"
-    assert dossier.metrics.get("previous_revision") == "ata-inventory-api-00088-old"
+    # The previously created revision is recorded as such; it is not claimed to have served.
+    assert dossier.metrics.get("previous_created_revision") == "ata-inventory-api-00088-old"
+    assert dossier.metrics.get("previous_serving_revision") is None
+    assert "not determined" in dossier.metrics.get("previous_serving_evidence", "")
 
     # Case 2: Created within window but image digest & env identical -> NOT genuine change (traffic shift)
     timeline_no_diff = {
@@ -738,7 +741,11 @@ def test_rollback_action_formatting_with_known_and_unknown_revision():
             findings=["Recent deployment detected on `ata-inventory-api`: `ata-inventory-api-00099-bad`."],
             metrics={
                 "recent_revision": "ata-inventory-api-00099-bad",
-                "previous_revision": "ata-inventory-api-00088-good",
+                "previous_serving_revision": "ata-inventory-api-00088-good",
+                "previous_serving_evidence": (
+                    "Cloud Monitoring run.googleapis.com/request_count: ata-inventory-api-00088-good was the only "
+                    "revision of ata-inventory-api that received requests before the deploy (40 requests)."
+                ),
                 "minutes_since_deploy": 5,
             },
             anomaly_detected=True,
@@ -760,7 +767,7 @@ def test_rollback_action_formatting_with_known_and_unknown_revision():
             findings=["Recent deployment detected on `ata-inventory-api`: `ata-inventory-api-00099-bad`."],
             metrics={
                 "recent_revision": "ata-inventory-api-00099-bad",
-                "previous_revision": None,
+                "previous_serving_revision": None,
                 "minutes_since_deploy": 5,
             },
             anomaly_detected=True,
