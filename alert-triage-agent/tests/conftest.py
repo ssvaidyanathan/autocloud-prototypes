@@ -184,11 +184,23 @@ def _checkout_stack_files_untouched():
 # Tests write their own pin file and point ATA_INVENTORY_PIN_FILE at it (or run a copy of
 # scripts/ under tmp_path). This guard fails any test that
 #   - opens a committed pin file from Python (read_text, open, shutil.copy, ...), or
-#   - starts a process that would read one: ATA_INVENTORY_PIN_FILE naming a committed pin, or
-#     unset/empty while the process runs a script of this checkout (argv, or a script file that
-#     names this checkout's scripts/ directory) with a NAME_PREFIX that has a committed pin.
+#   - starts a process (subprocess.*, os.system, os.posix_spawn, os.exec*) that
+#     - names a committed pin file in its argv or command string (`cat <pin>`,
+#       `bash -c 'source scripts/scenarios/inventory-pin.ata.env'`, a glob that matches one),
+#       relative paths resolved against the process's cwd (the given cwd, else the test's), or
+#     - has ATA_INVENTORY_PIN_FILE naming a committed pin, or
+#     - has ATA_INVENTORY_PIN_FILE unset/empty and runs a script of this checkout (argv, a
+#       relative path under the cwd, or a script file that names this checkout's scripts/
+#       directory) with a NAME_PREFIX that has a committed pin. This flags any checkout script
+#       run that way, even one that never sources common.sh: the remedy is always the fixture
+#       pin (set ATA_INVENTORY_PIN_FILE), not the marker.
 # A test that deliberately validates the committed file's FORMAT is marked
 # @pytest.mark.reads_committed_pin and must not assert its values.
+#
+# This is test HYGIENE, not a security boundary: it catches the ways a test plausibly reads the
+# pin by accident. Deliberate evasion (a path assembled inside a shell, a child process that
+# opens the file on its own initiative, ctypes, ...) is not caught and is not meant to be.
+import re  # noqa: E402
 import sys  # noqa: E402
 
 _SCRIPTS_DIR = os.path.join(_CHECKOUT, "scripts")
@@ -197,63 +209,117 @@ _COMMITTED_PINS = {os.path.realpath(p) for p in glob.glob(os.path.join(_SCENARIO
 _COMMITTED_PIN_PREFIXES = {os.path.basename(p)[len("inventory-pin."):-len(".env")] for p in _COMMITTED_PINS}
 _CHECKOUT_SCRIPT_ROOTS = tuple(os.path.realpath(os.path.join(_CHECKOUT, d)) + os.sep
                                for d in ("scripts", "demo", "agent", "bridge", "tools"))
-_pin_guard = {"active": False, "allowed": False, "busy": False, "violations": []}
+# Path-like words of a shell command string: split on whitespace, quotes and shell operators,
+# and on "=" so that VAR=<path> yields <path>.
+_SHELL_WORD = re.compile(r"""[^\s'"`=;&|<>()]+""")
+_pin_guard = {"active": False, "allowed": False, "busy": False, "violations": [], "last_popen_argv": None}
 
 
-def _is_committed_pin(path) -> bool:
+def _fsstr(value):
     try:
-        p = os.fsdecode(os.fspath(path))
+        return os.fsdecode(os.fspath(value))
     except TypeError:
+        return None
+
+
+def _resolve(path: str, cwd) -> str:
+    return os.path.join(cwd or os.getcwd(), path) if not os.path.isabs(path) else path
+
+
+def _is_committed_pin(path, cwd=None) -> bool:
+    p = _fsstr(path)
+    if not p or "\0" in p:
         return False
-    return os.path.basename(p).startswith("inventory-pin.") and os.path.realpath(p) in _COMMITTED_PINS
+    return os.path.basename(p).startswith("inventory-pin.") and os.path.realpath(_resolve(p, cwd)) in _COMMITTED_PINS
 
 
-def _names_checkout_script(arg: str) -> bool:
+def _names_committed_pin(arg: str, cwd) -> str:
+    """The committed pin that argv element / command string `arg` names (resolved against cwd), or ""."""
+    if "inventory-pin" not in arg:  # cheap pre-filter: every way to name the file contains this
+        return ""
+    for word in [arg, *_SHELL_WORD.findall(arg)]:
+        if _is_committed_pin(word, cwd):
+            return word
+        if "inventory-pin" in word and any(c in word for c in "*?["):
+            hits = [h for h in glob.glob(_resolve(word, cwd)) if _is_committed_pin(h)]
+            if hits:
+                return word
+    return ""
+
+
+def _names_checkout_script(arg: str, cwd=None) -> bool:
+    """Whether argv element / command string `arg` runs a script of this checkout: a path (relative
+    ones resolved against cwd) under one of its script roots, a script file that names its
+    scripts/ directory, or a command string with such a path among its words."""
     if not arg or "\0" in arg:
         return False
-    real = os.path.realpath(arg) if os.path.isabs(arg) else None
-    if real and real.startswith(_CHECKOUT_SCRIPT_ROOTS):
+    if _SCRIPTS_DIR + os.sep in arg:  # bash -c '... source <checkout>/scripts/...'
         return True
-    if real and os.path.isfile(real) and os.path.getsize(real) < 256 * 1024:
+    words = [arg] + [w for w in _SHELL_WORD.findall(arg) if w != arg]
+    if any(os.path.realpath(_resolve(w, cwd)).startswith(_CHECKOUT_SCRIPT_ROOTS) for w in words):
+        return True
+    real = os.path.realpath(_resolve(arg, cwd))
+    if os.path.isfile(real) and os.path.getsize(real) < 256 * 1024:
         try:
             with open(real, "rb") as f:
                 return os.fsencode(_SCRIPTS_DIR + os.sep) in f.read()
         except OSError:
             return False
-    return _SCRIPTS_DIR + os.sep in arg  # bash -c '... source <checkout>/scripts/...'
+    return False
 
 
-def _popen_reads_committed_pin(args, env) -> str:
-    env = os.environ if env is None else {os.fsdecode(k): os.fsdecode(v) for k, v in env.items()}
+def _argv_strings(args) -> list:
+    argv = [args] if isinstance(args, (str, bytes, os.PathLike)) else list(args or ())
+    return [a for a in (_fsstr(x) for x in argv) if a is not None]
+
+
+def _process_reads_committed_pin(args, env, cwd=None) -> str:
+    """Why the process (argv list or command string, env, cwd) would read a committed pin, or ""."""
+    cwd = _fsstr(cwd) if cwd is not None else None
+    argv = _argv_strings(args)
+    for a in argv:
+        named = _names_committed_pin(a, cwd)
+        if named:
+            return f"names the committed pin {named} in its command ({a[:120]})"
+    env = os.environ if env is None else {os.fsdecode(k): os.fsdecode(v) for k, v in dict(env).items()}
     pin_file = env.get("ATA_INVENTORY_PIN_FILE", "")
     if pin_file:
-        return f"ATA_INVENTORY_PIN_FILE={pin_file}" if _is_committed_pin(pin_file) else ""
+        return f"ATA_INVENTORY_PIN_FILE={pin_file}" if _is_committed_pin(pin_file, cwd) else ""
     if env.get("NAME_PREFIX", "") not in _COMMITTED_PIN_PREFIXES:
         return ""
-    argv = [args] if isinstance(args, (str, bytes, os.PathLike)) else list(args or ())
     for a in argv:
-        try:
-            a = os.fsdecode(os.fspath(a))
-        except TypeError:
-            continue
-        if _names_checkout_script(a):
+        if _names_checkout_script(a, cwd):
             return f"runs {a} with NAME_PREFIX={env['NAME_PREFIX']} and no ATA_INVENTORY_PIN_FILE"
     return ""
 
 
+_PROCESS_EVENTS = ("subprocess.Popen", "os.system", "os.posix_spawn", "os.exec")
+
+
 def _pin_audit_hook(event, args):
     g = _pin_guard
-    if not g["active"] or g["allowed"] or g["busy"] or event not in ("open", "subprocess.Popen"):
+    if not g["active"] or g["allowed"] or g["busy"] or (event != "open" and event not in _PROCESS_EVENTS):
         return
     g["busy"] = True
     try:
+        why = ""
         if event == "open":
             if args and _is_committed_pin(args[0]):
                 g["violations"].append(f"opened {os.fsdecode(os.fspath(args[0]))}")
-        else:
-            why = _popen_reads_committed_pin(args[1], args[3])
-            if why:
-                g["violations"].append(f"subprocess {why}")
+            return
+        if event == "subprocess.Popen":  # (executable, args, cwd, env)
+            g["last_popen_argv"] = _argv_strings(args[1])
+            why = _process_reads_committed_pin(args[1], args[3], args[2])
+        elif event == "os.system":  # (command,): a /bin/sh -c string, in this process's cwd and env
+            why = _process_reads_committed_pin(args[0], None)
+        else:  # os.posix_spawn / os.exec: (path, argv, env)
+            argv = _argv_strings(args[1])
+            if event == "os.posix_spawn" and argv == g["last_popen_argv"]:
+                g["last_popen_argv"] = None  # subprocess's own posix_spawn: already checked
+                return
+            why = _process_reads_committed_pin(argv, args[2])
+        if why:
+            g["violations"].append(f"subprocess {why}")
     finally:
         g["busy"] = False
 
