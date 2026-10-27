@@ -162,6 +162,29 @@ def test_ctrl_c_in_a_later_scenario_keeps_earlier_results(driver_env):
             Path(line.split("Log File: ", 1)[1].strip()).unlink(missing_ok=True)
 
 
+def test_ctrl_c_during_the_reset_between_scenarios(driver_env):
+    driver, env, tmp_path = driver_env
+    scenarios = driver.parent / "scenarios"
+    for script in scenarios.glob("s[1-5]_*.sh"):
+        script.write_text(f'#!/usr/bin/env bash\necho {script.name.split("_")[0]} >> "$ATA_TEST_RAN"\nexit 0\n')
+    # The second reset (after s4) hangs until the Ctrl-C kills it.
+    (driver.parent / "reset-scenarios.sh").write_text(
+        '#!/usr/bin/env bash\necho reset >> "$ATA_TEST_RESETS"\n'
+        'if [ "$(wc -l < "$ATA_TEST_RESETS")" -ge 2 ]; then echo "RESET HANGING"; sleep 30; fi\n'
+    )
+
+    rc, out = run_in_pty_with_ctrl_c([TEST_BASH, str(driver), "--priority"], env, tmp_path, "Resetting environment faults", delay=1.5)
+
+    assert rc == 130, out
+    assert (tmp_path / "ran").read_text().split() == ["s4"]
+    # The interrupted reset is reported as failed; nothing runs after it.
+    assert summary_rows(out) == {"S4": "RESET_FAILED", "S1": "SKIPPED", "S3": "SKIPPED", "S5": "SKIPPED"}
+    assert "Run interrupted by Ctrl-C. The environment was NOT reset" in out
+    for line in out.splitlines():
+        if "Log File: " in line:
+            Path(line.split("Log File: ", 1)[1].strip()).unlink(missing_ok=True)
+
+
 def test_without_ctrl_c_the_run_is_unchanged(driver_env):
     """Control: the same stubs, no Ctrl-C, run every priority scenario and exit 0."""
     import subprocess

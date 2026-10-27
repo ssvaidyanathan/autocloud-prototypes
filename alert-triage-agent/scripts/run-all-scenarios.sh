@@ -210,6 +210,9 @@ for sc in ${SCENARIOS_TO_RUN[@]+"${SCENARIOS_TO_RUN[@]}"}; do
     sc_clean="$(to_lower "${sc}")"
     desc="$(scenario_name "${sc_clean}" "Unknown")"
     status="${SCENARIO_STATUS[idx]:-UNKNOWN}"
+    if [ "${status}" = "UNKNOWN" ] && [ "${INTERRUPTED}" = "true" ]; then
+        status="SKIPPED"  # not reached: the run stopped (Ctrl-C) before it
+    fi
     dur="${SCENARIO_DURATION[idx]:-0s}"
     printf "%-8s %-45s %-12s %-10s\n" "$(to_upper "${sc}")" "${desc:0:43}" "${status}" "${dur}"
     if [ "${status}" != "PASSED" ]; then
