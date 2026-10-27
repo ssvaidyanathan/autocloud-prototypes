@@ -14,11 +14,22 @@
 # 3. Terminate background DB sleep connections and release locks
 # 4. Restore healthy Apigee proxy revisions (re-deploy base bundles)
 # 5. Restore Cloud Run service configuration if S5 was deployed
+# 5b. Warm up the demo services, check health (direct and via Apigee) and the admin fault
+#    injection endpoints. Every request the reset sends to the demo services runs before
+#    step 6, and each is timed (see "Alert window" below).
 # 6. Wait for open ATA alerts to close, then, concurrently, for the quiet period (Apigee
-#    metric lag) and for every incident group to reach a terminal state (recovery note posted)
+#    metric lag), for every incident group to reach a terminal state (recovery note posted)
+#    and for the alert window to pass
 # 7. Archive active OKF incident files and clean leftover root storage
-# 8. Verify healthy 200 responses across all services and 0 active incident groups
-# 9. Admin fault injection preflight verification
+# 8. Verify 0 active incident groups
+#
+# Alert window: the first request to an idle revision is a cold start (~5 s). Cloud Run's
+# latency metric reaches the alert policies ~6 min later, after a 3 min quiet period would
+# have ended, so an alert caused by the reset's own requests used to open after the reset
+# had archived and finished (stray ticket INC0010327). A demo request that is slower than
+# the latency alert threshold, returns HTTP 5xx or gets no response therefore keeps step 6
+# watching for alerts for --alert-lag after it; an alert that opens in that time is waited
+# for (close, then its incident group's terminal state) like any other before archiving.
 # ==============================================================================
 
 set -euo pipefail
@@ -50,6 +61,18 @@ POLL_INTERVAL_SECS="$(parse_duration "${ATA_RESET_POLL_INTERVAL:-${POLL_INTERVAL
 MAX_ALERT_AGE_SECS="$(parse_duration "${ATA_RESET_MAX_ALERT_AGE:-${MAX_ALERT_AGE:-3600}}")"
 # Consecutive failed Cloud Monitoring queries tolerated before the reset fails.
 MAX_QUERY_ATTEMPTS="${ATA_RESET_MAX_QUERY_ATTEMPTS:-3}"
+# A demo request at least this slow (ms) can raise an ata-*-latency alert: keep it equal to
+# threshold_value of the latency policies (infra/terraform/observability/main.tf, 2000).
+SLOW_REQUEST_MS="${ATA_RESET_SLOW_REQUEST_MS:-2000}"
+# Time from a request to the alert it can open. Live 2026-10-27: 332 s (cold /health at
+# 10:05:26Z, ata-inventory-latency opened 10:10:58Z) and 356 s (S2: first slow minute
+# 07:34:53Z, alert 07:40:49Z), both with the 60s retest window; 480 s adds 2 min margin.
+ALERT_LAG_SECS="$(parse_duration "${ATA_RESET_ALERT_LAG:-480}")"
+# Arm the alert window from the reset start, for requests made before the reset (e.g. by
+# verify-demo-infra.sh, which tells you when to use this).
+ALERT_WINDOW_FROM_START="${ATA_RESET_ALERT_WINDOW_FROM_START:-false}"
+# Epoch until which step 6 keeps watching for alerts (0 = no window armed).
+ALERT_WINDOW_UNTIL=0
 RESET_START_TIME="$(date +%s)"
 
 # Parse CLI arguments
@@ -99,6 +122,18 @@ while [[ $# -gt 0 ]]; do
             MAX_ALERT_AGE_SECS="$(parse_duration "${1#*=}")"
             shift
             ;;
+        --alert-lag)
+            ALERT_LAG_SECS="$(parse_duration "$2")"
+            shift 2
+            ;;
+        --alert-lag=*)
+            ALERT_LAG_SECS="$(parse_duration "${1#*=}")"
+            shift
+            ;;
+        --alert-window-from-start)
+            ALERT_WINDOW_FROM_START="true"
+            shift
+            ;;
         --serving-revisions)
             ATA_SERVING_REVISIONS="$2"
             shift 2
@@ -139,6 +174,12 @@ while [[ $# -gt 0 ]]; do
             echo "                             a terminal state (default: 900s / 15m)"
             echo "  --poll-interval <duration> Polling interval for alert and incident group queries (default: 15s)"
             echo "  --max-alert-age <duration> Max age of open alerts before reset start (default: 60m / 3600s)"
+            echo "  --alert-lag <duration>     How long after a slow (>= ATA_RESET_SLOW_REQUEST_MS, default 2000 ms), HTTP 5xx"
+            echo "                             or failed demo request step 6 keeps watching for the alert it can open"
+            echo "                             (Cloud Run metric lag; default: 480s / 8m; env ATA_RESET_ALERT_LAG)"
+            echo "  --alert-window-from-start  Watch for alerts for --alert-lag from the reset start even if no request of the"
+            echo "                             reset was slow: for slow requests made just before it (verify-demo-infra.sh"
+            echo "                             says when; env ATA_RESET_ALERT_WINDOW_FROM_START=true)"
             echo "  --serving-revisions <list> Comma or space separated list of active Cloud Run revisions"
             echo "  --monitoring-token-source <adc|gcloud>"
             echo "                             Token for the alert check: adc = 'gcloud auth application-default print-access-token',"
@@ -158,6 +199,29 @@ done
 
 # Fail before any reset step if the token source is misconfigured.
 monitoring_token_command "${ATA_MONITORING_TOKEN_SOURCE}" >/dev/null || exit 1
+
+# Fail before any reset step on an invalid alert-window setting (no silent default).
+validate_alert_window_settings() {
+    case "${SLOW_REQUEST_MS}" in
+        ""|*[!0-9]*|0)
+            log_error "Invalid ATA_RESET_SLOW_REQUEST_MS '${SLOW_REQUEST_MS}' (expected a positive number of milliseconds, the latency alert threshold)." >&2
+            return 1
+            ;;
+    esac
+    case "${ALERT_LAG_SECS}" in
+        ""|*[!0-9]*)
+            log_error "Invalid --alert-lag / ATA_RESET_ALERT_LAG '${ALERT_LAG_SECS}' (expected e.g. 480, 480s or 8m)." >&2
+            return 1
+            ;;
+    esac
+    case "${ALERT_WINDOW_FROM_START}" in
+        true|false) ;;
+        *)
+            log_error "Invalid ATA_RESET_ALERT_WINDOW_FROM_START '${ALERT_WINDOW_FROM_START}' (expected true or false)." >&2
+            return 1
+            ;;
+    esac
+}
 # open_alerts.py names the source in its 401 messages.
 export ATA_MONITORING_TOKEN_SOURCE
 
@@ -320,6 +384,9 @@ wait_for_open_alerts() {
     if [ "${NO_WAIT}" = "true" ]; then
         log_info "    [--no-wait] Skipping wait for open alerts, terminal incident groups and quiet period."
         log_warn "    [--no-wait] Incident files are archived even if the agent is still working on a group (e.g. a pending recovery note)."
+        if [ "${ALERT_WINDOW_UNTIL}" -gt "$(date +%s)" ]; then
+            log_warn "    [--no-wait] Not waiting for alerts from slow demo requests (alert window $((ALERT_WINDOW_UNTIL - $(date +%s)))s left): such an alert can open after this reset and create a ticket."
+        fi
         return 0
     fi
 
@@ -351,6 +418,9 @@ wait_for_open_alerts() {
 
     log_info "    Polling Cloud Monitoring API (read-only) for OPEN alerts on ata-* policies (label app=alert-triage-agent)..."
     log_info "    Max timeout: ${WAIT_TIMEOUT_SECS}s | Quiet period: ${QUIET_PERIOD_SECS}s | Polling interval: ${POLL_INTERVAL_SECS}s | Max alert age: ${MAX_ALERT_AGE_SECS}s | Token source: ${ATA_MONITORING_TOKEN_SOURCE}"
+    if [ "${ALERT_WINDOW_UNTIL}" -gt "${start_time}" ]; then
+        log_info "    Alert window: watching for alerts from slow demo requests for another $((ALERT_WINDOW_UNTIL - start_time))s."
+    fi
     if [ -n "${serving_revs}" ]; then
         log_info "    Serving revisions scoped: ${serving_revs}"
     fi
@@ -488,6 +558,15 @@ PYEOF
                 continue
             fi
 
+            # Alerts caused by the reset's own slow requests open up to ALERT_LAG_SECS later
+            # (Cloud Run metric lag): keep watching until then. An alert that opens restarts
+            # the quiet period above and its group is waited for like any other.
+            if [ "${now}" -lt "${ALERT_WINDOW_UNTIL}" ]; then
+                log_info "    [Alert window] $((ALERT_WINDOW_UNTIL - now))s left for alerts from slow demo requests | 0 open alerts | ${quiet_status} | all incident groups terminal"
+                sleep "${POLL_INTERVAL_SECS}"
+                continue
+            fi
+
             if [ "${QUIET_PERIOD_SECS}" -le 0 ] || [ "${quiet_elapsed}" -ge "${QUIET_PERIOD_SECS}" ]; then
                 if [ -n "${ignored_groups}" ]; then
                     log_warn "    [--ignore-group] Archiving $(count_lines "${ignored_groups}") incident group(s) that are NOT terminal: $(summarize_lines "${ignored_groups}")"
@@ -590,22 +669,67 @@ verify_no_active_incident_groups() {
     log_success "    Verified 0 active incident groups (knowledge/incident-manager/ is empty)."
 }
 
-# --- Steps 1 and 9: authenticated demo admin calls ----------------------------
-# A fresh Cloud Run ID token is minted for every call: a reset with a long quiet period
-# outlives a token minted at start (QA: 401 about 10 min in).
+# --- Steps 1 and 5b: timed demo requests ---------------------------------------
 
-# Print the HTTP status of METHOD BASE_URL+PATH ("000" when the request itself failed).
-admin_http_status() {
+# Arm or extend the step-6 alert window for a request sent at epoch $1 (reason $2).
+extend_alert_window() {
+    local at="$1" reason="$2" until
+    until=$((at + ALERT_LAG_SECS))
+    if [ "${until}" -gt "${ALERT_WINDOW_UNTIL}" ]; then
+        ALERT_WINDOW_UNTIL="${until}"
+    fi
+    log_warn "    ${reason}. A latency or 5xx alert from it can open up to ${ALERT_LAG_SECS}s later; step 6 keeps watching for alerts until then before archiving."
+}
+
+# demo_request <label> <curl args...>: send one timed request to a demo service. Sets
+# LAST_HTTP_STATUS ("000" without a response) and LAST_HTTP_MS ("" when curl reported no
+# duration). A request that can raise an alert (>= SLOW_REQUEST_MS, HTTP 5xx, no response
+# or unknown duration) arms the alert window. Call it in the current shell, not in $(...),
+# or the window is lost.
+demo_request() {
+    local label="$1" out status secs="" ms at reason=""
+    shift
+    at="$(date +%s)"
+    out="$(curl -s -o /dev/null -w "%{http_code} %{time_total}" "$@" 2>/dev/null)" || true
+    status="${out%% *}"
+    case "${out}" in
+        *" "*) secs="${out#* }" ;;
+    esac
+    case "${status}" in
+        [0-9][0-9][0-9]) ;;
+        *) status="000" ;;
+    esac
+    ms="$(awk -v s="${secs}" 'BEGIN { if (s ~ /^[0-9]+([.][0-9]+)?$/) printf "%d", s * 1000 }')"
+    LAST_HTTP_STATUS="${status}"
+    LAST_HTTP_MS="${ms}"
+    case "${status}" in
+        5??|000) reason="${label} -> HTTP ${status}" ;;
+        *)
+            if [ -z "${ms}" ]; then
+                reason="${label}: curl reported no request duration ('${out}')"
+            elif [ "${ms}" -ge "${SLOW_REQUEST_MS}" ]; then
+                reason="${label} took ${ms} ms (>= ${SLOW_REQUEST_MS} ms, the latency alert threshold; a cold start?)"
+            fi
+            ;;
+    esac
+    if [ -n "${reason}" ]; then
+        extend_alert_window "${at}" "${reason}"
+    fi
+}
+
+# Authenticated request METHOD BASE_URL+PATH to a demo service (demo_request: sets
+# LAST_HTTP_STATUS/LAST_HTTP_MS). A fresh Cloud Run ID token is minted for every call: a
+# reset with a long quiet period outlives a token minted at start (QA: 401 about 10 min in).
+admin_request() {
     local method="$1" base="$2" path="$3"
-    local token status
+    local token
     local auth=()
     token="$(resolve_id_token "${base}")"
     if [ -n "${token}" ] && [ "${token}" != "mock-id-token" ]; then
         auth=(-H "Authorization: Bearer ${token}")
     fi
-    status="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 30 -X "${method}" \
-        ${auth[@]+"${auth[@]}"} "${base}${path}" 2>/dev/null)" || true
-    echo "${status:-000}"
+    demo_request "${method} ${base}${path}" --connect-timeout 5 --max-time 30 -X "${method}" \
+        ${auth[@]+"${auth[@]}"} "${base}${path}"
 }
 
 # Explain a non-2xx admin status on stderr.
@@ -628,7 +752,8 @@ admin_status_error() {
 # Step 1: POST /admin/fault/reset on one demo app; non-2xx is fatal.
 reset_app_faults() {
     local name="$1" base="$2" status
-    status="$(admin_http_status POST "${base}" /admin/fault/reset)"
+    admin_request POST "${base}" /admin/fault/reset
+    status="${LAST_HTTP_STATUS}"
     case "${status}" in
         2??)
             log_success "    ${name}: POST ${base}/admin/fault/reset -> HTTP ${status}"
@@ -652,11 +777,44 @@ terminate_local_pg_sleep() {
     esac
 }
 
-# Step 9: GET probes of the admin endpoints on the pinned inventory code (each returns 200).
+# Step 5b: GET /health on one demo app with its ID token; the first request after idling
+# is the cold start. Non-2xx is fatal.
+warm_up_service() {
+    local name="$1" base="$2" status
+    admin_request GET "${base}" /health
+    status="${LAST_HTTP_STATUS}"
+    case "${status}" in
+        2??)
+            log_success "    ${name}: GET ${base}/health -> HTTP ${status} in ${LAST_HTTP_MS:-?} ms"
+            ;;
+        *)
+            admin_status_error "GET ${base}/health (${name})" "${status}"
+            return 1
+            ;;
+    esac
+}
+
+# Step 5b: unauthenticated health checks through Apigee (reach the backends too). A
+# non-200 is logged as a warning, as before.
+check_apigee_health() {
+    local name status
+    for name in inventory orders; do
+        demo_request "GET https://${APIGEE_HOST}/ata/${name}/v1/health" -k --connect-timeout 5 --max-time 10 \
+            "https://${APIGEE_HOST}/ata/${name}/v1/health"
+        status="${LAST_HTTP_STATUS}"
+        log_info "    Apigee ${name} health: HTTP ${status} in ${LAST_HTTP_MS:-?} ms"
+        if [ "${status}" != "200" ]; then
+            log_warn "    Apigee ${name} /health did not return HTTP 200."
+        fi
+    done
+}
+
+# Step 5b: GET probes of the admin endpoints on the pinned inventory code (each returns 200).
 verify_admin_endpoints() {
     local base="$1" path status failed=0
     for path in /admin/leak-connections /admin/fault/inject; do
-        status="$(admin_http_status GET "${base}" "${path}")"
+        admin_request GET "${base}" "${path}"
+        status="${LAST_HTTP_STATUS}"
         case "${status}" in
             2??)
                 log_success "    Verified ${path} endpoint exists (HTTP ${status})"
@@ -682,7 +840,12 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     return 0
 fi
 
+validate_alert_window_settings || exit 1
+
 log_info "=== Starting Scenario Fault Cleanup & Baseline Restoration ==="
+if [ "${ALERT_WINDOW_FROM_START}" = "true" ]; then
+    extend_alert_window "${RESET_START_TIME}" "--alert-window-from-start: requests made before this reset may have been slow"
+fi
 
 # Refuse to restore traffic to a pinned revision that does not run the pinned image.
 verify_pinned_inventory_revision || exit 1
@@ -733,6 +896,26 @@ if ! restore_inventory_pinned_baseline; then
 fi
 log_success "    Cloud Run configuration restored to pinned baseline."
 
+# 5b. Warm Up the Demo Services (every demo request of the reset runs before step 6)
+# The direct /health calls take the cold start of an idle revision (e.g. the pinned
+# revision after an S5 revert); a slow one arms the alert window that step 6 waits out.
+log_info "--> 5b. Warming up the demo services and checking health and admin endpoints before the alert wait..."
+if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
+    warm_up_service "${NAME_PREFIX}-inventory-api" "${INV_URL}" || exit 1
+    warm_up_service "${NAME_PREFIX}-orders-api" "${ORD_URL}" || exit 1
+    check_apigee_health
+    # The admin GET probes are only harmless on the pinned code; never send them elsewhere.
+    verify_inventory_serving_pinned || exit 1
+    verify_admin_endpoints "${INV_URL}" || exit 1
+else
+    log_info "    [MOCK/DRY-RUN] Simulating warm-up, health and admin endpoint checks."
+fi
+if [ "${ALERT_WINDOW_UNTIL}" -gt "$(date +%s)" ]; then
+    log_warn "    Alert window armed: step 6 watches for alerts for another $((ALERT_WINDOW_UNTIL - $(date +%s)))s before archiving."
+else
+    log_info "    No slow, 5xx or failed demo request: no alert window needed."
+fi
+
 # 6. Wait for Open ATA Alerts to Close, Terminal Incident Groups & Quiet Period
 wait_for_open_alerts
 
@@ -746,33 +929,12 @@ else
     log_info "    Archive and cleanup simulation completed."
 fi
 
-# 8. Final Verification of Healthy State & Zero Active Groups
-log_info "--> 8. Verifying healthy baseline state..."
-API_KEY="$(resolve_api_key)"
-KEY_HEADER=()
-if [ -n "${API_KEY}" ]; then
-    KEY_HEADER=(-H "x-api-key: ${API_KEY}")
-fi
-
+# 8. Final Verification of Zero Active Groups
+# No demo request after step 6: the health and admin checks ran in step 5b, so nothing the
+# reset sends can open an alert after it has archived.
+log_info "--> 8. Verifying 0 active incident groups..."
 if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
-    # curl -w prints 000 when the request itself fails.
-    HEALTH_INV=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "https://${APIGEE_HOST}/ata/inventory/v1/health" || true)
-    HEALTH_ORD=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "https://${APIGEE_HOST}/ata/orders/v1/health" || true)
-    log_info "    Inventory Health: HTTP ${HEALTH_INV:-000}"
-    log_info "    Orders Health:    HTTP ${HEALTH_ORD:-000}"
-    if [ "${HEALTH_INV:-000}" != "200" ] || [ "${HEALTH_ORD:-000}" != "200" ]; then
-        log_warn "    A health endpoint did not return HTTP 200 (see above)."
-    fi
-
     verify_no_active_incident_groups || exit 1
-fi
-
-# 9. Admin Fault Injection Preflight Verification
-log_info "--> 9. Verifying admin fault injection endpoints exist on deployed inventory service..."
-if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
-    # The GET probes below are only harmless on the pinned code; never send them elsewhere.
-    verify_inventory_serving_pinned || exit 1
-    verify_admin_endpoints "${INV_URL}" || exit 1
 fi
 
 log_success "=== All Scenarios Reset Successfully: Environment Healthy ==="

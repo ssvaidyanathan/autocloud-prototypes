@@ -20,7 +20,8 @@ TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
 BASE = "https://inv.example.run.app"
 
 # curl stub: logs "METHOD URL BEARER" and prints the status configured for the URL path
-# in $PWD/statuses ("<path> <code>" lines; default 200; "<path> fail" = connection error).
+# in $PWD/statuses ("<path> <code>" lines; default 200; "<path> fail" = connection error),
+# followed by a 10 ms time_total (reset-scenarios.sh asks for -w "%{http_code} %{time_total}").
 FAKE_CURL = r"""#!/bin/sh
 method=GET; url=""; bearer=""
 while [ $# -gt 0 ]; do
@@ -36,7 +37,7 @@ echo "$method $url $bearer" >> "$PWD/curl_calls"
 path="/${url#*://*/}"
 code=$(awk -v p="$path" '$1 == p {print $2}' "$PWD/statuses" 2>/dev/null)
 [ "$code" = "fail" ] && exit 7
-printf '%s' "${code:-200}"
+printf '%s 0.010' "${code:-200}"
 """
 
 # gcloud stub: each identity token is new (token-1, token-2, ...); describe prints $PWD/<svc>.json.
@@ -126,7 +127,7 @@ def test_every_admin_call_mints_a_fresh_id_token(tmp_path):
     assert tokens == ["token-1", "token-2", "token-3", "token-4"]
 
 
-# --- Step 9: preflight -----------------------------------------------------------
+# --- Step 5b: preflight -----------------------------------------------------------
 
 
 def test_preflight_accepts_only_2xx(tmp_path):
