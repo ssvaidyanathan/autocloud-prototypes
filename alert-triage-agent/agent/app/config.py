@@ -65,6 +65,15 @@ class AgentConfig(BaseSettings):
     # entries in the -15/+5 min window. When the cap is hit, the report says so, no revision
     # switch is evaluated and log-derived counts are stated as lower bounds.
     apigee_access_log_max_entries: int = Field(default=5000, alias="APIGEE_ACCESS_LOG_MAX_ENTRIES", ge=1)
+    # Late alerts on ticketed groups: an alert of a signal type the group does not have yet
+    # (e.g. 5xx joining a latency group) whose onset is more than this many seconds after the
+    # group's first alert opens a new group instead of joining a ticketed group. Same-service
+    # latency/5xx score 35 (topology) + 30 (causal) = the 65-pt attach threshold, so the
+    # temporal score alone never separates them. Default: the 10-min temporal scoring horizon.
+    # Live S5 (one incident) had latency -> 5xx 413 s apart; keep the window above that.
+    late_new_signal_max_onset_gap_seconds: float = Field(
+        default=600.0, alias="LATE_NEW_SIGNAL_MAX_ONSET_GAP_SECONDS", ge=0
+    )
 
     @property
     def effective_incidents_bucket(self) -> str:

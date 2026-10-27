@@ -137,6 +137,11 @@ class OKFDocument(BaseModel):
     servicenow_sys_id: Optional[str] = None
     servicenow_number: Optional[str] = None
     servicenow_url: Optional[str] = None
+    # Ticket title/priority as last sent to ServiceNow (at creation, then on late-alert updates).
+    ticket_short_description: Optional[str] = None
+    ticket_priority: Optional[str] = None
+    ticket_title_problem: Optional[str] = None
+    ticket_origin: Optional[str] = None
 
     # Deadlines & Timers (ISO-8601 UTC)
     created_at: Optional[str] = None

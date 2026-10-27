@@ -32,6 +32,7 @@ from ..correlation.engine import (
 )
 from ..correlation.scoring import THRESHOLD_AUTO_ATTACH, THRESHOLD_AUTO_NEW
 from ..timers.scheduler import TimerScheduleError, schedule_delayed_timer
+from .late_alerts import exclude_late_new_signal_groups, refresh_ticket_for_late_alerts
 from .models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument, format_okf_alert_entry
 from .store import OKFStore
 from .suppression import (
@@ -292,7 +293,12 @@ class GroupingManager:
             matched_group_id = bridge_group_id
             correlation_info = {"decision": "attach", "best_score": 100.0, "confidence": 1.0}
         else:
-            candidates = [candidate_from_okf(d) for d in active_docs]
+            # Explicit time-distance rule: a new signal type far after a ticketed group's onset
+            # does not join that group (see late_alerts.exclude_late_new_signal_groups).
+            eligible_docs, excluded_groups = exclude_late_new_signal_groups(
+                alert, active_docs, self.config.late_new_signal_max_onset_gap_seconds
+            )
+            candidates = [candidate_from_okf(d) for d in eligible_docs]
             decision = self.correlation_engine.evaluate_alert(alert, candidate_groups=candidates)
             correlation_info = {
                 "decision": decision.decision,
@@ -304,6 +310,8 @@ class GroupingManager:
                 "threshold_auto_new": THRESHOLD_AUTO_NEW,
                 "threshold_auto_attach": THRESHOLD_AUTO_ATTACH,
             }
+            if excluded_groups:
+                correlation_info["excluded_groups"] = excluded_groups
             if decision.decision == "attach" and decision.target_group_id:
                 matched_group_id = decision.target_group_id
 
@@ -311,14 +319,15 @@ class GroupingManager:
         if matched_group_id:
             note_appended = False
             rescheduled_settle: Optional[str] = None
+            alert_added = False
 
             def _attach_mutation(d: OKFDocument) -> OKFDocument:
-                nonlocal note_appended, rescheduled_settle
+                nonlocal note_appended, rescheduled_settle, alert_added
                 # Safe upstream DAG origin promotion
                 safe_promote_upstream_origin(d, alert)
 
                 # Add alert
-                d.add_alert({
+                alert_added = d.add_alert({
                     "incident_id": alert.incident_id,
                     "policy_name": alert.policy_name,
                     "policy_id": getattr(alert, "policy_id", None),
@@ -371,6 +380,11 @@ class GroupingManager:
                         note_appended = True
                     except Exception as exc:
                         logger.warning("Failed appending late alert work note to bridge: %s", exc)
+                    if alert_added:
+                        # Title count, problem and priority follow the group; logged and work-noted.
+                        refresh_ticket_for_late_alerts(
+                            updated_doc, [alert.incident_id], self.bridge_client, self.config, self.store
+                        )
 
             if rescheduled_settle and updated_doc.settle_deadline:
                 settle_dt = datetime.fromisoformat(updated_doc.settle_deadline.replace("Z", "+00:00"))

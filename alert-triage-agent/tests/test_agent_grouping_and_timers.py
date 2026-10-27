@@ -293,6 +293,8 @@ def test_flapping_cooling_down_reactivates_to_ticketed(agent_cfg: Path, monkeypa
         return ActionStatusResponse(status="success", sys_id=request.sys_id, group_id=request.group_id)
 
     monkeypatch.setattr(BridgeClient, "append_work_note", mock_append_work_note)
+    ticket_updates: list[Any] = []
+    monkeypatch.setattr(BridgeClient, "update_ticket_fields", lambda self, bridge_url, request, **kw: ticket_updates.append(request))
 
     res_retrigger = client.post("/triage", json=flapping_alert.model_dump(mode="json"))
     assert res_retrigger.status_code == 200
@@ -307,6 +309,8 @@ def test_flapping_cooling_down_reactivates_to_ticketed(agent_cfg: Path, monkeypa
     assert len(notes_appended) == 1
     assert notes_appended[0].sys_id == "sys_flap_123"
     assert "Correlated Alert Ingested" in notes_appended[0].work_note
+    # Ticket title follows the group: 2 alerts now.
+    assert len(ticket_updates) == 1 and ticket_updates[0].short_description.endswith("(2 alerts)")
 
     # Now simulate the original cooling timer wake arriving at t=1240.0 (1060 + 180)
     simulated_time = 1240.0
@@ -361,6 +365,8 @@ def test_late_alert_appends_work_note_on_ticketed_group(agent_cfg: Path, monkeyp
         return ActionStatusResponse(status="success", sys_id=request.sys_id, group_id=request.group_id)
 
     monkeypatch.setattr(BridgeClient, "append_work_note", mock_append_note)
+    ticket_updates: list[Any] = []
+    monkeypatch.setattr(BridgeClient, "update_ticket_fields", lambda self, bridge_url, request, **kw: ticket_updates.append(request))
 
     # Correlated late alert arrives
     late_alert = AlertEvent(
@@ -380,6 +386,7 @@ def test_late_alert_appends_work_note_on_ticketed_group(agent_cfg: Path, monkeyp
     assert notes_sent[0].sys_id == "sys_late_456"
     assert "ata-inventory-latency" in notes_sent[0].work_note
     assert "0.late-02" in notes_sent[0].work_note
+    assert len(ticket_updates) == 1 and ticket_updates[0].short_description.endswith("(2 alerts)")
 
     # OKF document must retain ticketed status and have both alerts
     updated = store.read(group_id)

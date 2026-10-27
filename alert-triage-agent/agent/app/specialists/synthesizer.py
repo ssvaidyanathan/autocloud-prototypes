@@ -266,10 +266,15 @@ def correlation_observation(correlation: Optional[dict[str, Any]]) -> Optional[s
     score = _as_number(correlation.get("best_score"))
     low = _as_number(correlation.get("threshold_auto_new"))
     high = _as_number(correlation.get("threshold_auto_attach"))
+    excluded = _excluded_groups_text(correlation.get("excluded_groups"))
     if compared == 0:
+        if excluded:
+            return f"{CORRELATION_PREFIX} opened a new incident group; {excluded}"
         return f"{CORRELATION_PREFIX} opened a new incident group (no other open incident group to compare with)"
     if score is None or not compared:
         return None
+    if excluded:
+        return correlation_observation({**correlation, "excluded_groups": None}) + f"; {excluded}"
     groups = "group" if compared == 1 else "groups"
     text = f"{CORRELATION_PREFIX} opened a new incident group; best correlation score {score:g} pts against {compared} open {groups}"
     if correlation.get("is_gray_zone") and low is not None and high is not None:
@@ -277,6 +282,26 @@ def correlation_observation(correlation: Optional[dict[str, Any]]) -> Optional[s
     if low is not None and score < low:
         return text + f", below the {low:g} pts new-group threshold"
     return text
+
+
+def _excluded_groups_text(excluded: Any) -> Optional[str]:
+    """Text naming ticketed groups left out of correlation by the late new-signal rule, or None."""
+    if not isinstance(excluded, list) or not excluded:
+        return None
+    parts = []
+    for g in excluded:
+        if not isinstance(g, dict) or not g.get("group_id"):
+            continue
+        gap = _as_number(g.get("onset_gap_seconds"))
+        window = _as_number(g.get("window_seconds"))
+        detail = (
+            f" (ticketed; this alert's signal type is new to it and opened {gap:g}s after its first alert, "
+            f"beyond the {window:g}s window)"
+            if gap is not None and window is not None
+            else " (ticketed; new signal type beyond the late-alert window)"
+        )
+        parts.append(f"{g['group_id']}{detail}")
+    return f"not compared with {'; '.join(parts)}" if parts else None
 
 
 def apply_correlation_note(report: InvestigationReport, correlation: Optional[dict[str, Any]]) -> None:

@@ -312,6 +312,8 @@ def test_alert_attached_during_ticket_create_gets_late_alert_work_note(agent_cfg
     app.dependency_overrides[get_agent_settings] = lambda: agent_cfg
     monkeypatch.setattr(BridgeClient, "create_ticket", _create_ticket)
     monkeypatch.setattr(BridgeClient, "append_work_note", _append_work_note)
+    updates = []
+    monkeypatch.setattr(BridgeClient, "update_ticket_fields", lambda self, bridge_url, request, **kw: updates.append(request))
     monkeypatch.setattr(agent_main, "execute_multi_agent_investigation", _primary_only_investigation)
     client = TestClient(app, raise_server_exceptions=False)
     store = OKFStore(config=agent_cfg)
@@ -321,6 +323,8 @@ def test_alert_attached_during_ticket_create_gets_late_alert_work_note(agent_cfg
     assert client.post("/triage", json=_event(ORDERS).model_dump(mode="json")).json()["group_id"] == group_id
 
     assert _wake(client, store, group_id, clock).json()["status"] == "executed"
+    # The ticket title was built from 2 alerts; the late one makes 3 (ticket refreshed).
+    assert len(updates) == 1 and updates[0].short_description.endswith("(3 alerts)")
 
     assert {a["incident_id"] for a in created[0].report.alerts} == {"0.inv", "0.ord"}
     assert "0.late" in {a["incident_id"] for a in store.read(group_id).alerts}

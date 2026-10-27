@@ -109,6 +109,7 @@ The end-to-end incident investigation lifecycle flows through deterministic, aud
      - `POST /instructions/ticket/create`: Idempotently creates ServiceNow incident records via Table API with correlation tracking.
      - `POST /instructions/ticket/work-note`: Appends timestamped diagnostic notes to incident journal.
      - `POST /instructions/ticket/update-report`: Updates incident description and attaches rendered HTML diagnostic report.
+     - `POST /instructions/ticket/update-fields`: Updates the short description (and urgency/impact when a late alert escalates the priority) with a work note, when alerts join an already-ticketed group.
      - `POST /instructions/ticket/resolve`: Resolves incident upon completion of cool-down period.
    - `ServiceNowAdapter` in `bridge/app/adapters/servicenow.py` handles communication with the external ServiceNow Table and Attachment APIs.
 
