@@ -121,6 +121,9 @@ printf '%s %s' "${code:-200}" "${secs:-0.012}"
 FAKE_GCLOUD = r"""#!/bin/sh
 case "$*" in
   "auth print-identity-token"*) echo "token" ;;
+  # verify-demo-infra.sh looks the demo services up by exact name (no fallback URL).
+  "run services list"*"metadata.name=ata-inventory-api"*) printf 'ata-inventory-api\thttps://ata-inventory-api-test123-uc.a.run.app\n' ;;
+  "run services list"*"metadata.name=ata-orders-api"*) printf 'ata-orders-api\thttps://ata-orders-api-test123-uc.a.run.app\n' ;;
   *) exit 1 ;;
 esac
 """
@@ -352,8 +355,8 @@ def test_help_documents_alert_window_options():
 # verify-demo-infra.sh: reports requests that can raise an alert
 # =======================================================================================
 
-INV_DIRECT = "ata-inventory-api-4klvlqnmpa-uw.a.run.app/health"
-ORD_DIRECT = "ata-orders-api-4klvlqnmpa-uw.a.run.app/health"
+INV_DIRECT = "ata-inventory-api-test123-uc.a.run.app/health"
+ORD_DIRECT = "ata-orders-api-test123-uc.a.run.app/health"
 VERIFY_OK = ("/ata/orders/v1/orders/test 401\n/ata/inventory/v1/admin/reset 403\n"
              "/ata/orders/v1/admin/reset 403\n")
 

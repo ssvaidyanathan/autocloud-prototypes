@@ -1,31 +1,28 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# Compatibility entrypoint: the demo infrastructure part of the from-scratch deploy.
+#
+# Usage: scripts/deploy-demo-infra.sh [--yes]
+#
+# scripts/deploy-stage1.sh is the single deploy entrypoint. This script only runs its phases
+# from "database" on (database, schema, applications, inventory-pin, triage, triage-iam,
+# apigee, observability, verify), in the corrected order:
+#   scripts/deploy-stage1.sh --from database [--yes]
+# The earlier phases (preflight, bootstrap, foundation, secrets, images) must have run; the
+# image refs come from the images phase (or exported INVENTORY_IMAGE, ORDERS_IMAGE,
+# AGENT_IMAGE, BRIDGE_IMAGE, TOOLS_IMAGE). Required inputs: as for deploy-stage1.sh.
+# ==============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-echo "=== Deploying ATA Demo Infrastructure (Stage 2) ==="
+for arg in "$@"; do
+    case "${arg}" in
+        --yes|-y) ;;
+        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+        *) echo "Unknown argument: ${arg} (use --yes)" >&2; exit 1 ;;
+    esac
+done
 
-# 1. Database Tier
-echo "--> Applying database Terraform..."
-(cd "${REPO_DIR}/infra/terraform/database" && \
-  terraform init -input=false && \
-  terraform apply -auto-approve -input=false)
-
-# 2. Applications Tier
-echo "--> Applying applications Terraform..."
-(cd "${REPO_DIR}/infra/terraform/applications" && \
-  terraform init -input=false && \
-  terraform apply -auto-approve -input=false)
-
-# 3. Observability Tier
-echo "--> Applying observability Terraform..."
-(cd "${REPO_DIR}/infra/terraform/observability" && \
-  terraform init -input=false && \
-  terraform apply -auto-approve -input=false)
-
-# 4. Apigee Proxies
-echo "--> Deploying Apigee Proxies..."
-"${SCRIPT_DIR}/deploy-apigee-proxies.sh"
-
-echo "=== Demo Infrastructure Deployed Successfully ==="
+echo "deploy-demo-infra.sh: running scripts/deploy-stage1.sh --from database $*"
+exec bash "${SCRIPT_DIR}/deploy-stage1.sh" --from database "$@"

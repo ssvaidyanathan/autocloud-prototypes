@@ -878,7 +878,7 @@ URLs are never hardcoded. An exported `AGENT_URL` or `BRIDGE_URL` wins. Otherwis
 | | `AGENT_URL` | The agent URL (the `/triage` target of the dispatched tasks). |
 | | `BRIDGE_URL` | The bridge's own `status.url`. Required. On a first deploy, the script deploys with the deterministic URL, then sets `status.url` with `gcloud run services update` if it differs. |
 | | `SERVICENOW_INSTANCE_URL` | Environment, else `servicenow_instance_url` in `infra/terraform/foundation/terraform.tfvars`, else the value on the service. Required. |
-| | `VERIFIER_SA` | Only when exported; `VERIFIER_SA=none` removes it. The list is passed with gcloud's `^\|^` delimiter, so commas in it are kept. |
+| | `VERIFIER_SA` | Only when exported. The list is passed with gcloud's `^\|^` delimiter, so commas in it are kept. `VERIFIER_SA=none` removes it from the service (`--remove-env-vars=VERIFIER_SA`). Entries must be email addresses; the bridge lowercases them and refuses to start on any other entry. |
 | | `IS_LOCAL` | Always `false`. |
 | | `WEBHOOK_TOKEN`, `SERVICENOW_USERNAME`, `SERVICENOW_PASSWORD` | Secret Manager `${NAME_PREFIX}-webhook-token`, `${NAME_PREFIX}-servicenow-username`, `${NAME_PREFIX}-servicenow-password` (`:latest`). |
 | `<prefix>-tools` | `PROJECT_ID`, `NAME_PREFIX`, `REGION` | From the environment. Runs as `${NAME_PREFIX}-agent-sa`. |

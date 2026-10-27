@@ -126,8 +126,8 @@ tee_log() {
 log_info "Performing pre-run baseline reset..."
 "${SCRIPT_DIR}/reset-scenarios.sh" >> "${LOG_FILE}" 2>&1 || true
 
-# Preflight Health Verification
-if [ "${SKIP_PREFLIGHT:-false}" != "true" ]; then
+# Preflight Health Verification (skipped after a Ctrl-C in the baseline reset: the run stops)
+if [ "${SKIP_PREFLIGHT:-false}" != "true" ] && [ "${INTERRUPTED}" != "true" ]; then
     log_info "Executing preflight health check before scenario execution..."
     "${SCRIPT_DIR}/scenarios/preflight.sh" 2>&1 | tee_log || {
         if [ "${INTERRUPTED}" != "true" ]; then

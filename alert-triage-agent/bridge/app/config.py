@@ -66,6 +66,19 @@ class BridgeConfig(BaseSettings):
             raise ValueError(f"PROJECT_NUMBER must be the numeric GCP project number, got {value!r}")
         return str(value)
 
+    @field_validator("verifier_sa", mode="before")
+    @classmethod
+    def _validate_verifier_sa(cls, value: Optional[str]) -> Optional[str]:
+        """VERIFIER_SA: comma-separated caller emails, lowercased (Google ID-token email claims
+        are lower case). A non-email entry fails at startup instead of a silent 403 later."""
+        if value is None or str(value).strip() == "":
+            return None
+        entries = [e.strip().lower() for e in str(value).split(",") if e.strip()]
+        bad = [e for e in entries if not re.fullmatch(r"[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+", e)]
+        if bad:
+            raise ValueError(f"VERIFIER_SA entries must be email addresses (comma-separated), got {bad!r}")
+        return ",".join(entries) if entries else None
+
     @field_validator("bridge_url", mode="before")
     @classmethod
     def _validate_bridge_url(cls, value: Optional[str]) -> Optional[str]:
