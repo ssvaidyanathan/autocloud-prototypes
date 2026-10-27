@@ -402,11 +402,12 @@ phase_schema() {
 #   - a pin file whose revision exists: the pinned image, as above;
 #   - gcloud cannot tell (any error but not-found): fail, nothing applied.
 phase_applications() {
-    local state pin inventory_image
+    local state kind pin inventory_image
     state="$(inventory_pin_state)" || die "cannot read the inventory pin of stack '${NAME_PREFIX}', or cannot tell whether it serves in ${PROJECT_ID}/${REGION} (errors above). Nothing was applied."
-    pin="${state#* }"
-    case "${state}" in
-        "live "*)
+    kind="${state%% *}"
+    pin="$(printf '%s\n' "${state}" | awk '{print $2}')"
+    case "${kind}" in
+        live)
             need_images ORDERS_IMAGE
             if [ -n "${INVENTORY_IMAGE:-}" ] && [ "${INVENTORY_IMAGE}" != "${pin}" ]; then
                 die "INVENTORY_IMAGE disagrees with the inventory pin of stack '${NAME_PREFIX}':
@@ -422,7 +423,7 @@ phase_applications() {
             echo "    inventory_image: the pinned image ${pin} ($(inventory_pin_file))"
             inventory_image="${pin}"
             ;;
-        "stale "*)
+        stale)
             need_images INVENTORY_IMAGE ORDERS_IMAGE
             echo "WARNING: the inventory pin file $(inventory_pin_file) names ${pin}, which is not a revision in ${PROJECT_ID}/${REGION}: it is from another deployment of stack '${NAME_PREFIX}' (another project, or before a teardown). Using the built image ${INVENTORY_IMAGE}; the inventory-pin phase creates a new pin and rewrites that file (commit it)." >&2
             inventory_image="${INVENTORY_IMAGE}"
@@ -449,9 +450,9 @@ inventory_pin_file() {
     printf '%s\n' "${ATA_INVENTORY_PIN_FILE:-${SCRIPT_DIR}/scenarios/inventory-pin.${NAME_PREFIX}.env}"
 }
 
-# The stack's inventory pin, one line: "none" (no pin file), "live <image>" (the pinned
-# revision exists in ${PROJECT_ID}/${REGION}) or "stale <image>" (pin file, revision not found
-# there). <image> is <repo>/<prefix>-inventory-api@<pin digest>. Fails (non-zero, errors on
+# The stack's inventory pin, one line: "none" (no pin file), "live <image> <revision>" (the
+# pinned revision exists in ${PROJECT_ID}/${REGION}) or "stale <image> <revision>" (pin file,
+# revision not found there). <image> is <repo>/<prefix>-inventory-api@<pin digest>. Fails (non-zero, errors on
 # stderr) on an invalid pin file or when gcloud cannot tell whether the revision exists. The
 # file is read and validated by common.sh itself (the one strict reader), in a separate bash
 # process; the per-run PINNED_INVENTORY_* overrides of the scenario scripts are ignored here,
@@ -468,17 +469,58 @@ fi
 rc=0
 pinned_inventory_revision_exists || rc=$?
 case "${rc}" in
-    0) printf "live %s@%s\n" "${PINNED_INVENTORY_IMAGE_BASE}" "${PIN_INVENTORY_DIGEST}" ;;
-    1) printf "stale %s@%s\n" "${PINNED_INVENTORY_IMAGE_BASE}" "${PIN_INVENTORY_DIGEST}" ;;
+    0) printf "live %s@%s %s\n" "${PINNED_INVENTORY_IMAGE_BASE}" "${PIN_INVENTORY_DIGEST}" "${PIN_INVENTORY_REVISION}" ;;
+    1) printf "stale %s@%s %s\n" "${PINNED_INVENTORY_IMAGE_BASE}" "${PIN_INVENTORY_DIGEST}" "${PIN_INVENTORY_REVISION}" ;;
     *) echo "gcloud run revisions describe ${PIN_INVENTORY_REVISION} failed (above): cannot tell whether the pin serves." >&2; exit 1 ;;
 esac' inventory-pin "${SCRIPT_DIR}/scenarios/common.sh"
+}
+
+# The inventory service's live traffic split, "revision,percent" entries on one line (common.sh
+# inventory_traffic, the reader reset/preflight use; empty when describe fails).
+inventory_traffic_now() {
+    # shellcheck disable=SC2016  # the script is for the child bash; $1 is common.sh there
+    env -u APIGEE_HOST -u APIGEE_ORG -u APIGEE_ENV INVENTORY_PIN_OPTIONAL=true \
+        "${BASH:-bash}" -c 'source "$1" >&2
+inventory_traffic | tr "\n" " " | sed -e "s/ *$//"' inventory-traffic "${SCRIPT_DIR}/scenarios/common.sh"
 }
 
 # First pin of the inventory baseline (ata-s3's repin-inventory.sh): candidate with no traffic,
 # verified; pin file written; 100% traffic to it. Then the demo services' instance caps
 # (set-demo-instance-caps.sh --apply; Terraform cannot set the service-level limit).
+#
+# Idempotent re-run: when the pinned revision exists in this project (inventory_pin_state
+# "live") AND serves 100% of the traffic, the stack is already pinned: log it and skip (the
+# applications phase has already restored the instance caps). A live pin that does not serve
+# 100%, or an INVENTORY_IMAGE other than the pinned image, fails loudly (prepare --initial would
+# refuse anyway: "a pin exists"). No pin file, or a pin file from another deployment ("stale"):
+# the first pin below.
 phase_inventory_pin() {
-    local repin="${SCRIPT_DIR}/repin-inventory.sh" out_file line revision digest
+    local repin="${SCRIPT_DIR}/repin-inventory.sh" out_file line revision digest state kind pin traffic
+    state="$(inventory_pin_state)" || die "cannot read the inventory pin of stack '${NAME_PREFIX}', or cannot tell whether it serves in ${PROJECT_ID}/${REGION} (errors above). Nothing changed."
+    kind="${state%% *}"
+    if [ "${kind}" = "live" ]; then
+        pin="$(printf '%s\n' "${state}" | awk '{print $2}')"
+        revision="$(printf '%s\n' "${state}" | awk '{print $3}')"
+        load_images
+        if [ -n "${INVENTORY_IMAGE:-}" ] && [ "${INVENTORY_IMAGE}" != "${pin}" ]; then
+            die "stack '${NAME_PREFIX}' is already pinned (${revision} exists in ${PROJECT_ID}/${REGION}), but INVENTORY_IMAGE is not the pinned image:
+    INVENTORY_IMAGE: ${INVENTORY_IMAGE} (exported, or from ${IMAGES_FILE})
+    pinned image:    ${pin} ($(inventory_pin_file))
+  Nothing changed. To serve the new image, re-pin: scripts/repin-inventory.sh prepare --image-digest <digest>,
+  then write-pin and switch (DEPLOY.md, 'Re-pinning the inventory baseline'). To keep the pin, unset
+  INVENTORY_IMAGE and set the INVENTORY_IMAGE line of ${IMAGES_FILE} to ${pin} (or delete it)."
+        fi
+        traffic="$(inventory_traffic_now)"
+        if [ "${traffic}" != "${revision},100" ]; then
+            die "stack '${NAME_PREFIX}' is pinned to ${revision} (it exists in ${PROJECT_ID}/${REGION}), but ${NAME_PREFIX}-inventory-api traffic is '${traffic:-<unknown>}', not ${revision}=100. Nothing changed.
+  - Traffic moved off the pin (an S5 run, a manual deploy): restore it with scripts/reset-scenarios.sh
+    (or scripts/scenarios/s5_bad_deploy.sh --revert), then re-run this phase.
+  - A re-pin was interrupted between write-pin and switch: finish it with scripts/repin-inventory.sh switch.
+  - scripts/repin-inventory.sh status shows the pin, the traffic and the baseline."
+        fi
+        echo "    already pinned: ${revision}; skipping (100% of traffic; $(inventory_pin_file))"
+        return 0
+    fi
     [ -x "${repin}" ] || [ -f "${repin}" ] || die "${repin} not found: the first inventory pin needs scripts/repin-inventory.sh (prepare --initial)."
     need_images INVENTORY_IMAGE
     digest="${INVENTORY_IMAGE##*@}"

@@ -66,6 +66,10 @@ elif args[:3] == ["run", "revisions", "describe"]:
         sys.stderr.write("ERROR: (gcloud.run.revisions.describe) PERMISSION_DENIED: run.revisions.get denied\n")
         sys.exit(1)
     print(args[3])
+elif args[:3] == ["run", "services", "describe"] and (opt("format") or "").startswith("csv[no-heading](status.traffic"):
+    # STUB_TRAFFIC: "rev,percent" lines separated by ";" (unset: no output, as when describe fails).
+    for l in os.environ.get("STUB_TRAFFIC", "").split(";"):
+        if l: print(l)
 elif args[:3] == ["run", "services", "describe"] and opt("format") == "value(status.url)":
     print(f"https://{args[3]}-hash1234-uc.a.run.app")
 elif args[:3] == ["run", "services", "describe"] and opt("format") == "json":
@@ -714,6 +718,77 @@ def test_refuses_another_stacks_backend(stack):
     assert res.returncode == 1
     assert "is not for NAME_PREFIX=atat" in res.stderr
     assert not [c for c in calls if c[0] == "terraform"]
+
+
+# --- inventory-pin phase on an already pinned stack (EM follow-up to fresh-rev-r2) -----------
+PIN_REVISION = "atat-inventory-api-pin-20260101000000"
+
+
+def _inventory_pin(stack, **env):
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "inventory-pin", **env)
+    return res, calls, [c for c in calls if c[0] in ("repin", "caps")]
+
+
+@pytest.mark.parametrize("images_digest", [PIN_DIGEST, None], ids=["images-file-agrees", "no-inventory-in-images-file"])
+def test_inventory_pin_skips_a_stack_whose_pin_exists_and_serves_100(stack, images_digest):
+    _write_stack_pin(stack)
+    _write_images(stack, images_digest)
+    res, calls, steps = _inventory_pin(stack, STUB_TRAFFIC=f"{PIN_REVISION},100")
+    assert res.returncode == 0, _out(res)
+    assert steps == [], "an already pinned stack must not be re-pinned"
+    assert f"already pinned: {PIN_REVISION}; skipping" in res.stdout
+    traffic = [c for c in calls if c[:5] == ["gcloud", "run", "services", "describe", "atat-inventory-api"]]
+    assert traffic and "--project=fresh-proj" in traffic[0] and "--region=us-central1" in traffic[0]
+
+
+@pytest.mark.parametrize("traffic", ["", "atat-inventory-api-00002-xyz,100", f"{PIN_REVISION},50;atat-inventory-api-00002-xyz,50"],
+                         ids=["unknown", "other-revision", "split"])
+def test_inventory_pin_fails_loudly_when_the_live_pin_does_not_serve_100(stack, traffic):
+    _write_stack_pin(stack)
+    _write_images(stack, PIN_DIGEST)
+    res, _, steps = _inventory_pin(stack, STUB_TRAFFIC=traffic)
+    assert res.returncode == 1
+    assert steps == []
+    assert f"is pinned to {PIN_REVISION}" in res.stderr and f"not {PIN_REVISION}=100" in res.stderr
+    assert "scripts/reset-scenarios.sh" in res.stderr and "repin-inventory.sh switch" in res.stderr
+    assert "already pinned" not in res.stdout
+
+
+def test_inventory_pin_fails_loudly_when_the_image_disagrees_with_a_live_pin(stack):
+    _write_stack_pin(stack)
+    _write_images(stack, OTHER_DIGEST)
+    res, _, steps = _inventory_pin(stack, STUB_TRAFFIC=f"{PIN_REVISION},100")
+    assert res.returncode == 1
+    assert steps == []
+    assert "is already pinned" in res.stderr and f"INVENTORY_IMAGE: {INV_REPO}@{OTHER_DIGEST}" in res.stderr
+    assert "scripts/repin-inventory.sh prepare --image-digest" in res.stderr
+
+
+def test_inventory_pin_with_a_pin_file_from_another_deployment_pins_the_built_image(stack):
+    _write_stack_pin(stack)
+    _write_images(stack, OTHER_DIGEST)
+    res, _, steps = _inventory_pin(stack, STUB_REVISION="missing")
+    assert res.returncode == 0, _out(res)
+    assert [c[1] for c in steps if c[0] == "repin"] == ["prepare", "write-pin", "switch"]
+    assert steps[0][1:] == ["prepare", "--initial", "--image-digest", OTHER_DIGEST]
+
+
+def test_inventory_pin_fails_loudly_when_it_cannot_tell_whether_the_pin_exists(stack):
+    _write_stack_pin(stack)
+    _write_images(stack, PIN_DIGEST)
+    res, _, steps = _inventory_pin(stack, STUB_REVISION="error")
+    assert res.returncode == 1 and steps == []
+    assert "PERMISSION_DENIED" in res.stderr and "cannot tell whether it serves" in res.stderr
+
+
+def test_full_rerun_of_a_pinned_stack_skips_the_inventory_pin(stack):
+    """A full deploy-stage1.sh re-run of a live, serving stack (same inventory build) completes."""
+    _write_stack_pin(stack)
+    res, calls = stack("deploy-stage1.sh", "--yes", STUB_DIGEST=PIN_DIGEST, STUB_TRAFFIC=f"{PIN_REVISION},100")
+    assert res.returncode == 0, _out(res)
+    assert [c for c in calls if c[0] == "repin"] == []
+    assert f"already pinned: {PIN_REVISION}; skipping" in res.stdout
+    assert [c[0] for c in calls if c[0] == "verify-stage1"] == ["verify-stage1"]
 
 
 def test_inventory_pin_needs_the_repin_script(stack):

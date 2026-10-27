@@ -595,6 +595,8 @@ It lists `<prefix>-inventory-api` and `<prefix>-orders-api` with URLs.
 
 **Expected:** `Candidate verified: <prefix>-inventory-api-<nnnnn>-<xxx> (sha256:...)`, then the pin written and the switch verified, and finally `pinned <revision> (<digest>)`.
 
+**Re-runs.** If the stack is already pinned, meaning the pinned revision exists in this project and serves 100% of the traffic, the phase prints `already pinned: <revision>; skipping` and changes nothing, so a full re-run of `deploy-stage1.sh` completes. The applications phase has already restored the instance caps. A pin file whose revision is not in this project, from another deployment of the prefix, is pinned again as above.
+
 **Verify:**
 
 ```bash
@@ -608,6 +610,8 @@ The pin file is `scripts/scenarios/inventory-pin.<prefix>.env`; the end-of-phase
 The phase then caps the demo services at the service level (the default is 1 instance; see [§4.2](#42-instance-caps)) by running `./scripts/set-demo-instance-caps.sh --apply`. If only that step fails, the pin is in place: fix the cause, re-run that command alone, and resume with `--from triage`.
 
 **If it fails:**
+- `is pinned to <revision> ..., but ... traffic is '...', not <revision>=100`: the pin exists but does not serve all traffic, so nothing changed. Restore it with `./scripts/reset-scenarios.sh` (or `s5_bad_deploy.sh --revert`), or finish an interrupted re-pin with `./scripts/repin-inventory.sh switch`. `./scripts/repin-inventory.sh status` shows the state.
+- `is already pinned ..., but INVENTORY_IMAGE is not the pinned image`: nothing changed. Re-pin to serve the new image ([§4.3](#43-re-pinning-the-inventory-baseline-and-pruning-revisions)), or set the images file's `INVENTORY_IMAGE` line to the pinned image.
 - `--initial: a pin exists`: this stack's pin file names a revision that exists in this project, so the stack is already pinned. Re-pin without `--initial` ([§4.3](#43-re-pinning-the-inventory-baseline-and-pruning-revisions)), or check `NAME_PREFIX` and `PROJECT_ID`.
 - `/items` fails in `prepare`: the schema or the GRANT is missing (Step 8), or the instance is not `RUNNABLE` yet.
 - `could not read the candidate revision`: `prepare` succeeded but its output changed. Run `./scripts/repin-inventory.sh write-pin --initial --revision <candidate> --digest <digest>`, then `./scripts/repin-inventory.sh switch`, using the values from the `Candidate verified` line.
