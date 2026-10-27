@@ -34,6 +34,7 @@ from .grouping.store import OKFStore, read_okf, update_okf_atomically
 from .grouping.suppression import format_late_alert_work_note
 from .grouping.stuck_investigation import (
     WATCHDOG_DEADLINE_TYPE,
+    apply_degraded_predecessor_note,
     apply_recovery_note,
     investigation_started_epoch,
     is_stuck_investigation,
@@ -43,7 +44,12 @@ from .grouping.stuck_investigation import (
 )
 from .recovery import recovery_note_for_group
 from .specialists.origin_selection import alert_event_from_entry
-from .specialists.synthesizer import SynthesizerAgent, _priority_rank, apply_correlation_note, apply_group_alerts
+from .specialists.synthesizer import (
+    SynthesizerAgent,
+    apply_correlation_note,
+    apply_group_alerts,
+    raise_file_priority,
+)
 from .timers.scheduler import schedule_delayed_timer
 from .triage import (
     execute_multi_agent_investigation,
@@ -822,6 +828,7 @@ def _apply_current_group_alerts(report: InvestigationReport, store: OKFStore, do
     apply_group_alerts(report, list(current.alerts or []))
     apply_correlation_note(report, current.correlation)
     apply_recovery_note(report, getattr(current, "investigation_recoveries", None))
+    apply_degraded_predecessor_note(report, getattr(current, "degraded_predecessors", None))
 
 
 def _record_ticket_title(d: OKFDocument, report: InvestigationReport) -> None:
@@ -830,14 +837,7 @@ def _record_ticket_title(d: OKFDocument, report: InvestigationReport) -> None:
     d.ticket_priority = report.priority
     # The file's priority follows the ticket's: alerts merged at ticket time can raise it.
     # Only raised, never lowered automatically.
-    if _priority_rank(report.priority) < _priority_rank(d.priority):
-        logger.info("Group %s: priority %s -> %s (ticket priority)", d.group_id, d.priority, report.priority)
-        d.priority = report.priority
-    elif d.priority != report.priority:
-        logger.warning(
-            "Group %s: file priority %s is higher than the ticket priority %s; not lowered automatically",
-            d.group_id, d.priority, report.priority,
-        )
+    raise_file_priority(d, report.priority, "ticket priority")
     d.ticket_title_problem = report.resolve_title_problem()
     d.ticket_origin = report.origin
 

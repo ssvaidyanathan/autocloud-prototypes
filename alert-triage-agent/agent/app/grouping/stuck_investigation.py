@@ -17,9 +17,17 @@ recorded). Two triggers detect it:
 
 Recovery is logged at ERROR, recorded on the group (``investigation_recoveries``) and
 stated in the ticket. It re-enqueues a settle wake, which gets a fresh retry window,
-plus a watchdog. After ``INVESTIGATION_MAX_RECOVERIES`` recoveries the group is marked
-``degraded`` instead (ERROR): degraded groups are not attachable, so new alerts open a new
-group rather than joining one that is not being ticketed.
+plus a watchdog. If that settle wake cannot be scheduled, the attempt still counts: the
+record is kept (marked ``settle_wake_scheduled: false``), the attempt stamp is restored so
+the group stays detectable as stuck, and the failure is logged at ERROR. The watchdog path
+re-raises (Cloud Tasks retries the watchdog wake); the ingest path does not, so one group's
+failure cannot fail the ingest of an unrelated alert.
+
+After ``INVESTIGATION_MAX_RECOVERIES`` recoveries the group is marked ``degraded`` instead
+(ERROR, listing its alert ids and policies): degraded groups are not attachable, so new
+alerts open a new group rather than joining one that is not being ticketed. The next group
+that opens for the same scope (``degraded_group_in_scope``) lists the degraded group's
+alerts in its ticket (``degraded_predecessor_observation``), so they are not dropped.
 
 The decision is taken inside ``OKFStore.update_atomically`` on the freshly read document,
 so concurrent triggers recover a group at most once per stale period.
@@ -41,11 +49,14 @@ logger = logging.getLogger(__name__)
 
 WATCHDOG_DEADLINE_TYPE = "investigation_watchdog"
 RECOVERY_OBSERVATION_PREFIX = "Investigation recovery:"
+DEGRADED_PREDECESSOR_PREFIX = "Degraded incident group"
+DEGRADED_CAUSE_STUCK = "stuck_investigation"
 
 OUTCOME_RECOVERED = "recovered"
 OUTCOME_DEGRADED = "degraded"
 OUTCOME_NOT_STUCK = "not_stuck"
 OUTCOME_GROUP_GONE = "group_gone"
+OUTCOME_SCHEDULE_FAILED = "recovery_schedule_failed"
 
 
 def _iso(epoch: float) -> str:
@@ -104,11 +115,16 @@ def recover_stuck_investigation(
     now: float,
     settings: AgentConfig,
     trigger: str,
+    reraise_schedule_failure: bool = True,
 ) -> RecoveryResult:
     """Recover (re-enqueue) or degrade a stuck group. No-op if the fresh document is not stuck.
 
-    Raises TimerScheduleError if the recovery settle wake cannot be scheduled; the group is
-    then marked degraded first, so it is not left looking recovered.
+    If the recovery settle wake cannot be scheduled, the attempt still counts toward
+    ``INVESTIGATION_MAX_RECOVERIES``: its record is kept, the group's attempt stamp is
+    restored so it stays detectable as stuck, and the failure is logged at ERROR. The error
+    is then re-raised (watchdog path: Cloud Tasks retries the wake) unless
+    ``reraise_schedule_failure`` is False (ingest path), which returns
+    ``OUTCOME_SCHEDULE_FAILED`` with the restored document instead.
     """
     stale = settings.investigation_stale_seconds
     max_recoveries = settings.investigation_max_recoveries
@@ -134,8 +150,10 @@ def recover_stuck_investigation(
         if len(prior) >= max_recoveries:
             outcome = OUTCOME_DEGRADED
             record["recoveries_used"] = len(prior)
+            record["alerts"] = alert_refs(d.alerts)
             d.status = IncidentGroupStatus.DEGRADED.value
             d.degraded = True
+            d.degraded_cause = DEGRADED_CAUSE_STUCK
             d.degraded_reason = (
                 f"investigating without a ServiceNow ticket; last wake attempt {last_attempt or 'not recorded'}, "
                 f"stale after {stale:g}s; {len(prior)} of {max_recoveries} recoveries already used"
@@ -175,19 +193,36 @@ def recover_stuck_investigation(
             service_account_email=settings.service_account_email,
         )
     except Exception as exc:
-        logger.error(
-            "Failed to schedule the recovery settle wake for stuck group %s: %s", group_id, exc, exc_info=True
-        )
+        error_text = f"{type(exc).__name__}: {exc}"
 
-        def _degrade(d: OKFDocument) -> OKFDocument:
-            d.status = IncidentGroupStatus.DEGRADED.value
-            d.degraded = True
-            d.degraded_reason = f"stuck investigation recovery could not schedule a settle wake: {exc}"
+        def _restore(d: OKFDocument) -> OKFDocument:
+            # Keep the attempt (it counts toward the limit); make the group stuck again.
+            for r in getattr(d, "investigation_recoveries", None) or []:
+                if isinstance(r, dict) and r.get("at") == now_iso and r.get("trigger") == trigger:
+                    r["settle_wake_scheduled"] = False
+                    r["settle_wake_error"] = error_text
+            if getattr(d, "investigation_started_at", None) == now_iso:
+                d.investigation_started_at = record.get("last_wake_attempt_at")
             d.updated_at = now_iso
             return d
 
-        store.update_atomically(group_id, _degrade, create_if_missing=False)
-        raise
+        restored = store.update_atomically(group_id, _restore, create_if_missing=False)
+        logger.error(
+            "Failed to schedule the recovery settle wake for stuck group %s (recovery %s of %s): %s; the attempt "
+            "is counted and the group stays detectable as stuck, so the %s",
+            group_id,
+            record.get("recovery_number"),
+            max_recoveries,
+            error_text,
+            "watchdog wake is retried by Cloud Tasks" if reraise_schedule_failure
+            else "next alert ingest or watchdog wake retries it",
+            exc_info=True,
+        )
+        if reraise_schedule_failure:
+            raise
+        if restored is None:
+            return RecoveryResult(outcome=OUTCOME_GROUP_GONE, doc=None)
+        return RecoveryResult(outcome=OUTCOME_SCHEDULE_FAILED, doc=restored)
 
     try:
         schedule_watchdog(settings, group_id, now + stale)
@@ -210,10 +245,11 @@ def recovery_observation(recoveries: Optional[list[Any]]) -> Optional[str]:
         return None
     parts = []
     for r in items:
-        parts.append(
-            f"restarted at {r.get('at')} ({r.get('trigger')}; last wake attempt "
-            f"{r.get('last_wake_attempt_at') or 'not recorded'})"
-        )
+        detail = f"({r.get('trigger')}; last wake attempt {r.get('last_wake_attempt_at') or 'not recorded'})"
+        if r.get("settle_wake_scheduled") is False:
+            parts.append(f"restart attempted at {r.get('at')} {detail} but its settle wake could not be scheduled")
+        else:
+            parts.append(f"restarted at {r.get('at')} {detail}")
     stale = items[-1].get("stale_seconds")
     stale_txt = f"{float(stale):g}s" if isinstance(stale, (int, float)) else "the stale threshold"
     return (
@@ -231,3 +267,112 @@ def apply_recovery_note(report: Any, recoveries: Optional[list[Any]]) -> None:
     items = [i for i in items if not i.startswith(RECOVERY_OBSERVATION_PREFIX)]
     items.append(line)
     report.observations = " | ".join(items)
+
+
+# Alerts of a group degraded after the recovery limit (carried into the next group's ticket) ---
+
+
+def alert_refs(alerts: Optional[list[Any]]) -> list[dict[str, Any]]:
+    """``[{incident_id, policy_name}]`` for each alert entry with an incident id."""
+    out = []
+    for a in alerts or []:
+        if isinstance(a, dict) and a.get("incident_id"):
+            out.append({"incident_id": a.get("incident_id"), "policy_name": a.get("policy_name")})
+    return out
+
+
+def _resources(doc: OKFDocument) -> set[str]:
+    names = {doc.resource_name, doc.origin, *(doc.blast_radius or [])}
+    names.update(a.get("resource_name") for a in doc.alerts or [] if isinstance(a, dict))
+    return {n for n in names if n}
+
+
+def degraded_group_in_scope(degraded: OKFDocument, new_resources: set[str]) -> bool:
+    """True if ``degraded`` was degraded after the recovery limit, is not yet carried into another
+    group, and shares a resource (resource, origin, blast radius or alert resource) with the new group.
+    """
+    if str(degraded.status).lower() != IncidentGroupStatus.DEGRADED.value:
+        return False
+    if getattr(degraded, "degraded_cause", None) != DEGRADED_CAUSE_STUCK:
+        return False
+    if getattr(degraded, "carried_to_group_id", None):
+        return False
+    return bool(_resources(degraded) & {r for r in new_resources if r})
+
+
+def degraded_predecessor_entry(degraded: OKFDocument) -> dict[str, Any]:
+    """What the new group records about a degraded group whose alerts it carries."""
+    attempts = len(getattr(degraded, "investigation_recoveries", None) or [])
+    return {
+        "group_id": degraded.group_id,
+        "alerts": alert_refs(degraded.alerts),
+        "reason": f"investigation stuck; {attempts} recovery attempts failed",
+        "degraded_reason": degraded.degraded_reason,
+    }
+
+
+def degraded_predecessor_observation(predecessors: Optional[list[Any]]) -> Optional[str]:
+    """Ticket observation listing each degraded group's alerts carried into this group, or None."""
+    lines = []
+    for p in predecessors or []:
+        if not isinstance(p, dict) or not p.get("group_id"):
+            continue
+        alerts = ", ".join(
+            f"{a.get('incident_id')} ({a.get('policy_name') or 'policy not recorded'})"
+            for a in p.get("alerts") or [] if isinstance(a, dict)
+        ) or "none recorded"
+        lines.append(
+            f"{DEGRADED_PREDECESSOR_PREFIX} {p['group_id']} ({p.get('reason')}) was not ticketed; its alerts: {alerts}."
+        )
+    return " | ".join(lines) or None
+
+
+def apply_degraded_predecessor_note(report: Any, predecessors: Optional[list[Any]]) -> None:
+    """Append the degraded-predecessor observation(s) to ``report.observations`` (idempotent)."""
+    line = degraded_predecessor_observation(predecessors)
+    if not line:
+        return
+    items = split_observations(report.observations or "")
+    items = [i for i in items if not i.startswith(DEGRADED_PREDECESSOR_PREFIX)]
+    items.extend(split_observations(line))
+    report.observations = " | ".join(items)
+
+
+def claim_degraded_predecessors(
+    store: OKFStore, predecessors: list[dict[str, Any]], new_group_id: str, now_iso: str
+) -> None:
+    """Record on each degraded group which new group carries its alerts (so it is carried once).
+
+    A group already claimed by another new group (a concurrent instance) keeps that claim and
+    is logged at WARNING: its alerts are then listed by both tickets, never by neither.
+    """
+    for p in predecessors:
+        gid = p["group_id"]
+        holder: dict[str, Optional[str]] = {"to": None}
+
+        def _claim(d: OKFDocument) -> OKFDocument:
+            holder["to"] = getattr(d, "carried_to_group_id", None)
+            if not holder["to"]:
+                d.carried_to_group_id = new_group_id
+                d.updated_at = now_iso
+            return d
+
+        try:
+            store.update_atomically(gid, _claim, create_if_missing=False)
+        except Exception as exc:
+            logger.error(
+                "Could not record that group %s carries the alerts of degraded group %s (%s: %s); "
+                "a later new group may list them again",
+                new_group_id, gid, type(exc).__name__, exc,
+            )
+            continue
+        if holder["to"] and holder["to"] != new_group_id:
+            logger.warning(
+                "Degraded group %s was already carried into group %s; group %s lists its alerts too",
+                gid, holder["to"], new_group_id,
+            )
+        logger.warning(
+            "DEGRADED_ALERTS_CARRIED: %s",
+            json.dumps({"event": "degraded_alerts_carried", "degraded_group_id": gid,
+                        "new_group_id": new_group_id, "alerts": p.get("alerts")}),
+        )

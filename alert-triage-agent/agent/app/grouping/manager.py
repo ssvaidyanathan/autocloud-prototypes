@@ -35,7 +35,14 @@ from ..timers.scheduler import TimerScheduleError, schedule_delayed_timer
 from .late_alerts import exclude_late_new_signal_groups, refresh_ticket_for_late_alerts
 from .models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument, format_okf_alert_entry
 from .store import OKFStore
-from .stuck_investigation import is_stuck_investigation, recover_stuck_investigation
+from .stuck_investigation import (
+    OUTCOME_DEGRADED,
+    claim_degraded_predecessors,
+    degraded_group_in_scope,
+    degraded_predecessor_entry,
+    is_stuck_investigation,
+    recover_stuck_investigation,
+)
 from .suppression import (
     check_duplicate_alert,
     format_late_alert_work_note,
@@ -133,22 +140,34 @@ class GroupingManager:
 
     def _recover_stuck_investigations(
         self, active_docs: list[OKFDocument], now: float, alert: AlertEvent
-    ) -> list[OKFDocument]:
-        """Recover stuck investigating groups; drop the ones degraded (not attachable) from ``active_docs``."""
+    ) -> tuple[list[OKFDocument], list[OKFDocument]]:
+        """Recover stuck investigating groups. Returns (attachable docs, docs degraded by this sweep).
+
+        A recovery whose settle wake cannot be scheduled is logged at ERROR and counted, and the
+        group stays attachable; it does not fail this (possibly unrelated) alert's ingest.
+        """
         stale = self.config.investigation_stale_seconds
         kept: list[OKFDocument] = []
+        degraded: list[OKFDocument] = []
         for d in active_docs:
             if not is_stuck_investigation(d, now, stale):
                 kept.append(d)
                 continue
             result = recover_stuck_investigation(
-                self.store, d.group_id, now, self.config, trigger=f"alert {alert.incident_id} ingested"
+                self.store,
+                d.group_id,
+                now,
+                self.config,
+                trigger=f"alert {alert.incident_id} ingested",
+                reraise_schedule_failure=False,
             )
             if result.doc is None:
                 continue
             if str(result.doc.status).lower() in ACTIVE_GROUP_STATUSES:
                 kept.append(result.doc)
-        return kept
+            elif result.outcome == OUTCOME_DEGRADED:
+                degraded.append(result.doc)
+        return kept, degraded
 
     def ingest_alert(
         self,
@@ -178,13 +197,16 @@ class GroupingManager:
         now_dt = datetime.fromtimestamp(now, tz=timezone.utc)
         now_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Discover active incident documents
-        active_docs = self.store.list_documents(
-            status_filter=set(ACTIVE_GROUP_STATUSES)
+        # Discover active incident documents (and degraded ones, whose alerts a new group may carry)
+        listed = self.store.list_documents(
+            status_filter=set(ACTIVE_GROUP_STATUSES) | {IncidentGroupStatus.DEGRADED.value}
         )
+        active_docs = [d for d in listed if str(d.status).lower() in ACTIVE_GROUP_STATUSES]
+        degraded_docs = [d for d in listed if str(d.status).lower() == IncidentGroupStatus.DEGRADED.value]
         # Groups stuck in 'investigating' (their wake exhausted its retries) are recovered or
         # degraded before this alert can attach to them (see grouping/stuck_investigation.py).
-        active_docs = self._recover_stuck_investigations(active_docs, now, alert)
+        active_docs, newly_degraded = self._recover_stuck_investigations(active_docs, now, alert)
+        degraded_docs.extend(newly_degraded)
 
         # 1. Closed alert handling
         if alert.state and alert.state.lower() == "closed":
@@ -482,6 +504,13 @@ class GroupingManager:
         except Exception as b_exc:
             logger.debug("Failed computing blast radius: %s", b_exc)
 
+        # A group degraded after INVESTIGATION_MAX_RECOVERIES in this scope was never ticketed:
+        # this group's ticket lists its alerts (stuck_investigation.degraded_predecessor_observation).
+        scope = set(initial_blast)
+        predecessors = [
+            degraded_predecessor_entry(d) for d in degraded_docs if degraded_group_in_scope(d, scope)
+        ]
+
         new_doc = OKFDocument(
             group_id=group_id,
             status=IncidentGroupStatus.OPEN.value,
@@ -498,6 +527,7 @@ class GroupingManager:
             max_wait_deadline=max_wait_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
             alerts=[format_okf_alert_entry(alert, valid_ts=alert.started_at, received_at=now_iso)],
             correlation={k: v for k, v in correlation_info.items() if k != "confidence"} or None,
+            degraded_predecessors=predecessors,
         )
 
         saved_doc = self.store.write(group_id, new_doc)
@@ -545,6 +575,10 @@ class GroupingManager:
             )
             self._mark_group_degraded(group_id, str(exc))
             raise
+
+        # Claimed only once this group's timers are scheduled: if it is degraded above instead,
+        # the predecessors stay unclaimed and the next new group carries them.
+        claim_degraded_predecessors(self.store, predecessors, group_id, now_iso)
 
         self._emit_decision_log(
             event="alert_ingested",
