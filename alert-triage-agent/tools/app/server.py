@@ -649,7 +649,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
                 if self.allowed_service_accounts:
                     caller_email = claims.get("email")
-                    if caller_email not in self.allowed_service_accounts:
+                    allowed = {str(sa).strip().lower() for sa in self.allowed_service_accounts}
+                    if str(caller_email or "").strip().lower() not in allowed:
                         return JSONResponse(
                             {"error": "Forbidden", "detail": f"Caller email '{caller_email}' not authorized"},
                             status_code=403,
@@ -684,6 +685,13 @@ def create_app(
         expected_audience = cfg.effective_expected_audiences
     if allowed_service_accounts is None:
         allowed_service_accounts = cfg.effective_allowed_service_accounts
+    # Fail closed on Cloud Run (K_SERVICE is set there): ENFORCE_AUTH without VERIFY_OIDC accepts
+    # any non-empty Bearer string, and neither leaves the MCP tools open to anyone with run.invoker.
+    if os.getenv("K_SERVICE") and not cfg.is_local and not (enforce_auth and verify_oidc):
+        raise RuntimeError(
+            "ata-tools on Cloud Run requires ENFORCE_AUTH=true and VERIFY_OIDC=true "
+            "(tools/scripts/deploy.sh sets both)"
+        )
     if enforce_auth and verify_oidc and not expected_audience:
         raise RuntimeError(
             "ata-tools cannot start: VERIFY_OIDC is on but no ID-token audience is configured "
