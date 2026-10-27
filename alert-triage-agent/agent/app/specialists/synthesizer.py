@@ -22,6 +22,7 @@ from ..contracts.report import (
     InvestigationReport,
     ProbableRootCause,
     SIGNAL_TITLE_PROBLEMS,
+    split_observations,
     TimelineItem,
     title_problem_for_signal,
 )
@@ -115,7 +116,7 @@ def apply_group_alerts(report: InvestigationReport, group_alerts: list[Any]) -> 
         if marker not in obs and line not in new_lines:
             new_lines.append(line)
     if new_lines:
-        items = [o for o in obs.split(" | ") if o] if obs else []
+        items = split_observations(obs)
         # Directly after the primary alert's trigger line (the first item) when present.
         insert_at = 1 if items else 0
         items[insert_at:insert_at] = new_lines

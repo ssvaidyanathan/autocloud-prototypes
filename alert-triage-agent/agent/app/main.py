@@ -19,7 +19,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException
 from .bridge_client import BridgeClient
 from .config import AgentConfig, get_agent_settings
 from .contracts.alert import AlertEvent, is_ata_alert
-from .contracts.instructions import CreateTicketRequest, ResolveTicketRequest
+from .contracts.instructions import CreateTicketRequest, ResolveTicketRequest, WorkNoteRequest
 from .contracts.report import InvestigationReport
 from .contracts.timers import TimerWakeRequest, TimerWakeResponse
 from .duplicate_checker import (
@@ -30,6 +30,7 @@ from .duplicate_checker import (
 from .grouping.manager import GroupingManager
 from .grouping.models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument
 from .grouping.store import OKFStore, read_okf, update_okf_atomically
+from .grouping.suppression import format_late_alert_work_note
 from .specialists.synthesizer import apply_group_alerts
 from .timers.scheduler import schedule_delayed_timer
 from .triage import (
@@ -363,6 +364,7 @@ async def timer_wake(
             return d
 
         updated_doc = store.update_atomically(doc.group_id, _mark_ticketed)
+        _note_alerts_missed_by_ticket(report, updated_doc, bridge_client, settings)
         if cooling_scheduled and cooling_dt is not None:
             try:
                 schedule_delayed_timer(
@@ -454,6 +456,7 @@ async def timer_wake(
             return d
 
         updated_doc = store.update_atomically(doc.group_id, _mark_ticketed_mw)
+        _note_alerts_missed_by_ticket(report, updated_doc, bridge_client, settings)
         if cooling_scheduled and cooling_dt is not None:
             try:
                 schedule_delayed_timer(
@@ -575,22 +578,73 @@ def _apply_current_group_alerts(report: InvestigationReport, store: OKFStore, do
     apply_group_alerts(report, list(current.alerts or []))
 
 
+def _note_alerts_missed_by_ticket(
+    report: InvestigationReport,
+    doc: OKFDocument,
+    bridge_client: BridgeClient,
+    settings: AgentConfig,
+) -> None:
+    """Append a late-alert work note for each group alert the created ticket does not list.
+
+    An alert that attaches after the ticket-time re-read but before ``servicenow_sys_id`` is
+    stored finds the group without a ticket, so GroupingManager sends no work note for it.
+    ``doc`` is the group as stored after the ticket fields were written; every alert it holds
+    that is absent from ``report.alerts`` is reported here.
+    """
+    if not doc.servicenow_sys_id:
+        return
+    reported = {
+        a.get("incident_id") for a in (report.alerts or []) if isinstance(a, dict) and a.get("incident_id")
+    }
+    for entry in doc.alerts or []:
+        inc_id = entry.get("incident_id") if isinstance(entry, dict) else None
+        if not inc_id or inc_id in reported:
+            continue
+        logger.warning(
+            "Alert %s attached to group %s while ticket %s was being created; appending a late-alert work note",
+            inc_id,
+            doc.group_id,
+            doc.servicenow_number or doc.servicenow_sys_id,
+        )
+        note = format_late_alert_work_note(
+            _alert_event_from_entry(entry, doc),
+            doc.blast_radius,
+            project_id=settings.project_id or doc.project,
+        )
+        try:
+            bridge_client.append_work_note(
+                bridge_url=settings.bridge_url,
+                request=WorkNoteRequest(sys_id=doc.servicenow_sys_id, work_note=note, group_id=doc.group_id),
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed appending late-alert work note for alert %s to group %s: %s",
+                inc_id,
+                doc.group_id,
+                type(exc).__name__,
+            )
+
+
+def _alert_event_from_entry(first_a: dict[str, Any], doc: OKFDocument) -> AlertEvent:
+    """Build an AlertEvent from one OKF ``alerts`` entry (group fields fill the gaps)."""
+    a_labels = first_a.get("labels") or first_a.get("policy_user_labels") or {}
+    return AlertEvent(
+        incident_id=first_a.get("incident_id", "0.unknown"),
+        policy_name=first_a.get("policy_name") or first_a.get("policy", doc.policy_name or "unknown"),
+        policy_id=first_a.get("policy_id"),
+        resource_name=first_a.get("resource_name") or first_a.get("resource", doc.resource_name or "unknown"),
+        state=first_a.get("state", "open"),
+        started_at=first_a.get("started_at", doc.created_at),
+        url=first_a.get("url"),
+        policy_user_labels=a_labels,
+        labels=a_labels,
+    )
+
+
 def _extract_primary_alert(doc: OKFDocument) -> AlertEvent:
     """Extract primary alert from OKFDocument for investigation synthesizers."""
     if doc.alerts:
-        first_a = doc.alerts[0]
-        a_labels = first_a.get("labels") or first_a.get("policy_user_labels") or {}
-        return AlertEvent(
-            incident_id=first_a.get("incident_id", "0.unknown"),
-            policy_name=first_a.get("policy_name") or first_a.get("policy", doc.policy_name or "unknown"),
-            policy_id=first_a.get("policy_id"),
-            resource_name=first_a.get("resource_name") or first_a.get("resource", doc.resource_name or "unknown"),
-            state=first_a.get("state", "open"),
-            started_at=first_a.get("started_at", doc.created_at),
-            url=first_a.get("url"),
-            policy_user_labels=a_labels,
-            labels=a_labels,
-        )
+        return _alert_event_from_entry(doc.alerts[0], doc)
     return AlertEvent(
         incident_id="0.unknown",
         policy_name=doc.policy_name or "unknown",

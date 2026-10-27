@@ -1,9 +1,12 @@
 from datetime import datetime, timezone
+import logging
 import re
 from typing import Any, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 from .links import ConsoleLinkBuilder
+
+logger = logging.getLogger(__name__)
 
 
 class ProbableRootCause(BaseModel):
@@ -151,23 +154,48 @@ def split_observations(observations: Optional[str]) -> list[str]:
     return [o.strip() for o in re.split(r"\s+\|\s+", observations) if o.strip()]
 
 
+_CODE_TAG_RE = re.compile(r"\[(/?code)\]", re.IGNORECASE)
+
+
 def _html_text(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    """Escape text for the work-note HTML inside ServiceNow's [code] block.
+
+    HTML special characters are escaped, and a literal [code] / [/code] in the text is
+    rewritten with entity brackets so it cannot end the block early.
+    """
+    escaped = str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return _CODE_TAG_RE.sub(lambda m: f"&#91;{m.group(1)}&#93;", escaped)
 
 
-def normalize_title_problem(value: Optional[str]) -> Optional[str]:
+_PLACEHOLDER_TITLE_PROBLEMS = ("none", "n/a", "unknown", "under investigation")
+
+
+def normalize_title_problem(value: Optional[str], *, warn_on_reject: bool = False) -> Optional[str]:
     """Return a clean single-line title problem, or None when unusable.
 
-    None is returned for empty text and for text longer than TITLE_PROBLEM_MAX_LENGTH, so
-    the title falls back to the signal-derived phrase instead of truncating a sentence.
+    None is returned for empty text, placeholders and text longer than
+    TITLE_PROBLEM_MAX_LENGTH, so the title falls back to the signal-derived phrase instead
+    of truncating a sentence. With ``warn_on_reject`` a rejected non-empty value is logged
+    at WARNING with the reason and the value; None input stays quiet (older agents send none).
     """
     if value is None:
         return None
     text = clean_problem_text(str(value)).replace("*", "").replace("`", "")
     text = re.sub(r"\s+", " ", text).strip()
-    if not text or text.lower() in ("none", "n/a", "unknown", "under investigation"):
-        return None
-    if len(text) > TITLE_PROBLEM_MAX_LENGTH:
+    reason: Optional[str] = None
+    if not text:
+        reason = "empty after cleaning"
+    elif text.lower() in _PLACEHOLDER_TITLE_PROBLEMS:
+        reason = "placeholder value"
+    elif len(text) > TITLE_PROBLEM_MAX_LENGTH:
+        reason = f"len={len(text)} > {TITLE_PROBLEM_MAX_LENGTH}"
+    if reason is not None:
+        if warn_on_reject and str(value).strip():
+            logger.warning(
+                "title_problem rejected (%s): %r; deriving the title problem from the alert signal",
+                reason,
+                str(value)[:120],
+            )
         return None
     return text
 
@@ -245,7 +273,7 @@ class InvestigationReport(BaseModel):
     @field_validator("title_problem", mode="before")
     @classmethod
     def _validate_title_problem(cls, value: Any) -> Optional[str]:
-        return normalize_title_problem(value)
+        return normalize_title_problem(value, warn_on_reject=True)
 
     def get_normalized_actions(self) -> list[ActionItem]:
         """Normalize recommended actions into structured ActionItem instances."""
@@ -338,17 +366,20 @@ class InvestigationReport(BaseModel):
             sig = self.raw_metadata.get("signal") or (self.raw_metadata.get("labels") or {}).get("signal") or (self.raw_metadata.get("policy_user_labels") or {}).get("signal")
 
         comp_sig_parts = []
+        def _val(value: Any) -> str:
+            return _html_text(str(value).replace("**", "").replace("*", ""))
+
         if comp:
-            comp_sig_parts.append(f"Component: <code>{comp}</code>")
+            comp_sig_parts.append(f"Component: <code>{_val(comp)}</code>")
         if sig:
-            comp_sig_parts.append(f"Signal: <code>{sig}</code>")
+            comp_sig_parts.append(f"Signal: <code>{_val(sig)}</code>")
 
         # Systems and Observations are rendered as sub-bullets, one item per line.
-        sys_items = [f"Origin: <code>{self.origin}</code> ({conf_pct}% confidence)"]
+        # Every interpolated value is escaped; only the markup around it is literal HTML.
+        sys_items = [f"Origin: <code>{_val(self.origin)}</code> ({conf_pct}% confidence)"]
         if comp_sig_parts:
             sys_items.append(", ".join(comp_sig_parts))
-        sys_items.append(f"Blast Radius: {blast_str}")
-        sys_items = [i.replace("**", "").replace("*", "") for i in sys_items]
+        sys_items.append(f"Blast Radius: {_val(blast_str)}")
 
         obs_items = [
             _html_text(o.replace("**", "").replace("*", "")) for o in split_observations(self.observations)
@@ -364,8 +395,8 @@ class InvestigationReport(BaseModel):
             lis = "\n".join(f"      <li>{i}</li>" for i in items)
             return f"\n    <ul>\n{lis}\n    </ul>"
 
-        # Clean any raw asterisks or markdown formatting
-        prob_text = prob_text.replace("**", "").replace("*", "")
+        # Clean any raw asterisks or markdown formatting, then escape.
+        prob_text = _html_text(prob_text.replace("**", "").replace("*", ""))
 
         actions = self.get_normalized_actions()
         action_items_html: list[str] = []
@@ -374,18 +405,18 @@ class InvestigationReport(BaseModel):
 
         for act in actions:
             if act.rollback and not act.command and (not act.title or act.title.lower() == "rollback"):
-                rollback_notes.append(act.rollback.replace("**", "").replace("*", ""))
+                rollback_notes.append(_html_text(act.rollback.replace("**", "").replace("*", "")))
                 continue
 
-            title_part = (act.title or "").replace("**", "").replace("*", "")
-            verif_part = f" (Verification: {act.verification})" if act.verification else ""
+            title_part = _html_text((act.title or "").replace("**", "").replace("*", ""))
+            verif_part = f" (Verification: {_html_text(act.verification)})" if act.verification else ""
             cmd_html = ""
             if act.command:
-                escaped_cmd = act.command.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                escaped_cmd = _html_text(act.command)
                 cmd_html = f'\n        <pre><code style="{code_style}">{escaped_cmd}</code></pre>'
 
             if act.rollback and act.title.lower() != "rollback":
-                rollback_notes.append(act.rollback.replace("**", "").replace("*", ""))
+                rollback_notes.append(_html_text(act.rollback.replace("**", "").replace("*", "")))
 
             action_items_html.append(f"      <li>{title_part}{verif_part}{cmd_html}</li>")
 
@@ -462,20 +493,41 @@ class InvestigationReport(BaseModel):
         """Short problem phrase for the title: title_problem, else alert signal, else issue_type."""
         if self.title_problem:
             return self.title_problem
-        from_signal = title_problem_for_signal(self._alert_signal())
+        signal = self._alert_signal()
+        from_signal = title_problem_for_signal(signal)
         if from_signal:
+            logger.info(
+                "Title problem for group %s: no title_problem, using alert signal %r -> %r",
+                self.group_id,
+                signal,
+                from_signal,
+            )
             return from_signal
         explicit = self.issue_type or self.raw_metadata.get("issue_type")
         if explicit in ISSUE_TYPE_TITLE_PROBLEMS:
-            return ISSUE_TYPE_TITLE_PROBLEMS[explicit]
+            return self._title_fallback("issue_type", ISSUE_TYPE_TITLE_PROBLEMS[explicit], signal)
         # A summary that is already short is used as is; a sentence is never truncated.
         from_summary = normalize_title_problem(self.summary)
         if from_summary:
-            return from_summary
+            return self._title_fallback("short summary", from_summary, signal)
         inferred = self.infer_issue_type()
         if inferred != "runtime_anomaly":
-            return ISSUE_TYPE_TITLE_PROBLEMS[inferred]
-        return DEFAULT_TITLE_PROBLEM
+            return self._title_fallback(
+                f"issue_type inferred from summary ({inferred})", ISSUE_TYPE_TITLE_PROBLEMS[inferred], signal
+            )
+        return self._title_fallback("default phrase", DEFAULT_TITLE_PROBLEM, signal)
+
+    def _title_fallback(self, branch: str, phrase: str, signal: Optional[str]) -> str:
+        """Log (WARNING) that the title problem came from a fallback branch, then return it."""
+        logger.warning(
+            "Title problem for group %s taken from fallback branch '%s' -> %r "
+            "(no usable title_problem; alert signal %r has no title phrase)",
+            self.group_id,
+            branch,
+            phrase,
+            signal,
+        )
+        return phrase
 
     def build_short_description(self, max_length: int = TITLE_MAX_LENGTH) -> str:
         """Format the ServiceNow title: '[<Priority>] <origin>: <short problem> (<N> alerts)'.
