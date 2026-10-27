@@ -480,7 +480,8 @@ def test_tools_timeout_is_bounded():
 
 
 def test_agent_startup_fails_without_tools_url_when_not_local(tmp_path: Path):
-    cfg = AgentConfig(is_local=False, incident_store_path=str(tmp_path), fallback_store_path=str(tmp_path))
+    cfg = AgentConfig(is_local=False, incident_store_path=str(tmp_path), fallback_store_path=str(tmp_path),
+                      BRIDGE_URL="https://ata-bridge-abc-uw.a.run.app", AGENT_URL="https://ata-agent-abc-uw.a.run.app")
     assert cfg.missing_required_settings() == ["TOOLS_URL"]
     agent_app.dependency_overrides[get_agent_settings] = lambda: cfg
     try:
