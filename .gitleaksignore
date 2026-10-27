@@ -1,0 +1,6 @@
+# Exact-fingerprint suppressions. Prefer a narrow allowlist in .gitleaks.toml for
+# recurring non-secret patterns (fingerprints are bound to a commit SHA and break
+# on squash or rebase).
+
+# Mock Jira token in a test fixture (not a real credential); sanitized in tests/test_jira_cleanup.py by the fix for issue #46.
+34788c12956d4edfc29e36e43800f2d380d12f54:tests/test_jira_cleanup.py:generic-api-key:352

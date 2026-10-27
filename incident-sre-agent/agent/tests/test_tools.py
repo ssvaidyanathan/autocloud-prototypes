@@ -311,7 +311,7 @@ def test_describe_cloud_run_service_redacts_env_values() -> None:
     # Container env contains secret/config VALUES that MUST NEVER be exposed!
     container.env = [
         {"name": "DATABASE_URL", "value": "postgres://user:SUPER_SECRET_PASSWORD@db:5432/db"},
-        {"name": "API_SECRET_KEY", "value": "sk_live_very_secret_token_12345"},
+        {"name": "API_SECRET_KEY", "value": "fake-api-secret-value-for-redaction-test"},
         {"name": "PORT", "value": "8080"},
     ]
     template.containers = [container]
@@ -330,7 +330,7 @@ def test_describe_cloud_run_service_redacts_env_values() -> None:
     # CRITICAL: Assert secret VALUES do NOT exist anywhere in the output!
     res_str = str(res)
     assert "SUPER_SECRET_PASSWORD" not in res_str
-    assert "sk_live_very_secret_token_12345" not in res_str
+    assert "fake-api-secret-value-for-redaction-test" not in res_str
     assert "postgres://" not in res_str
     assert "value" not in res
 
@@ -790,7 +790,7 @@ def test_diff_revisions_full_diff_and_zero_secret_leakage() -> None:
     # Env vars with sensitive secrets
     container_a.env = [
         {"name": "DATABASE_URL", "value": "postgres://user:SUPER_SECRET_PASS@db:5432/shop"},
-        {"name": "GATEWAY_API_KEY", "value": "AIzaSySecretKeyValue12345"},
+        {"name": "GATEWAY_API_KEY", "value": "fake-gateway-api-key-for-redaction-test"},
         {"name": "PORT", "value": "8080"},
     ]
     probe_a = MagicMock()
@@ -859,7 +859,7 @@ def test_diff_revisions_full_diff_and_zero_secret_leakage() -> None:
     raw_output_str = str(diff)
     assert "SUPER_SECRET_PASS" not in raw_output_str
     assert "DIFFERENT_SECRET" not in raw_output_str
-    assert "AIzaSySecretKeyValue12345" not in raw_output_str
+    assert "fake-gateway-api-key-for-redaction-test" not in raw_output_str
 
     # Limits diff
     assert diffs["limits_changed"] is True

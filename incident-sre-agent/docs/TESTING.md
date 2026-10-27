@@ -671,6 +671,8 @@ mypy bridge agent demo
 gitleaks detect --source . -v
 ```
 
+Test fixtures must use obviously fake secret values (for example `fake-api-key-for-test`), never real vendor token prefixes such as `ATATT`, `ghp_`, `xoxb-`, `AKIA`, `AIza`, `glpat-`, or `sk_live_`.
+
 ---
 
 ### Continuous Integration (CI) Architecture

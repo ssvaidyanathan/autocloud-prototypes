@@ -376,7 +376,7 @@ class TestCredentialResolution:
 class TestSensitiveDataLogging:
     def test_token_and_basic_auth_masked(self):
         """SensitiveDataFilter masks plain token strings, Basic auth headers, and token keywords."""
-        secret_token = "ATATT3xFfGF0abc123secret"
+        secret_token = "fake-jira-token-for-masking-test"
         record = logging.LogRecord(
             name="test",
             level=logging.INFO,
