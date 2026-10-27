@@ -13,7 +13,7 @@ This skill defines formatting, tone, and structural standards for all alert tria
 ## 1. Dual Formatting Standards for ServiceNow
 
 ServiceNow handles text differently depending on the target field:
-- **Work Notes Journal (`work_notes`)**: Does NOT render Markdown. Work notes MUST use `[code]<html>...</html>[/code]` with a valid HTML list (`<ul><li>...</li></ul>`), bold labels (`<b>Problem:</b>`, `<b>Systems:</b>`, `<b>Observations:</b>`, `<b>Recommended Actions:</b>`), and clean formatting.
+- **Work Notes Journal (`work_notes`)**: Does NOT render Markdown. Work notes MUST use `[code]<html>...</html>[/code]` with a valid HTML list (`<ul><li>...</li></ul>`), bold labels (`<b>Problem:</b>`, `<b>Systems:</b>`, `<b>Probable Root Cause:</b>`, `<b>Observations:</b>`, `<b>Recommended Actions:</b>`), and clean formatting. The probable root cause is one line, cut at 600 characters with "... (full text in the attached report)".
 - **Incident Description (`description`)**: A plain-text field that displays Markdown formatting literally. Descriptions MUST use clean plain text with labels on their own lines, `- ` or numbered sub-items, and strictly **ZERO markdown asterisks (`*`)** and **ZERO hashes (`#`)**.
 
 ---
@@ -28,6 +28,7 @@ Every executive summary posted into the ServiceNow `work_notes` journal must be 
 <ul>
   <li><b>Problem:</b> Elevated HTTP 5xx error rate (14.2% failure rate) on ata-inventory-api impacting upstream consumers (ata-orders-api, ata-apigee-orders-v1) since 2026-10-23T00:13:00Z (Severity: P1).</li>
   <li><b>Systems:</b> Origin: <code>ata-inventory-api</code> [Cloud Run Service] (91% confidence) | Blast Radius: ata-inventory-api [Cloud Run Service], ata-orders-api [Cloud Run Service], ata-apigee-orders-v1 [Apigee API Proxy] | Dependency Path: Apigee (ata-apigee-orders-v1) -&gt; Cloud Run (ata-orders-api) -&gt; Cloud Run (ata-inventory-api) -&gt; Cloud SQL (ata-inventory-db).</li>
+  <li><b>Probable Root Cause:</b> Service degradation on <code>ata-inventory-api</code> (HTTP 5xx error rate 14.2%) after revision ata-inventory-api-00004-abc.</li>
   <li><b>Observations:</b> Cloud Monitoring policy 'ata-inventory-5xx' fired at 2026-10-23T00:13:00Z; HTTP 5xx errors reached 14.2% of total traffic; Container restarts recorded: 2 instances; Log signature: 'Database query timeout after 5000ms'; Revision ata-inventory-api-00004-abc deployed 18m prior to alert trigger.</li>
   <li><b>Recommended Actions:</b> 1. gcloud run services update-traffic ata-inventory-api --to-revisions=ata-inventory-api-00003-prev=100 --region=us-west1 (Verification: Confirm HTTP 5xx error rate drops below 1% in Cloud Monitoring); 2. gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="ata-inventory-api"' --limit=20 (Verification: Confirm healthy container startup); Rollback: Re-route traffic via gcloud run services update-traffic ata-inventory-api --to-latest --region=us-west1 if regression persists.</li>
 </ul>
