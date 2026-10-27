@@ -154,7 +154,7 @@ sequenceDiagram
 - **Purpose**: List GKE clusters across all GCP regions or within a specific location, identifying cluster health status, node counts, and Autopilot enablement.
 - **Parameters**:
   - `project_id` (*Optional[str]*, default: `None`): Target GCP project ID (falls back to pinned project).
-  - `location` (*Optional[str]*, default: `"-"`): Specific GCP region/zone or `"-"` for all locations wildcard.
+  - `location` (*Optional[str]*, default: `None`): Specific GCP region/zone or `None` / `"-"` for all locations wildcard.
   - `client` (*Any*, default: `None`): Optional client instance for unit testing.
 - **Result Shape**:
   ```json
@@ -291,7 +291,7 @@ sequenceDiagram
 - **Owning Specialist**: `ResourcesSpecialist`.
 - **Module**: [`agent/app/tools/resources.py`](../agent/app/tools/resources.py)
 - **Data Source / API**: Kubernetes REST API via GKE Master Endpoint (`/apis/apps/v1` and `/api/v1`) using `google.auth.transport.requests.AuthorizedSession`.
-- **Purpose**: Inspect live Deployments, StatefulSets, and Pods directly from the Kubernetes control plane. Gathers replica desired vs. ready counts, update strategies, pod phase details, container restart counters, last termination exit codes, and readiness/liveness/startup probe definitions.
+- **Purpose**: Inspect live Deployments, StatefulSets, and Pods directly from the Kubernetes control plane. Gathers replica desired, current, ready, updated, and available counts, workload conditions, pod phase details, container restart counters, previous container termination states and exit codes, and readiness/liveness/startup probe definitions.
 - **Parameters**:
   - `namespace` (*str*, required): Kubernetes namespace name.
   - `cluster_name` (*Optional[str]*, default: `None`): Cluster name. Discovered automatically across project clusters if omitted.
@@ -319,13 +319,18 @@ sequenceDiagram
       {
         "name": "<WORKLOAD>",
         "namespace": "<NAMESPACE>",
-        "replicas_desired": 1,
-        "replicas_ready": 1,
-        "replicas_updated": 1,
-        "replicas_available": 1,
-        "strategy": "RollingUpdate",
+        "desired_replicas": 1,
+        "current_replicas": 1,
+        "ready_replicas": 1,
+        "updated_replicas": 1,
+        "available_replicas": 1,
         "conditions": [
-          {"type": "Available", "status": "True", "reason": "MinimumReplicasAvailable"}
+          {
+            "type": "Available",
+            "status": "True",
+            "reason": "MinimumReplicasAvailable",
+            "message": "Deployment has minimum availability."
+          }
         ],
         "containers": [
           {
@@ -333,7 +338,8 @@ sequenceDiagram
             "image": "gcr.io/<PROJECT_ID>/app:v1.0.0",
             "readiness_probe": {"httpGet": {"path": "/healthz", "port": 8501}},
             "liveness_probe": {"httpGet": {"path": "/healthz", "port": 8501}},
-            "startup_probe": null
+            "startup_probe": null,
+            "resources": {}
           }
         ]
       }
@@ -354,8 +360,11 @@ sequenceDiagram
             "name": "app",
             "ready": true,
             "restart_count": 0,
-            "state": {"running": {"started_at": "2026-10-27T01:03:34Z"}},
-            "last_termination": null
+            "state": {
+              "state": "running",
+              "started_at": "2026-10-27T01:03:34Z"
+            },
+            "last_state": {}
           }
         ]
       }
@@ -364,6 +373,19 @@ sequenceDiagram
     "console_url": "https://console.cloud.google.com/kubernetes/workload/overview?project=<PROJECT_ID>"
   }
   ```
+- **Schema Details & StatefulSets**:
+  - `last_state`: When a container has not previously terminated, `last_state` is an empty dictionary `{}`. If a prior termination occurred (e.g. crash or OOM), `last_state` contains:
+    ```json
+    {
+      "state": "terminated",
+      "exit_code": 137,
+      "reason": "OOMKilled",
+      "started_at": "2026-10-27T01:00:00Z",
+      "finished_at": "2026-10-27T01:02:50Z"
+    }
+    ```
+  - `state`: Container state is an unnested dictionary containing `"state"` (`"running"`, `"waiting"`, or `"terminated"`), along with corresponding lifecycle fields (`started_at`, `reason`, `message`, `exit_code`, `finished_at`).
+  - `statefulsets`: When present, each item has `"name"`, `"namespace"`, `"desired_replicas"`, `"current_replicas"`, `"ready_replicas"`, `"updated_replicas"`, and `"containers"` (StatefulSets do not return `available_replicas` or `conditions`).
 - **Result Caps**: Pod collection bounded by `max_pods` (up to 200). `truncated: true` indicates additional pods exist.
 
 ---
@@ -611,7 +633,7 @@ print(f"Metric series captured: {metrics['total_series']}")
 | Symptom / Status | Probable Cause | Diagnostic & Remediation Steps |
 |---|---|---|
 | **`status: "UNREACHABLE"`** | Control plane network barrier (private cluster or Master Authorized Networks). | 1. Check if the cluster has Master Authorized Networks enabled.<br>2. Verify whether agent environment has VPC peering or Serverless VPC Access to the master CIDR.<br>3. Add the agent egress IP or CIDR to the cluster's authorized networks: `gcloud container clusters update <CLUSTER> --enable-master-authorized-networks --master-authorized-networks=<AGENT_CIDR>`.<br>4. Note: Logging and Monitoring telemetry tools continue to function even when direct master REST access is unreachable. |
-| **`status: "FORBIDDEN"`** | Missing Kubernetes RBAC permissions. | 1. The agent service account lacks RBAC viewer permissions in Kubernetes.<br>2. Create a ClusterRoleBinding granting the `view` role: `kubectl create clusterrolebinding isa-view --clusterrole=view --user="agent-sa@<PROJECT_ID>.iam.gserviceaccount.com"`. |
+| **`status: "FORBIDDEN"`** | Missing Kubernetes RBAC permissions. | 1. The agent service account lacks RBAC viewer permissions in Kubernetes.<br>2. Create a ClusterRoleBinding granting the `view` role: `kubectl create clusterrolebinding isa-agent-view --clusterrole=view --user="agent-sa@<PROJECT_ID>.iam.gserviceaccount.com"`. |
 | **`status: "NOT_FOUND"`** | Cluster or location mismatch. | 1. Verify `cluster_name` spelling.<br>2. `describe_gke_clusters` defaults to `"-"` (all locations wildcard); if specifying `location`, ensure the region/zone matches the cluster's location. |
 | **IP endpoint not resolving (`found: false`)** | Endpoint is not backed by a GCP Forwarding Rule, or targets a non-GKE backend. | 1. Verify the IP address matches an active Compute Forwarding Rule in the project.<br>2. If the IP is backed by Cloud Run or external services, triage automatically falls through to standard service extraction without impact. |
 | **Zero events returned in `get_gke_workload_events`** | Event window elapsed or GKE system logging disabled. | 1. Increase `lookback_minutes` or verify `start_time` covers the incident onset.<br>2. Set `include_normal_events=True` to view `Normal` scheduling events.<br>3. Verify GKE system logging is enabled: `gcloud container clusters describe <CLUSTER> --format="value(loggingConfig.componentConfig.enableComponents)"` (should include `SYSTEM_COMPONENTS`). |
