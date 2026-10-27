@@ -277,6 +277,8 @@ def run_wait(tmp_path, body, extra_env=None, stub_token=True):
         f'source "{RESET_SCRIPT}"\n'
         "POLL_INTERVAL_SECS=0\nQUIET_PERIOD_SECS=0\n"
         "get_serving_revisions() { echo ''; }\n"
+        # The incident group state check is tested in test_reset_terminal_groups.py.
+        "non_terminal_incident_groups() { :; }\n"
         f"{token_stub}"
         f"{body}\n"
         "wait_for_open_alerts\n"
@@ -460,19 +462,16 @@ def test_reset_no_wait_skips_the_query_entirely(tmp_path):
     assert not (tmp_path / "calls").exists()
 
 
-def test_reset_help_states_300s_default_quiet_period():
+def test_reset_help_states_180s_default_quiet_period():
     res = subprocess.run([str(RESET_SCRIPT), "--help"], capture_output=True, text=True, timeout=30)
-    assert "(default: 300s / 5m)" in res.stdout
+    assert "(default: 180s / 3m)" in res.stdout
     assert "(default: adc; env ATA_MONITORING_TOKEN_SOURCE)" in res.stdout
 
 
-def test_reset_default_quiet_period_outlasts_the_agent_cool_down(tmp_path):
-    """The archive must not race the recovery note posted when the 180s cool-down ends."""
+def test_reset_default_quiet_period_is_180s(tmp_path):
     script = tmp_path / "q.sh"
     script.write_text(f'#!/usr/bin/env bash\nsource "{RESET_SCRIPT}"\necho "QUIET=${{QUIET_PERIOD_SECS}}"\n')
     script.chmod(0o755)
     env = {k: v for k, v in os.environ.items() if k not in ("ATA_RESET_QUIET_PERIOD", "QUIET_PERIOD")}
     res = subprocess.run([str(script)], capture_output=True, text=True, env=env, timeout=30)
-    assert "QUIET=300" in res.stdout
-    from agent.app.grouping.models import COOLING_WINDOW_SECONDS
-    assert 300 > COOLING_WINDOW_SECONDS
+    assert "QUIET=180" in res.stdout

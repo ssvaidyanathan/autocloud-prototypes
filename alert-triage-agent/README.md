@@ -787,15 +787,16 @@ Execute scenarios with logging and automated assertions:
 ```
 
 ### 4. Resetting Between Scenarios
-Reset injected faults, clear database sleep connections, restore Apigee proxies, wait for open alerts to close plus a quiet period (5 min: Apigee's 1-3 min metric lag and the agent's 180s cool-down recovery note), and move active incidents to `archive/`. Admin calls use a fresh ID token each and fail the reset on any non-2xx response. For S4, run the reset right after the scenario: the leaked connections keep `ata-cloudsql-connections-critical` open until the reset releases them:
+Reset injected faults, clear database sleep connections, restore Apigee proxies, wait for open alerts to close, then for every incident group to reach a terminal state (`recovered`/`resolved`/`archived`/`degraded`, so the agent's recovery note is posted first), then a 3 min quiet period (Apigee's 1-3 min metric lag), and move active incidents to `archive/`. If a group is still active when `--timeout` (15 min) expires, the reset fails and lists it; nothing is archived. Admin calls use a fresh ID token each and fail the reset on any non-2xx response. For S4, run the reset right after the scenario: the leaked connections keep `ata-cloudsql-connections-critical` open until the reset releases them:
 ```bash
-# Standard reset (waits for open ata-* alerts to close + 5m quiet period).
+# Standard reset (waits for open ata-* alerts to close, terminal incident groups, + 3m quiet period).
 # Fails if Cloud Monitoring cannot be queried. The alert check uses an ADC token by default
 # (run: gcloud auth application-default login; or --monitoring-token-source gcloud).
 # On macOS CERTIFICATE_VERIFY_FAILED: export SSL_CERT_FILE=/etc/ssl/cert.pem
 ./scripts/reset-scenarios.sh
 
-# Quick dev reset (bypasses alert clearance wait and quiet period)
+# Quick dev reset (bypasses the alert, incident group and quiet period waits;
+# risky: can archive a group whose recovery note is still pending)
 ./scripts/reset-scenarios.sh --no-wait
 ```
 

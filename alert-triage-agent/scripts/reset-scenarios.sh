@@ -14,7 +14,8 @@
 # 3. Terminate background DB sleep connections and release locks
 # 4. Restore healthy Apigee proxy revisions (re-deploy base bundles)
 # 5. Restore Cloud Run service configuration if S5 was deployed
-# 6. Wait for open ATA alerts to close & quiet period (Apigee metric lag window)
+# 6. Wait for open ATA alerts to close, for every incident group to reach a terminal
+#    state (the agent's recovery note is posted), then the quiet period (Apigee metric lag)
 # 7. Archive active OKF incident files and clean leftover root storage
 # 8. Verify healthy 200 responses across all services and 0 active incident groups
 # 9. Admin fault injection preflight verification
@@ -39,9 +40,9 @@ parse_duration() {
 
 # Configuration options & defaults
 NO_WAIT="${ATA_RESET_NO_WAIT:-${NO_WAIT:-false}}"
-# 300s: the agent posts its recovery note when the 180s cool-down after the last close ends;
-# archiving earlier races that note (QA S4). It also covers Apigee's 1-3 min metric lag.
-QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-300}}")"
+# 180s covers Apigee's 1-3 min metric lag. The agent's recovery note is not covered by
+# time: step 6 waits for every incident group to reach a terminal state first.
+QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-180}}")"
 WAIT_TIMEOUT_SECS="$(parse_duration "${ATA_RESET_TIMEOUT:-${WAIT_TIMEOUT:-900}}")"
 POLL_INTERVAL_SECS="$(parse_duration "${ATA_RESET_POLL_INTERVAL:-${POLL_INTERVAL:-15}}")"
 MAX_ALERT_AGE_SECS="$(parse_duration "${ATA_RESET_MAX_ALERT_AGE:-${MAX_ALERT_AGE:-3600}}")"
@@ -116,10 +117,12 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --no-wait                  Skip waiting for open alerts to close and quiet period"
-            echo "  --quiet-period <duration>  Quiet period after alerts close (default: 300s / 5m)"
-            echo "  --timeout <duration>       Max timeout waiting for alerts to close (default: 900s / 15m)"
-            echo "  --poll-interval <duration> Polling interval for alert queries (default: 15s)"
+            echo "  --no-wait                  Skip waiting for open alerts, terminal incident groups and quiet period"
+            echo "                             (risky: can archive groups the agent is still working on)"
+            echo "  --quiet-period <duration>  Quiet period after alerts close and groups are terminal (default: 180s / 3m)"
+            echo "  --timeout <duration>       Max timeout waiting for alerts to close and groups to reach"
+            echo "                             a terminal state (default: 900s / 15m)"
+            echo "  --poll-interval <duration> Polling interval for alert and incident group queries (default: 15s)"
             echo "  --max-alert-age <duration> Max age of open alerts before reset start (default: 60m / 3600s)"
             echo "  --serving-revisions <list> Comma or space separated list of active Cloud Run revisions"
             echo "  --monitoring-token-source <adc|gcloud>"
@@ -206,15 +209,61 @@ query_open_ata_alerts() {
     python3 "${OPEN_ALERTS_PY}" "${proj}" "${tok}" "${reset_start}" "${max_age_secs}" "${serving_revs}"
 }
 
+# Incident group statuses after which the agent does nothing more with a group (no timer,
+# no work note): resolved, recovered (set when the cool-down ends; kept only once the
+# recovery note is posted), archived, and degraded (excluded from grouping and timers;
+# needs a human). Anything else, including a missing or unknown status, is still active.
+TERMINAL_GROUP_STATUSES="resolved recovered archived degraded"
+
+# Print the status in the YAML frontmatter of OKF markdown on stdin ("" if none).
+okf_status() {
+    awk '{ sub(/\r$/, "") }
+         NR == 1 { if ($0 != "---") exit; next }
+         $0 == "---" { exit }
+         /^status:/ { s = $0; sub(/^status:[ \t]*/, "", s); gsub(/["\047]/, "", s); sub(/[ \t]+$/, "", s); print s; exit }'
+}
+
+is_terminal_group_status() {
+    case " ${TERMINAL_GROUP_STATUSES} " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+# Print "<file> (<status>)" for every incident file in knowledge/incident-manager/ whose
+# group is not in a terminal state. Reads with gcloud storage (same login as step 7).
+# Returns non-zero after gcloud's error is printed when the files cannot be read.
+non_terminal_incident_groups() {
+    local src="gs://${INCIDENTS_BUCKET}/${ACTIVE_INCIDENTS_URL_SUFFIX}"
+    local urls url content status
+    urls="$(gcs_run ls "${src}")" || return 1
+    for url in ${urls}; do
+        content="$(gcs_run cat "${url}")" || return 1
+        # Moved or deleted since the listing: no longer an active file.
+        [ -n "${content}" ] || continue
+        status="$(printf '%s\n' "${content}" | okf_status)"
+        if ! is_terminal_group_status "${status}"; then
+            echo "${url##*/} (${status:-no status})"
+        fi
+    done
+}
+
+# Comma-separated summary of the first 5 lines of $1.
+summarize_lines() {
+    printf '%s\n' "$1" | awk 'NR <= 5 { out = out (NR > 1 ? ", " : "") $0 } END { if (NR > 5) out = out ", ...+" (NR - 5) " more"; print out }'
+}
+
 wait_for_open_alerts() {
-    log_info "--> 6. Checking Cloud Monitoring Alerts API for open ATA alerts..."
+    log_info "--> 6. Checking Cloud Monitoring Alerts API for open ATA alerts and incident group states..."
     if [ "${NO_WAIT}" = "true" ]; then
-        log_info "    [--no-wait] Skipping wait for open alerts and quiet period."
+        log_info "    [--no-wait] Skipping wait for open alerts, terminal incident groups and quiet period."
+        log_warn "    [--no-wait] Incident files are archived even if the agent is still working on a group (e.g. a pending recovery note)."
         return 0
     fi
 
     if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
         log_info "    [MOCK/DRY-RUN] Simulating wait for open alerts to close (0 open alerts)."
+        log_info "    [MOCK/DRY-RUN] Simulating wait for incident groups to reach a terminal state."
         log_info "    [MOCK/DRY-RUN] Simulating quiet period (${QUIET_PERIOD_SECS}s)."
         return 0
     fi
@@ -332,14 +381,37 @@ PYEOF
             log_info "    [Progress] Elapsed: ${elapsed}s / ${WAIT_TIMEOUT_SECS}s | Still open: ${count} alert(s) [${alert_summary}]"
             sleep "${POLL_INTERVAL_SECS}"
         else
+            # Archiving a group the agent is still working on races its recovery note
+            # (posted when the 180s cool-down after the last close ends): wait by state.
+            local non_terminal="" group_count
+            if ! non_terminal="$(non_terminal_incident_groups)"; then
+                log_error "FATAL: could not read incident group states from gs://${INCIDENTS_BUCKET}/${ACTIVE_INCIDENTS_URL_SUFFIX}; incident files were NOT archived." >&2
+                gcs_error_hint
+                log_error "To skip the check deliberately (risky: active groups get archived), re-run with --no-wait." >&2
+                exit 1
+            fi
+            if [ -n "${non_terminal}" ]; then
+                quiet_start=""
+                group_count="$(count_lines "${non_terminal}")"
+                if [ "${now}" -ge "${deadline}" ]; then
+                    log_error "Timed out after ${WAIT_TIMEOUT_SECS}s (${elapsed}s elapsed): all ATA alerts are closed, but ${group_count} incident group(s) are not in a terminal state (${TERMINAL_GROUP_STATUSES}):" >&2
+                    printf '%s\n' "${non_terminal}" | awk '{ print "  - " $0 }' >&2
+                    log_error "Incident files were NOT archived. Check the agent (cooling timer, recovery note) and rerun, raise --timeout, or re-run with --no-wait to archive anyway (risky)." >&2
+                    exit 1
+                fi
+                log_info "    [Progress] Elapsed: ${elapsed}s / ${WAIT_TIMEOUT_SECS}s | 0 open alerts | ${group_count} incident group(s) not terminal yet [$(summarize_lines "${non_terminal}")]"
+                sleep "${POLL_INTERVAL_SECS}"
+                continue
+            fi
+
             if [ "${QUIET_PERIOD_SECS}" -le 0 ]; then
-                log_success "    Zero open ATA alerts detected (quiet period disabled). Proceeding."
+                log_success "    Zero open ATA alerts and all incident groups terminal (quiet period disabled). Proceeding."
                 return 0
             fi
 
             if [ -z "${quiet_start}" ]; then
                 quiet_start=$(date +%s)
-                log_success "    All open ATA alerts have closed! Entering ${QUIET_PERIOD_SECS}s quiet period to cover Apigee metric ingestion lag..."
+                log_success "    All open ATA alerts have closed and all incident groups are terminal! Entering ${QUIET_PERIOD_SECS}s quiet period to cover Apigee metric ingestion lag..."
             else
                 local quiet_elapsed=$((now - quiet_start))
                 if [ "${quiet_elapsed}" -ge "${QUIET_PERIOD_SECS}" ]; then
@@ -580,7 +652,7 @@ if ! restore_inventory_pinned_baseline; then
 fi
 log_success "    Cloud Run configuration restored to pinned baseline."
 
-# 6. Wait for Open ATA Alerts to Close & Quiet Period (Apigee Metric Ingestion Lag)
+# 6. Wait for Open ATA Alerts to Close, Terminal Incident Groups & Quiet Period
 wait_for_open_alerts
 
 # 7. Archive Active Incident Files & Clean Leftover Root Storage

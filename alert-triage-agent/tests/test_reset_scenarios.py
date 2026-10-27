@@ -38,7 +38,8 @@ def test_reset_scenarios_mock_no_wait():
         timeout=30,
     )
     assert res.returncode == 0
-    assert "[--no-wait] Skipping wait for open alerts and quiet period." in res.stdout
+    assert "[--no-wait] Skipping wait for open alerts, terminal incident groups and quiet period." in res.stdout
+    assert "archived even if the agent is still working on a group" in res.stdout + res.stderr
     assert "All Scenarios Reset Successfully" in res.stdout
 
 
@@ -53,6 +54,7 @@ def test_reset_scenarios_mock_simulation():
     )
     assert res.returncode == 0
     assert "Simulating wait for open alerts to close" in res.stdout
+    assert "Simulating wait for incident groups to reach a terminal state" in res.stdout
     assert "Simulating quiet period" in res.stdout
     assert "All Scenarios Reset Successfully" in res.stdout
 
@@ -68,6 +70,7 @@ def test_reset_scenarios_dry_run_simulation():
     )
     assert res.returncode == 0
     assert "Simulating wait for open alerts to close" in res.stdout
+    assert "Simulating wait for incident groups to reach a terminal state" in res.stdout
     assert "Simulating quiet period" in res.stdout
     assert "All Scenarios Reset Successfully" in res.stdout
 
