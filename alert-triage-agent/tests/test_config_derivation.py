@@ -260,3 +260,10 @@ def test_investigation_report_carries_the_configured_region(tmp_path):
     finally:
         reset_agent_settings(None)
     assert (report.project_id, report.region) == ("proj-r", "r9")
+
+
+def test_change_timeline_source_name_follows_the_prefix(no_env):
+    from agent.app.specialists.change import timeline_source
+
+    cfg = AgentConfig(PROJECT_ID="p", REGION="r1", NAME_PREFIX="atat")
+    assert timeline_source(cfg) == "atat-tools change timeline"

@@ -208,6 +208,7 @@ def stack(tmp_path):
     _recorder(scripts / "deploy-apigee-proxies.sh", "apigee")
     _recorder(scripts / "teardown-apigee.sh", "teardown-apigee")
     _recorder(scripts / "verify-demo-infra.sh", "verify-demo-infra")
+    _recorder(scripts / "set-demo-instance-caps.sh", "caps")
     _recorder(scripts / "repin-inventory.sh", "repin",
               extra='[ "$1" = prepare ] && echo "  $0 write-pin --revision ${NAME_PREFIX}-inventory-api-00001-abc '
                     '--digest $4 --initial"; exit 0')
@@ -291,6 +292,18 @@ def test_full_run_order(stack):
     assert calls[repin[0]][1:] == ["prepare", "--initial", "--image-digest",
                                    calls[repin[1]][calls[repin[1]].index("--digest") + 1]]
     assert calls[repin[1]][1:4] == ["write-pin", "--revision", "atat-inventory-api-00001-abc"]
+
+
+def test_inventory_pin_phase_applies_the_instance_caps_and_names_the_per_prefix_pin_file(stack):
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "inventory-pin",
+                       INVENTORY_IMAGE="r-docker.pkg.dev/p/atat-docker/atat-inventory-api@sha256:" + "a" * 64)
+    assert res.returncode == 0, _out(res)
+    assert [c[0] for c in calls if c[0] in ("repin", "caps")] == ["repin", "repin", "repin", "caps"]
+    assert [c for c in calls if c[0] == "caps"] == [["caps", "--apply"]]
+    out = _out(res)
+    assert "Commit scripts/scenarios/inventory-pin.atat.env" in out
+    assert "git status scripts/scenarios/inventory-pin.atat.env" in out
+    assert "inventory-pin.env" not in out
 
 
 def test_terraform_roots_reconfigure_and_get_the_vars(stack):

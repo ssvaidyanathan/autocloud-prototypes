@@ -326,7 +326,7 @@ fi
 # --- Inventory image build (Cloud Build as the stack's build SA) ----------------------
 # Same flags as the stack's other image builds (scripts/build-image.sh): build SA
 # BUILD_SA_EMAIL, sources and logs in BUILD_BUCKET.
-INVENTORY_DEMO_DIR="${ALERT_TRIAGE_DIR}/demo/ata-inventory-api"
+INVENTORY_DEMO_DIR="${ALERT_TRIAGE_DIR}/demo/ata-inventory-api"  # prefix-ok: repo directory name
 
 # build_inventory_image <tag>: build INVENTORY_DEMO_DIR into
 # ${PINNED_INVENTORY_IMAGE_BASE}:<tag>. Prints the pushed sha256 digest on stdout (progress on
@@ -710,14 +710,6 @@ require_service_url() {
         return 1
     fi
     echo "${url}"
-}
-
-# resolve_service_url <service> [<ignored>]: compatibility name for scripts outside this
-# lane that still call it (verify-demo-infra.sh until ata-fresh-scripts lands). It is
-# require_service_url: the second argument, once a fixed fallback URL, is ignored. No
-# fallback. Remove once no caller is left.
-resolve_service_url() {
-    require_service_url "$1"
 }
 
 # Resolve Bearer Token for Cloud Run IAM Invocation

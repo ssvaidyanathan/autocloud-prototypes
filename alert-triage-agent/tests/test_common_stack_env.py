@@ -170,12 +170,21 @@ def test_require_apigee_mgmt_names_what_is_missing(pkg):
 # --- service URLs: no fallback ------------------------------------------------------------
 
 
-@pytest.mark.parametrize("fn", ["require_service_url", "resolve_service_url"])
-def test_service_url_without_describe_fails_loudly(pkg, fn):
-    body = f'{fn} atat-inventory-api https://ata-inventory-api-4klvlqnmpa-uw.a.run.app && echo "NO FAILURE"'
+def test_service_url_without_describe_fails_loudly(pkg):
+    body = 'require_service_url atat-inventory-api https://ata-inventory-api-4klvlqnmpa-uw.a.run.app && echo "NO FAILURE"'
     res = source(pkg, body, gcloud="exit 1")
     assert res.returncode != 0 and "NO FAILURE" not in res.stdout and "4klvlqnmpa" not in res.stdout
     assert "Could not read the URL of Cloud Run service atat-inventory-api in test-project/test-region1" in res.stderr
+
+
+def test_resolve_service_url_shim_is_gone(pkg):
+    """The fallback-era name had no caller left after the scripts and scen merges."""
+    res = source(pkg, 'type resolve_service_url >/dev/null 2>&1 && echo DEFINED || echo GONE')
+    assert res.stdout == "GONE\n"
+    callers = [p for p in (ROOT / "scripts").rglob("*.sh") if "resolve_service_url" in p.read_text()]
+    callers += [p for top in ("agent", "bridge", "tools", "demo") for p in (ROOT / top).rglob("*.sh")
+                if "resolve_service_url" in p.read_text()]
+    assert callers == []
 
 
 def test_service_url_is_the_described_one(pkg):

@@ -6,8 +6,6 @@ The deployment is one script, `scripts/deploy-stage1.sh`, made of 14 phases. You
 
 Every command is meant to be copied and pasted as it is, in bash 3.2 or later (the macOS default `/bin/bash`) or on Linux. Nothing outside this guide is needed.
 
-Markers of the form `TODO(scen-lane)` mark interfaces of the scenario scripts that are still landing on another branch.
-
 ---
 
 ## Contents
@@ -595,13 +593,9 @@ It lists `<prefix>-inventory-api` and `<prefix>-orders-api` with URLs.
 
 It exits 0 and reports traffic 100% on the pin, with no baseline gaps.
 
-> TODO(scen-lane): the pin file becomes `scripts/scenarios/inventory-pin.<prefix>.env`, and the end-of-phase message will name it. Check its `PIN_INVENTORY_REVISION` with `grep '^PIN_' scripts/scenarios/inventory-pin.${NAME_PREFIX}.env` once the scenario lane lands.
+The pin file is `scripts/scenarios/inventory-pin.<prefix>.env`; the end-of-phase message names it. Check it with `grep '^PIN_' scripts/scenarios/inventory-pin.${NAME_PREFIX}.env` and commit it.
 
-Then cap the demo services at the service level (the default is 1 instance; see [§4.2](#42-instance-caps)). This command is not a phase:
-
-```bash
-./scripts/set-demo-instance-caps.sh --apply
-```
+The phase then caps the demo services at the service level (the default is 1 instance; see [§4.2](#42-instance-caps)) by running `./scripts/set-demo-instance-caps.sh --apply`. If only that step fails, the pin is in place: fix the cause, re-run that command alone, and resume with `--from triage`.
 
 **If it fails:**
 - `--initial: a pin exists`: this stack's pin file names a revision that exists in this project, so the stack is already pinned. Re-pin without `--initial` ([§4.3](#43-re-pinning-the-inventory-baseline-and-pruning-revisions)), or check `NAME_PREFIX` and `PROJECT_ID`.
@@ -774,7 +768,7 @@ It sends one `<prefix>-inventory-5xx` alert (expects **202**), waits for its inc
 
 **Purpose:** prove the triage itself. Each scenario must produce one incident group and one ServiceNow ticket with the expected origin.
 
-> TODO(scen-lane): the scenario scripts take the prefix from `NAME_PREFIX` (required, with `PROJECT_ID` and `REGION`), source `.<prefix>-apigee.env` and read `.<prefix>-api-key`. Until the scenario lane lands, this step works only for `NAME_PREFIX=ata`.
+> The scenario scripts take the prefix from `NAME_PREFIX` (required, with `PROJECT_ID` and `REGION`), read the Apigee values from `.<prefix>-apigee.env` (parsed, not sourced) and the key from `.<prefix>-api-key`.
 
 ```bash
 ./scripts/scenarios/preflight.sh
@@ -864,7 +858,7 @@ The service-level limit covers every revision, including a pinned revision creat
 
 ### 4.3 Re-pinning the inventory baseline and pruning revisions
 
-Each stack's pin lives only in `scripts/scenarios/inventory-pin.<prefix>.env` (TODO(scen-lane): per-prefix name): the revision, its image digest, and the previous pin (the rollback target). Do not edit the file by hand. Use `scripts/repin-inventory.sh`:
+Each stack's pin lives only in `scripts/scenarios/inventory-pin.<prefix>.env`: the revision, its image digest, and the previous pin (the rollback target). Do not edit the file by hand. Use `scripts/repin-inventory.sh`:
 
 ```bash
 ./scripts/repin-inventory.sh status                       # read-only: pin, traffic, baseline gaps, caps

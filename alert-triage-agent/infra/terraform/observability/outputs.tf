@@ -1,5 +1,5 @@
 output "webhook_notification_channel_id" {
-  description = "Notification channel ID for ata-bridge webhook"
+  description = "Notification channel ID for the <name_prefix>-bridge webhook"
   value       = local.notification_channel_id
 }
 

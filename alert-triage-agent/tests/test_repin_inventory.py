@@ -500,3 +500,32 @@ def test_new_stack_without_pin_file_points_to_prepare_initial(tmp_path, command)
     assert "no inventory pin for stack 'atat'" in res.stderr and "prepare --initial" in res.stderr
     assert cloud.calls(["run", "services", "update"]) == [] and cloud.calls(["run", "services", "update-traffic"]) == []
     assert not cloud.pin_file.exists()
+
+
+def test_status_for_a_new_prefix_uses_its_own_default_pin_file_and_leaves_atas_untouched(tmp_path):
+    """Review R2: the REAL common.sh resolves the default pin path (no ATA_INVENTORY_PIN_FILE).
+    With NAME_PREFIX=atat and only ata's pin file present, status must report the first-pin path
+    for atat, never read or touch inventory-pin.ata.env, and make no change in the project."""
+    import hashlib
+    import shutil
+
+    repo = tmp_path / "repo"
+    shutil.copytree(REPO_ROOT / "scripts", repo / "scripts",
+                    ignore=shutil.ignore_patterns("__pycache__", "inventory-pin.*.env"))
+    scenarios = repo / "scripts" / "scenarios"
+    shutil.copy2(REPO_ROOT / "scripts" / "scenarios" / "inventory-pin.ata.env", scenarios)
+    ata_pin = scenarios / "inventory-pin.ata.env"
+    before = (hashlib.sha256(ata_pin.read_bytes()).hexdigest(), ata_pin.stat().st_mtime_ns)
+    assert sorted(p.name for p in scenarios.glob("inventory-pin.*.env")) == ["inventory-pin.ata.env"]
+
+    (tmp_path / "cloud").mkdir()
+    cloud = FakeCloud(tmp_path / "cloud", for_prefix(fresh_project_state(), "atat"))
+    res = cloud.run([repo / "scripts" / "repin-inventory.sh", "status"], NAME_PREFIX="atat", ATA_INVENTORY_PIN_FILE="")
+
+    assert res.returncode != 0
+    assert f"no inventory pin for stack 'atat': {scenarios / 'inventory-pin.atat.env'} does not exist" in res.stderr
+    assert "prepare --initial" in res.stderr
+    assert "inventory-pin.ata.env" not in res.stdout + res.stderr
+    assert (hashlib.sha256(ata_pin.read_bytes()).hexdigest(), ata_pin.stat().st_mtime_ns) == before
+    assert not (scenarios / "inventory-pin.atat.env").exists()
+    assert cloud.calls(["run", "services", "update"]) == [] and cloud.calls(["run", "services", "update-traffic"]) == []

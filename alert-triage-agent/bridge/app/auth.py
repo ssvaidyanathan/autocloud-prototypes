@@ -77,8 +77,9 @@ async def verify_agent_caller(
     missing = settings.missing_required_settings()
     if missing:
         logger.error(
-            "ata-bridge misconfigured: %s not set, so the bridge Cloud Run URL audiences cannot be "
+            "%s-bridge misconfigured: %s not set, so the bridge Cloud Run URL audiences cannot be "
             "built; rejecting the request. bridge/scripts/deploy.sh sets them.",
+            settings.name_prefix,
             ", ".join(missing),
         )
         raise HTTPException(
