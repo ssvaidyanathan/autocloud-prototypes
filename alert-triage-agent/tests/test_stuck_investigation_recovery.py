@@ -12,7 +12,8 @@ Covered here (agent/app/grouping/stuck_investigation.py, manager.py, main.py):
 3. Watchdog: armed once on entering investigating, re-arms while the wake is still retrying,
    recovers when stuck, and is ignored after the group is ticketed.
 4. Bounded: after INVESTIGATION_MAX_RECOVERIES the group is degraded (ERROR) and new alerts
-   open a new group.
+   open a new group. A failed recovery scheduling call uses up one attempt; it does not degrade
+   the group (R1). The next group for the same scope lists the degraded group's alerts (O1).
 5. Idempotent: two triggers in one stale period recover once.
 6. Config: env overrides, validation, and the stale default exceeds the timer queue backoff
    plus the request timeout (drift guard against the Terraform default).
@@ -255,7 +256,104 @@ def test_legacy_investigating_group_without_attempt_stamp_is_treated_as_stuck(ag
     assert _stuck_logs(caplog)
 
 
-def test_failed_recovery_settle_scheduling_degrades_group_and_retried_alert_opens_new_group(
+def _schedule_failure_logs(caplog) -> list[logging.LogRecord]:
+    return [
+        r for r in caplog.records
+        if r.levelno == logging.ERROR and "Failed to schedule the recovery settle wake" in r.getMessage()
+    ]
+
+
+def test_failed_recovery_settle_scheduling_on_ingest_consumes_one_attempt_and_keeps_the_group_stuck(
+    agent_cfg, monkeypatch, clock, caplog
+):
+    # R1 (fresh-rev-s12): a Cloud Tasks blip during recovery uses up one recovery attempt; it
+    # does not degrade the group, and it does not fail ingest of the alert that triggered the sweep.
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    clock["now"] = last_attempt + STALE + 10.0
+    clock["timers"].fail_types = {"settle"}
+
+    with caplog.at_level(logging.ERROR):
+        res = _triage(client, 2)
+
+    assert res.status_code == 200
+    assert res.json()["group_id"] == group_id  # still attachable: the alert is not split off
+    doc = store.read(group_id)
+    assert doc.status == "investigating" and doc.degraded is False
+    assert doc.has_alert("0.stuck-alert-2")
+    assert len(doc.investigation_recoveries) == 1
+    rec = doc.investigation_recoveries[0]
+    assert rec["recovery_number"] == 1
+    assert rec["settle_wake_scheduled"] is False
+    assert "cloud tasks unavailable" in rec["settle_wake_error"]
+    # Detectable as stuck again: the attempt stamp is back to the last real wake attempt.
+    assert doc.investigation_started_at == rec["last_wake_attempt_at"]
+    assert is_stuck_investigation(doc, clock["now"], STALE)
+    assert _schedule_failure_logs(caplog)
+
+
+def test_next_ingest_after_a_failed_recovery_scheduling_retries_the_recovery(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    clock["now"] = last_attempt + STALE + 10.0
+    clock["timers"].fail_types = {"settle"}
+    assert _triage(client, 2).status_code == 200
+
+    clock["timers"].fail_types = set()
+    clock["now"] += 5.0
+    settles_before = len(clock["timers"].of("settle"))
+    with caplog.at_level(logging.ERROR):
+        res = _triage(client, 3)
+
+    assert res.status_code == 200 and res.json()["group_id"] == group_id
+    doc = store.read(group_id)
+    assert doc.status == "investigating"
+    assert [r["recovery_number"] for r in doc.investigation_recoveries] == [1, 2]
+    assert doc.investigation_recoveries[1].get("settle_wake_scheduled", True) is True
+    assert clock["timers"].of("settle")[settles_before:] == [int(clock["now"])]
+    assert not is_stuck_investigation(doc, clock["now"], STALE)
+
+    # The recovery wake tickets the group; the note states the failed attempt as a fact.
+    bridge.down = False
+    clock["now"] += 1.0
+    assert _wake(client, group_id, "settle", clock["timers"].of("settle")[-1]).json()["status"] == "executed"
+    note = next(o for o in bridge.reports[group_id].observations.split(" | ")
+                if o.startswith(RECOVERY_OBSERVATION_PREFIX))
+    assert "its settle wake could not be scheduled" in note
+    assert "alert 0.stuck-alert-3 ingested" in note
+
+
+def test_watchdog_reraises_when_the_recovery_settle_cannot_be_scheduled_and_its_retry_recovers(
+    agent_cfg, monkeypatch, clock, caplog
+):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id, _ = _stuck_group(client, store, clock, bridge)
+    watchdog_epoch = clock["timers"].of(WATCHDOG_DEADLINE_TYPE)[0]
+    clock["now"] = watchdog_epoch
+    clock["timers"].fail_types = {"settle"}
+
+    with caplog.at_level(logging.ERROR):
+        first = _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, watchdog_epoch)
+
+    assert first.status_code >= 500  # Cloud Tasks retries the watchdog wake
+    doc = store.read(group_id)
+    assert doc.status == "investigating" and len(doc.investigation_recoveries) == 1
+    assert is_stuck_investigation(doc, clock["now"], STALE)
+    assert _schedule_failure_logs(caplog)
+
+    clock["timers"].fail_types = set()
+    clock["now"] += 2.0
+    retry = _wake(client, group_id, WATCHDOG_DEADLINE_TYPE, watchdog_epoch)
+    assert retry.status_code == 200
+    assert retry.json()["reason"] == "stuck_investigation_recovered"
+    doc = store.read(group_id)
+    assert doc.status == "investigating" and len(doc.investigation_recoveries) == 2
+
+
+def test_recovery_scheduling_failures_degrade_the_group_only_after_max_recoveries(
     agent_cfg, monkeypatch, clock, caplog
 ):
     bridge = FakeBridge()
@@ -264,18 +362,145 @@ def test_failed_recovery_settle_scheduling_degrades_group_and_retried_alert_open
     clock["now"] = last_attempt + STALE + 10.0
     clock["timers"].fail_types = {"settle"}
 
-    first = _triage(client, 2)
-
-    assert first.status_code >= 500
-    stuck = store.read(group_id)
-    assert stuck.status == "degraded"
-    assert "could not schedule a settle wake" in stuck.degraded_reason
+    for n in (2, 3):  # INVESTIGATION_MAX_RECOVERIES=2: two failed attempts, group kept
+        clock["now"] += 1.0
+        res = _triage(client, n)
+        assert res.status_code == 200 and res.json()["group_id"] == group_id
+        assert store.read(group_id).status == "investigating"
+    assert len(store.read(group_id).investigation_recoveries) == 2
 
     clock["timers"].fail_types = set()
-    retry = _triage(client, 2)
-    assert retry.status_code == 200
-    assert retry.json()["group_id"] != group_id
-    assert not store.read(group_id).has_alert("0.stuck-alert-2")
+    clock["now"] += 1.0
+    caplog.clear()
+    with caplog.at_level(logging.ERROR):
+        res = _triage(client, 4)
+
+    assert res.status_code == 200
+    assert res.json()["group_id"] != group_id
+    stuck = store.read(group_id)
+    assert stuck.status == "degraded" and stuck.degraded is True
+    assert "2 of 2 recoveries already used" in stuck.degraded_reason
+    assert [e["action"] for e in _stuck_logs(caplog)] == ["degraded"]
+
+
+def test_recovery_observation_states_an_attempt_whose_settle_wake_was_not_scheduled():
+    line = recovery_observation([
+        {"at": "2026-10-24T01:00:00Z", "trigger": "investigation watchdog",
+         "last_wake_attempt_at": "2026-10-24T00:00:00Z", "stale_seconds": 3600.0,
+         "settle_wake_scheduled": False, "settle_wake_error": "TimerScheduleError: 503"},
+        {"at": "2026-10-24T01:00:05Z", "trigger": "investigation watchdog",
+         "last_wake_attempt_at": "2026-10-24T00:00:00Z", "stale_seconds": 3600.0},
+    ])
+    assert ("restart attempted at 2026-10-24T01:00:00Z (investigation watchdog; last wake attempt "
+            "2026-10-24T00:00:00Z) but its settle wake could not be scheduled") in line
+    assert "restarted at 2026-10-24T01:00:05Z" in line
+    assert "503" not in line  # the error text stays in the file and the log, not the ticket
+
+
+# O1 (fresh-rev-s12): alerts of a group degraded after the recovery limit are not dropped ----
+
+
+def _degrade_after_max_recoveries(client, store, clock, bridge) -> str:
+    group_id, last_attempt = _stuck_group(client, store, clock, bridge)
+    t = last_attempt
+    for n in (2, 3):  # INVESTIGATION_MAX_RECOVERIES=2
+        t += STALE + 10.0
+        clock["now"] = t
+        assert _triage(client, n).json()["group_id"] == group_id
+    clock["now"] = t + STALE + 10.0
+    return group_id
+
+
+def test_degrade_error_log_lists_the_groups_alerts_and_policies(agent_cfg, monkeypatch, clock, caplog):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    group_id = _degrade_after_max_recoveries(client, store, clock, bridge)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR):
+        assert _triage(client, 4).status_code == 200
+
+    (log,) = [e for e in _stuck_logs(caplog) if e["action"] == "degraded"]
+    assert log["group_id"] == group_id
+    assert log["alerts"] == [
+        {"incident_id": f"0.stuck-alert-{n}", "policy_name": _alert(n).policy_name} for n in (1, 2, 3)
+    ]
+    assert store.read(group_id).degraded_cause == "stuck_investigation"
+
+
+def test_next_group_for_the_same_scope_tickets_the_degraded_groups_alerts(agent_cfg, monkeypatch, clock):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    degraded_id = _degrade_after_max_recoveries(client, store, clock, bridge)
+
+    res = _triage(client, 4)
+    new_id = res.json()["group_id"]
+    assert new_id != degraded_id
+    assert store.read(degraded_id).carried_to_group_id == new_id
+    new_doc = store.read(new_id)
+    assert [p["group_id"] for p in new_doc.degraded_predecessors] == [degraded_id]
+
+    bridge.down = False
+    settle = store.read(new_id).settle_deadline_epoch()
+    clock["now"] = settle
+    assert _wake(client, new_id, "settle", settle).json()["status"] == "executed"
+
+    notes = [o for o in bridge.reports[new_id].observations.split(" | ") if degraded_id in o]
+    assert len(notes) == 1
+    note = notes[0]
+    policy = _alert(1).policy_name
+    for n in (1, 2, 3):
+        assert f"0.stuck-alert-{n} ({policy})" in note
+    assert "investigation stuck; 2 recovery attempts failed" in note
+    assert "0.stuck-alert-4" not in note  # the new group's own alert is not listed as dropped
+
+
+def test_degraded_groups_alerts_are_carried_into_one_new_group_only(agent_cfg, monkeypatch, clock):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    degraded_id = _degrade_after_max_recoveries(client, store, clock, bridge)
+    first_new = _triage(client, 4).json()["group_id"]
+    store.update_atomically(first_new, lambda d: setattr(d, "status", "resolved") or d)
+
+    clock["now"] += 10.0
+    second_new = _triage(client, 5).json()["group_id"]
+
+    assert second_new not in (first_new, degraded_id)
+    assert store.read(second_new).degraded_predecessors == []
+    assert store.read(degraded_id).carried_to_group_id == first_new
+
+
+def test_degraded_group_is_not_carried_into_a_group_for_an_unrelated_resource(agent_cfg, monkeypatch, clock):
+    bridge = FakeBridge()
+    client, store = _setup(agent_cfg, monkeypatch, bridge)
+    degraded_id = _degrade_after_max_recoveries(client, store, clock, bridge)
+    # Degrade it (sweep) via an alert on an unrelated resource: that alert's new group must not carry it.
+    unrelated = _alert(4).model_copy(update={"resource_name": "ata-s2fix-unrelated",
+                                             "policy_name": "projects/p/alertPolicies/ata-s2fix-unrelated-latency"})
+    res = client.post("/triage", json=unrelated.model_dump(mode="json"))
+
+    assert res.status_code == 200
+    assert store.read(degraded_id).status == "degraded"
+    assert store.read(res.json()["group_id"]).degraded_predecessors == []
+    assert store.read(degraded_id).carried_to_group_id is None
+
+    # A later group for the degraded group's resource still carries it.
+    clock["now"] += 10.0
+    later = _triage(client, 5).json()["group_id"]
+    assert [p["group_id"] for p in store.read(later).degraded_predecessors] == [degraded_id]
+
+
+def test_degraded_predecessor_observation_text():
+    from agent.app.grouping.stuck_investigation import degraded_predecessor_observation
+
+    line = degraded_predecessor_observation([
+        {"group_id": "g-old", "reason": "investigation stuck; 3 recovery attempts failed",
+         "alerts": [{"incident_id": "0.a", "policy_name": "pol-a"}, {"incident_id": "0.b", "policy_name": None}]},
+    ])
+    assert line == (
+        "Degraded incident group g-old (investigation stuck; 3 recovery attempts failed) was not ticketed; "
+        "its alerts: 0.a (pol-a), 0.b (policy not recorded)."
+    )
+    assert degraded_predecessor_observation([]) is None
 
 
 # 2. Normal path unchanged -----------------------------------------------------------------

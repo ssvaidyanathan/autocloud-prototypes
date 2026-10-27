@@ -13,6 +13,7 @@ Shapes and values come from the live round-3 tickets (cloud-assist-fde-2, 2026-1
 - S4 INC0010339: only the database was investigated, so its dependents' 5xx was not measured.
 """
 
+from pathlib import Path
 import re
 
 import pytest
@@ -430,3 +431,74 @@ def test_ticket_record_never_lowers_the_file_priority(caplog):
     _record_ticket_title(doc, _report(priority="P2"))
     assert doc.priority == "P1"
     assert "not lowered automatically" in caplog.text
+
+
+# ---------------------------------------------------------------------------------------
+# O2 / N1 (fresh-rev-s12): both file-priority write paths are raise-only, via one helper
+# ---------------------------------------------------------------------------------------
+
+def test_okf_update_never_lowers_the_file_priority(tmp_path, caplog):
+    # The group was created at P1 (policy-name heuristic); every alert is labelled p2, so the
+    # report says P2. The file keeps P1 and the lowering is logged, as on the ticket-record path.
+    cfg = _cfg(tmp_path)
+    store = OKFStore(config=cfg)
+    group_id = "ata-inventory-5xx-ata-inventory-api-20261027t140825z"
+    p2_entry = _entry("0.oebdcf2m1bu3", "ata-inventory-5xx", INV, "5xx", "p2", "2026-10-27T14:08:12Z")
+    store.write(group_id, OKFDocument(group_id=group_id, priority="P1", policy_name="ata-inventory-5xx",
+                                      resource_name=INV, origin=INV, alerts=[dict(p2_entry)]))
+    report = _report(group_id=group_id, filename=f"incident-{group_id}.md", priority="P2", alerts=[dict(p2_entry)])
+    alert = AlertEvent(incident_id="0.oebdcf2m1bu3", policy_name="ata-inventory-5xx", resource_name=INV,
+                       started_at="2026-10-27T14:08:12Z", policy_user_labels={"signal": "5xx", "severity": "p2"})
+
+    with caplog.at_level("WARNING"):
+        SynthesizerAgent()._update_okf_file(report, alert, cfg, store=store)
+
+    assert store.read(group_id).priority == "P1"
+    assert report.priority == "P2"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "not lowered automatically" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "P1" in warnings[0].getMessage() and "P2" in warnings[0].getMessage()
+
+
+def test_both_priority_write_paths_use_the_shared_raise_only_helper(tmp_path, monkeypatch):
+    from agent.app import main as agent_main
+    from agent.app.specialists import synthesizer as synth_mod
+
+    calls: list[tuple[str, str]] = []
+    real = synth_mod.raise_file_priority
+
+    def _spy(doc, priority, source):
+        calls.append((priority, source))
+        return real(doc, priority, source)
+
+    monkeypatch.setattr(synth_mod, "raise_file_priority", _spy)
+    monkeypatch.setattr(agent_main, "raise_file_priority", _spy)
+
+    agent_main._record_ticket_title(OKFDocument(group_id="g", priority="P2"), _report(priority="P1"))
+    cfg = _cfg(tmp_path)
+    store = OKFStore(config=cfg)
+    store.write("g2", OKFDocument(group_id="g2", priority="P2", policy_name="ata-inventory-latency",
+                                  resource_name=INV, origin=INV, alerts=[dict(S5_GROUP[0])]))
+    SynthesizerAgent()._update_okf_file(
+        _report(group_id="g2", filename="incident-g2.md", priority="P2", alerts=[dict(S5_GROUP[0])]),
+        S5_LATENCY_ALERT, cfg, store=store,
+    )
+    assert [p for p, _ in calls] == ["P1", "P2"]
+
+
+@pytest.mark.parametrize("current, new, expected", [("P2", "P1", "P1"), ("P1", "P2", "P1"), ("P2", "P2", "P2"),
+                                                    (None, "P3", "P3"), ("P1", None, "P1")])
+def test_raise_file_priority_only_raises(current, new, expected):
+    from agent.app.specialists.synthesizer import raise_file_priority
+
+    doc = OKFDocument(group_id="g", priority=current)
+    raise_file_priority(doc, new, "test")
+    assert doc.priority == expected
+
+
+def test_priority_rank_is_public_and_main_does_not_import_a_private_helper():
+    from agent.app.specialists.synthesizer import priority_rank
+
+    assert priority_rank("P1") < priority_rank("p2") < priority_rank(None)
+    main_src = (Path(__file__).resolve().parents[1] / "agent" / "app" / "main.py").read_text()
+    assert "_priority_rank" not in main_src

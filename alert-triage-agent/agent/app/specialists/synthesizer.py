@@ -259,7 +259,7 @@ def apply_group_alerts(report: InvestigationReport, group_alerts: list[Any]) -> 
     # Priority reflects the most severe alert of the group, not only the investigated one
     # (S5: the first alert was latency/p2 while the group held 5xx/p1 alerts). Only raised.
     group_priority = highest_severity_priority(merged)
-    if group_priority and _priority_rank(group_priority) < _priority_rank(report.priority):
+    if group_priority and priority_rank(group_priority) < priority_rank(report.priority):
         logger.info(
             "Group %s: priority raised from %s to %s (highest alert severity label in the group)",
             report.group_id, report.priority, group_priority,
@@ -386,9 +386,26 @@ def apply_correlation_note(report: InvestigationReport, correlation: Optional[di
     report.observations = " | ".join(items)
 
 
-def _priority_rank(priority: Optional[str]) -> int:
+def priority_rank(priority: Optional[str]) -> int:
+    """Numeric rank of 'P<n>' (lower is more severe); 99 when it is not a priority."""
     m = re.fullmatch(r"[Pp](\d+)", str(priority or "").strip())
     return int(m.group(1)) if m else 99
+
+
+def raise_file_priority(doc: Any, priority: Optional[str], source: str) -> None:
+    """Set ``doc.priority`` to ``priority`` only if that raises it; never lower it automatically.
+
+    Shared by every write of the incident file's priority (the OKF update before the ticket
+    and the ticket record after it). A lower ``priority`` is ignored with a WARNING.
+    """
+    if priority_rank(priority) < priority_rank(doc.priority):
+        logger.info("Group %s: priority %s -> %s (%s)", doc.group_id, doc.priority, priority, source)
+        doc.priority = priority
+    elif doc.priority != priority:
+        logger.warning(
+            "Group %s: file priority %s is higher than the %s %s; not lowered automatically",
+            doc.group_id, doc.priority, source, priority,
+        )
 
 
 def highest_severity_priority(alerts: list[Any]) -> Optional[str]:
@@ -398,7 +415,7 @@ def highest_severity_priority(alerts: list[Any]) -> Optional[str]:
         if not isinstance(a, dict):
             continue
         sev = a.get("severity") or (a.get("labels") or {}).get("severity") or (a.get("policy_user_labels") or {}).get("severity")
-        rank = _priority_rank(sev)
+        rank = priority_rank(sev)
         if rank != 99 and (best is None or rank < best):
             best = rank
     return f"P{best}" if best is not None else None
@@ -3142,8 +3159,9 @@ class SynthesizerAgent:
             # The report section and the ticket must cover every alert of the group.
             apply_group_alerts(report, doc.alerts)
             # After apply_group_alerts, which can raise the priority to the group's most severe
-            # alert: written before it, the file kept P2 while the ticket said P1.
-            doc.priority = report.priority
+            # alert: written before it, the file kept P2 while the ticket said P1. Raise-only,
+            # like the ticket record (main._record_ticket_title).
+            raise_file_priority(doc, report.priority, "report priority")
 
             report_markdown = self._build_report_markdown(report, doc.policy_name, origin, merged_blast, topology)
             doc.body = _merge_report_section(doc.body, report_markdown)
