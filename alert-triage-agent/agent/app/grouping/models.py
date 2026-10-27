@@ -15,6 +15,9 @@ class IncidentGroupStatus(str, Enum):
     TICKETED = "ticketed"
     COOLING_DOWN = "cooling_down"
     RESOLVED = "resolved"
+    # Terminal: monitoring recovered after cool-down but the ticket was left open
+    # for a human to verify and resolve (AUTO_RESOLVE_ON_RECOVERY=false).
+    RECOVERED = "recovered"
     ARCHIVED = "archived"
     DEGRADED = "degraded"
 
@@ -142,6 +145,10 @@ class OKFDocument(BaseModel):
     settle_deadline: Optional[str] = None
     max_wait_deadline: Optional[str] = None
     cooling_deadline: Optional[str] = None
+
+    # Monitoring recovery (cool-down expired without auto-resolve)
+    recovered_at: Optional[str] = None
+    recovery_note_posted_at: Optional[str] = None
 
     # Degraded mode flags
     degraded: bool = False

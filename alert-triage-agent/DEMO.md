@@ -63,6 +63,8 @@ Scenario Workflow:
 [Inject & Sustained Traffic] ---> [Wait for Hold Window] ---> [check-result.sh] ---> [Verify ServiceNow] ---> [reset-scenarios.sh]
 ```
 
+**Ticket state after the alerts close:** When a scenario's traffic stops, its alerts close even though the fault is still injected. With the default `AUTO_RESOLVE_ON_RECOVERY=false`, the agent does **not** resolve the ticket. About 180s after the last alert closes, the ticket gets one more work note: "Monitoring recovered at <time>: all <N> alerts closed and the 180s cool-down passed with no recurrence. No remediation was recorded by the agent. Please verify the fix and resolve this incident." The ServiceNow state stays **In Progress**, and the incident group's OKF `status` becomes `recovered`. Resolve the ticket yourself after `reset-scenarios.sh` removes the fault. A new alert after that point opens a new group and a new ticket. You will see "Incident resolved. All monitoring conditions recovered and cool-down expired." only if the agent is deployed with `AUTO_RESOLVE_ON_RECOVERY=true`.
+
 ---
 
 #### Scenario S1: Backend 5xx Error Spike

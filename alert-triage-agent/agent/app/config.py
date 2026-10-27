@@ -48,6 +48,11 @@ class AgentConfig(BaseSettings):
     # use 60s duration + 60s alignment, so alert open times skew by up to ~2 min; the extra
     # margin allows a gradual upstream ramp to push the downstream over its threshold first.
     origin_onset_tolerance_seconds: float = Field(default=300.0, alias="ORIGIN_ONSET_TOLERANCE_SECONDS", ge=0)
+    # Cool-down outcome: when all alerts in a ticketed group close and the cool-down
+    # passes with no recurrence, resolve the ServiceNow ticket (true) or leave it
+    # In Progress with a "please verify and resolve" work note (false, default).
+    # Monitoring recovery is not proof of a fix (low traffic can mask a live fault).
+    auto_resolve_on_recovery: bool = Field(default=False, alias="AUTO_RESOLVE_ON_RECOVERY")
 
     @property
     def effective_incidents_bucket(self) -> str:

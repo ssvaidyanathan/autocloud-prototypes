@@ -57,7 +57,7 @@ The end-to-end incident investigation lifecycle flows through deterministic, aud
 7. Bridge Instruction API (`agent/app/bridge_client.py` -> `bridge/app/main.py`)
    ├── `POST /instructions/ticket/create` (query correlation_id before create)
    ├── `POST /instructions/ticket/work-note` (late alert / status updates)
-   └── `POST /instructions/ticket/resolve` (cool-down resolved ticket closing)
+   └── `POST /instructions/ticket/resolve` (cool-down ticket closing, only when `AUTO_RESOLVE_ON_RECOVERY=true`; by default a verify-and-resolve work note is posted instead)
           │
           ▼
 8. ServiceNow Incident Update (`bridge/app/adapters/servicenow.py`)

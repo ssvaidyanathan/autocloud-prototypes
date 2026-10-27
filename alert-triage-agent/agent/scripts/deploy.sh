@@ -17,6 +17,9 @@ AGENT_SA="${NAME_PREFIX}-agent-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 INCIDENTS_BUCKET="${PROJECT_ID}-${NAME_PREFIX}-incidents"
 ENVIRONMENT="${ENVIRONMENT:-demo}"
 OWNER="${OWNER:-sre-prototypes}"
+# Resolve the ServiceNow ticket when monitoring recovers and the cool-down passes (true),
+# or leave it In Progress with a verify-and-resolve work note (false). See CONFIGURATION.md §1.2.
+AUTO_RESOLVE_ON_RECOVERY="${AUTO_RESOLVE_ON_RECOVERY:-false}"
 
 echo "==================================================================="
 echo "  Deploying ${SERVICE_NAME} to Cloud Run"
@@ -49,7 +52,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --add-volume="name=incidents-volume,type=cloud-storage,bucket=${INCIDENTS_BUCKET},mount-options=only-dir=knowledge/incident-manager" \
     --add-volume-mount="volume=incidents-volume,mount-path=/knowledge/incident-manager" \
     --labels="app=alert-triage-agent,component=${NAME_PREFIX}-agent,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}" \
-    --set-env-vars="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${INCIDENTS_BUCKET},INCIDENT_STORE_PATH=/knowledge/incident-manager,BRIDGE_URL=${BRIDGE_URL},AGENT_URL=${AGENT_URL}"
+    --set-env-vars="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${INCIDENTS_BUCKET},INCIDENT_STORE_PATH=/knowledge/incident-manager,BRIDGE_URL=${BRIDGE_URL},AGENT_URL=${AGENT_URL},AUTO_RESOLVE_ON_RECOVERY=${AUTO_RESOLVE_ON_RECOVERY}"
 
 # 3. Ensure IAM run.invoker is granted only to bridge-sa and authorized caller SAs
 echo "Ensuring IAM run.invoker is restricted to authorized service accounts..."
