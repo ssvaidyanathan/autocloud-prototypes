@@ -171,6 +171,9 @@ class AgentConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _require_and_derive(self) -> "AgentConfig":
+        # IS_LOCAL turns on mock tokens and local fallbacks; never on Cloud Run (K_SERVICE is set there).
+        if self.is_local and os.getenv("K_SERVICE"):
+            raise ValueError("IS_LOCAL=true is not allowed on Cloud Run (K_SERVICE is set)")
         for field_name in ("project_id", "region", "location", "timer_queue_name", "service_account_email"):
             value = getattr(self, field_name)
             if isinstance(value, str) and not value.strip():

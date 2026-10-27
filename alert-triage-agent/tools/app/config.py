@@ -1,3 +1,4 @@
+import os
 import re
 from typing import Optional
 from pydantic import Field, field_validator, model_validator
@@ -68,6 +69,9 @@ class ToolsConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _require_and_derive(self) -> "ToolsConfig":
+        # IS_LOCAL turns on mock tokens and local fallbacks; never on Cloud Run (K_SERVICE is set there).
+        if self.is_local and os.getenv("K_SERVICE"):
+            raise ValueError("IS_LOCAL=true is not allowed on Cloud Run (K_SERVICE is set)")
         for field_name in ("project_id", "region", "apigee_org", "apigee_env"):
             value = getattr(self, field_name)
             if isinstance(value, str) and not value.strip():

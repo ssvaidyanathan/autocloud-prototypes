@@ -83,3 +83,34 @@ def test_tools_other_caller_is_still_forbidden(monkeypatch):
     client = _middleware_client(monkeypatch, ["atat-agent-sa@proj-x.iam.gserviceaccount.com"],
                                 "ata-agent-sa@proj-x.iam.gserviceaccount.com")
     assert client.post("/mcp", headers={"Authorization": "Bearer t"}).status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# L4: IS_LOCAL=true is refused on Cloud Run (K_SERVICE set) in agent, bridge and tools
+# ---------------------------------------------------------------------------
+
+def _config_classes():
+    from agent.app.config import AgentConfig
+    from bridge.app.config import BridgeConfig
+    return [AgentConfig, BridgeConfig, ToolsConfig]
+
+
+@pytest.mark.parametrize("cls_index", [0, 1, 2], ids=["agent", "bridge", "tools"])
+def test_is_local_is_refused_on_cloud_run(monkeypatch, cls_index):
+    from pydantic import ValidationError
+
+    cls = _config_classes()[cls_index]
+    monkeypatch.setenv("K_SERVICE", "atat-svc")
+    with pytest.raises(ValidationError, match="IS_LOCAL=true is not allowed on Cloud Run"):
+        cls(NAME_PREFIX="atat", IS_LOCAL=True)
+    # Off Cloud Run, local mode still works.
+    monkeypatch.delenv("K_SERVICE")
+    assert cls(NAME_PREFIX="atat", IS_LOCAL=True).is_local is True
+
+
+@pytest.mark.parametrize("cls_index", [0, 1, 2], ids=["agent", "bridge", "tools"])
+def test_non_local_config_on_cloud_run_is_unaffected(monkeypatch, cls_index):
+    cls = _config_classes()[cls_index]
+    monkeypatch.setenv("K_SERVICE", "atat-svc")
+    cfg = cls(NAME_PREFIX="atat", PROJECT_ID="proj-x", REGION="us-central1", IS_LOCAL=False)
+    assert cfg.is_local is False
