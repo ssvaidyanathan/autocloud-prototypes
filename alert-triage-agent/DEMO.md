@@ -81,7 +81,7 @@ Injects an internal 500 error fault at an 85% error rate into `ata-inventory-api
   *(To inspect only incidents created since you started: pass `--since <START_TIMESTAMP>` displayed in the script header).*
 - **What to Look for in ServiceNow:**
   - **Ticket Count:** Exactly **1** Incident Ticket (e.g. `INC0010482`).
-  - **Title / Short Description:** `P1 Incident: ata-inventory-api - Elevated upstream HTTP 5xx error rate (85%)`
+  - **Title / Short Description:** `[P1] ata-inventory-api: <problem summary> (<N> alerts)`, e.g. `[P1] ata-inventory-api: Elevated HTTP 5xx error rate (2 alerts)`
   - **Origin Attribution:** `ata-inventory-api`
   - **Work Notes & Links:**
     - Structured 4-bullet SRE summary (Problem, Systems, Observations, Recommended Actions)
