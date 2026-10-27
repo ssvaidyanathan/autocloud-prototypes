@@ -1,6 +1,7 @@
 """Tests for F4 alert policies: inventory latency, calibrated Cloud SQL connections, and Apigee timeout."""
 
 import re
+import subprocess
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,10 +91,14 @@ def test_terraform_observability_channel_migration():
     assert "value       = local.notification_channel_id" in outputs_tf
 
 
-def test_apigee_proxy_target_timeouts_configured():
+def test_apigee_proxy_target_timeouts_configured(tmp_path):
     """Verify Apigee proxy target endpoints specify 5000ms io.timeout.millis and connect.timeout.millis."""
-    orders_target = (REPO_ROOT / "demo/apigee/ata-orders-v1/apiproxy/targets/default.xml").read_text()
-    inv_target = (REPO_ROOT / "demo/apigee/ata-inventory-v1/apiproxy/targets/default.xml").read_text()
+    rendered = {}
+    for api in ("orders", "inventory"):
+        subprocess.run(["bash", str(REPO_ROOT / "demo/apigee/render-bundle.sh"), f"{api}-v1", "ata",
+                        str(tmp_path / api)], check=True, capture_output=True)
+        rendered[api] = (tmp_path / api / "apiproxy/targets/default.xml").read_text()
+    orders_target, inv_target = rendered["orders"], rendered["inventory"]
 
     for content, name in [(orders_target, "orders"), (inv_target, "inventory")]:
         root = ET.fromstring(content)
