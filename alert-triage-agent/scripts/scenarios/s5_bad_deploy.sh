@@ -103,9 +103,9 @@ revert_s5_on_error() {
 }
 trap revert_s5_on_error EXIT
 
-log_info "--> Updating ata-inventory-api with invalid DB credentials on pinned image..."
+log_info "--> Updating ${NAME_PREFIX}-inventory-api with invalid DB credentials on pinned image..."
 if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
-    log_info "[MOCK/DRY-RUN] Simulating Cloud Run deployment with DB_USER=invalid_user on ${PINNED_INVENTORY_IMAGE}..."
+    log_info "[MOCK/DRY-RUN] Simulating Cloud Run deployment with ATA_INVENTORY_DB_USER=invalid-iam-user on ${PINNED_INVENTORY_IMAGE}..."
 else
     # Name the revision ourselves: reading latestCreatedRevisionName races with any
     # concurrent `services update`, which would make S5 route to someone else's revision.
@@ -115,7 +115,7 @@ else
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --image="${PINNED_INVENTORY_IMAGE}" \
-        --update-env-vars="ATA_INVENTORY_DB_USER=invalid-iam-user@${PROJECT_ID}.iam,DB_USER=invalid-iam-user@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false,MOCK_DB=false" \
+        --update-env-vars="ATA_INVENTORY_DB_USER=invalid-iam-user@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false" \
         --revision-suffix="${S5_REVISION_SUFFIX}" \
         --quiet; then
         log_error "FATAL: Cloud Run update of ${NAME_PREFIX}-inventory-api failed; S5 not injected." >&2
@@ -148,7 +148,7 @@ fi
 
 # 2. Check Service Health
 log_info "--> Checking service status to observe startup/DB connection failure..."
-INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
+INV_URL="$(require_service_url "${NAME_PREFIX}-inventory-api")"
 ID_TOKEN="$(resolve_id_token "${INV_URL}")"
 
 AUTH_HEADER=()
@@ -239,7 +239,7 @@ log_success "=== Scenario S5 Injected Successfully ==="
 log_info "Expected Triage & Correlation Outcome:"
 log_info "  - Total Groups: 1 Incident Group"
 log_info "  - Total Tickets: 1 ServiceNow Incident Ticket"
-log_info "  - Origin Attribution: ata-inventory-api; the bad revision is named in the problem and root cause"
+log_info "  - Origin Attribution: ${NAME_PREFIX}-inventory-api; the bad revision is named in the problem and root cause"
 log_info "  - Rollback: to the revision that served before the deploy (Cloud Monitoring request_count by revision), with that evidence"
 log_info "  - Blast Radius: Inventory & dependent APIs"
 log_info "  - Root Cause: Change-induced database authentication failure."
@@ -254,9 +254,9 @@ cat <<EOF
 
 2. Check Incident in ServiceNow:
    - Expected Ticket Count: 1
-   - Expected Origin: ata-inventory-api (explicitly named bad revision)
+   - Expected Origin: ${NAME_PREFIX}-inventory-api (explicitly named bad revision)
    - Expected Root Cause: Change-induced database authentication failure
-   - Blast Radius: Inventory & dependent APIs (ata-inventory-v1, ata-orders-api, ata-orders-v1)
+   - Blast Radius: Inventory & dependent APIs (ata-inventory-v1, ${NAME_PREFIX}-orders-api, ata-orders-v1)
    - Verify HTML diagnostic report is attached to ServiceNow ticket
 
 3. Reset Environment Before Running Next Scenario:

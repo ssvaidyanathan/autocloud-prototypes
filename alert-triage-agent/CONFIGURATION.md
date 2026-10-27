@@ -92,11 +92,22 @@ Configuration for demo workloads (`ata-inventory-api` and `ata-orders-api`).
 | `PORT` | `8080` | HTTP listening port. |
 | `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
 | `REGION` | `us-west1` | GCP deployment region. |
-| `DB_USER` | `ata-inventory-sa@...` | IAM database user for Cloud SQL IAM authentication. |
-| `DB_NAME` | `inventory` | PostgreSQL database name. |
-| `INSTANCE_CONNECTION_NAME` | `cloud-assist-fde-2:us-west1:ata-inventory-db` | Cloud SQL instance connection name. |
-| `DB_IAM_AUTH` | `true` | Enables IAM database authentication via pg8000 connector. |
-| `MOCK_DB` | `false` | Fallback to in-memory catalog when database is unreachable. |
+| `ATA_INVENTORY_DB_USER` | *none (required unless mock)* | IAM database user for Cloud SQL IAM authentication (`<prefix>-inventory-sa@<project>.iam`). |
+| `ATA_INVENTORY_DB_NAME` | `inventory` | PostgreSQL database name. |
+| `ATA_INVENTORY_INSTANCE_CONNECTION_NAME` | *none (required unless mock)* | Cloud SQL instance connection name (`<project>:<region>:<prefix>-inventory-db`). |
+| `ATA_INVENTORY_DB_IAM_AUTH` | `true` | Enables IAM database authentication via pg8000 connector. |
+| `ATA_INVENTORY_MOCK_DB` | `false` | Serve the in-memory catalog instead of Cloud SQL (`true`/`false`; other values fail at start). |
+
+The inventory API reads only `ATA_INVENTORY_*` names; the legacy `DB_USER` / `MOCK_DB` aliases are not read.
+
+Demo script settings (scripts/scenarios/common.sh):
+
+| Variable | Default Value | Description |
+| :--- | :--- | :--- |
+| `ATA_DEMO_MAX_INSTANCES` | `1` | Max Cloud Run instances of the demo services (service and revision level). Keep equal to Terraform `demo_max_instance_count`. |
+| `ATA_INVENTORY_RESTOCK_BASELINE` | `item-101=1000,...,item-105=1000` | Stock that `reset-scenarios.sh` sets via `POST /admin/restock` before each scenario (`<id>=<stock>`, stock >= 1). |
+| `ATA_INVENTORY_PIN_FILE` | `scripts/scenarios/inventory-pin.env` | The inventory pin (revision, digest, previous pin). Change it with `scripts/repin-inventory.sh`. |
+| `ATA_ARTIFACT_REGISTRY_HOST` | `<REGION>-docker.pkg.dev` | Artifact Registry host of the `<prefix>-docker` repository. |
 | `INVENTORY_SERVICE_URL` | *Cloud Run URL* | Internal Cloud Run URL of inventory service called by orders API. |
 
 ---

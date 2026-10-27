@@ -323,6 +323,7 @@ This script:
 6. **Archives active OKF files:** Only after all alerts have closed, every incident group is terminal and the quiet period has elapsed does the script move active incident files from `gs://<bucket>/knowledge/incident-manager/*.md` to `archive/` and remove leftover root copies.
 7. **Verifies healthy baseline:** Confirms HTTP 200 health responses across all services and verifies 0 active incident groups on the bridge.
 8. **Preflights admin endpoints:** GETs the fault injection endpoints (`/admin/fault/inject` and `/admin/leak-connections`) on the pinned inventory revision. Only HTTP 2xx passes; 401/403, 404, connection errors and other codes fail the reset with a clear message.
+9. **Restocks the demo items (step 5b, before the alert wait):** `POST /admin/restock` on the pinned revision sets every item in `ATA_INVENTORY_RESTOCK_BASELINE` (default `item-101`..`item-105` = 1000 each) to that absolute stock. The reset then checks the response and reads the stock back with `GET /items`. Scenario traffic used to drain the stock across runs, until `POST /orders` returned HTTP 400. Any failure stops the reset. A 404 means the serving revision predates the restock endpoint: re-pin (DEPLOY.md, "Re-pinning the inventory baseline"). `./scripts/reset-scenarios.sh --restock-only` runs just the pinned-baseline checks and the restock.
 
 ### CLI Options & Flags
 
@@ -334,6 +335,8 @@ This script:
 | `--timeout <duration>` | Maximum time to wait for open alerts to clear and incident groups to reach a terminal state before failing with the still-open alerts or active groups listed | `1800s` (`30m`; S4's reset can take up to ~27 min) |
 | `--poll-interval <duration>`| Interval between Cloud Monitoring alert queries and incident group state reads | `15s` |
 | `--monitoring-token-source <adc\|gcloud>` | Token for the alert check: `adc` = `gcloud auth application-default print-access-token`, `gcloud` = `gcloud auth print-access-token`. Only the chosen source is tried; if it fails the reset fails (run `gcloud auth application-default login`, or use `--no-wait`). Env: `ATA_MONITORING_TOKEN_SOURCE` | `adc` |
+| `--no-restock` | Skips the restock with a warning (e.g. after `repin-inventory.sh rollback` to code without `/admin/restock`, where the restock would fail with 404) | `false` |
+| `--restock-only` | Only restocks the demo items (`POST /admin/restock` on the pinned revision, verified with `GET /items`) to `ATA_INVENTORY_RESTOCK_BASELINE`; no fault reset, no alert wait | `false` |
 | `--dry-run` | Simulates reset steps without issuing network mutations | `false` |
 | `--mock` | Executes in mock mode without GCP cloud dependencies | `false` |
 

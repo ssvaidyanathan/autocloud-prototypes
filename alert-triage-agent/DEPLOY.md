@@ -182,6 +182,33 @@ terraform apply tfplan
 - `ata-orders-api`: Securely invokes `ata-inventory-api` using ambient Google ID tokens.
 - Apigee TargetServers: `ata-orders-target` and `ata-inventory-target`.
 
+Both demo services run with at most `demo_max_instance_count` instances (default 1) and min instances 0. Fault state and leaked DB connections live in one instance's memory, and `/admin/fault/reset` clears only the instance it reaches. The inventory API reads only `ATA_INVENTORY_*` variables (`ATA_INVENTORY_INSTANCE_CONNECTION_NAME`, `ATA_INVENTORY_DB_USER`, `ATA_INVENTORY_DB_NAME`, `ATA_INVENTORY_DB_IAM_AUTH`, `ATA_INVENTORY_MOCK_DB`). The legacy `DB_USER` / `MOCK_DB` aliases are not read or set anywhere. Without the Cloud SQL settings, database requests fail with a message that names them.
+
+### Instance caps
+
+`scripts/set-demo-instance-caps.sh` does a dry run by default and runs only with `--apply`. It sets the **service-level** limit (`gcloud run services update --max`) on `<prefix>-inventory-api` and `<prefix>-orders-api`, plus the orders revision-level limits. The service-level limit covers every revision, including a pinned revision created before the cap, and needs no new revision. Google provider 5.x cannot set it, so Terraform does not. `ATA_DEMO_MAX_INSTANCES` (default 1) sets the limit; keep it equal to `demo_max_instance_count`. `scenarios/preflight.sh` fails if either service lacks the limit.
+
+### Re-pinning the inventory baseline
+
+Scenarios, reset and preflight restore and check inventory traffic against **one pinned revision**. The pin lives only in `scripts/scenarios/inventory-pin.env`: the revision, its image digest, and the previous pin (the rollback target). Do not edit it by hand. Use `scripts/repin-inventory.sh`:
+
+```bash
+./scripts/repin-inventory.sh status                       # read-only: pin, traffic, baseline gaps, caps
+./scripts/repin-inventory.sh prepare --image-tag v1.2.0   # build; deploy a candidate with NO traffic; verify; untag
+#   (or: prepare --image-digest sha256:<hex> for an image already in <REGION>-docker.pkg.dev/<project>/<prefix>-docker)
+./scripts/repin-inventory.sh write-pin --revision <candidate> --digest sha256:<hex>
+git add scripts/scenarios/inventory-pin.env && git commit -m "chore(inventory): pin <candidate>"
+./scripts/repin-inventory.sh switch                       # 100% to the pin; verify serving, /health, /items, admin probes
+./scripts/reset-scenarios.sh                              # restock and full baseline check
+# Rollback: ./scripts/repin-inventory.sh rollback  (traffic and pin file back to the previous pin; commit the file)
+```
+
+`prepare` verifies the candidate before it ever serves traffic. It checks the digest, the `ATA_INVENTORY_*` env with no aliases, max instances `ATA_DEMO_MAX_INSTANCES`, min 0, and Ready. It then sends GET requests through a temporary traffic tag: `/health`, `/items` (the Cloud SQL IAM login), and the admin probes, including `/admin/restock`. It removes the tag before exiting, even on failure. On a **fresh project**, where no pinned revision exists yet, use `prepare --initial` and `write-pin --initial`, then `switch`. `--initial` fails if the pin file's revision exists in the project.
+
+### Pruning old revisions
+
+Every S5 run and baseline restore creates an inventory revision. `scripts/prune-revisions.sh` does a dry run by default and runs only with `--apply`. It lists, and with `--apply` deletes, the inventory and orders revisions that have 0% traffic and no tag and are not the latest. It never deletes the pinned revision, the previous pin or any `--keep <revision>`. `--apply` runs only while inventory serves the pin. It re-reads the protected set before deleting.
+
 ---
 
 ## 6. Step 4: Apigee API Proxies & Products

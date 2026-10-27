@@ -1,13 +1,17 @@
-"""Configuration for ata-inventory-api."""
+"""Configuration for ata-inventory-api.
 
-import os
+Every setting is read from ATA_INVENTORY_<NAME> (pydantic-settings env_prefix). There are
+no legacy aliases: DB_USER and MOCK_DB are not read. The Cloud SQL connection settings
+have no built-in project values; require_db_settings() fails loudly when the database is
+used without them (Terraform, deploy.sh and repin-inventory.sh set them).
+"""
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    project_id: str = "cloud-assist-fde-2"
-    instance_connection_name: str = "cloud-assist-fde-2:us-west1:ata-inventory-db"
-    db_user: str = "ata-inventory-sa@cloud-assist-fde-2.iam"
+    instance_connection_name: str = ""
+    db_user: str = ""
     db_name: str = "inventory"
     db_iam_auth: bool = True
     mock_db: bool = False
@@ -21,14 +25,24 @@ class Settings(BaseSettings):
 
     @property
     def effective_db_user(self) -> str:
-        return os.getenv("ATA_INVENTORY_DB_USER") or os.getenv("DB_USER") or self.db_user
+        return self.db_user
 
     @property
     def effective_mock_db(self) -> bool:
-        val = os.getenv("ATA_INVENTORY_MOCK_DB") or os.getenv("MOCK_DB")
-        if val is not None:
-            return val.lower() in ("true", "1", "yes")
         return self.mock_db
+
+    def require_db_settings(self) -> None:
+        """Raise unless the Cloud SQL connection settings are configured."""
+        missing = [
+            f"ATA_INVENTORY_{name.upper()}"
+            for name in ("instance_connection_name", "db_user", "db_name")
+            if not getattr(self, name)
+        ]
+        if missing:
+            raise RuntimeError(
+                "Cloud SQL settings not configured: " + ", ".join(missing)
+                + " (set them, or ATA_INVENTORY_MOCK_DB=true for the in-memory catalog)"
+            )
 
 
 settings = Settings()
