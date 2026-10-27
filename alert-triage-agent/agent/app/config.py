@@ -43,6 +43,12 @@ class AgentConfig(BaseSettings):
 
     is_local: bool = Field(default=False, alias="IS_LOCAL")
 
+    # Cool-down outcome: when all alerts in a ticketed group close and the cool-down
+    # passes with no recurrence, resolve the ServiceNow ticket (true) or leave it
+    # In Progress with a "please verify and resolve" work note (false, default).
+    # Monitoring recovery is not proof of a fix (low traffic can mask a live fault).
+    auto_resolve_on_recovery: bool = Field(default=False, alias="AUTO_RESOLVE_ON_RECOVERY")
+
     @property
     def effective_incidents_bucket(self) -> str:
         return self.incidents_bucket or f"{self.project_id}-{self.name_prefix}-incidents"

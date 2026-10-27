@@ -145,7 +145,7 @@ def write_preanalysis_lock(
                         frontmatter["servicenow_sys_id"] = old_meta["servicenow_sys_id"]
                     if old_meta.get("servicenow_number"):
                         frontmatter["servicenow_number"] = old_meta["servicenow_number"]
-                    if old_meta.get("status") in {"ticketed", "resolved"}:
+                    if old_meta.get("status") in {"ticketed", "resolved", "recovered"}:
                         frontmatter["status"] = old_meta["status"]
                     old_alerts = old_meta.get("alerts", [])
                     if isinstance(old_alerts, list):

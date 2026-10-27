@@ -19,7 +19,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException
 from .bridge_client import BridgeClient
 from .config import AgentConfig, get_agent_settings
 from .contracts.alert import AlertEvent, is_ata_alert
-from .contracts.instructions import CreateTicketRequest, ResolveTicketRequest
+from .contracts.instructions import CreateTicketRequest, ResolveTicketRequest, WorkNoteRequest
 from .contracts.report import InvestigationReport
 from .contracts.timers import TimerWakeRequest, TimerWakeResponse
 from .duplicate_checker import (
@@ -520,7 +520,16 @@ async def timer_wake(
                 reason="unresolved_unticketed",
             )
 
+        if doc.servicenow_sys_id and not settings.auto_resolve_on_recovery:
+            return _mark_recovered_without_resolving(store, doc, now, settings)
+
         # Valid cooling wake: call bridge resolve and archive OKF
+        logger.info(
+            "JSON_DECISION: auto_resolve_on_recovery=%s; resolving group %s (servicenow_sys_id=%s)",
+            settings.auto_resolve_on_recovery,
+            doc.group_id,
+            doc.servicenow_sys_id,
+        )
         logger.info(
             "Cooling deadline expired for group %s; resolving and archiving incident",
             doc.group_id,
@@ -554,6 +563,108 @@ async def timer_wake(
         group_id=doc.group_id,
         reason=f"unsupported_deadline_type_{payload.deadline_type}",
     )
+
+
+def _mark_recovered_without_resolving(
+    store: OKFStore,
+    doc: OKFDocument,
+    now: float,
+    settings: AgentConfig,
+) -> TimerWakeResponse:
+    """Cool-down expired with AUTO_RESOLVE_ON_RECOVERY=false: leave the ticket In Progress.
+
+    Monitoring recovery is not resolution, so instead of calling ticket/resolve this posts
+    one work note asking a human to verify the fix and moves the group to the terminal
+    RECOVERED state (excluded from grouping exactly like RESOLVED, so new alerts open a
+    fresh group).
+
+    Idempotency: the group is claimed (cooling_down -> recovered) before the note is posted,
+    so a retried or duplicate cooling wake finds it no longer cooling_down and is ignored.
+    If posting the note fails the claim is released and the error re-raised, so the timer
+    queue retries the wake rather than the note being silently dropped.
+    """
+    now_iso = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cooling_epoch = doc.cooling_deadline_epoch()
+    if cooling_epoch is not None:
+        recovered_epoch = cooling_epoch - COOLING_WINDOW_SECONDS
+    else:
+        logger.warning(
+            "Group %s has no cooling_deadline; reporting recovery time as the wake time %s",
+            doc.group_id,
+            now_iso,
+        )
+        recovered_epoch = now
+    recovered_iso = datetime.fromtimestamp(recovered_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    claimed = False
+
+    def _claim(d: OKFDocument) -> OKFDocument:
+        nonlocal claimed
+        claimed = str(d.status).lower() == IncidentGroupStatus.COOLING_DOWN.value
+        if claimed:
+            d.status = IncidentGroupStatus.RECOVERED.value
+            d.recovered_at = recovered_iso
+            d.updated_at = now_iso
+        return d
+
+    claimed_doc = store.update_atomically(doc.group_id, _claim)
+    if not claimed:
+        logger.info(
+            "Cooling wake ignored: group %s status changed to %s before recovery was recorded",
+            doc.group_id,
+            claimed_doc.status,
+        )
+        return TimerWakeResponse(
+            status="ignored",
+            group_id=doc.group_id,
+            reason=f"group_status_{claimed_doc.status}",
+        )
+
+    alert_count = len(claimed_doc.alerts)
+    note = (
+        f"Monitoring recovered at {recovered_iso}: all {alert_count} alerts closed and the "
+        f"{int(COOLING_WINDOW_SECONDS)}s cool-down passed with no recurrence. "
+        "No remediation was recorded by the agent. Please verify the fix and resolve this incident."
+    )
+    logger.info(
+        "JSON_DECISION: auto_resolve_on_recovery=false; not resolving ServiceNow ticket %s for group %s; "
+        "posting recovery work note and marking group recovered",
+        claimed_doc.servicenow_sys_id,
+        doc.group_id,
+    )
+
+    try:
+        BridgeClient(config=settings).append_work_note(
+            bridge_url=settings.bridge_url,
+            request=WorkNoteRequest(
+                sys_id=claimed_doc.servicenow_sys_id,
+                work_note=note,
+                group_id=doc.group_id,
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "Failed posting recovery work note for group %s; releasing claim so the cooling wake is retried",
+            doc.group_id,
+        )
+
+        def _release(d: OKFDocument) -> OKFDocument:
+            if str(d.status).lower() == IncidentGroupStatus.RECOVERED.value and d.recovery_note_posted_at is None:
+                d.status = IncidentGroupStatus.COOLING_DOWN.value
+                d.recovered_at = None
+                d.updated_at = now_iso
+            return d
+
+        store.update_atomically(doc.group_id, _release)
+        raise
+
+    def _mark_note_posted(d: OKFDocument) -> OKFDocument:
+        d.recovery_note_posted_at = now_iso
+        d.updated_at = now_iso
+        return d
+
+    store.update_atomically(doc.group_id, _mark_note_posted)
+    return TimerWakeResponse(status="executed", group_id=doc.group_id, reason="recovered_not_resolved")
 
 
 def _apply_current_group_alerts(report: InvestigationReport, store: OKFStore, doc: OKFDocument) -> None:

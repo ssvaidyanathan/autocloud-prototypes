@@ -181,7 +181,11 @@ Paths not shown in the diagram:
 - **Filtering and duplicates**: `ata-bridge` drops non-`ata` alerts with HTTP 200 and does no deduplication. `ata-agent` suppresses repeat alerts for an already-active policy and resource by appending them to the existing incident group.
 - **Timer extension**: Each alert that attaches to an open group resets the settle deadline to 120s after that alert's arrival, capped at the 300s max-wait deadline. A wake that arrives more than 2.0s before the group's current deadline is ignored.
 - **Late alerts**: Alerts that correlate to an already-ticketed (or cooling-down) group are added to the ServiceNow ticket as work notes (`POST /instructions/ticket/work-note`). A recent repeat (within 30 minutes) of a policy and resource already in the group is caught by the duplicate check instead: it is appended to the incident group only, with no work note.
-- **Cool-down and resolution**: When every alert in a ticketed group has closed (or all are already closed when the ticket is created), the group enters `COOLING_DOWN` and a 180s cooling timer is scheduled. A new alert that attaches during cool-down returns the group to `TICKETED`. If none arrives before that timer fires, the agent calls `POST /instructions/ticket/resolve` and marks the group `RESOLVED`.
+- **Cool-down and resolution**: When every alert in a ticketed group has closed (or all are already closed when the ticket is created), the group enters `COOLING_DOWN` and a 180s cooling timer is scheduled. A new alert that attaches during cool-down returns the group to `TICKETED`. If none arrives before that timer fires, what happens depends on `AUTO_RESOLVE_ON_RECOVERY`:
+  - `false` (default): the agent does **not** resolve the ticket. Monitoring recovery is not proof of a fix, because low traffic can hide a fault that is still there. The agent posts one work note (`POST /instructions/ticket/work-note`): "Monitoring recovered at <time>: all <N> alerts closed and the 180s cool-down passed with no recurrence. No remediation was recorded by the agent. Please verify the fix and resolve this incident." The ServiceNow incident stays In Progress, and the group moves to the terminal `RECOVERED` state. Like `RESOLVED`, a `RECOVERED` group takes no new alerts, so a later alert opens a new group. A retried cooling wake posts no second note.
+  - `true`: the agent calls `POST /instructions/ticket/resolve` and marks the group `RESOLVED`.
+
+  An unticketed group with an explicit suppression reason has no ServiceNow incident, so it is marked `RESOLVED` whatever the flag says.
 - **Investigation fallback**: If the multi-agent investigation raises an error, the agent falls back to a single-pass report (`generate_investigation_report`) and still creates the ticket.
 
 ### Topology as Single Source of Truth (`TOPOLOGY.md`)
@@ -281,6 +285,7 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 | **IAM DB Auth Flag**   | `DB_IAM_AUTH` | `true` | Enables IAM database authentication via pg8000 connector. |
 | **Mock Database Flag** | `MOCK_DB` | `false` | Enables in-memory catalog fallback when Cloud SQL is unreachable. |
 | **Local Mode Flag**    | `IS_LOCAL` | `false` | Enables mock storage and local adapters for offline testing. |
+| **Auto-Resolve on Recovery** | `AUTO_RESOLVE_ON_RECOVERY` | `false` | When all alerts close and the 180s cool-down passes: `false` leaves the ServiceNow ticket In Progress and adds a work note asking a human to verify and resolve it. `true` resolves the ticket. See "Cool-down and resolution" under [Sequence Flow](#sequence-flow-mermaid). |
 
 ### Secret Manager Secret Names
 Sensitive credentials reside exclusively in Google Secret Manager:

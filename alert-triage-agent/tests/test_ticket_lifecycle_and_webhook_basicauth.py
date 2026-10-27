@@ -304,7 +304,8 @@ def test_cooling_wake_allows_resolution_for_suppressed_group(agent_cfg: AgentCon
 
 
 def test_cooling_wake_resolves_ticketed_group(agent_cfg: AgentConfig, monkeypatch):
-    """Test that cooling wake resolves a ticketed group and calls bridge resolve."""
+    """With AUTO_RESOLVE_ON_RECOVERY=true, cooling wake resolves a ticketed group and calls bridge resolve."""
+    agent_cfg = agent_cfg.model_copy(update={"auto_resolve_on_recovery": True})
     agent_app.dependency_overrides[get_agent_settings] = lambda: agent_cfg
     client = TestClient(agent_app)
     store = OKFStore(config=agent_cfg)
