@@ -100,7 +100,7 @@ def _wake(client: TestClient, group_id: str, deadline_type: str, epoch: float):
     return client.post("/timer/wake", json=req.model_dump(mode="json"))
 
 
-async def _stub_investigation(primary_alert, group_id, filename, settings):
+async def _stub_investigation(primary_alert, group_id, filename, settings, group_alerts=None):
     # The investigation itself is out of scope here; these tests cover the wake state machine.
     return InvestigationReport(group_id=group_id, summary="stub", observations="stub")
 

@@ -60,8 +60,8 @@ def test_executive_summary_html_work_notes_formatting(sample_report):
     assert html_notes.startswith("[code]\n<p><b>Executive Summary:</b></p>\n<ul>")
     assert html_notes.endswith("</ul>\n[/code]")
     assert "<li><b>Problem:</b> Cloud SQL database connection exhaustion" in html_notes
-    assert "<li><b>Systems:</b> Origin: <code>ata-inventory-db</code> (94% confidence)" in html_notes
-    assert "<li><b>Observations:</b> Active database connections reached 100/100" in html_notes
+    assert "<li><b>Systems:</b>\n    <ul>\n      <li>Origin: <code>ata-inventory-db</code> (94% confidence)</li>" in html_notes
+    assert "<li><b>Observations:</b>\n    <ul>\n      <li>Active database connections reached 100/100" in html_notes
     assert "<li><b>Recommended Actions:</b>" in html_notes
     assert "Terminate idle database sessions" in html_notes
 
@@ -150,7 +150,7 @@ def test_servicenow_adapter_table_api_and_attachment_success(sample_report):
     assert captured_payload["state"] == "1"
     assert captured_payload["correlation_id"] == "incident-db-conn-20261022.md"
     assert captured_payload["urgency"] == "1"
-    assert captured_payload["short_description"] == "[P1] ata-inventory-db: Cloud SQL database connection exhaustion causing cascading 5xx service failures (1 alert)"
+    assert captured_payload["short_description"] == "[P1] ata-inventory-db: Resource exhaustion (1 alert)"
 
     # Verify state and work_notes PATCH payloads (state=2 immediately, then work_notes)
     assert len(patch_calls) == 2

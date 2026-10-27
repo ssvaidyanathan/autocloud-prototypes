@@ -23,15 +23,74 @@ EXCLUDED_ENDPOINT_PATTERNS = [
     re.compile(r"/admin(/.*)?"),
 ]
 
-DB_AUTH_KEYWORDS = [
-    "password",
-    "authentication",
-    "auth",
-    "denied",
-    "failed to connect to cloud sql",
-    "access denied",
-    "handshake failed",
+# Database authentication failure signatures. Each pattern names a specific DB login
+# failure (PostgreSQL/MySQL server message, SQLSTATE class 28 code, or the Cloud SQL
+# connector's IAM login failure). Generic words such as "auth", "denied" or "password"
+# are deliberately absent: they match HTTP Authorization headers, OAuth and IAM text in
+# ordinary request logs and produced false DB-auth findings.
+DB_AUTH_PATTERNS = [
+    # PostgreSQL: FATAL: password authentication failed for user "..."
+    re.compile(r"\bpassword authentication failed\b"),
+    re.compile(r"\bpam authentication failed\b"),
+    re.compile(r"\bfatal:\s*password\b"),
+    # Cloud SQL IAM database authentication:
+    # FATAL: Cloud SQL IAM user|service account authentication failed for user "..."
+    re.compile(r"\biam (?:user |service account |database |db )?authentication failed\b"),
+    # PostgreSQL: FATAL: role "..." does not exist (unknown DB user)
+    re.compile(r"\brole \"[^\"]+\" does not exist\b"),
+    re.compile(r"\bpermission denied for database\b"),
+    # MySQL: Access denied for user 'x'@'host'
+    re.compile(r"\baccess denied for user\b"),
+    # SQLSTATE 28000 (invalid_authorization_specification) / 28P01 (invalid_password),
+    # only as an explicit code field, e.g. pg8000 "'C': '28P01'" or "SQLSTATE 28000".
+    re.compile(r"(?:\bsqlstate|\bcode|'c')\W{0,4}28(?:000|p01)\b"),
+    # Cloud SQL connector + pg8000 IAM login rejection as logged by the inventory app
+    # (S5: invalid IAM DB user): "Failed to connect to Cloud SQL: 'NoneType' object has
+    # no attribute 'decode'". Matched in full; a bare "failed to connect" is not auth.
+    re.compile(r"\bfailed to connect to cloud sql:.*'nonetype' object has no attribute 'decode'"),
 ]
+
+
+# Measured breach thresholds for Cloud Run telemetry (5xx share of requests, P95 latency).
+ERROR_RATE_5XX_BREACH_PCT = 5.0
+LATENCY_P95_BREACH_MS = 2000.0
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.replace("%", "").replace("ms", "").strip())
+        except ValueError:
+            return None
+    return None
+
+
+def measured_breaches(metrics: dict[str, Any]) -> list[str]:
+    """Measured 5xx / latency threshold breaches recorded in a Cloud Run dossier's metrics.
+
+    Only telemetry values count; log-derived signals (e.g. ``has_db_auth_error``) do not.
+    Returns human-readable breach descriptions (empty when nothing was measured over threshold).
+    """
+    breaches: list[str] = []
+    metrics = metrics or {}
+    rate_raw = metrics.get("error_rate_5xx")
+    rate = _as_float(rate_raw) if not isinstance(rate_raw, str) or "%" in rate_raw else None
+    if rate is not None and rate >= ERROR_RATE_5XX_BREACH_PCT:
+        breaches.append(f"HTTP 5xx error rate {rate_raw}")
+    latency = _as_float(metrics.get("latency_p95_ms"))
+    if latency is not None and latency >= LATENCY_P95_BREACH_MS:
+        breaches.append(f"P95 latency {latency:g}ms")
+    return breaches
+
+
+def has_db_auth_signature(text: str) -> bool:
+    """Return True if log text contains a specific database authentication failure."""
+    lowered = (text or "").lower()
+    return any(p.search(lowered) for p in DB_AUTH_PATTERNS)
 
 
 def is_excluded_endpoint(path: str) -> bool:
@@ -293,7 +352,7 @@ class CloudRunSpecialist(BaseSpecialist):
                     entry_text_parts.append(clean_line)
                 full_entry_text = " ".join(entry_text_parts).lower()
 
-                if any(k in full_entry_text for k in DB_AUTH_KEYWORDS):
+                if has_db_auth_signature(full_entry_text):
                     detected_db_auth_in_logs = True
 
                 if req_path and is_excluded_endpoint(req_path):
@@ -383,8 +442,8 @@ class CloudRunSpecialist(BaseSpecialist):
                 rate_val = float(error_rate_5xx_val.replace("%", "").strip())
             except ValueError:
                 rate_val = 0.0
-        has_real_5xx_breach = rate_val >= 5.0
-        has_latency_breach = latency_p95_ms_val is not None and latency_p95_ms_val >= 2000.0
+        has_real_5xx_breach = rate_val >= ERROR_RATE_5XX_BREACH_PCT
+        has_latency_breach = latency_p95_ms_val is not None and latency_p95_ms_val >= LATENCY_P95_BREACH_MS
         is_target_of_alert = (target_service == (alert.resource_labels.get("service_name") or alert.resource_name))
         is_alert_policy_5xx = is_target_of_alert and ("5xx" in alert.policy_name.lower() or "500" in (alert.condition_name or ""))
         is_alert_policy_lat = is_target_of_alert and ("latency" in alert.policy_name.lower() or "timeout" in alert.policy_name.lower() or "slow" in alert.policy_name.lower())
