@@ -39,7 +39,7 @@ from topology.topology_graph import (
 
 # Initialize FastMCP service
 mcp = FastMCP(
-    name="ata-tools",
+    name="ata-tools",  # prefix-ok: MCP server identifier (not a deployed resource name)
     instructions="Strictly read-only telemetry, topology, and change inspection server for alert triage.",
 )
 
@@ -354,7 +354,7 @@ def get_proxy_bundle(
 
     try:
         if bundle_bytes is None and not effective_org:
-            raise ValueError("APIGEE_ORG not set in ata-tools (and no org argument given)")
+            raise ValueError(f"APIGEE_ORG not set in {cfg.name_prefix}-tools (and no org argument given)")
         if bundle_bytes is None:
             url = f"https://apigee.googleapis.com/v1/organizations/{effective_org}/apis/{api_name}/revisions/{revision}?format=bundle"
             headers = _get_auth_headers()
@@ -533,7 +533,7 @@ def get_change_timeline(
     try:
         if not cfg.apigee_org or not cfg.apigee_env:
             missing = [n for n, v in (("APIGEE_ORG", cfg.apigee_org), ("APIGEE_ENV", cfg.apigee_env)) if not v]
-            raise ValueError(f"{' and '.join(missing)} not set in ata-tools")
+            raise ValueError(f"{' and '.join(missing)} not set in {cfg.name_prefix}-tools")
         deps_url = (
             f"https://apigee.googleapis.com/v1/organizations/{cfg.apigee_org}"
             f"/environments/{cfg.apigee_env}/deployments"
@@ -583,7 +583,7 @@ def get_change_timeline(
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
     """Health check endpoint for Cloud Run probes."""
-    return JSONResponse({"status": "healthy", "service": "ata-tools"})
+    return JSONResponse({"status": "healthy", "service": "ata-tools"})  # prefix-ok: component identifier
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -686,7 +686,7 @@ def create_app(
         allowed_service_accounts = cfg.effective_allowed_service_accounts
     if enforce_auth and verify_oidc and not expected_audience:
         raise RuntimeError(
-            "ata-tools cannot start: VERIFY_OIDC is on but no ID-token audience is configured "
+            f"{cfg.name_prefix}-tools cannot start: VERIFY_OIDC is on but no ID-token audience is configured "
             "(set EXPECTED_AUDIENCE or PROJECT_NUMBER)"
         )
 

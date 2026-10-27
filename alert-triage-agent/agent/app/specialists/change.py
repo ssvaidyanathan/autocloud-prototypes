@@ -31,7 +31,9 @@ AUDIT_LOG_MAX_ENTRIES = 20
 # Look-back of the change timeline before the alert.
 CHANGE_WINDOW_HOURS = 2
 # Change source / gap labels. The synthesizer lists change sources in Change-Induced.
-TIMELINE_SOURCE = "ata-tools change timeline"
+def timeline_source(config: AgentConfig) -> str:
+    """Name of the change timeline source in tickets and gap records: <NAME_PREFIX>-tools."""
+    return f"{config.name_prefix}-tools change timeline"
 CLOUD_RUN_HISTORY = "Cloud Run revision history"
 APIGEE_HISTORY = "Apigee deployment history"
 NO_CLOUD_RUN_CHANGES_FINDING = (
@@ -360,7 +362,7 @@ class ChangeSpecialist(BaseSpecialist):
             timeline = await fetch_change_timeline(config, window_hours=CHANGE_WINDOW_HOURS)
         except ToolsNotConfigured as exc:
             if config.is_local:
-                logger.info("TOOLS_URL not set (local mode): ata-tools change timeline not queried")
+                logger.info("TOOLS_URL not set (local mode): %s not queried", timeline_source(config))
                 return None
             reason = exc.reason
         except ToolsCallError as exc:
@@ -373,17 +375,17 @@ class ChangeSpecialist(BaseSpecialist):
                 if label in errors:
                     self._timeline_unavailable(
                         metrics, findings, evidence_items,
-                        source=f"{TIMELINE_SOURCE} ({label})", target=alert.resource_name,
+                        source=f"{timeline_source(config)} ({label})", target=alert.resource_name,
                         reason=f"{label} source failed ({errors[label]})",
                         not_assessed=("Apigee proxy deployment history was" if label == APIGEE_HISTORY
                                       else "Cloud Run revision history was"),
                     )
                 else:
-                    record_change_source(metrics, f"{TIMELINE_SOURCE} ({label})")
+                    record_change_source(metrics, f"{timeline_source(config)} ({label})")
             return timeline
         self._timeline_unavailable(
             metrics, findings, evidence_items,
-            source=TIMELINE_SOURCE, target=alert.resource_name, reason=reason,
+            source=timeline_source(config), target=alert.resource_name, reason=reason,
             not_assessed="Apigee proxy deployment history and Cloud Run revision history were",
         )
         return None
@@ -535,7 +537,7 @@ class ChangeSpecialist(BaseSpecialist):
         elif metrics.get(UNAVAILABLE_KEY):
             # A change source could not be read: "no deployments" would be an unverified claim.
             # Change timeline gaps are already stated ("change timeline unavailable: ...").
-            other = [g for g in metrics[UNAVAILABLE_KEY] if not str(g.get("source", "")).startswith(TIMELINE_SOURCE)]
+            other = [g for g in metrics[UNAVAILABLE_KEY] if not str(g.get("source", "")).startswith(timeline_source(config))]
             if other:
                 gaps = "; ".join(gap_text(g) for g in other)
                 content = f"Change detection incomplete: {gaps}; change attribution not assessed."
@@ -545,7 +547,7 @@ class ChangeSpecialist(BaseSpecialist):
             # Nothing was read (local run without TOOLS_URL): no finding either way.
             content = (
                 "Change history not queried: no change source was available (TOOLS_URL not set in local "
-                "mode, so the ata-tools change timeline with Cloud Run revision and Apigee deployment "
+                f"mode, so the {timeline_source(config)} with Cloud Run revision and Apigee deployment "
                 "history was not read; the Cloud Run audit log is not read in local mode); change "
                 "attribution not assessed."
             )
@@ -555,7 +557,7 @@ class ChangeSpecialist(BaseSpecialist):
             findings.append(NO_CLOUD_RUN_CHANGES_FINDING)
             evidence_items.append(EvidenceItem(
                 headline="Deployment History Analysis",
-                content=f"No recent Cloud Run deployments detected ({TIMELINE_SOURCE}: {CLOUD_RUN_HISTORY}).",
+                content=f"No recent Cloud Run deployments detected ({timeline_source(config)}: {CLOUD_RUN_HISTORY}).",
             ))
 
         # Apigee deployment history is stated whenever it was read (it is never omitted silently).

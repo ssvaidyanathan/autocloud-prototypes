@@ -25,7 +25,7 @@ source "${SCRIPT_DIR}/scenarios/common.sh"
 
 MODE="priority"
 TARGET_SCENARIO=""
-LOG_FILE="/tmp/ata-scenarios-$(date +%s).log"
+LOG_FILE="/tmp/${NAME_PREFIX}-scenarios-$(date +%s).log"
 
 # Parse CLI arguments
 while [[ $# -gt 0 ]]; do
@@ -96,11 +96,11 @@ fi
 # Print the description of scenario $1 (lowercase id), or $2 if unknown.
 scenario_name() {
     case "$1" in
-        s1) echo "Backend 5xx Error Spike (Cloud Run ata-inventory-api)" ;;
+        s1) echo "Backend 5xx Error Spike (Cloud Run ${SVC_INVENTORY})" ;;
         s2) echo "Backend Latency Degradation (>5s timeout)" ;;
-        s3) echo "Concurrent Disjoint Incidents (ata-orders-v1 & ata-inventory-api)" ;;
+        s3) echo "Concurrent Disjoint Incidents (${PROXY_ORDERS} & ${SVC_INVENTORY})" ;;
         s4) echo "Database Connection Pool Exhaustion (Cloud SQL max_conn)" ;;
-        s5) echo "Bad Deploy / Config Failure (Cloud Run ata-inventory-api)" ;;
+        s5) echo "Bad Deploy / Config Failure (Cloud Run ${SVC_INVENTORY})" ;;
         *) echo "$2" ;;
     esac
 }

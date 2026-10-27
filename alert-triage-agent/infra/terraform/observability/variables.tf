@@ -27,7 +27,7 @@ variable "cloudsql_connections_threshold" {
 variable "notification_channel_id" {
   type        = string
   default     = null
-  description = "Notification channel resource name for ata-bridge webhook. If null, the channel named <name_prefix>-bridge-webhook (type webhook_basicauth, created by the foundation root) is looked up."
+  description = "Notification channel resource name for the <name_prefix>-bridge webhook. If null, the channel named <name_prefix>-bridge-webhook (type webhook_basicauth, created by the foundation root) is looked up."
 }
 
 variable "latency_per_series_aligner" {
