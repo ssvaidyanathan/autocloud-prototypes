@@ -121,6 +121,19 @@ apigee_fail_call() {
     exit 1
 }
 
+# For calls whose response or URL carries app credentials (GET .../apps/<app> returns every
+# consumerKey and consumerSecret; POST .../keys/<key> has the key in the URL): no body, and the
+# key segment of the URL withheld.
+apigee_fail_call_redacted() {
+    local where="${API_LAST}"
+    case "${where}" in
+        */keys/*) where="${where%%/keys/*}/keys/<withheld>" ;;
+    esac
+    printf 'ERROR: %s failed: HTTP %s on %s (response body withheld: it can contain app credentials)\n' \
+        "$1" "${API_CODE}" "${where}" >&2
+    exit 1
+}
+
 apigee_json() {
     printf '%s' "${API_BODY}" | python3 -c '
 import json, sys

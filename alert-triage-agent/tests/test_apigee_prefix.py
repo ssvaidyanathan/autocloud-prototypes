@@ -427,6 +427,31 @@ def test_deploy_existing_app_key_gets_product(env):
     assert (Path(env["ALERT_TRIAGE_DIR"]) / ".atat-api-key").read_text() == "oldkey\n"
 
 
+def test_credential_bearing_failures_withhold_body_and_key(env):
+    """sec L1: a failed read of the app (body = every consumerKey/Secret) or of its key URL
+    prints neither."""
+    secret_app = {"name": "atat-demo-app", "credentials": [
+        {"consumerKey": "oldkey-SECRET", "consumerSecret": "csecret-SECRET", "status": "approved", "apiProducts": []}]}
+    env["STUB_RULES"] = json.dumps([
+        {"method": "POST", "match": "/developers/atat-dev@example.com/apps", "code": 409, "body": {}},
+        {"method": "GET", "match": "/apps/atat-demo-app", "code": 500, "body": secret_app},
+    ])
+    res = run(DEPLOY, env)
+    assert res.returncode != 0
+    assert "Reading app atat-demo-app failed: HTTP 500" in res.stderr and "body withheld" in res.stderr
+    assert "SECRET" not in res.stderr + res.stdout
+    env["STUB_RULES"] = json.dumps([
+        {"method": "POST", "match": "/apps/atat-demo-app/keys/oldkey-SECRET", "code": 403,
+         "body": {"error": {"message": "denied for oldkey-SECRET"}}},
+        {"method": "POST", "match": "/developers/atat-dev@example.com/apps", "code": 409, "body": {}},
+        {"method": "GET", "match": "/apps/atat-demo-app", "code": 200, "body": secret_app},
+    ])
+    res = run(DEPLOY, env)
+    assert res.returncode != 0
+    assert "/apps/atat-demo-app/keys/<withheld>" in res.stderr
+    assert "SECRET" not in res.stderr + res.stdout
+
+
 def test_deploy_never_uses_a_key_from_another_app(env):
     other = {"name": "ata-demo-app", "credentials": [
         {"consumerKey": "livekey", "status": "approved", "apiProducts": [{"apiproduct": "atat-product"}]}]}
