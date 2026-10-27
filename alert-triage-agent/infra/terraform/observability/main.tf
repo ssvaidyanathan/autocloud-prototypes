@@ -20,7 +20,7 @@ resource "google_monitoring_alert_policy" "orders_5xx" {
   notification_channels = [local.notification_channel_id]
 
   alert_strategy {
-    auto_close = "1800s"
+    auto_close = "${var.alert_auto_close_secs}s"
   }
 
   conditions {
@@ -58,7 +58,7 @@ resource "google_monitoring_alert_policy" "orders_latency" {
   notification_channels = [local.notification_channel_id]
 
   alert_strategy {
-    auto_close = "1800s"
+    auto_close = "${var.alert_auto_close_secs}s"
   }
 
   conditions {
@@ -97,7 +97,7 @@ resource "google_monitoring_alert_policy" "inventory_5xx" {
   notification_channels = [local.notification_channel_id]
 
   alert_strategy {
-    auto_close = "1800s"
+    auto_close = "${var.alert_auto_close_secs}s"
   }
 
   conditions {
@@ -135,7 +135,7 @@ resource "google_monitoring_alert_policy" "inventory_latency" {
   notification_channels = [local.notification_channel_id]
 
   alert_strategy {
-    auto_close = "1800s"
+    auto_close = "${var.alert_auto_close_secs}s"
   }
 
   conditions {
@@ -174,7 +174,7 @@ resource "google_monitoring_alert_policy" "apigee_orders_5xx" {
   notification_channels = [local.notification_channel_id]
 
   alert_strategy {
-    auto_close = "1800s"
+    auto_close = "${var.alert_auto_close_secs}s"
   }
 
   conditions {
@@ -212,7 +212,7 @@ resource "google_monitoring_alert_policy" "apigee_orders_429" {
   notification_channels = [local.notification_channel_id]
 
   alert_strategy {
-    auto_close = "1800s"
+    auto_close = "${var.alert_auto_close_secs}s"
   }
 
   conditions {
@@ -249,7 +249,7 @@ resource "google_monitoring_alert_policy" "cloudsql_connections" {
   notification_channels = [local.notification_channel_id]
 
   alert_strategy {
-    auto_close = "1800s"
+    auto_close = "${var.alert_auto_close_secs}s"
   }
 
   conditions {
@@ -285,7 +285,7 @@ resource "google_monitoring_alert_policy" "cloudsql_cpu" {
   notification_channels = [local.notification_channel_id]
 
   alert_strategy {
-    auto_close = "1800s"
+    auto_close = "${var.alert_auto_close_secs}s"
   }
 
   conditions {
