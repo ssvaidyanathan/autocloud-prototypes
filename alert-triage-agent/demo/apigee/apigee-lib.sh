@@ -15,8 +15,9 @@
 #   apigee_json EXPR              -> evaluates a Python expression on `d` = json(API_BODY)
 #   apigee_download URL FILE      -> GET URL into FILE (binary-safe); sets API_CODE, API_LAST,
 #                                    and API_BODY (the error body, only when not 2xx)
-#   apigee_json_contains JSON     -> 0 if every field of JSON equals the one in API_BODY
-#                                    (lists compared order-insensitively)
+#   apigee_json_matches JSON      -> 0 if API_BODY equals JSON exactly once the server-set
+#                                    fields are dropped (lists order-insensitive); any extra
+#                                    or different field -> 1
 #   apigee_bundles_equal A B      -> 0 same proxy content, 1 different (reason on stdout),
 #                                    2 unreadable bundle (reason on stdout)
 #
@@ -186,23 +187,39 @@ apigee_list_names() {
     apigee_json '[ (x.get("name") or x.get("email") or "") if isinstance(x, dict) else x for x in (d if isinstance(d, list) else next((v for v in d.values() if isinstance(v, list)), [])) ]'
 }
 
-apigee_json_contains() {
+# Server-set fields of TargetServer, API product and developer GET responses (observed
+# read-only on the live org, 2026-10-27). They are never part of what we send, so they are
+# dropped from API_BODY before the exact compare. Keep this list explicit: any other key in
+# API_BODY that JSON does not have makes the resource differ, so it gets the full-replace PUT.
+#   createdAt, lastModifiedAt                     product, developer
+#   developerId, organizationName, status, apps   developer
+# Server defaults: dropped only when they hold exactly the default value (TargetServer
+# echoes "protocol": "HTTP" when none was sent; any other protocol is drift).
+apigee_json_matches() {
     printf '%s' "${API_BODY}" | python3 -c '
 import json, sys
+SERVER_SET = {"createdAt", "lastModifiedAt", "developerId", "organizationName", "status", "apps"}
+SERVER_DEFAULTS = {"protocol": "HTTP"}
 def canon(v):
     return json.dumps(v, sort_keys=True)
-def contains(want, have):
+def same(want, have):
     if isinstance(want, dict):
-        return isinstance(have, dict) and all(k in have and contains(v, have[k]) for k, v in want.items())
+        return (isinstance(have, dict) and sorted(want) == sorted(have)
+                and all(same(v, have[k]) for k, v in want.items()))
     if isinstance(want, list):
         return isinstance(have, list) and sorted(map(canon, want)) == sorted(map(canon, have))
-    return want == have
+    return type(want) is type(have) and want == have
 try:
     have = json.load(sys.stdin)
     want = json.loads(sys.argv[1])
 except ValueError:
     sys.exit(3)
-sys.exit(0 if contains(want, have) else 1)
+if not isinstance(want, dict) or not isinstance(have, dict):
+    sys.exit(1)
+have = {k: v for k, v in have.items()
+        if k in want or (k not in SERVER_SET
+                         and not (k in SERVER_DEFAULTS and v == SERVER_DEFAULTS[k]))}
+sys.exit(0 if same(want, have) else 1)
 ' "$1"
 }
 

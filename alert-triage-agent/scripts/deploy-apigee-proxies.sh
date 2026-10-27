@@ -114,12 +114,13 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/apigee-deploy-${P}.XXXXXX")"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 # create_or_update DESC CREATE_URL UPDATE_URL JSON
-# A resource that already holds every field of JSON is left alone (no write, no new
-# lastModifiedAt). A failed read only costs that shortcut: the create/update path runs.
+# A resource that already equals JSON (apart from server-set fields) is left alone (no write,
+# no new lastModifiedAt). Any extra or different field (e.g. a hand-added product quota) gets
+# the full-replace PUT, which clears that drift. A failed read only costs that shortcut: the create/update path runs.
 create_or_update() {
     local desc="$1" create_url="$2" update_url="$3" json="$4"
     apigee_api GET "${update_url}"
-    if apigee_ok && apigee_json_contains "${json}"; then
+    if apigee_ok && apigee_json_matches "${json}"; then
         echo "    ${desc} unchanged; not updated."
         return 0
     fi

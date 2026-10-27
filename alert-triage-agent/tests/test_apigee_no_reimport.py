@@ -159,7 +159,8 @@ elif re.search(r"/developers/[^/]+/apps(/[^/]+)?$", path):
     else:
         code, body = 404, {}
 elif re.search(r"/developers(/[^/]+)?$", path):
-    crud("developers", "email", lambda d: dict(d, developerId="dev-1", status="active"))
+    crud("developers", "email", lambda d: dict(d, developerId="dev-1", status="active", apps=[],
+                                               organizationName="org-x", createdAt="1", lastModifiedAt="2"))
 json.dump(st, open(state_file, "w"))
 if out:
     if raw: shutil.copy(raw, out)
@@ -310,6 +311,56 @@ def test_changed_targetserver_host_is_updated(deployed):
     assert f"PUT {ENV_URL}/targetservers/{P}-orders-target" in ws
     assert f"PUT {ENV_URL}/targetservers/{P}-inventory-target" not in ws
     assert state(env)["targetservers"][f"{P}-orders-target"]["host"] == f"{P}-orders-api-abc123-uw.a.run.app"
+
+
+@pytest.mark.parametrize("coll,name,url,extra", [
+    ("apiproducts", f"{P}-product", f"{BASE}/apiproducts/{P}-product",
+     {"quota": "1", "quotaInterval": "1", "quotaTimeUnit": "minute"}),
+    ("apiproducts", f"{P}-product", f"{BASE}/apiproducts/{P}-product",
+     {"attributes": [{"name": "access", "value": "private"}]}),
+    ("targetservers", f"{P}-orders-target", f"{ENV_URL}/targetservers/{P}-orders-target",
+     {"sSLInfo": {"enabled": True, "ignoreValidationErrors": True}}),
+    ("targetservers", f"{P}-orders-target", f"{ENV_URL}/targetservers/{P}-orders-target",
+     {"protocol": "GRPC"}),
+    ("developers", f"{P}-dev@example.com", f"{BASE}/developers/{P}-dev@example.com",
+     {"attributes": [{"name": "tier", "value": "x"}]}),
+])
+def test_extra_field_drift_is_cleared_by_a_full_replace_put(deployed, coll, name, url, extra):
+    """F1: a resource holding a superset of the wanted fields (e.g. a hand-added product
+    quota) is not "unchanged": the PUT full replace runs and the drift is gone."""
+    env = deployed
+    st = state(env)
+    st[coll][name].update(extra)
+    set_state(env, st)
+    res = deploy(env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    ws = writes(calls(env))
+    assert f"PUT {url}" in ws
+    assert [w for w in ws if w.startswith("PUT ")] == [f"PUT {url}"]
+    have = state(env)[coll][name]
+    for k, v in extra.items():
+        assert have.get(k) != v
+    assert "unchanged; not updated." in res.stdout  # the untouched resources still skip
+
+
+def test_only_server_set_fields_differing_writes_nothing(deployed):
+    """Server-set fields (timestamps, developerId, status, apps, ...) and the TargetServer's
+    default protocol never force a write, whatever their values."""
+    env = deployed
+    st = state(env)
+    st["apiproducts"][f"{P}-product"].update(createdAt="1792708869081", lastModifiedAt="1793142176595")
+    st["developers"][f"{P}-dev@example.com"].update(
+        developerId="c7f7d1cb", organizationName="org-y", status="inactive", apps=[f"{P}-demo-app"],
+        createdAt="1792708869395", lastModifiedAt="1793142177034")
+    for ts in st["targetservers"].values():
+        assert ts["protocol"] == "HTTP"
+    set_state(env, st)
+    res = deploy(env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert writes(calls(env)) == [f"POST {BASE}/developers/{P}-dev@example.com/apps"]
+    for what in [f"TargetServer {P}-orders-target", f"TargetServer {P}-inventory-target",
+                 f"API product {P}-product", f"Developer {P}-dev@example.com"]:
+        assert f"{what} unchanged; not updated." in res.stdout
 
 
 def test_after_the_s3_fault_the_proxy_is_imported_and_deployed(deployed, tmp_path):
