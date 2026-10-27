@@ -11,7 +11,9 @@ active groups. --no-wait skips the check (documented as risky).
 A fake `gcloud` serves `gcloud storage ls/cat/mv` from a local directory. A file
 `<root>/_seq/<name>` holds one status per line; each `cat` of <name> rewrites the file's
 status to the next line (the last one repeats), so a group can change state between
-polls. The Monitoring alert query is stubbed to "no open alerts", or to a per-poll sequence
+polls. "recovered" is the agent's final state (status recovered with
+recovery_note_posted_at set); "recovered-claimed" is the window between the agent's claim
+and its note post (status recovered, recovery_note_posted_at null). The Monitoring alert query is stubbed to "no open alerts", or to a per-poll sequence
 of open-alert counts. reset-scenarios.sh is sourced (which defines its functions without
 running the reset) and run under ATA_TEST_BASH, as in test_bash32_compat.py.
 
@@ -76,7 +78,15 @@ def advance(path):
     if len(states) > 1:
         open(seq, "w").write("\\n".join(states[1:]) + "\\n")
     text = open(path).read()
-    open(path, "w").write(re.sub(r"(?m)^status: .*$", "status: " + states[0], text, count=1))
+    status, note = states[0], None
+    if status == "recovered":
+        note = "'2026-10-27T10:03:14Z'"
+    elif status == "recovered-claimed":
+        status, note = "recovered", "null"
+    text = re.sub(r"(?m)^status: .*$", "status: " + status, text, count=1)
+    if note is not None:
+        text = re.sub(r"(?m)^recovery_note_posted_at: .*$", "recovery_note_posted_at: " + note, text, count=1)
+    open(path, "w").write(text)
 
 if cmd == "mv":
     found = matches(urls[0]) or no_match(urls[0])
@@ -109,10 +119,18 @@ def gcs(tmp_path):
     return bin_dir, root
 
 
-def okf(group_id, status):
-    """An incident file exactly as the agent writes it (OKFDocument.to_markdown)."""
+NOTE_POSTED_AT = "2026-10-27T10:03:14Z"
+
+
+def okf(group_id, status, note_posted_at="default"):
+    """An incident file exactly as the agent writes it (OKFDocument.to_markdown). A
+    'recovered' group gets recovery_note_posted_at by default, as the agent leaves it once
+    the recovery note is posted; pass note_posted_at=None for the claim-to-note window."""
+    if note_posted_at == "default":
+        note_posted_at = NOTE_POSTED_AT if status == IncidentGroupStatus.RECOVERED else None
     return OKFDocument(group_id=group_id, status=status, policy_name="ata-inventory-5xx",
                        alerts=[{"incident_id": "i-1", "state": "closed"}],
+                       recovery_note_posted_at=note_posted_at,
                        body="# Incident\n\n- Status: open\n").to_markdown()
 
 
@@ -153,7 +171,7 @@ ALERT_SEQUENCE_STUB = """query_open_ata_alerts() {
 
 
 def run_step6(tmp_path, gcs, after="", fail="", quiet=0, timeout=900, poll=0,
-              alerts=None, fake_clock=False, **extra):
+              alerts=None, fake_clock=False, pre="", **extra):
     """Source the reset, stub the alert query (0 open alerts, or the per-poll counts in
     `alerts`), optionally the clock, and run step 6 (then `after`)."""
     bin_dir, root = gcs
@@ -168,6 +186,7 @@ def run_step6(tmp_path, gcs, after="", fail="", quiet=0, timeout=900, poll=0,
         "set -euo pipefail\n"
         f'source "{RESET_SCRIPT}"\n'
         f"POLL_INTERVAL_SECS={poll}\nQUIET_PERIOD_SECS={quiet}\nWAIT_TIMEOUT_SECS={timeout}\n"
+        + pre
         + (FAKE_CLOCK if fake_clock else "")
         + "get_serving_revisions() { echo ''; }\n"
         "resolve_monitoring_token() { echo tok; }\n"
@@ -178,7 +197,8 @@ def run_step6(tmp_path, gcs, after="", fail="", quiet=0, timeout=900, poll=0,
         + f"{after}\n"
     )
     env = {k: v for k, v in os.environ.items()
-           if k not in ("ATA_API_KEY", "INCIDENTS_BUCKET", "ATA_RESET_NO_WAIT", "NO_WAIT")}
+           if k not in ("ATA_API_KEY", "INCIDENTS_BUCKET", "ATA_RESET_NO_WAIT", "NO_WAIT",
+                        "ATA_RESET_IGNORE_GROUPS")}
     env.update(PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", ATA_TEST_CALLS=str(tmp_path / "calls"),
                ATA_FAKE_GCS_ROOT=str(root), ATA_FAKE_GCS_FAIL=fail,
                MOCK_MODE="false", DRY_RUN="false", PROJECT_ID="proj")
@@ -399,6 +419,177 @@ def test_missing_or_unknown_status_is_not_terminal(tmp_path, gcs, text, shown):
     assert f"  - incident-x.md ({shown})" in res.stderr
 
 
+# --- recovered counts only once the recovery note is posted (review R1) --------------
+# The agent writes status 'recovered' (claim) BEFORE it posts the recovery note and sets
+# recovery_note_posted_at only after the note posted. Archiving in between let the agent's
+# post-note write recreate an 'open' stub file in the active folder.
+
+
+def test_recovered_without_note_posted_stays_active_and_is_listed_on_timeout(tmp_path, gcs):
+    _, root = gcs
+    put(root, "incident-a.md", okf("a", IncidentGroupStatus.RECOVERED, note_posted_at=None))
+    put(root, "incident-b.md", okf("b", IncidentGroupStatus.RECOVERED))
+
+    res = run_step6(tmp_path, gcs, timeout=0, after="archive_active_incidents || exit 1")
+
+    assert res.returncode == 1, out(res)
+    assert "1 incident group(s) are not in a terminal state" in res.stderr
+    assert "recovered only once the recovery note is posted" in res.stderr
+    assert "  - incident-a.md (recovered, recovery note not posted yet)" in res.stderr
+    assert "incident-b.md" not in res.stderr
+    assert calls(tmp_path, "mv") == []
+    assert active_names(root) == ["incident-a.md", "incident-b.md"]
+
+
+def test_recovered_with_note_posted_is_archived(tmp_path, gcs):
+    _, root = gcs
+    put(root, "incident-a.md", okf("a", IncidentGroupStatus.RECOVERED))
+
+    res = run_step6(tmp_path, gcs, timeout=0, after="archive_active_incidents || exit 1")
+
+    assert res.returncode == 0, out(res)
+    assert f"recovery_note_posted_at: '{NOTE_POSTED_AT}'" in (root / BUCKET / "archive" / "incident-a.md").read_text()
+    assert active_names(root) == []
+
+
+def test_waits_through_the_claim_to_note_window_before_archiving(tmp_path, gcs):
+    """cooling_down -> recovered (claimed, note pending) x2 -> recovered with the note."""
+    _, root = gcs
+    put(root, "incident-a.md", okf("a", IncidentGroupStatus.COOLING_DOWN),
+        sequence=["cooling_down", "recovered-claimed", "recovered-claimed", "recovered"])
+
+    res = run_step6(tmp_path, gcs, after="archive_active_incidents || exit 1")
+
+    assert res.returncode == 0, out(res)
+    progress = [line for line in res.stdout.splitlines() if "not terminal yet" in line]
+    assert len(progress) == 3
+    assert "[incident-a.md (cooling_down)]" in progress[0]
+    assert all("[incident-a.md (recovered, recovery note not posted yet)]" in line for line in progress[1:])
+    archived = (root / BUCKET / "archive" / "incident-a.md").read_text()
+    assert "status: recovered" in archived
+    assert f"recovery_note_posted_at: '{NOTE_POSTED_AT}'" in archived
+    assert active_names(root) == []
+
+
+def group_state(tmp_path, text):
+    probe = tmp_path / "state.sh"
+    probe.write_text(f'source "{RESET_SCRIPT}"\ngroup_state < "$OKF_DOC"\n')
+    data = tmp_path / "doc.md"
+    data.write_bytes(text.encode())
+    res = subprocess.run([TEST_BASH, str(probe)], capture_output=True, text=True, timeout=30,
+                         check=False, env={**os.environ, "MOCK_MODE": "true", "OKF_DOC": str(data)})
+    assert res.returncode == 0, out(res)
+    return res.stdout.strip()
+
+
+PENDING = "recovered, recovery note not posted yet"
+
+
+@pytest.mark.parametrize("note_line, expected", [
+    ("recovery_note_posted_at: '2026-10-27T10:03:14Z'", "terminal"),
+    ('recovery_note_posted_at: "2026-10-27T10:03:14Z"', "terminal"),
+    ("recovery_note_posted_at: 2026-10-27T10:03:14Z\r", "terminal"),
+    ("recovery_note_posted_at: null", PENDING),
+    ("recovery_note_posted_at: ~", PENDING),
+    ("recovery_note_posted_at:", PENDING),
+    ("recovery_note_posted_at: ''", PENDING),
+    ("other: x", PENDING),
+    # A nested key of the same name is not the group's field.
+    ("correlation:\n  recovery_note_posted_at: '2026-10-27T10:03:14Z'", PENDING),
+])
+def test_group_state_recovered_needs_recovery_note_posted_at(tmp_path, note_line, expected):
+    text = f"---\ngroup_id: g\nstatus: recovered\n{note_line}\n---\nrecovery_note_posted_at: '2026'\n"
+    assert group_state(tmp_path, text) == expected
+
+
+@pytest.mark.parametrize("status, expected", [
+    ("resolved", "terminal"), ("archived", "terminal"), ("degraded", "terminal"),
+    ("cooling_down", "cooling_down"), ("open", "open"),
+])
+def test_group_state_other_statuses_ignore_recovery_note_posted_at(tmp_path, status, expected):
+    assert group_state(tmp_path, f"---\ngroup_id: g\nstatus: {status}\nrecovery_note_posted_at: null\n---\n") == expected
+
+
+# --- --ignore-group: targeted escape for a group that will never become terminal (C2) --
+
+
+@pytest.mark.parametrize("how", ["file", "id", "env"])
+def test_ignore_group_skips_only_that_group_and_keeps_the_other_waits(tmp_path, gcs, how):
+    """A stuck 'investigating' group is ignored; the alert wait, the 60s quiet period and
+    the wait on the other (cooling) group still run, and the archive warns loudly."""
+    _, root = gcs
+    put(root, "incident-stuck.md", okf("stuck", IncidentGroupStatus.INVESTIGATING))
+    put(root, "incident-b.md", okf("b", IncidentGroupStatus.COOLING_DOWN),
+        sequence=["cooling_down"] * 6 + ["recovered"])
+    extra, pre = {}, ""
+    if how == "env":
+        extra["ATA_RESET_IGNORE_GROUPS"] = "incident-other.md,incident-stuck.md"
+    else:
+        pre = 'IGNORE_GROUPS="%s"\n' % ("incident-stuck.md" if how == "file" else "stuck")
+
+    res = run_step6(tmp_path, gcs, quiet=60, poll=15, alerts=[1, 0], fake_clock=True,
+                    after="archive_active_incidents || exit 1", pre=pre, **extra)
+
+    assert res.returncode == 0, out(res)
+    # The alert wait ran (1 open at t=0), then the cooling group was waited on until it
+    # recovered at the 7th group read (t=15 + 6*15 = 105), past the quiet end (t=75).
+    assert "Still open: 1 alert(s)" in res.stdout
+    assert done_at(res) == 15 + 6 * 15
+    progress = [line for line in res.stdout.splitlines() if "not terminal yet" in line]
+    assert progress and all("[incident-b.md (cooling_down)]" in line for line in progress)
+    assert "incident-stuck.md" not in "".join(progress)
+    assert "[--ignore-group] RISKY" in res.stdout
+    assert "[--ignore-group] Archiving 1 incident group(s) that are NOT terminal: incident-stuck.md (investigating)" in res.stdout
+    assert active_names(root) == []
+    assert "status: investigating" in (root / BUCKET / "archive" / "incident-stuck.md").read_text()
+
+
+def test_ignore_group_does_not_ignore_other_groups_on_timeout(tmp_path, gcs):
+    _, root = gcs
+    put(root, "incident-stuck.md", okf("stuck", IncidentGroupStatus.INVESTIGATING))
+    put(root, "incident-b.md", okf("b", IncidentGroupStatus.COOLING_DOWN))
+
+    res = run_step6(tmp_path, gcs, timeout=0, pre='IGNORE_GROUPS="stuck"\n',
+                    after="archive_active_incidents || exit 1")
+
+    assert res.returncode == 1, out(res)
+    assert "  - incident-b.md (cooling_down)" in res.stderr
+    assert "incident-stuck.md" not in res.stderr
+    assert calls(tmp_path, "mv") == []
+
+
+def test_ignored_group_that_is_terminal_is_archived_without_the_not_terminal_warning(tmp_path, gcs):
+    _, root = gcs
+    put(root, "incident-a.md", okf("a", IncidentGroupStatus.RECOVERED))
+
+    res = run_step6(tmp_path, gcs, pre='IGNORE_GROUPS="a"\n', after="archive_active_incidents || exit 1")
+
+    assert res.returncode == 0, out(res)
+    assert "[--ignore-group] RISKY" in res.stdout
+    assert "NOT terminal" not in res.stdout
+    assert active_names(root) == []
+
+
+def test_timeout_names_ignore_group_as_the_targeted_escape(tmp_path, gcs):
+    _, root = gcs
+    put(root, "incident-a.md", okf("a", IncidentGroupStatus.INVESTIGATING))
+
+    res = run_step6(tmp_path, gcs, timeout=0)
+
+    assert res.returncode == 1, out(res)
+    assert "--ignore-group <file>" in res.stderr
+    assert "--no-wait" in res.stderr
+
+
+def test_ignore_group_cli_flag_is_repeatable():
+    probe = (f'set -- --mock --ignore-group incident-a.md --ignore-group=b\n'
+             f'source "{RESET_SCRIPT}"\necho "IG=${{IGNORE_GROUPS}}"\n')
+    res = subprocess.run([TEST_BASH, "-c", probe], capture_output=True, text=True, timeout=30, check=False,
+                         env={k: v for k, v in os.environ.items() if k != "ATA_RESET_IGNORE_GROUPS"})
+    assert res.returncode == 0, out(res)
+    assert "IG=incident-a.md b" in res.stdout
+
+
 # --- gcloud storage failure ---------------------------------------------------------
 
 
@@ -486,3 +677,5 @@ def test_help_documents_the_group_wait_no_wait_risk_and_180s_default():
     assert re.search(r"--no-wait .*terminal incident groups", res.stdout)
     assert "risky" in res.stdout
     assert "(default: 180s / 3m)" in res.stdout
+    assert re.search(r"--ignore-group <file\|id> +Leave one incident group out of the terminal-state wait only", res.stdout)
+    assert "Risky: the group is archived as it is" in res.stdout

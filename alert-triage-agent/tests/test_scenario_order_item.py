@@ -69,3 +69,26 @@ def test_s4_sends_the_selected_item_not_a_fixed_one():
     assert '"item_id":"item-101"' not in s4.replace('ORDER_ITEM="item-101"', "")
     assert 'select_order_item "${API_KEY}" "${HOLD_SECS}"' in s4
     assert '\\"item_id\\":\\"${ORDER_ITEM}\\"' in s4
+
+
+# Review N2: a non-integer stock (e.g. 12.0) used to make `[ -gt ]` fail silently, so the
+# low-stock warning was skipped. The stock is now coerced with int().
+@pytest.mark.parametrize("stock", [12.0, "12", "12.0", 12.7])
+def test_non_integer_stock_is_coerced_and_still_warns(tmp_path, stock):
+    res = _run(tmp_path, json.dumps([{"id": "item-103", "stock": stock}]), expected=600)
+    assert "ITEM=item-103" in res.stdout, res.stdout + res.stderr
+    assert "item-103 has stock 12, below the ~600 orders this run sends" in res.stderr
+
+
+def test_unparseable_stock_counts_as_not_in_stock(tmp_path):
+    body = json.dumps([{"id": "item-101", "stock": "lots"}, {"id": "item-103", "stock": 5.0}])
+    res = _run(tmp_path, body, expected=10)
+    assert "ITEM=item-103" in res.stdout, res.stdout + res.stderr
+    assert "item-103 has stock 5, below the ~10 orders" in res.stderr
+
+
+@pytest.mark.parametrize("stock", ["lots", None, [1]])
+def test_only_unparseable_stock_fails_loudly(tmp_path, stock):
+    res = _run(tmp_path, json.dumps([{"id": "item-101", "stock": stock}]))
+    assert "RC=1" in res.stdout
+    assert "Could not find an in-stock item" in res.stderr

@@ -332,20 +332,33 @@ try:
     items = json.load(sys.stdin)
 except Exception:
     sys.exit(1)
-stocked = [i for i in items if isinstance(i, dict) and i.get("id") and (i.get("stock") or 0) > 0]
+def stock(i):
+    # The API may send 12, 12.0 or "12"; anything else is not a known stock.
+    try:
+        return int(float(i.get("stock")))
+    except (TypeError, ValueError, OverflowError):
+        return None
+stocked = [i for i in items if isinstance(i, dict) and i.get("id") and (stock(i) or 0) > 0]
 if not stocked:
     sys.exit(2)
-best = max(stocked, key=lambda i: i.get("stock") or 0)
-print(best["id"], best.get("stock"))
+best = max(stocked, key=stock)
+print(best["id"], stock(best))
 ' 2>/dev/null)"; then
         log_error "Could not find an in-stock item via GET https://${APIGEE_HOST}/ata/inventory/v1/items; every POST /orders would return HTTP 400 and never exercise the inventory path." >&2
         return 1
     fi
     item="${picked%% *}"
     stock="${picked##* }"
-    if [ "${expected}" -gt "${stock}" ] 2>/dev/null; then
-        log_warn "Order item ${item} has stock ${stock}, below the ~${expected} orders this run sends; orders return HTTP 400 once it runs out." >&2
-    fi
+    case "${stock}" in
+        ""|*[!0-9]*)
+            log_warn "Order item ${item} has a non-integer stock '${stock}'; cannot check that it covers the ~${expected} orders this run sends (orders return HTTP 400 once it runs out)." >&2
+            ;;
+        *)
+            if [ "${expected}" -gt "${stock}" ]; then
+                log_warn "Order item ${item} has stock ${stock}, below the ~${expected} orders this run sends; orders return HTTP 400 once it runs out." >&2
+            fi
+            ;;
+    esac
     echo "${item}"
 }
 

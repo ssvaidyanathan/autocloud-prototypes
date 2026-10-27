@@ -787,7 +787,7 @@ Execute scenarios with logging and automated assertions:
 ```
 
 ### 4. Resetting Between Scenarios
-Reset injected faults, clear database sleep connections, restore Apigee proxies, wait for open alerts to close, then, at the same time, for a 3 min quiet period (Apigee's 1-3 min metric lag; restarts if an alert reopens) and for every incident group to reach a terminal state (`recovered`/`resolved`/`archived`/`degraded`, so the agent's recovery note is posted first), and move active incidents to `archive/` once both are done (about 3 min after the last close, not 6). If a group is still active when `--timeout` (15 min) expires, the reset fails and lists it; nothing is archived. Admin calls use a fresh ID token each and fail the reset on any non-2xx response. For S4, run the reset right after the scenario: the leaked connections keep `ata-cloudsql-connections-critical` open until the reset releases them:
+Reset injected faults, clear database sleep connections, restore Apigee proxies, wait for open alerts to close, then, at the same time, for a 3 min quiet period (Apigee's 1-3 min metric lag; restarts if an alert reopens) and for every incident group to reach a terminal state (`resolved`/`archived`/`degraded`, or `recovered` with `recovery_note_posted_at` set, so the agent's recovery note is posted first), and move active incidents to `archive/` once both are done (about 3 min after the last close, not 6). If a group is still active when `--timeout` (15 min) expires, the reset fails and lists it; nothing is archived. For a group that will never become terminal, `--ignore-group <file>` leaves only that group out of the wait (risky: it is archived as it is). Admin calls use a fresh ID token each and fail the reset on any non-2xx response. For S4, run the reset right after the scenario: the leaked connections keep `ata-cloudsql-connections-critical` open until the reset releases them:
 ```bash
 # Standard reset (waits for open ata-* alerts to close, then for terminal incident groups and the 3m quiet period together).
 # Fails if Cloud Monitoring cannot be queried. The alert check uses an ADC token by default
@@ -798,6 +798,10 @@ Reset injected faults, clear database sleep connections, restore Apigee proxies,
 # Quick dev reset (bypasses the alert, incident group and quiet period waits;
 # risky: can archive a group whose recovery note is still pending)
 ./scripts/reset-scenarios.sh --no-wait
+
+# A group that will never become terminal (e.g. stuck 'investigating'): skip only that group;
+# the alert wait, the quiet period and the wait for every other group still run (risky)
+./scripts/reset-scenarios.sh --ignore-group incident-<group-id>.md
 ```
 
 ---

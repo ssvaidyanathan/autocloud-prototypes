@@ -319,10 +319,14 @@ async def timer_wake(
             now,
             doc.settle_deadline,
         )
-        doc = store.update_atomically(
+        investigating_doc = store.update_atomically(
             doc.group_id,
             lambda d: setattr(d, "status", IncidentGroupStatus.INVESTIGATING.value) or d,
+            create_if_missing=False,
         )
+        if investigating_doc is None:
+            return _group_file_gone(doc.group_id, f"{deadline_type} wake")
+        doc = investigating_doc
 
         primary_alert = _extract_primary_alert(doc)
         filename = f"incident-{doc.group_id}.md"
@@ -369,7 +373,15 @@ async def timer_wake(
                 d.status = IncidentGroupStatus.TICKETED.value
             return d
 
-        updated_doc = store.update_atomically(doc.group_id, _mark_ticketed)
+        updated_doc = store.update_atomically(doc.group_id, _mark_ticketed, create_if_missing=False)
+        if updated_doc is None:
+            logger.warning(
+                "Ticket %s was created for group %s, but its incident file was archived or deleted "
+                "meanwhile; the ticket fields are not recorded and no cooling timer is scheduled",
+                ticket_resp.number,
+                doc.group_id,
+            )
+            return TimerWakeResponse(status="executed", group_id=doc.group_id, reason="group_file_gone")
         _note_alerts_missed_by_ticket(report, updated_doc, bridge_client, settings)
         if cooling_scheduled and cooling_dt is not None:
             try:
@@ -416,10 +428,14 @@ async def timer_wake(
             now,
             doc.max_wait_deadline,
         )
-        doc = store.update_atomically(
+        investigating_doc = store.update_atomically(
             doc.group_id,
             lambda d: setattr(d, "status", IncidentGroupStatus.INVESTIGATING.value) or d,
+            create_if_missing=False,
         )
+        if investigating_doc is None:
+            return _group_file_gone(doc.group_id, f"{deadline_type} wake")
+        doc = investigating_doc
 
         primary_alert = _extract_primary_alert(doc)
         filename = f"incident-{doc.group_id}.md"
@@ -465,7 +481,15 @@ async def timer_wake(
                 d.status = IncidentGroupStatus.TICKETED.value
             return d
 
-        updated_doc = store.update_atomically(doc.group_id, _mark_ticketed_mw)
+        updated_doc = store.update_atomically(doc.group_id, _mark_ticketed_mw, create_if_missing=False)
+        if updated_doc is None:
+            logger.warning(
+                "Ticket %s was created for group %s on max_wait, but its incident file was archived or "
+                "deleted meanwhile; the ticket fields are not recorded and no cooling timer is scheduled",
+                ticket_resp.number,
+                doc.group_id,
+            )
+            return TimerWakeResponse(status="executed", group_id=doc.group_id, reason="group_file_gone")
         _note_alerts_missed_by_ticket(report, updated_doc, bridge_client, settings)
         if cooling_scheduled and cooling_dt is not None:
             try:
@@ -526,7 +550,7 @@ async def timer_wake(
                 d.updated_at = now_iso
                 return d
 
-            store.update_atomically(doc.group_id, _mark_degraded)
+            store.update_atomically(doc.group_id, _mark_degraded, create_if_missing=False)
             return TimerWakeResponse(
                 status="rejected",
                 group_id=doc.group_id,
@@ -568,7 +592,12 @@ async def timer_wake(
             d.updated_at = now_iso
             return d
 
-        store.update_atomically(doc.group_id, _mark_resolved)
+        if store.update_atomically(doc.group_id, _mark_resolved, create_if_missing=False) is None:
+            logger.warning(
+                "Group %s was resolved on the bridge, but its incident file was archived or deleted "
+                "meanwhile; status resolved is not recorded and the file is not recreated",
+                doc.group_id,
+            )
         return TimerWakeResponse(status="executed", group_id=doc.group_id)
 
     return TimerWakeResponse(
@@ -576,6 +605,16 @@ async def timer_wake(
         group_id=doc.group_id,
         reason=f"unsupported_deadline_type_{payload.deadline_type}",
     )
+
+
+def _group_file_gone(group_id: str, context: str) -> TimerWakeResponse:
+    """The group's incident file vanished (archived/deleted) between the wake's read and its update."""
+    logger.warning(
+        "%s ignored: incident file for group %s was archived or deleted since it was read; not recreating it",
+        context.capitalize(),
+        group_id,
+    )
+    return TimerWakeResponse(status="ignored", group_id=group_id, reason="group_not_found")
 
 
 def _mark_recovered_without_resolving(
@@ -620,7 +659,9 @@ def _mark_recovered_without_resolving(
             d.updated_at = now_iso
         return d
 
-    claimed_doc = store.update_atomically(doc.group_id, _claim)
+    claimed_doc = store.update_atomically(doc.group_id, _claim, create_if_missing=False)
+    if claimed_doc is None:
+        return _group_file_gone(doc.group_id, "cooling wake")
     if not claimed:
         logger.info(
             "Cooling wake ignored: group %s status changed to %s before recovery was recorded",
@@ -666,7 +707,7 @@ def _mark_recovered_without_resolving(
             return d
 
         try:
-            store.update_atomically(doc.group_id, _release)
+            store.update_atomically(doc.group_id, _release, create_if_missing=False)
         except Exception as release_exc:
             # Both storage steps failed: the group stays 'recovered' with no note, and every
             # retried wake will be ignored. Make that visible rather than silent.
@@ -687,7 +728,14 @@ def _mark_recovered_without_resolving(
         d.updated_at = now_iso
         return d
 
-    store.update_atomically(doc.group_id, _mark_note_posted)
+    # The reset may archive the file once it reads 'recovered' plus recovery_note_posted_at;
+    # if it was archived or deleted anyway (e.g. reset --no-wait), do not recreate it.
+    if store.update_atomically(doc.group_id, _mark_note_posted, create_if_missing=False) is None:
+        logger.warning(
+            "Recovery note posted for group %s, but its incident file was archived or deleted before "
+            "recovery_note_posted_at could be recorded; the file is not recreated",
+            doc.group_id,
+        )
     return TimerWakeResponse(status="executed", group_id=doc.group_id, reason="recovered_not_resolved")
 
 

@@ -296,11 +296,11 @@ def test_failed_note_and_failed_release_logs_stuck_group(base_cfg, monkeypatch, 
     real_update = OKFStore.update_atomically
     calls = {"n": 0}
 
-    def flaky_update(self, gid, fn):
+    def flaky_update(self, gid, fn, **kwargs):
         calls["n"] += 1
         if calls["n"] == 2:  # the release after the failed note
             raise RuntimeError("precondition retries exhausted")
-        return real_update(self, gid, fn)
+        return real_update(self, gid, fn, **kwargs)
 
     monkeypatch.setattr(OKFStore, "update_atomically", flaky_update)
     with caplog.at_level("ERROR", logger="agent.app.main"):

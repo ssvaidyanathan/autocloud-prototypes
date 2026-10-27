@@ -156,8 +156,11 @@ async def test_traffic_window_ends_at_the_deploy_and_uses_the_configured_lookbac
     assert req.interval.start_time.timestamp() == int(deploy.timestamp()) - 30 * 60
     assert 'metric.type = "run.googleapis.com/request_count"' in req.filter
     assert f'resource.labels.service_name = "{SERVICE}"' in req.filter
+    assert 'resource.type = "cloud_run_revision"' in req.filter
+    assert f'resource.labels.location = "{REGION}"' in req.filter
+    assert req.name == f"projects/{PROJECT}"
 
-    other = previous_serving_revision(client, PROJECT, SERVICE, S5_REV, S5_CREATED, lookback_minutes=10)
+    other = previous_serving_revision(client, PROJECT, REGION, SERVICE, S5_REV, S5_CREATED, lookback_minutes=10)
     assert other["window_start"] == "2026-10-27T09:16:02Z"
 
 
@@ -207,14 +210,14 @@ async def test_traffic_query_failure_is_logged_and_names_no_target(caplog):
 
 def test_new_revision_requests_are_not_counted_as_previous_serving():
     client = FakeRequestCountClient({SERVICE: {PINNED_REV: [8], S5_REV: [3]}})
-    out = previous_serving_revision(client, PROJECT, SERVICE, S5_REV, S5_CREATED, 30)
+    out = previous_serving_revision(client, PROJECT, REGION, SERVICE, S5_REV, S5_CREATED, 30)
     assert out["revision"] == PINNED_REV
     assert out["requests_by_revision"] == {PINNED_REV: 8}
 
 
 def test_unknown_deploy_time_names_no_target():
     client = FakeRequestCountClient({SERVICE: {PINNED_REV: [8]}})
-    out = previous_serving_revision(client, PROJECT, SERVICE, S5_REV, None, 30)
+    out = previous_serving_revision(client, PROJECT, REGION, SERVICE, S5_REV, None, 30)
     assert out["revision"] is None
     assert "creation time" in out["evidence"]
     assert client.calls == []
@@ -346,6 +349,61 @@ def test_s5_recovery_note_says_alerts_closed_with_no_traffic_and_asks_for_verifi
                          "or the injected fault was cleared) before resolving this incident.")
     # One query per distinct Cloud Run service, not per alert.
     assert len(client.calls) == 2
+    # Scoped to the configured project and region (review R2).
+    for req in client.calls:
+        assert req.name == f"projects/{PROJECT}"
+        assert 'resource.type = "cloud_run_revision"' in req.filter
+        assert f'resource.labels.location = "{REGION}"' in req.filter
+
+
+OTHER_REGION = "europe-west4"
+
+
+def test_rollback_traffic_query_uses_the_given_region_not_a_default():
+    """Review R2: a same-named service in another region must not be counted."""
+    client = FakeRequestCountClient({SERVICE: {PINNED_REV: [5]}})
+    out = previous_serving_revision(client, PROJECT, OTHER_REGION, SERVICE, S5_REV, S5_CREATED, 30)
+    assert out["revision"] == PINNED_REV
+    (req,) = client.calls
+    assert f'resource.labels.location = "{OTHER_REGION}"' in req.filter
+    assert f'location = "{REGION}"' not in req.filter
+
+
+def test_change_specialist_passes_config_region_to_the_traffic_query():
+    client = FakeRequestCountClient({SERVICE: {PINNED_REV: [5]}})
+    cfg = AgentConfig(project_id=PROJECT, region=OTHER_REGION, is_local=False)
+    chg = {"service": SERVICE, "revision": S5_REV, "timestamp": S5_CREATED}
+    out = ChangeSpecialist(metric_client=client)._previous_serving(chg, cfg)
+    assert out["revision"] == PINNED_REV
+    (req,) = client.calls
+    assert f'resource.labels.location = "{OTHER_REGION}"' in req.filter
+
+
+def test_recovery_note_query_uses_the_configured_region():
+    client = _CodeSeriesClient({})
+    cfg = AgentConfig(project_id=PROJECT, region=OTHER_REGION, is_local=True)
+    recovery.set_recovery_metric_client_factory(lambda s: client)
+    try:
+        recovery.recovery_note_for_group(S5_GROUP_ALERTS[:1], S5_RECOVERED, S5_NOTE_AT, 180, cfg)
+    finally:
+        recovery.set_recovery_metric_client_factory(None)
+    (req,) = client.calls
+    assert f'resource.labels.location = "{OTHER_REGION}"' in req.filter
+    assert 'resource.labels.service_name = "ata-inventory-api"' in req.filter
+
+
+def test_rollback_and_recovery_share_one_request_count_filter():
+    """Review C1: one helper builds the request_count query for both callers."""
+    from agent.app import request_count
+    from agent.app.specialists import change
+
+    assert change.REQUEST_COUNT_METRIC is request_count.REQUEST_COUNT_METRIC
+    assert change.request_count_series is request_count.request_count_series
+    assert recovery.request_count_series is request_count.request_count_series
+    assert request_count.request_count_filter("r1", "svc") == (
+        'metric.type = "run.googleapis.com/request_count" AND resource.type = "cloud_run_revision" '
+        'AND resource.labels.location = "r1" AND resource.labels.service_name = "svc"'
+    )
 
 
 def test_recovery_note_states_measured_traffic_and_5xx_when_requests_continue():

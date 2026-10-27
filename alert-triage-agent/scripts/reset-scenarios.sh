@@ -40,6 +40,8 @@ parse_duration() {
 
 # Configuration options & defaults
 NO_WAIT="${ATA_RESET_NO_WAIT:-${NO_WAIT:-false}}"
+# Incident groups (file names or group ids) left out of the terminal-state wait only.
+IGNORE_GROUPS="${ATA_RESET_IGNORE_GROUPS:-}"
 # 180s covers Apigee's 1-3 min metric lag. The agent's recovery note is not covered by
 # time: step 6 also waits (concurrently) for every incident group to reach a terminal state.
 QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-180}}")"
@@ -55,6 +57,14 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-wait)
             NO_WAIT="true"
+            shift
+            ;;
+        --ignore-group)
+            IGNORE_GROUPS="${IGNORE_GROUPS:+${IGNORE_GROUPS} }$2"
+            shift 2
+            ;;
+        --ignore-group=*)
+            IGNORE_GROUPS="${IGNORE_GROUPS:+${IGNORE_GROUPS} }${1#*=}"
             shift
             ;;
         --quiet-period)
@@ -119,6 +129,10 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --no-wait                  Skip waiting for open alerts, terminal incident groups and quiet period"
             echo "                             (risky: can archive groups the agent is still working on)"
+            echo "  --ignore-group <file|id>   Leave one incident group out of the terminal-state wait only (repeatable;"
+            echo "                             env ATA_RESET_IGNORE_GROUPS). For a group that will never become terminal"
+            echo "                             (e.g. stuck 'investigating'). The alert wait, the quiet period and the wait"
+            echo "                             for every other group still run. Risky: the group is archived as it is"
             echo "  --quiet-period <duration>  Quiet period after alerts close, run alongside the wait for terminal"
             echo "                             incident groups (default: 180s / 3m)"
             echo "  --timeout <duration>       Max timeout waiting for alerts to close and groups to reach"
@@ -211,17 +225,25 @@ query_open_ata_alerts() {
 }
 
 # Incident group statuses after which the agent does nothing more with a group (no timer,
-# no work note): resolved, recovered (set when the cool-down ends; kept only once the
-# recovery note is posted), archived, and degraded (excluded from grouping and timers;
-# needs a human). Anything else, including a missing or unknown status, is still active.
+# no work note): resolved, recovered, archived, and degraded (excluded from grouping and
+# timers; needs a human). Anything else, including a missing or unknown status, is active.
+# 'recovered' alone is not enough: the agent sets it when the cool-down ends, BEFORE it
+# posts the recovery note, and records recovery_note_posted_at only after the note posted.
+# A 'recovered' group without recovery_note_posted_at is still active (see group_state).
 TERMINAL_GROUP_STATUSES="resolved recovered archived degraded"
+
+# Print the value of top-level YAML frontmatter key $1 in OKF markdown on stdin ("" if
+# none). Quotes and surrounding blanks are stripped; nested keys are ignored.
+okf_field() {
+    awk -v key="$1" '{ sub(/\r$/, "") }
+         NR == 1 { if ($0 != "---") exit; next }
+         $0 == "---" { exit }
+         index($0, key ":") == 1 { s = substr($0, length(key) + 2); sub(/^[ \t]*/, "", s); gsub(/["\047]/, "", s); sub(/[ \t]+$/, "", s); print s; exit }'
+}
 
 # Print the status in the YAML frontmatter of OKF markdown on stdin ("" if none).
 okf_status() {
-    awk '{ sub(/\r$/, "") }
-         NR == 1 { if ($0 != "---") exit; next }
-         $0 == "---" { exit }
-         /^status:/ { s = $0; sub(/^status:[ \t]*/, "", s); gsub(/["\047]/, "", s); sub(/[ \t]+$/, "", s); print s; exit }'
+    okf_field status
 }
 
 is_terminal_group_status() {
@@ -231,20 +253,59 @@ is_terminal_group_status() {
     return 1
 }
 
-# Print "<file> (<status>)" for every incident file in knowledge/incident-manager/ whose
-# group is not in a terminal state. Reads with gcloud storage (same login as step 7).
-# Returns non-zero after gcloud's error is printed when the files cannot be read.
+# Print "terminal" or the reason a group is still active, for OKF markdown on stdin.
+group_state() {
+    local content status note
+    content="$(cat)"
+    status="$(printf '%s\n' "${content}" | okf_field status)"
+    if ! is_terminal_group_status "${status}"; then
+        echo "${status:-no status}"
+        return 0
+    fi
+    if [ "${status}" = "recovered" ]; then
+        note="$(printf '%s\n' "${content}" | okf_field recovery_note_posted_at)"
+        case "${note}" in
+            ""|null|Null|NULL|"~")
+                echo "recovered, recovery note not posted yet"
+                return 0
+                ;;
+        esac
+    fi
+    echo "terminal"
+}
+
+# --ignore-group: true if incident file name $1 (incident-<id>.md) is listed in IGNORE_GROUPS
+# (file names or group ids, comma or space separated).
+is_ignored_group() {
+    local entry
+    for entry in ${IGNORE_GROUPS//,/ }; do
+        if [ "$1" = "${entry}" ] || [ "$1" = "incident-${entry}.md" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Print "<file> (<status or reason>)" for every incident file in knowledge/incident-manager/
+# whose group is not in a terminal state (group_state); a group named with --ignore-group is
+# printed as "IGNORED <file> (<status or reason>)". Reads with gcloud storage (same login as
+# step 7). Returns non-zero after gcloud's error is printed when the files cannot be read.
 non_terminal_incident_groups() {
     local src="gs://${INCIDENTS_BUCKET}/${ACTIVE_INCIDENTS_URL_SUFFIX}"
-    local urls url content status
+    local urls url content state
     urls="$(gcs_run ls "${src}")" || return 1
     for url in ${urls}; do
         content="$(gcs_run cat "${url}")" || return 1
         # Moved or deleted since the listing: no longer an active file.
         [ -n "${content}" ] || continue
-        status="$(printf '%s\n' "${content}" | okf_status)"
-        if ! is_terminal_group_status "${status}"; then
-            echo "${url##*/} (${status:-no status})"
+        state="$(printf '%s\n' "${content}" | group_state)"
+        if [ "${state}" = "terminal" ]; then
+            continue
+        fi
+        if is_ignored_group "${url##*/}"; then
+            echo "IGNORED ${url##*/} (${state})"
+        else
+            echo "${url##*/} (${state})"
         fi
     done
 }
@@ -262,6 +323,10 @@ wait_for_open_alerts() {
         return 0
     fi
 
+    if [ -n "${IGNORE_GROUPS}" ]; then
+        log_warn "    [--ignore-group] RISKY: left out of the terminal-state wait and archived in whatever state they are in: ${IGNORE_GROUPS}"
+    fi
+
     if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
         log_info "    [MOCK/DRY-RUN] Simulating wait for open alerts to close (0 open alerts)."
         log_info "    [MOCK/DRY-RUN] Simulating wait for incident groups to reach a terminal state."
@@ -273,6 +338,7 @@ wait_for_open_alerts() {
     start_time=$(date +%s)
     local deadline=$((start_time + WAIT_TIMEOUT_SECS))
     local quiet_start=""
+    local ignored_groups=""
     local first_poll="true"
     local query_failures=0
     local query_err_file
@@ -406,12 +472,15 @@ PYEOF
                 log_error "To skip the check deliberately (risky: active groups get archived), re-run with --no-wait." >&2
                 exit 1
             fi
+            ignored_groups="$(printf '%s\n' "${non_terminal}" | awk 'sub(/^IGNORED /, "")')"
+            non_terminal="$(printf '%s\n' "${non_terminal}" | awk 'NF && !/^IGNORED /')"
             if [ -n "${non_terminal}" ]; then
                 group_count="$(count_lines "${non_terminal}")"
                 if [ "${now}" -ge "${deadline}" ]; then
-                    log_error "Timed out after ${WAIT_TIMEOUT_SECS}s (${elapsed}s elapsed): all ATA alerts are closed, but ${group_count} incident group(s) are not in a terminal state (${TERMINAL_GROUP_STATUSES}):" >&2
+                    log_error "Timed out after ${WAIT_TIMEOUT_SECS}s (${elapsed}s elapsed): all ATA alerts are closed, but ${group_count} incident group(s) are not in a terminal state (${TERMINAL_GROUP_STATUSES}; recovered only once the recovery note is posted):" >&2
                     printf '%s\n' "${non_terminal}" | awk '{ print "  - " $0 }' >&2
-                    log_error "Incident files were NOT archived. Check the agent (cooling timer, recovery note) and rerun, raise --timeout, or re-run with --no-wait to archive anyway (risky)." >&2
+                    log_error "Incident files were NOT archived. Check the agent (cooling timer, recovery note) and rerun, or raise --timeout." >&2
+                    log_error "For a group that will never become terminal, re-run with --ignore-group <file> for that group (risky: it is archived as it is; the other waits still run), or --no-wait to skip every wait (riskier)." >&2
                     exit 1
                 fi
                 log_info "    [Progress] Elapsed: ${elapsed}s / ${WAIT_TIMEOUT_SECS}s | 0 open alerts | ${quiet_status} | ${group_count} incident group(s) not terminal yet [$(summarize_lines "${non_terminal}")]"
@@ -419,6 +488,11 @@ PYEOF
                 continue
             fi
 
+            if [ "${QUIET_PERIOD_SECS}" -le 0 ] || [ "${quiet_elapsed}" -ge "${QUIET_PERIOD_SECS}" ]; then
+                if [ -n "${ignored_groups}" ]; then
+                    log_warn "    [--ignore-group] Archiving $(count_lines "${ignored_groups}") incident group(s) that are NOT terminal: $(summarize_lines "${ignored_groups}")"
+                fi
+            fi
             if [ "${QUIET_PERIOD_SECS}" -le 0 ]; then
                 log_success "    Zero open ATA alerts and all incident groups terminal (quiet period disabled). Proceeding."
                 return 0

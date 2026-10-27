@@ -72,8 +72,13 @@ def _update_gcs_atomically(
     max_retries: int = 5,
     storage_client: Optional[Any] = None,
     backoff_base: float = 0.05,
-) -> OKFDocument:
-    """Execute atomic read-modify-write on GCS with if_generation_match precondition."""
+    create_if_missing: bool = True,
+) -> Optional[OKFDocument]:
+    """Execute atomic read-modify-write on GCS with if_generation_match precondition.
+
+    With ``create_if_missing=False`` a blob that does not exist is not created: the update
+    is skipped with a WARNING and None is returned (see ``OKFStore.update_atomically``).
+    """
     if storage_client is None:
         from google.cloud import storage
         storage_client = storage.Client()
@@ -98,11 +103,13 @@ def _update_gcs_atomically(
                 or getattr(exc, "status_code", None) == 404
                 or "NotFound" in type(exc).__name__
             )
-            if is_not_found:
-                generation = 0
-                doc = OKFDocument(group_id=inferred_group_id)
-            else:
+            if not is_not_found:
                 raise
+            if not create_if_missing:
+                _log_missing_not_recreated(inferred_group_id, f"gs://{bucket_name}/{canonical_blob_name}")
+                return None
+            generation = 0
+            doc = OKFDocument(group_id=inferred_group_id)
 
         updated_doc = update_fn(doc)
         if not isinstance(updated_doc, OKFDocument):
@@ -142,6 +149,15 @@ def _update_gcs_atomically(
     raise ConcurrencyLockError(f"Failed to update OKF {canonical_blob_name} after {max_retries} retries")
 
 
+def _log_missing_not_recreated(group_id: str, location: str) -> None:
+    logger.warning(
+        "OKF incident file for group %s no longer exists at %s (archived or deleted since it was read); "
+        "skipping the update and NOT recreating it",
+        group_id,
+        location,
+    )
+
+
 # Directory used when the configured local store directory cannot be created.
 LOCAL_FALLBACK_DIR = Path("/tmp/knowledge/incident-manager")
 
@@ -173,9 +189,16 @@ def _update_local_atomically(
     identifier: str,
     update_fn: Callable[[OKFDocument], OKFDocument],
     max_retries: int = 5,
-) -> OKFDocument:
+    create_if_missing: bool = True,
+) -> Optional[OKFDocument]:
     """Execute atomic read-modify-write on local filesystem using file lock and atomic rename."""
-    target_file = resolve_local_target_file(storage_path, identifier)
+    if not create_if_missing:
+        target_file = resolve_local_target_file(storage_path, identifier, create=False)
+        if not target_file.exists():
+            _log_missing_not_recreated(_extract_group_id_from_path(identifier), str(target_file))
+            return None
+    else:
+        target_file = resolve_local_target_file(storage_path, identifier)
 
     lock_file = target_file.parent / f".{target_file.name}.lock"
     inferred_group_id = _extract_group_id_from_path(identifier)
@@ -186,6 +209,10 @@ def _update_local_atomically(
             if target_file.exists():
                 content = target_file.read_text(encoding="utf-8")
                 doc = OKFDocument.from_markdown(content)
+            elif not create_if_missing:
+                # Removed between the check above and taking the lock.
+                _log_missing_not_recreated(inferred_group_id, str(target_file))
+                return None
             else:
                 doc = OKFDocument(group_id=inferred_group_id)
 
@@ -227,8 +254,16 @@ class OKFStore:
         blob_name_or_group_id: str,
         update_fn: Callable[[OKFDocument], OKFDocument],
         max_retries: int = 5,
-    ) -> OKFDocument:
-        """Atomically update an OKF document."""
+        create_if_missing: bool = True,
+    ) -> Optional[OKFDocument]:
+        """Atomically update an OKF document.
+
+        By default a missing document is created from ``OKFDocument(group_id=...)`` (status
+        open). Updates to an existing group (e.g. after a timer wake) pass
+        ``create_if_missing=False``: if the file was archived or deleted meanwhile, nothing
+        is written, a WARNING names the group, and None is returned. Otherwise the write
+        would recreate a stub ``status: open`` file in the active folder.
+        """
         if self.storage_client is not None or (self.bucket_name and not self.is_local):
             return _update_gcs_atomically(
                 bucket_name=self.bucket_name,
@@ -236,12 +271,14 @@ class OKFStore:
                 update_fn=update_fn,
                 max_retries=max_retries,
                 storage_client=self.storage_client,
+                create_if_missing=create_if_missing,
             )
         return _update_local_atomically(
             storage_path=self.storage_path,
             identifier=blob_name_or_group_id,
             update_fn=update_fn,
             max_retries=max_retries,
+            create_if_missing=create_if_missing,
         )
 
     def read(self, blob_name_or_group_id: str) -> Optional[OKFDocument]:

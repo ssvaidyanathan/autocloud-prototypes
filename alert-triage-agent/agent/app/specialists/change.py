@@ -11,6 +11,7 @@ from typing import Any, Optional
 from ..config import AgentConfig
 from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
+from ..request_count import REQUEST_COUNT_METRIC, request_count_filter, request_count_series
 from .base import BaseSpecialist, EvidenceDossier
 
 logger = logging.getLogger(__name__)
@@ -55,9 +56,6 @@ def is_genuine_change(c: dict[str, Any]) -> bool:
     return True
 
 
-REQUEST_COUNT_METRIC = "run.googleapis.com/request_count"
-
-
 def _parse_ts(value: Any) -> Optional[datetime]:
     if not value:
         return None
@@ -73,22 +71,11 @@ def _iso(dt: datetime) -> str:
 
 
 def requests_by_revision(
-    metric_client: Any, project_id: str, service: str, start: datetime, end: datetime
+    metric_client: Any, project_id: str, region: str, service: str, start: datetime, end: datetime
 ) -> dict[str, int]:
-    """Sum Cloud Run request_count per revision of `service` over [start, end]."""
-    from google.cloud import monitoring_v3
-
-    req = monitoring_v3.ListTimeSeriesRequest(
-        name=f"projects/{project_id}",
-        filter=f'metric.type = "{REQUEST_COUNT_METRIC}" AND resource.labels.service_name = "{service}"',
-        interval=monitoring_v3.TimeInterval(
-            start_time={"seconds": int(start.timestamp())},
-            end_time={"seconds": int(end.timestamp())},
-        ),
-        view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
-    )
+    """Sum Cloud Run request_count per revision of `service` in `region` over [start, end]."""
     totals: dict[str, int] = {}
-    for ts in metric_client.list_time_series(request=req):
+    for ts in request_count_series(metric_client, project_id, region, service, start.timestamp(), end.timestamp()):
         rev = ts.resource.labels.get("revision_name", "")
         if not rev:
             continue
@@ -100,6 +87,7 @@ def requests_by_revision(
 def previous_serving_revision(
     metric_client: Any,
     project_id: str,
+    region: str,
     service: str,
     new_revision: str,
     deploy_timestamp: Any,
@@ -123,7 +111,7 @@ def previous_serving_revision(
     start = deploy_dt - timedelta(minutes=lookback_minutes)
     window = f"between {_iso(start)} and {_iso(deploy_dt)}"
     try:
-        totals = requests_by_revision(metric_client, project_id, service, start, deploy_dt)
+        totals = requests_by_revision(metric_client, project_id, region, service, start, deploy_dt)
     except Exception as exc:
         logger.warning("Traffic history query for %s failed: %s", service, exc)
         result["evidence"] = (
@@ -190,7 +178,7 @@ class ChangeSpecialist(BaseSpecialist):
             logger.warning("%s", evidence)
             return {"revision": None, "evidence": evidence, "requests_by_revision": {}}
         return previous_serving_revision(
-            client, config.project_id, service, revision, chg.get("timestamp"),
+            client, config.project_id, config.region, service, revision, chg.get("timestamp"),
             config.rollback_traffic_lookback_minutes,
         )
 
@@ -510,7 +498,7 @@ class ChangeSpecialist(BaseSpecialist):
             if serving["evidence"]:
                 findings.append(serving["evidence"])
                 queries_executed.setdefault("cloud_monitoring", []).append(
-                    f'metric.type="{REQUEST_COUNT_METRIC}" AND resource.labels.service_name="{chg.get("service")}" '
+                    f'{request_count_filter(config.region, chg.get("service") or "")} '
                     f'grouped by resource.labels.revision_name, {config.rollback_traffic_lookback_minutes} min '
                     f'before {chg.get("timestamp")}'
                 )

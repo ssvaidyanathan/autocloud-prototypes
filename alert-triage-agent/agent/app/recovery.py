@@ -12,9 +12,10 @@ from datetime import datetime, timezone
 import logging
 from typing import Any, Callable, Iterable, Optional
 
+from .request_count import request_count_series
+
 logger = logging.getLogger(__name__)
 
-REQUEST_COUNT_METRIC = "run.googleapis.com/request_count"
 CLOUD_RUN_TYPE = "cloud run"
 
 # Test hook: returns a Cloud Monitoring client (or None) for the recovery traffic check.
@@ -50,19 +51,11 @@ def cloud_run_services(resources: Iterable[str]) -> tuple[list[str], list[str]]:
     return run, other
 
 
-def _requests_and_5xx(client: Any, project_id: str, service: str, start: float, end: float) -> tuple[int, int]:
-    from google.cloud import monitoring_v3
-
-    req = monitoring_v3.ListTimeSeriesRequest(
-        name=f"projects/{project_id}",
-        filter=f'metric.type = "{REQUEST_COUNT_METRIC}" AND resource.labels.service_name = "{service}"',
-        interval=monitoring_v3.TimeInterval(
-            start_time={"seconds": int(start)}, end_time={"seconds": int(end)}
-        ),
-        view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
-    )
+def _requests_and_5xx(
+    client: Any, project_id: str, region: str, service: str, start: float, end: float
+) -> tuple[int, int]:
     total = errors = 0
-    for ts in client.list_time_series(request=req):
+    for ts in request_count_series(client, project_id, region, service, start, end):
         labels = ts.metric.labels
         is_5xx = str(labels.get("response_code", "")).startswith("5") or labels.get("response_code_class") == "5xx"
         count = sum(int(pt.value.int64_value) for pt in ts.points)
@@ -73,9 +66,9 @@ def _requests_and_5xx(client: Any, project_id: str, service: str, start: float, 
 
 
 def traffic_at_close_facts(
-    resources: Iterable[str], project_id: str, start: float, end: float, client: Any
+    resources: Iterable[str], project_id: str, region: str, start: float, end: float, client: Any
 ) -> list[str]:
-    """Measured traffic facts per affected Cloud Run service over [start, end]."""
+    """Measured traffic facts per affected Cloud Run service in `region` over [start, end]."""
     window = f"between {_iso(start)} and {_iso(end)}"
     try:
         run_services, other = cloud_run_services(resources)
@@ -93,7 +86,7 @@ def traffic_at_close_facts(
         run_services = []
     for svc in run_services:
         try:
-            total, errors = _requests_and_5xx(client, project_id, svc, start, end)
+            total, errors = _requests_and_5xx(client, project_id, region, svc, start, end)
         except Exception as exc:
             logger.warning("Recovery traffic check for %s failed: %s", svc, exc)
             facts.append(f"Traffic around the close was not checked for {svc}: the query failed ({type(exc).__name__}).")
@@ -144,5 +137,5 @@ def recovery_note_for_group(
             client = monitoring_v3.MetricServiceClient()
     except Exception as exc:
         logger.warning("Cloud Monitoring client unavailable for the recovery traffic check: %s", exc)
-    facts = traffic_at_close_facts(resources, settings.project_id, start, now_epoch, client)
+    facts = traffic_at_close_facts(resources, settings.project_id, settings.region, start, now_epoch, client)
     return build_recovery_note(_iso(recovered_epoch), len(alerts), cooling_seconds, facts)
