@@ -21,6 +21,15 @@ PINNED_REVISION = "ata-inventory-api-00073-9vb"
 PINNED_IMAGE = f"us-west1-docker.pkg.dev/cloud-assist-fde-2/ata-docker/ata-inventory-api@{PINNED_DIGEST}"
 GOOD_USER = "ata-inventory-sa@cloud-assist-fde-2.iam"
 BAD_USER = "invalid-iam-user@cloud-assist-fde-2.iam"
+# common.sh INVENTORY_BASELINE_ENV_VARS for the default project/region/prefix.
+BASELINE_ENV = {
+    "ATA_INVENTORY_INSTANCE_CONNECTION_NAME": "cloud-assist-fde-2:us-west1:ata-inventory-db",
+    "ATA_INVENTORY_DB_USER": GOOD_USER,
+    "ATA_INVENTORY_DB_NAME": "inventory",
+    "ATA_INVENTORY_DB_IAM_AUTH": "true",
+    "ATA_INVENTORY_MOCK_DB": "false",
+}
+LEGACY_ALIASES = ("DB_USER", "MOCK_DB")
 
 # Stateful fake gcloud: state.json holds traffic, template and revision counter;
 # calls.log records one JSON argv per invocation. "fail" lists verbs to fail.
@@ -66,14 +75,25 @@ elif args[:3] == ["run", "services", "describe"]:
         print(f"{revs},{pcts}")
     elif fmt == "json":
         env = [{"name": k, "value": v} for k, v in state["env"].items()]
-        print(json.dumps({"spec": {"template": {"spec": {"containers": [{"image": state["image"], "env": env}]}}}}))
+        annotations = {"autoscaling.knative.dev/maxScale": state["max_scale"]}
+        if state["min_scale"] is not None:
+            annotations["autoscaling.knative.dev/minScale"] = state["min_scale"]
+        print(json.dumps({"spec": {"template": {
+            "metadata": {"annotations": annotations},
+            "spec": {"containers": [{"image": state["image"], "env": env}]}}}}))
     else:
         sys.exit(f"fake gcloud: unhandled describe format {fmt}")
 elif args[:3] == ["run", "services", "update"]:
     if "update" in state["fail"]:
         sys.exit(1)
     state["image"] = opt("image")
+    for name in (opt("remove-env-vars") or "").split(","):
+        state["env"].pop(name, None)
     state["env"].update(dict(kv.split("=", 1) for kv in opt("update-env-vars").split(",")))
+    if opt("max-instances") is not None:
+        state["max_scale"] = opt("max-instances")
+    if opt("min-instances") is not None:
+        state["min_scale"] = opt("min-instances")
     if "no-new-revision" not in state["fail"]:
         state["counter"] += 1
         suffix = opt("revision-suffix") or f"{state['counter']:05d}-new"
@@ -103,13 +123,9 @@ def baseline_state(**overrides):
         "latest": "ata-inventory-api-00139-ff2",
         "counter": 139,
         "image": PINNED_IMAGE,
-        "env": {
-            "ATA_INVENTORY_DB_USER": GOOD_USER,
-            "DB_USER": GOOD_USER,
-            "ATA_INVENTORY_MOCK_DB": "false",
-            "MOCK_DB": "false",
-            "ATA_INVENTORY_DB_NAME": "inventory",
-        },
+        "env": dict(BASELINE_ENV),
+        "max_scale": "1",
+        "min_scale": "0",
         "revisions": {PINNED_REVISION: PINNED_DIGEST},
         "digest_for_new": PINNED_DIGEST,
         "fail": [],
@@ -181,7 +197,8 @@ def test_s5_routes_all_traffic_to_the_new_faulty_revision(tmp_path):
     new_rev = s5_revision(env)
     assert new_rev.startswith("ata-inventory-api-s5-")
     assert env.state["traffic"] == [[new_rev, 100]]
-    assert env.state["env"]["DB_USER"] == BAD_USER
+    assert env.state["env"]["ATA_INVENTORY_DB_USER"] == BAD_USER
+    assert not set(LEGACY_ALIASES) & set(env.state["env"])
     assert env.writes() == [["run", "services", "update"], ["run", "services", "update-traffic"]]
     assert f"--to-revisions={new_rev}=100" in env.calls[[c[:3] for c in env.calls].index(
         ["run", "services", "update-traffic"])]
@@ -252,7 +269,7 @@ def s5_active_state(**overrides):
         latest="ata-inventory-api-00140-new",
         counter=140,
     )
-    state["env"].update(ATA_INVENTORY_DB_USER=BAD_USER, DB_USER=BAD_USER)
+    state["env"].update(ATA_INVENTORY_DB_USER=BAD_USER)
     state["revisions"]["ata-inventory-api-00140-new"] = PINNED_DIGEST
     state.update(overrides)
     return state
@@ -265,7 +282,6 @@ def test_revert_after_s5_restores_pin_and_template(tmp_path):
 
     assert res.returncode == 0, res.stdout + res.stderr
     assert env.state["traffic"] == [[PINNED_REVISION, 100]]
-    assert env.state["env"]["DB_USER"] == GOOD_USER
     assert env.state["env"]["ATA_INVENTORY_DB_USER"] == GOOD_USER
     # Traffic is re-pinned before the template update, so the new revision gets 0%.
     assert env.writes() == [["run", "services", "update-traffic"], ["run", "services", "update"]]
@@ -279,7 +295,7 @@ def test_revert_full_s5_cycle_ends_on_pinned_revision(tmp_path):
 
     assert res.returncode == 0, res.stdout + res.stderr
     assert env.state["traffic"] == [[PINNED_REVISION, 100]]
-    assert env.state["env"]["DB_USER"] == GOOD_USER
+    assert env.state["env"]["ATA_INVENTORY_DB_USER"] == GOOD_USER
 
 
 def test_restore_on_baseline_makes_no_writes(tmp_path):
@@ -306,12 +322,21 @@ def test_restore_repins_traffic_without_template_update_when_template_matches(tm
 
 @pytest.mark.parametrize(
     "field, value",
-    [("image", "us-west1-docker.pkg.dev/x/ata-docker/ata-inventory-api@sha256:other"), ("MOCK_DB", "true")],
+    [
+        ("image", "us-west1-docker.pkg.dev/x/ata-docker/ata-inventory-api@sha256:other"),
+        ("ATA_INVENTORY_MOCK_DB", "true"),
+        # Legacy aliases left on the template (live before this change) are removed.
+        ("DB_USER", GOOD_USER),
+        ("MOCK_DB", "false"),
+        # The pre-cap template (live: maxScale 100) gets the demo instance limit.
+        ("max_scale", "100"),
+        ("min_scale", "1"),
+    ],
 )
 def test_restore_updates_template_when_it_differs(tmp_path, field, value):
     state = baseline_state()
-    if field == "image":
-        state["image"] = value
+    if field in ("image", "max_scale", "min_scale"):
+        state[field] = value
     else:
         state["env"][field] = value
     env = Env(tmp_path, state)
@@ -321,8 +346,32 @@ def test_restore_updates_template_when_it_differs(tmp_path, field, value):
     assert res.returncode == 0, res.stdout + res.stderr
     assert env.writes() == [["run", "services", "update"]]
     assert env.state["image"] == PINNED_IMAGE
-    assert env.state["env"]["MOCK_DB"] == "false"
+    assert env.state["env"] == BASELINE_ENV
+    assert (env.state["max_scale"], env.state["min_scale"]) == ("1", "0")
     assert env.state["traffic"] == [[PINNED_REVISION, 100]]
+    update = next(c for c in env.calls if c[:3] == ["run", "services", "update"])
+    assert "--remove-env-vars=DB_USER,MOCK_DB" in update
+    assert "--max-instances=1" in update and "--min-instances=0" in update
+
+
+def test_restore_accepts_a_template_without_min_scale_annotation(tmp_path):
+    """minScale unset means 0 (scale to zero): no write."""
+    env = Env(tmp_path, baseline_state(min_scale=None))
+
+    res = env.run_function("restore_inventory_pinned_baseline")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert env.writes() == []
+
+
+def test_restore_uses_the_configured_instance_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATA_DEMO_MAX_INSTANCES", "2")
+    env = Env(tmp_path, baseline_state())
+
+    res = env.run_function("restore_inventory_pinned_baseline")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert env.state["max_scale"] == "2"
 
 
 @pytest.mark.parametrize(

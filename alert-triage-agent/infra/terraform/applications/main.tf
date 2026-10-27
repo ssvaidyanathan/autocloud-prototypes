@@ -9,8 +9,7 @@ locals {
 }
 
 locals {
-  # Cloud SQL IAM database user for ata-inventory-api. Rendered into both
-  # ATA_INVENTORY_DB_USER and its legacy alias DB_USER so the two cannot diverge.
+  # Cloud SQL IAM database user for ata-inventory-api (ATA_INVENTORY_DB_USER).
   inventory_db_user = "${var.name_prefix}-inventory-sa@${var.project_id}.iam"
 }
 
@@ -38,7 +37,9 @@ resource "google_cloud_run_v2_service" "inventory_api" {
     service_account = local.inventory_sa_email
 
     # One instance holds the fault state and leaked connections; see var.demo_max_instance_count.
+    # Min 0: scale to zero (min instances 1 is not approved for the demo).
     scaling {
+      min_instance_count = 0
       max_instance_count = var.demo_max_instance_count
     }
 
@@ -72,18 +73,9 @@ resource "google_cloud_run_v2_service" "inventory_api" {
         name  = "ATA_INVENTORY_MOCK_DB"
         value = tostring(var.inventory_mock_db)
       }
-      # Legacy aliases. The app reads ATA_INVENTORY_* first and falls back to
-      # these (demo/ata-inventory-api/app/config.py). deploy.sh, s5_bad_deploy.sh
-      # and reset-scenarios.sh set both name families, so they are declared here
-      # to keep Terraform in line with the live service.
-      env {
-        name  = "DB_USER"
-        value = local.inventory_db_user
-      }
-      env {
-        name  = "MOCK_DB"
-        value = tostring(var.inventory_mock_db)
-      }
+      # Only ATA_INVENTORY_* names: the app no longer reads the legacy DB_USER /
+      # MOCK_DB aliases (demo/ata-inventory-api/app/config.py), and deploy.sh,
+      # s5_bad_deploy.sh and the reset restore no longer set them.
     }
   }
 
@@ -121,6 +113,7 @@ resource "google_cloud_run_v2_service" "orders_api" {
     service_account = local.orders_sa_email
 
     scaling {
+      min_instance_count = 0
       max_instance_count = var.demo_max_instance_count
     }
 

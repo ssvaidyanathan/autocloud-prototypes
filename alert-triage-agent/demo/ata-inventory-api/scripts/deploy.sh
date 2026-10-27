@@ -1,20 +1,32 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Build and Deploy ata-inventory-api to Cloud Run
+# Build and Deploy ata-inventory-api to Cloud Run (initial / stage-1 deploy)
+#
+# Deploys the pinned image (scripts/scenarios/inventory-pin.env) and routes 100% of
+# traffic to the new revision. To move the demo baseline to new code, do NOT use this
+# script: use scripts/repin-inventory.sh (no-traffic candidate, verify, then switch;
+# DEPLOY.md, "Re-pinning the inventory baseline").
+#
+# Env and limits come from scripts/scenarios/common.sh, so this script, Terraform and the
+# scenario restore agree: ATA_INVENTORY_* only (no DB_USER/MOCK_DB aliases), at most
+# DEMO_MAX_INSTANCES instances (service level and revision level), min instances 0.
 # ==============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEMO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${DEMO_DIR}/../.." && pwd)"
 
-PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-cloud-assist-fde-2}}"
-REGION="${REGION:-${GCP_REGION:-us-west1}}"
-NAME_PREFIX="${NAME_PREFIX:-ata}"
+# PROJECT_ID, REGION, NAME_PREFIX, the pin (PINNED_INVENTORY_DIGEST), DEMO_MAX_INSTANCES,
+# INVENTORY_BASELINE_ENV_VARS. Fails loudly on an invalid pin file or cap.
+# shellcheck source=scripts/scenarios/common.sh
+source "${REPO_ROOT}/scripts/scenarios/common.sh"
+
 SERVICE_NAME="${NAME_PREFIX}-inventory-api"
-PINNED_DIGEST="${PINNED_INVENTORY_DIGEST:-sha256:24b07eaa50db6d226889607116f0dd43693df5e1f597867a79e0f86e3d7767ce}"
+PINNED_DIGEST="${PINNED_INVENTORY_DIGEST}"
 PINNED_TAG="${PINNED_INVENTORY_TAG:-v1.1.0}"
-IMAGE_BASE="us-west1-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${SERVICE_NAME}"
+IMAGE_BASE="${PINNED_INVENTORY_IMAGE_BASE}"
 IMAGE_TAG="${IMAGE_BASE}:${PINNED_TAG}"
 PINNED_IMAGE="${IMAGE_BASE}@${PINNED_DIGEST}"
 ENVIRONMENT="${ENVIRONMENT:-demo}"
@@ -24,6 +36,7 @@ echo "==================================================================="
 echo "  Deploying ${SERVICE_NAME} to Cloud Run"
 echo "  Project: ${PROJECT_ID} | Region: ${REGION}"
 echo "  Pinned Image: ${PINNED_IMAGE}"
+echo "  Max instances: ${DEMO_MAX_INSTANCES} (service and revision) | Min instances: 0"
 echo "==================================================================="
 
 # 1. Optionally build and push container image using Cloud Build if requested
@@ -42,6 +55,11 @@ if [ "${BUILD_IMAGE:-false}" = "true" ]; then
 fi
 
 # 2. Deploy to Cloud Run using pinned image
+# --set-env-vars on purpose: the env is replaced by the COMPLETE inventory env,
+# INVENTORY_BASELINE_ENV_VARS (common.sh: the five ATA_INVENTORY_* variables). The test
+# test_applications_terraform_drift.py keeps that set equal to Terraform's inventory env.
+# Replacing (not --update-env-vars) removes stale variables such as the legacy DB_USER /
+# MOCK_DB aliases. A new inventory variable goes into INVENTORY_BASELINE_ENV_VARS and main.tf.
 echo "Deploying Cloud Run service ${SERVICE_NAME} using pinned image..."
 gcloud run deploy "${SERVICE_NAME}" \
     --project="${PROJECT_ID}" \
@@ -49,7 +67,10 @@ gcloud run deploy "${SERVICE_NAME}" \
     --image="${PINNED_IMAGE}" \
     --service-account="${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
     --labels="app=alert-triage-agent,component=${NAME_PREFIX}-inventory-api,role=demo-workload,tier=service,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}" \
-    --set-env-vars="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},ATA_INVENTORY_INSTANCE_CONNECTION_NAME=${PROJECT_ID}:${REGION}:${NAME_PREFIX}-inventory-db,ATA_INVENTORY_DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,ATA_INVENTORY_DB_NAME=inventory,ATA_INVENTORY_DB_IAM_AUTH=true,ATA_INVENTORY_MOCK_DB=false,DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,MOCK_DB=false" \
+    --set-env-vars="${INVENTORY_BASELINE_ENV_VARS}" \
+    --max="${DEMO_MAX_INSTANCES}" \
+    --max-instances="${DEMO_MAX_INSTANCES}" \
+    --min-instances=0 \
     --no-allow-unauthenticated \
     --quiet
 

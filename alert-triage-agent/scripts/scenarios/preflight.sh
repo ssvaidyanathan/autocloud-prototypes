@@ -4,9 +4,11 @@
 #
 # Validates system health and operational readiness before executing scenarios:
 # 1. Cloud Run Demo Microservice Admin Endpoints:
-#    - ata-inventory-api: /health, /admin/leak-connections,
+#    - Pinned inventory revision serving; service-level max instances (ATA_DEMO_MAX_INSTANCES)
+#      on ${NAME_PREFIX}-inventory-api and ${NAME_PREFIX}-orders-api
+#    - ${NAME_PREFIX}-inventory-api: /health, /admin/leak-connections,
 #      /admin/fault/inject, /admin/fault/reset
-#    - ata-orders-api: /health, /admin/reset, /admin/fault/latency, /admin/fault/5xx
+#    - ${NAME_PREFIX}-orders-api: /health, /admin/reset, /admin/fault/latency, /admin/fault/5xx
 # 2. Apigee Proxies & SpikeArrest Configuration:
 #    - Gateway ingress health for inventory and orders
 #    - Active proxy revisions deployed to environment
@@ -40,8 +42,8 @@ record_failure() {
 }
 
 # Resolve Service URLs
-INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
-ORD_URL="$(resolve_service_url "${NAME_PREFIX}-orders-api" "https://ata-orders-api-4klvlqnmpa-uw.a.run.app")"
+INV_URL="$(require_service_url "${NAME_PREFIX}-inventory-api")"
+ORD_URL="$(require_service_url "${NAME_PREFIX}-orders-api")"
 
 ID_TOKEN_INV="$(resolve_id_token "${INV_URL}")"
 AUTH_HEADER_INV=()
@@ -73,17 +75,27 @@ else
     # 1a. Inventory API health & admin endpoints
     # The GET probes below are only harmless on the pinned code; never send them elsewhere.
     if ! verify_pinned_inventory_revision || ! verify_inventory_serving_pinned; then
-        log_error "FATAL: ata-inventory-api is not on the pinned baseline; refusing to probe admin endpoints."
+        log_error "FATAL: ${NAME_PREFIX}-inventory-api is not on the pinned baseline; refusing to probe admin endpoints."
         exit 1
     fi
     log_success "      Serving pinned revision ${PINNED_INVENTORY_REVISION} (${PINNED_INVENTORY_DIGEST})"
-    log_info "    Probing ata-inventory-api (${INV_URL})..."
+    # One instance per demo service: fault state and leaked connections are per instance, and
+    # /admin/fault/reset clears only the instance it reaches. The service-level limit covers
+    # every revision, including a pinned revision created before the cap.
+    for svc in "${NAME_PREFIX}-inventory-api" "${NAME_PREFIX}-orders-api"; do
+        if service_max_matches_baseline "${svc}"; then
+            log_success "      ${svc}: service-level max instances ${DEMO_MAX_INSTANCES}"
+        else
+            record_failure "${svc} service-level max instances is not ${DEMO_MAX_INSTANCES} (see above); a fault or reset can miss an instance. Fix: scripts/set-demo-instance-caps.sh --apply"
+        fi
+    done
+    log_info "    Probing ${NAME_PREFIX}-inventory-api (${INV_URL})..."
     INV_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
         ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/health" || echo "000")
     if [ "${INV_HEALTH}" = "200" ]; then
         log_success "      /health -> HTTP 200 OK"
     else
-        record_failure "ata-inventory-api /health returned HTTP ${INV_HEALTH} (expected 200)"
+        record_failure "${NAME_PREFIX}-inventory-api /health returned HTTP ${INV_HEALTH} (expected 200)"
     fi
 
 
@@ -92,7 +104,7 @@ else
     if [ "${INV_LEAK}" = "200" ]; then
         log_success "      /admin/leak-connections -> HTTP 200 OK (Endpoint Present)"
     else
-        record_failure "ata-inventory-api /admin/leak-connections returned HTTP ${INV_LEAK} (expected 200)"
+        record_failure "${NAME_PREFIX}-inventory-api /admin/leak-connections returned HTTP ${INV_LEAK} (expected 200)"
     fi
 
     INV_INJECT=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
@@ -100,7 +112,7 @@ else
     if [ "${INV_INJECT}" = "200" ]; then
         log_success "      /admin/fault/inject -> HTTP 200 OK (Endpoint Present)"
     else
-        record_failure "ata-inventory-api /admin/fault/inject returned HTTP ${INV_INJECT} (expected 200)"
+        record_failure "${NAME_PREFIX}-inventory-api /admin/fault/inject returned HTTP ${INV_INJECT} (expected 200)"
     fi
 
     INV_RESET=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
@@ -108,17 +120,17 @@ else
     if [ "${INV_RESET}" = "200" ]; then
         log_success "      /admin/fault/reset -> HTTP 200 OK"
     else
-        record_failure "ata-inventory-api /admin/fault/reset returned HTTP ${INV_RESET} (expected 200)"
+        record_failure "${NAME_PREFIX}-inventory-api /admin/fault/reset returned HTTP ${INV_RESET} (expected 200)"
     fi
 
     # 1b. Orders API health & admin endpoints
-    log_info "    Probing ata-orders-api (${ORD_URL})..."
+    log_info "    Probing ${NAME_PREFIX}-orders-api (${ORD_URL})..."
     ORD_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
         ${AUTH_HEADER_ORD[@]+"${AUTH_HEADER_ORD[@]}"} "${ORD_URL}/health" || echo "000")
     if [ "${ORD_HEALTH}" = "200" ]; then
         log_success "      /health -> HTTP 200 OK"
     else
-        record_failure "ata-orders-api /health returned HTTP ${ORD_HEALTH} (expected 200)"
+        record_failure "${NAME_PREFIX}-orders-api /health returned HTTP ${ORD_HEALTH} (expected 200)"
     fi
 
     ORD_RESET=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
@@ -126,7 +138,7 @@ else
     if [ "${ORD_RESET}" = "200" ]; then
         log_success "      /admin/reset -> HTTP 200 OK"
     else
-        record_failure "ata-orders-api /admin/reset returned HTTP ${ORD_RESET} (expected 200)"
+        record_failure "${NAME_PREFIX}-orders-api /admin/reset returned HTTP ${ORD_RESET} (expected 200)"
     fi
 fi
 

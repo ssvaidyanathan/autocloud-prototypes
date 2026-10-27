@@ -256,5 +256,5 @@ def test_s5_ctrl_c_on_a_terminal_finishes_and_keeps_the_bad_deploy(tmp_path, api
     rc, output = run_on_pty_and_press_ctrl_c(
         [TEST_BASH, str(SCENARIOS_DIR / "s5_bad_deploy.sh"), "--hold", "5m"], e, tmp_path, server_log, delay)
     assert_finished_gracefully(rc, output)
-    assert s5.state["env"]["DB_USER"] == BAD_USER
+    assert s5.state["env"]["ATA_INVENTORY_DB_USER"] == BAD_USER
     assert s5.state["traffic"] != [[PINNED_REVISION, 100]]

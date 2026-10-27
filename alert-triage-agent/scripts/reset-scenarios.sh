@@ -15,8 +15,10 @@
 # 4. Restore healthy Apigee proxy revisions (re-deploy base bundles)
 # 5. Restore Cloud Run service configuration if S5 was deployed
 # 5b. Warm up the demo services, check health (direct and via Apigee) and the admin fault
-#    injection endpoints. Every request the reset sends to the demo services runs before
-#    step 6, and each is timed (see "Alert window" below).
+#    injection endpoints, and restock the demo items to INVENTORY_RESTOCK_BASELINE
+#    (POST /admin/restock, then verified with GET /items). Every request the reset sends
+#    to the demo services runs before step 6, and each is timed (see "Alert window" below).
+#    --restock-only runs just the pinned-baseline checks and the restock.
 # 5c. Verify on the database side (Cloud SQL num_backends gauge, read-only) that no leaked
 #    connections remain: the fault reset frees only the Cloud Run instance it reaches.
 # 6. Wait for open ATA alerts to close, then, concurrently, for the quiet period (Apigee
@@ -55,6 +57,8 @@ parse_duration() {
 
 # Configuration options & defaults
 NO_WAIT="${ATA_RESET_NO_WAIT:-${NO_WAIT:-false}}"
+RESTOCK_ONLY=false
+NO_RESTOCK=false
 # Incident groups (file names or group ids) left out of the terminal-state wait only.
 IGNORE_GROUPS="${ATA_RESET_IGNORE_GROUPS:-}"
 # 180s covers Apigee's 1-3 min metric lag. The agent's recovery note is not covered by
@@ -105,6 +109,14 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-wait)
             NO_WAIT="true"
+            shift
+            ;;
+        --restock-only)
+            RESTOCK_ONLY="true"
+            shift
+            ;;
+        --no-restock)
+            NO_RESTOCK="true"
             shift
             ;;
         --ignore-group)
@@ -219,6 +231,11 @@ while [[ $# -gt 0 ]]; do
             echo "                             Token for the alert check: adc = 'gcloud auth application-default print-access-token',"
             echo "                             gcloud = 'gcloud auth print-access-token'"
             echo "                             (default: adc; env ATA_MONITORING_TOKEN_SOURCE). No fallback between them."
+            echo "  --restock-only             Only restock the demo items (POST /admin/restock on the pinned revision, then"
+            echo "                             verify with GET /items) to ATA_INVENTORY_RESTOCK_BASELINE"
+            echo "                             (default: item-101..item-105 = 1000 each); every full reset does this too"
+            echo "  --no-restock               Skip the restock (e.g. after a re-pin rollback to code without /admin/restock);"
+            echo "                             warns that demo stock is NOT restocked"
             echo "  --dry-run                  Simulate reset without network modifications"
             echo "  --mock                     Run in mock mode without GCP cloud dependencies"
             echo "  -h, --help                 Display this help message"
@@ -804,11 +821,16 @@ extend_alert_window() {
 # or unknown duration) arms the alert window. Call it in the current shell, not in $(...),
 # or the window is lost.
 demo_request() {
-    local label="$1" out status secs="" ms at reason=""
-    shift
+    demo_request_to /dev/null "$@"
+}
+
+# demo_request_to <body file> <label> <curl args...>: demo_request, keeping the response body.
+demo_request_to() {
+    local body_file="$1" label="$2" out status secs="" ms at reason=""
+    shift 2
     at="$(date +%s)"
     # LC_ALL=C: time_total and awk's number parsing use a '.' decimal point.
-    out="$(LC_ALL=C curl -s -o /dev/null -w "%{http_code} %{time_total}" "$@" 2>/dev/null)" || true
+    out="$(LC_ALL=C curl -s -o "${body_file}" -w "%{http_code} %{time_total}" "$@" 2>/dev/null)" || true
     status="${out%% *}"
     case "${out}" in
         *" "*) secs="${out#* }" ;;
@@ -839,15 +861,22 @@ demo_request() {
 # LAST_HTTP_STATUS/LAST_HTTP_MS). A fresh Cloud Run ID token is minted for every call: a
 # reset with a long quiet period outlives a token minted at start (QA: 401 about 10 min in).
 admin_request() {
-    local method="$1" base="$2" path="$3"
+    admin_request_to /dev/null "$@"
+}
+
+# admin_request_to <body file> METHOD BASE_URL PATH [curl args...]: admin_request, keeping
+# the response body; extra curl args (e.g. -H/-d for a JSON body) go before the URL.
+admin_request_to() {
+    local body_file="$1" method="$2" base="$3" path="$4"
     local token
     local auth=()
+    shift 4
     token="$(resolve_id_token "${base}")"
     if [ -n "${token}" ] && [ "${token}" != "mock-id-token" ]; then
         auth=(-H "Authorization: Bearer ${token}")
     fi
-    demo_request "${method} ${base}${path}" --connect-timeout 5 --max-time 30 -X "${method}" \
-        ${auth[@]+"${auth[@]}"} "${base}${path}"
+    demo_request_to "${body_file}" "${method} ${base}${path}" --connect-timeout 5 --max-time 30 -X "${method}" \
+        ${auth[@]+"${auth[@]}"} "$@" "${base}${path}"
 }
 
 # Explain a non-2xx admin status on stderr.
@@ -953,12 +982,89 @@ verify_admin_endpoints() {
     fi
 }
 
+# Step 5b (and --restock-only): set the demo items' stock to INVENTORY_RESTOCK_BASELINE via
+# POST /admin/restock on the pinned revision (absolute values: idempotent), check the
+# response, then read it back with GET /items. Fails loudly, naming what is wrong; a missing
+# endpoint means the serving code predates the restock (re-pin: scripts/repin-inventory.sh).
+restock_inventory() {
+    local base="$1" payload body_file status
+    payload="$(python3 -c '
+import json, sys
+print(json.dumps({"items": {k: int(v) for k, v in (e.split("=", 1) for e in sys.argv[1].split(","))}}))
+' "${INVENTORY_RESTOCK_BASELINE}")" || { log_error "FATAL: cannot build the restock request from ATA_INVENTORY_RESTOCK_BASELINE." >&2; return 1; }
+    body_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-restock.XXXXXX")"
+    admin_request_to "${body_file}" POST "${base}" /admin/restock -H "Content-Type: application/json" -d "${payload}"
+    status="${LAST_HTTP_STATUS}"
+    case "${status}" in
+        2??) ;;
+        404)
+            log_error "FATAL: POST ${base}/admin/restock -> HTTP 404: the serving inventory revision has no restock endpoint (code older than the restock change)." >&2
+            log_error "Re-pin ${NAME_PREFIX}-inventory-api to current code first: scripts/repin-inventory.sh (DEPLOY.md, 'Re-pinning the inventory baseline'), or, deliberately on old code, reset with --no-restock. Demo stock was NOT restocked." >&2
+            rm -f "${body_file}"
+            return 1
+            ;;
+        400)
+            log_error "FATAL: POST ${base}/admin/restock rejected the baseline (HTTP 400): $(head -c 300 "${body_file}"). Fix ATA_INVENTORY_RESTOCK_BASELINE. Demo stock was NOT restocked." >&2
+            rm -f "${body_file}"
+            return 1
+            ;;
+        *)
+            admin_status_error "POST ${base}/admin/restock" "${status}"
+            log_error "Response: $(head -c 300 "${body_file}" 2>/dev/null). Demo stock was NOT restocked." >&2
+            rm -f "${body_file}"
+            return 1
+            ;;
+    esac
+    if ! python3 "${SCRIPT_DIR}/scenarios/inventory_baseline.py" stock --expect="${INVENTORY_RESTOCK_BASELINE}" < "${body_file}"; then
+        log_error "FATAL: POST ${base}/admin/restock answered HTTP ${status} but not with the baseline stock (above)." >&2
+        rm -f "${body_file}"
+        return 1
+    fi
+    admin_request_to "${body_file}" GET "${base}" /items
+    status="${LAST_HTTP_STATUS}"
+    if [ "${status}" != "200" ]; then
+        admin_status_error "GET ${base}/items (restock check)" "${status}"
+        rm -f "${body_file}"
+        return 1
+    fi
+    if ! python3 "${SCRIPT_DIR}/scenarios/inventory_baseline.py" stock --expect="${INVENTORY_RESTOCK_BASELINE}" < "${body_file}"; then
+        log_error "FATAL: GET ${base}/items after the restock does not show the baseline stock (above); were orders sent during the reset?" >&2
+        rm -f "${body_file}"
+        return 1
+    fi
+    rm -f "${body_file}"
+    log_success "    Restocked and verified: ${INVENTORY_RESTOCK_BASELINE}"
+}
+
 # Sourced (tests): define the functions above without running the reset.
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     return 0
 fi
 
 validate_alert_window_settings || exit 1
+validate_restock_baseline || exit 1
+if [ "${RESTOCK_ONLY}" = "true" ] && [ "${NO_RESTOCK}" = "true" ]; then
+    log_error "--restock-only and --no-restock contradict each other." >&2
+    exit 2
+fi
+
+if [ "${RESTOCK_ONLY}" = "true" ]; then
+    log_info "=== Restocking demo inventory (--restock-only) ==="
+    if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
+        log_info "    [MOCK/DRY-RUN] Would POST /admin/restock ${INVENTORY_RESTOCK_BASELINE} and verify with GET /items."
+        exit 0
+    fi
+    # Admin calls only on the pinned code (as in step 5b).
+    verify_pinned_inventory_revision || exit 1
+    verify_inventory_serving_pinned || exit 1
+    INV_URL="$(require_service_url "${NAME_PREFIX}-inventory-api")"
+    restock_inventory "${INV_URL}" || exit 1
+    if [ "${ALERT_WINDOW_UNTIL}" -gt "$(date +%s)" ]; then
+        log_warn "A restock request was slow or failed (above): an ata-inventory latency/5xx alert can open within ${ALERT_LAG_SECS}s. Run ./scripts/reset-scenarios.sh before the next scenario." >&2
+    fi
+    log_success "=== Demo inventory restocked ==="
+    exit 0
+fi
 
 log_info "=== Starting Scenario Fault Cleanup & Baseline Restoration ==="
 if [ "${ALERT_WINDOW_FROM_START}" = "true" ]; then
@@ -968,8 +1074,8 @@ fi
 # Refuse to restore traffic to a pinned revision that does not run the pinned image.
 verify_pinned_inventory_revision || exit 1
 
-INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
-ORD_URL="$(resolve_service_url "${NAME_PREFIX}-orders-api" "https://ata-orders-api-4klvlqnmpa-uw.a.run.app")"
+INV_URL="$(require_service_url "${NAME_PREFIX}-inventory-api")"
+ORD_URL="$(require_service_url "${NAME_PREFIX}-orders-api")"
 
 # 1. Reset Faults on Cloud Run Demo Apps
 log_info "--> 1. Resetting demo applications via /admin/fault/reset..."
@@ -1026,8 +1132,14 @@ if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
     # The admin GET probes are only harmless on the pinned code; never send them elsewhere.
     verify_inventory_serving_pinned || exit 1
     verify_admin_endpoints "${INV_URL}" || exit 1
+    if [ "${NO_RESTOCK}" = "true" ]; then
+        log_warn "    --no-restock: demo stock is NOT restocked; orders return HTTP 400 once an item runs out."
+    else
+        restock_inventory "${INV_URL}" || exit 1
+    fi
 else
     log_info "    [MOCK/DRY-RUN] Simulating warm-up, health and admin endpoint checks."
+    log_info "    [MOCK/DRY-RUN] Would restock ${INVENTORY_RESTOCK_BASELINE} via POST /admin/restock and verify with GET /items."
 fi
 if [ "${ALERT_WINDOW_UNTIL}" -gt "$(date +%s)" ]; then
     if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
