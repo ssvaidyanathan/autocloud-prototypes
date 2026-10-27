@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <ProxyEndpoint name="default">
-    <Description>Default proxy endpoint for ata-inventory-v1</Description>
+    <Description>Default proxy endpoint for @PREFIX@-orders-v1</Description>
     <FaultRules/>
     <PreFlow name="PreFlow">
         <Request>
@@ -36,7 +36,7 @@
     </PostClientFlow>
     <Flows/>
     <HTTPProxyConnection>
-        <BasePath>/ata/inventory/v1</BasePath>
+        <BasePath>/@PREFIX@/orders/v1</BasePath>
         <Properties/>
     </HTTPProxyConnection>
     <RouteRule name="default">

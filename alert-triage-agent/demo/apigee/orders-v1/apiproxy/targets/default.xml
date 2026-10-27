@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <TargetEndpoint name="default">
-    <Description>Target endpoint routing to ata-orders-api Cloud Run</Description>
+    <Description>Target endpoint routing to @PREFIX@-orders-api Cloud Run</Description>
     <FaultRules/>
     <PreFlow name="PreFlow">
         <Request/>
@@ -19,7 +19,7 @@
             </GoogleIDToken>
         </Authentication>
         <LoadBalancer>
-            <Server name="ata-orders-target"/>
+            <Server name="@PREFIX@-orders-target"/>
         </LoadBalancer>
         <Path>/</Path>
         <Properties>
