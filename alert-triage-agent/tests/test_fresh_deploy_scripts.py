@@ -771,6 +771,83 @@ def test_teardown_and_verify_keep_bearer_tokens_off_curl_argv(stack):
         assert [x["text"] for x in c["configs"]] == ['header = "Authorization: Bearer access-token"\n']
 
 
+def _write_backends(stack, bucket, prefix):
+    for root in ROOTS:
+        (stack.work / "infra" / "terraform" / root / "backend.hcl").write_text(
+            f'bucket = "{bucket}"\nprefix = "{prefix}/{root}"\n')
+
+
+@pytest.mark.parametrize("bucket,prefix,message", [
+    # The live adoption runbook writes ata's backend.hcl into the same checkout.
+    ("fresh-proj-ata-tfstate", "ata", "is not for NAME_PREFIX=atat"),
+    # Foreign state prefix alone (own bucket): the prefix check must catch it.
+    ("fresh-proj-atat-tfstate", "ata", "is not for NAME_PREFIX=atat"),
+    # Foreign bucket alone (own prefix): the bucket check must catch it.
+    ("fresh-proj-ata-tfstate", "atat", "does not use bucket fresh-proj-atat-tfstate"),
+])
+def test_teardown_refuses_another_stacks_backend_before_any_terraform_or_delete(stack, bucket, prefix, message):
+    """test review H1: the backend.hcl guard is the only thing between an atat teardown and a
+    terraform destroy of ata's state. Removing either check must fail this test."""
+    _write_backends(stack, bucket, prefix)
+    for args in (["--apply", "--confirm-prefix", "atat", "--skip-apigee"], ["--skip-apigee"]):
+        res, calls = stack("teardown-stack.sh", *args)
+        assert res.returncode == 1, _out(res)
+        assert message in res.stderr
+        assert "observability/backend.hcl" in res.stderr  # the first root, before anything else
+        assert not [c for c in calls if c[0] == "terraform"], calls
+        assert not _mutations(calls), calls
+        assert not [c for c in calls if c[0] == "gcloud" and "delete" in c], calls
+
+
+def test_teardown_with_its_own_backend_does_run_terraform(stack):
+    """Control for the guard test: with this stack's backend.hcl the destroy does happen."""
+    _write_backends(stack, "fresh-proj-atat-tfstate", "atat")
+    res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--skip-apigee")
+    destroys = [c[1] for c in calls if c[:3] == ["terraform", c[1], "destroy"]]
+    assert destroys[:2] == ["observability", "triage-iam"], (destroys, _out(res))
+
+
+def _teardown_functions(tmp_path):
+    """assert_owned and mut, extracted from teardown-stack.sh into a sourceable file."""
+    text = (ROOT / "scripts" / "teardown-stack.sh").read_text()
+    funcs = [re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", text, re.S | re.M) for name in ("die", "assert_owned", "mut")]
+    assert all(funcs), "teardown-stack.sh must define die, assert_owned and mut"
+    lib = tmp_path / "teardown-funcs.sh"
+    lib.write_text("".join(f.group(0) for f in funcs))
+    return lib
+
+
+@pytest.mark.parametrize("name,owned", [
+    ("atat-agent", True), ("fresh-proj-atat-incidents", True), ("fresh-proj-atat-tfstate", True),
+    ("ata-agent", False), ("fresh-proj-ata-incidents", False), ("fresh-proj-ata-tfstate", False),
+    ("atat", False), ("atat-", False), ("xatat-agent", False), ("", False),
+])
+def test_teardown_assert_owned_refuses_foreign_names_through_mut(tmp_path, name, owned):
+    """test review H1: `mut <name> <cmd>` must die before running cmd for any name that is not
+    <prefix>-* or <project>-<prefix>-*. Kills the 'assert_owned accepts anything' mutant and a
+    mut that skips assert_owned."""
+    lib = _teardown_functions(tmp_path)
+    marker = tmp_path / "ran"
+    script = (f'set -euo pipefail\nsource "{lib}"\nNAME_GUARD="atat-"\nBUCKET_GUARD="fresh-proj-atat-"\n'
+              f'APPLY=true\nunset TFSTATE_BUCKET\nmut "$1" touch "{marker}"\n')
+    res = subprocess.run([TEST_BASH, "-c", script, "x", name], capture_output=True, text=True, timeout=30)
+    if owned:
+        assert res.returncode == 0, res.stderr
+        assert marker.exists()
+    else:
+        assert res.returncode == 1
+        assert f"refusing to touch '{name}'" in res.stderr
+        assert not marker.exists(), "the mutating command ran for a foreign name"
+
+
+def test_teardown_assert_owned_allows_only_the_explicit_state_bucket(tmp_path):
+    lib = _teardown_functions(tmp_path)
+    script = (f'set -euo pipefail\nsource "{lib}"\nNAME_GUARD="atat-"\nBUCKET_GUARD="fresh-proj-atat-"\n'
+              f'APPLY=false\nTFSTATE_BUCKET=custom-state\nassert_owned custom-state\nassert_owned "$1"\n')
+    res = subprocess.run([TEST_BASH, "-c", script, "x", "other-state"], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 1 and "refusing to touch 'other-state'" in res.stderr
+
+
 @pytest.mark.parametrize("prefix", ["", "A", "ata-x", "toolongprefix1"])
 def test_teardown_guards_the_prefix(stack, prefix):
     res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", prefix, NAME_PREFIX=prefix)
