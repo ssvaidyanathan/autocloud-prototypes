@@ -194,7 +194,11 @@ resource "google_cloud_tasks_queue" "timer_queue" {
 }
 ```
 
-The triage queue retry values come from variables in `infra/terraform/foundation/variables.tf`. The defaults below are copied from that file, which is the source of truth. The rest of the documentation refers to the retry window as `triage_queue_max_retry_duration` and does not repeat its value. Terraform validation rejects `max_attempts` below 1, malformed or zero durations, and a `max_backoff` smaller than `min_backoff`. Validation does not enforce a lower bound on `min_backoff` (`"0s"` is accepted) or an upper bound on either backoff; range checking is left to the Cloud Tasks API. A `max_backoff` in the wrong format (for example `"5m"`) reports two errors: the format error and the `max_backoff >= min_backoff` check, which cannot compare a value it cannot parse. Fix the format and both errors clear.
+The triage queue retry values come from variables in `infra/terraform/foundation/variables.tf`. The defaults below are copied from that file, which is the source of truth. The rest of the documentation refers to the retry window as `triage_queue_max_retry_duration` and does not repeat its value. Terraform validation rejects `max_attempts` below 1, malformed durations, and a `max_backoff` smaller than `min_backoff`. It also enforces these ranges, which follow the Cloud Tasks limits:
+- **Retry duration:** greater than `0s` and at most `"2678400s"`, the 31-day [maximum task retention](https://cloud.google.com/tasks/docs/quotas).
+- **Both backoffs:** from `"1s"` to `"2592000s"`. The upper bound is the 30-day [maximum schedule time](https://cloud.google.com/tasks/docs/quotas), since no retry can be scheduled further ahead. The lower bound is there because the [`RetryConfig` reference](https://cloud.google.com/tasks/docs/reference/rpc/google.cloud.tasks.v2#retryconfig) says backoffs are truncated to whole seconds, so `"0s"` and sub-second values are rejected.
+
+The `max_backoff >= min_backoff` check runs only when both values are well formed, so a malformed value (for example `"5m"`) reports only its own format error.
 
 | Variable | Default | Effect |
 | :--- | :--- | :--- |
