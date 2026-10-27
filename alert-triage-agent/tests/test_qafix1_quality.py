@@ -7,6 +7,7 @@
 4. Log excerpts label only genuine error lines as errors (severity- and status-aware).
 """
 
+from agent.app.tools.tools_client import ToolsNotConfigured
 from agent.app.contracts.report import InvestigationReport, ProbableRootCause
 from agent.app.specialists.synthesizer import SynthesizerAgent, dependency_path_for
 from topology.topology_graph import get_loader
@@ -626,11 +627,12 @@ def test_change_specialist_no_deploy_finding_names_what_was_queried():
         resource_name="ata-orders-v1", started_at="2026-10-27T08:35:28Z",
     )
     config = AgentConfig(project_id="test-proj", region="test-region", is_local=True)
-    with _patch("tools.app.server.get_change_timeline", side_effect=ImportError("no tools in agent image")):
+    with _patch("agent.app.specialists.change.fetch_change_timeline", side_effect=ToolsNotConfigured("TOOLS_URL is not set")):
         dossier = asyncio.run(ChangeSpecialist().investigate(alert, config))
     joined = " ".join(dossier.findings)
     assert "No configuration or revision deployments detected" not in joined
-    assert "Apigee proxy deployment history not queried" in joined
+    assert "Change history not queried" in joined
+    assert "Apigee deployment history was not read" in joined
 
 
 # ---------------------------------------------------------------------------------------

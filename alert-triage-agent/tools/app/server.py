@@ -394,6 +394,11 @@ def get_change_timeline(
     try:
         services_url = f"https://run.googleapis.com/v2/projects/{proj}/locations/{reg}/services"
         resp = requests.get(services_url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            changes.append({
+                "source": "cloud_run",
+                "error": f"Cloud Run Admin API services list returned HTTP {resp.status_code}",
+            })
         if resp.status_code == 200:
             services = resp.json().get("services", [])
             for svc in services:
@@ -405,6 +410,12 @@ def get_change_timeline(
                 rev_resp = requests.get(rev_url, headers=headers, timeout=15)
                 new_revisions_in_window = []
                 all_service_revs = []
+                if rev_resp.status_code != 200:
+                    changes.append({
+                        "source": "cloud_run",
+                        "service_name": svc_short,
+                        "error": f"Cloud Run Admin API revisions list returned HTTP {rev_resp.status_code}",
+                    })
                 if rev_resp.status_code == 200:
                     all_service_revs = rev_resp.json().get("revisions", [])
                     for rev in all_service_revs:
@@ -510,25 +521,45 @@ def get_change_timeline(
     except Exception as e:
         changes.append({"source": "cloud_run", "error": str(e)})
 
-    # 2. Apigee deployments and proxy revisions
+    # 2. Apigee deployment history of this stack's proxies (<NAME_PREFIX>-*) in APIGEE_ORG /
+    # APIGEE_ENV: every deployed revision with its deploy start time ("apigee" block), and the
+    # deployments started in the window as changes. A failed read is an "apigee" error entry.
+    proxy_prefix = f"{cfg.name_prefix}-"
+    apigee_summary: Dict[str, Any] = {
+        "org": cfg.apigee_org, "environment": cfg.apigee_env, "proxy_prefix": proxy_prefix, "deployments": [],
+    }
     try:
-        org = cfg.apigee_org or proj
-        deps_url = f"https://apigee.googleapis.com/v1/organizations/{org}/environments/{cfg.environment}/deployments"
+        if not cfg.apigee_org or not cfg.apigee_env:
+            missing = [n for n, v in (("APIGEE_ORG", cfg.apigee_org), ("APIGEE_ENV", cfg.apigee_env)) if not v]
+            raise ValueError(f"{' and '.join(missing)} not set in ata-tools")
+        deps_url = (
+            f"https://apigee.googleapis.com/v1/organizations/{cfg.apigee_org}"
+            f"/environments/{cfg.apigee_env}/deployments"
+        )
         resp = requests.get(deps_url, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            deployments = resp.json().get("deployments", [])
-            for dep in deployments:
-                dep_time_ms = int(dep.get("deployStartTime", 0))
-                if dep_time_ms >= cutoff_ms:
-                    ts_iso = datetime.fromtimestamp(dep_time_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    changes.append({
-                        "source": "apigee_deployment",
-                        "api_name": dep.get("apiProxy"),
-                        "revision": dep.get("revision"),
-                        "environment": dep.get("environment"),
-                        "timestamp": ts_iso,
-                        "details": dep,
-                    })
+        if resp.status_code != 200:
+            raise RuntimeError(f"Apigee deployments list returned HTTP {resp.status_code}")
+        for dep in resp.json().get("deployments", []):
+            proxy = str(dep.get("apiProxy") or "")
+            if not proxy.startswith(proxy_prefix):
+                continue
+            dep_time_ms = int(dep.get("deployStartTime", 0) or 0)
+            ts_iso = (
+                datetime.fromtimestamp(dep_time_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if dep_time_ms else None
+            )
+            apigee_summary["deployments"].append({
+                "api_name": proxy, "revision": dep.get("revision"), "timestamp": ts_iso,
+            })
+            if dep_time_ms >= cutoff_ms:
+                changes.append({
+                    "source": "apigee_deployment",
+                    "api_name": proxy,
+                    "revision": dep.get("revision"),
+                    "environment": dep.get("environment") or cfg.apigee_env,
+                    "timestamp": ts_iso,
+                    "details": dep,
+                })
     except Exception as e:
         changes.append({"source": "apigee", "error": str(e)})
 
@@ -543,6 +574,7 @@ def get_change_timeline(
         "cutoff_timestamp": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "changes": changes,
         "total_changes": len([c for c in changes if "error" not in c]),
+        "apigee": apigee_summary,
     }
 
 
@@ -560,7 +592,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         app: ASGIApp,
         enforce_auth: bool = False,
         verify_oidc: bool = False,
-        expected_audience: str | None = None,
+        expected_audience: str | list[str] | None = None,
         allowed_service_accounts: list[str] | None = None,
     ) -> None:
         super().__init__(app)
@@ -598,7 +630,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 status_code=401,
             )
 
-        if self.verify_oidc and self._auth_request is not None:
+        if self.verify_oidc and (self._auth_request is None or not self.expected_audience):
+            # Fail closed: never accept a token that cannot be verified against an audience.
+            return JSONResponse(
+                {"error": "Unauthorized", "detail": "OIDC verification is not configured (audience or transport missing)"},
+                status_code=401,
+            )
+
+        if self.verify_oidc:
             try:
                 from google.oauth2 import id_token
                 claims: dict[str, Any] = id_token.verify_oauth2_token(
@@ -625,19 +664,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
 def create_app(
     enforce_auth: Optional[bool] = None,
     verify_oidc: Optional[bool] = None,
-    expected_audience: Optional[str] = None,
+    expected_audience: Optional[str | list[str]] = None,
     allowed_service_accounts: Optional[list[str]] = None,
 ) -> Any:
-    """Create and configure the FastMCP Starlette ASGI application."""
+    """Create and configure the FastMCP Starlette ASGI application.
+
+    Auth defaults come from config: the accepted audiences are EXPECTED_AUDIENCE plus the
+    deterministic <prefix>-tools URL (PROJECT_NUMBER), and the accepted callers are
+    ALLOWED_SERVICE_ACCOUNTS, else <prefix>-agent-sa@<PROJECT_ID>.
+    """
     cfg = get_tools_config()
     if enforce_auth is None:
         enforce_auth = cfg.enforce_auth
     if verify_oidc is None:
         verify_oidc = cfg.verify_oidc
     if expected_audience is None:
-        expected_audience = cfg.expected_audience
-    if allowed_service_accounts is None and cfg.allowed_service_accounts:
-        allowed_service_accounts = [s.strip() for s in cfg.allowed_service_accounts.split(",") if s.strip()]
+        expected_audience = cfg.effective_expected_audiences
+    if allowed_service_accounts is None:
+        allowed_service_accounts = cfg.effective_allowed_service_accounts
+    if enforce_auth and verify_oidc and not expected_audience:
+        raise RuntimeError(
+            "ata-tools cannot start: VERIFY_OIDC is on but no ID-token audience is configured "
+            "(set EXPECTED_AUDIENCE or PROJECT_NUMBER)"
+        )
 
     middleware = [
         Middleware(

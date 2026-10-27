@@ -2,7 +2,9 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
-from pydantic import Field
+from urllib.parse import urlsplit
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,37 @@ class AgentConfig(BaseSettings):
     # Recoveries (re-enqueued settle wakes) per stuck group. When one more would be needed the
     # group is marked degraded (ERROR) and new alerts open a new group instead of joining it.
     investigation_max_recoveries: int = Field(default=3, alias="INVESTIGATION_MAX_RECOVERIES", ge=1)
+
+    # ata-tools (FastMCP) service URL, e.g. https://<prefix>-tools-<PROJECT_NUMBER>.<REGION>.run.app.
+    # The change specialist calls its get_change_timeline tool over MCP streamable HTTP with an
+    # ID token whose audience is this URL. No default: required when not local (startup fails
+    # without it). Must be https with no path; set by deploy.sh from the deployed service.
+    tools_url: Optional[str] = Field(default=None, alias="TOOLS_URL")
+    # Per-attempt HTTP timeout of an ata-tools call. get_change_timeline lists every Cloud Run
+    # service's revisions plus the Apigee deployments (15 s per upstream call inside ata-tools).
+    tools_timeout_seconds: float = Field(default=60.0, alias="TOOLS_TIMEOUT_SECONDS", gt=0, le=300)
+    # Attempts in total for an ata-tools call on transient failures (connection error, timeout,
+    # HTTP 429/5xx), with exponential backoff (TOOLS_RETRY_BASE_SECONDS * 2**(n-1), capped at 10 s).
+    tools_retry_attempts: int = Field(default=3, alias="TOOLS_RETRY_ATTEMPTS", ge=1, le=5)
+    tools_retry_base_seconds: float = Field(default=1.0, alias="TOOLS_RETRY_BASE_SECONDS", ge=0, le=10)
+
+    @field_validator("tools_url", mode="before")
+    @classmethod
+    def _validate_tools_url(cls, value: Optional[str]) -> Optional[str]:
+        """https://host[:port] only (an optional trailing slash is dropped); empty means unset."""
+        if value is None or str(value).strip() == "":
+            return None
+        url = str(value).strip().rstrip("/")
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not parts.hostname or parts.path or parts.query or parts.fragment:
+            raise ValueError(f"TOOLS_URL must be an https URL with no path (https://<host>), got {value!r}")
+        return url
+
+    def missing_required_settings(self) -> list[str]:
+        """Settings without which a non-local agent cannot run a complete investigation."""
+        if self.is_local:
+            return []
+        return ["TOOLS_URL"] if self.tools_url is None else []
 
     @property
     def effective_incidents_bucket(self) -> str:

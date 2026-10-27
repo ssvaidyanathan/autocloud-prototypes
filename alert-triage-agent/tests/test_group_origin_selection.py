@@ -18,7 +18,6 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-import tools.app.server as tools_server
 from agent.app.bridge_client import BridgeClient
 from agent.app.config import AgentConfig, get_agent_settings
 from agent.app.contracts.alert import AlertEvent
@@ -28,6 +27,7 @@ from agent.app.grouping.store import OKFStore
 from agent.app.main import app, set_clock_func
 from agent.app.specialists.apigee import ApigeeSpecialist
 from agent.app.specialists.base import EvidenceDossier
+import agent.app.specialists.change as change_module
 from agent.app.specialists.change import ChangeSpecialist
 from agent.app.specialists.cloud_run import CloudRunSpecialist
 from agent.app.specialists.cloud_sql import CloudSQLSpecialist
@@ -162,13 +162,14 @@ def telemetry(monkeypatch):
             queries_executed={"cloud_monitoring": ["cloudsql.googleapis.com/database/postgresql/num_backends"]},
         )
 
-    def change_timeline(window_hours=2, project_id=None, region=None, **kwargs):
+    async def change_timeline(config, window_hours=2, **kwargs):
+        # The ata-tools get_change_timeline result (remote MCP call stubbed at the client seam).
         return {"changes": list(state["changes"])}
 
     monkeypatch.setattr(CloudRunSpecialist, "investigate", cloud_run)
     monkeypatch.setattr(ApigeeSpecialist, "investigate", apigee)
     monkeypatch.setattr(CloudSQLSpecialist, "investigate", cloud_sql)
-    monkeypatch.setattr(tools_server, "get_change_timeline", change_timeline)
+    monkeypatch.setattr(change_module, "fetch_change_timeline", change_timeline)
     monkeypatch.setattr(
         ChangeSpecialist, "_get_metric_client", lambda self, config: FakeRequestCountClient(state["traffic"])
     )

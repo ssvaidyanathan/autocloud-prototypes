@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agent.app.tools.tools_client import ToolsNotConfigured
 from agent.app.contracts.report import InvestigationReport
 from agent.app.specialists.apigee import ApigeeSpecialist
 from agent.app.specialists.base import EvidenceDossier
@@ -39,7 +40,10 @@ from tests.test_group_origin_selection import (  # noqa: F401  (fixtures)
 )
 from tests.test_s3_evidence_quality import FakeGCP, _orders_alert, _orders_report, cfg  # noqa: F401
 
-TIMELINE = "ata-tools change timeline"
+TIMELINE = (
+    "ata-tools change timeline (Cloud Run revision history), "
+    "ata-tools change timeline (Apigee deployment history)"
+)
 
 
 def _investigate(alert, agent_cfg, group_alerts=None):
@@ -59,7 +63,7 @@ def _desc(report) -> str:
 
 @pytest.mark.asyncio
 async def test_s3_proxy_revision_169_is_change_induced_yes(cfg):
-    with patch("tools.app.server.get_change_timeline", side_effect=ImportError("not in agent image")):
+    with patch("agent.app.specialists.change.fetch_change_timeline", side_effect=ToolsNotConfigured("TOOLS_URL is not set")):
         report = await _orders_report(cfg, FakeGCP())
 
     assert report.change_induced == (
@@ -126,7 +130,7 @@ def test_no_change_source_queried_is_not_assessed(agent_cfg, telemetry):
     inventory = _entry("0.no-source", "ata-inventory-5xx", "ata-inventory-api", "5xx")
     telemetry["degraded"] = {"ata-inventory-api": "5xx"}
 
-    with patch("tools.app.server.get_change_timeline", side_effect=ImportError("not in agent image")):
+    with patch("agent.app.specialists.change.fetch_change_timeline", side_effect=ToolsNotConfigured("TOOLS_URL is not set")):
         report = _investigate(_event(inventory), agent_cfg)
 
     assert report.change_induced == (
@@ -139,18 +143,18 @@ def test_failed_change_timeline_is_not_assessed(agent_cfg, telemetry):
     inventory = _entry("0.tl-fail", "ata-inventory-5xx", "ata-inventory-api", "5xx")
     telemetry["degraded"] = {"ata-inventory-api": "5xx"}
 
-    with patch("tools.app.server.get_change_timeline", side_effect=RuntimeError("deadline exceeded")):
+    with patch("agent.app.specialists.change.fetch_change_timeline", side_effect=RuntimeError("deadline exceeded")):
         report = _investigate(_event(inventory), agent_cfg)
 
     assert report.change_induced == (
-        "Not assessed (change detection incomplete: change timeline read failed (RuntimeError); "
+        "Not assessed (change detection incomplete: change timeline unavailable: RuntimeError: deadline exceeded; "
         "change attribution not assessed)"
     )
 
 
 @pytest.mark.asyncio
 async def test_s3_access_log_quota_exhausted_is_not_assessed(cfg):
-    with patch("tools.app.server.get_change_timeline", side_effect=ImportError("not in agent image")):
+    with patch("agent.app.specialists.change.fetch_change_timeline", side_effect=ToolsNotConfigured("TOOLS_URL is not set")):
         report = await _orders_report(cfg, FakeGCP(access_log_failures=99))
     assert report.change_induced.startswith("Not assessed (change detection incomplete: Cloud Logging read quota")
 
@@ -209,14 +213,15 @@ def test_apigee_origin_with_revisions_evaluated_and_no_switch_is_no():
 
 
 def test_change_specialist_records_the_timeline_as_checked(agent_cfg):
-    with patch("tools.app.server.get_change_timeline", return_value={"changes": []}):
+    with patch("agent.app.specialists.change.fetch_change_timeline", return_value={"changes": []}):
         dossier = asyncio.run(ChangeSpecialist().investigate(_event(S2_ORDERS), agent_cfg))
-    assert dossier.metrics[CHANGE_SOURCES_KEY] == [TIMELINE]
-    assert any("No configuration or revision deployments detected" in f for f in dossier.findings)
+    assert ", ".join(dossier.metrics[CHANGE_SOURCES_KEY]) == TIMELINE
+    assert any("No Cloud Run revision deployments detected" in f for f in dossier.findings)
+    assert any(f.startswith("Apigee deployment history: no proxy deployments") for f in dossier.findings)
 
 
 def test_change_specialist_with_no_source_makes_no_negative_finding(agent_cfg):
-    with patch("tools.app.server.get_change_timeline", side_effect=ImportError("not in agent image")):
+    with patch("agent.app.specialists.change.fetch_change_timeline", side_effect=ToolsNotConfigured("TOOLS_URL is not set")):
         dossier = asyncio.run(ChangeSpecialist().investigate(_event(S2_ORDERS), agent_cfg))
     assert CHANGE_SOURCES_KEY not in dossier.metrics
     joined = " ".join(dossier.findings)

@@ -7,6 +7,7 @@ Implements:
 - POST /investigate: diagnostic investigation execution and report compilation.
 """
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
@@ -54,10 +55,25 @@ from .triage import (
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Fail startup when a required setting is missing (TOOLS_URL when not local), so a
+    misconfigured revision never takes traffic (Cloud Run keeps serving the previous one)."""
+    settings = app.dependency_overrides.get(get_agent_settings, get_agent_settings)()
+    missing = settings.missing_required_settings()
+    if missing:
+        message = f"ata-agent cannot start: required setting(s) not set: {', '.join(missing)}"
+        logger.error(message)
+        raise RuntimeError(message)
+    yield
+
+
 app = FastAPI(
     title="Alert Triage Agent",
     description="Agent performing pre-analysis locking, multi-agent triage, and diagnostic investigations",
     version="0.3.0",
+    lifespan=lifespan,
 )
 
 # Virtual clock hook for deterministic replay testing

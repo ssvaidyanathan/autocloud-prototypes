@@ -658,7 +658,7 @@ async def test_generic_genuine_change_detection():
             "action": "revision_create",
         }]
     }
-    with patch("tools.app.server.get_change_timeline", return_value=timeline_genuine):
+    with patch("agent.app.specialists.change.fetch_change_timeline", return_value=timeline_genuine):
         dossier = await specialist.investigate(alert, config)
     assert dossier.anomaly_detected is True
     assert dossier.metrics.get("recent_revision") == "ata-inventory-api-00099-new"
@@ -681,7 +681,7 @@ async def test_generic_genuine_change_detection():
             "action": "traffic_shift",
         }]
     }
-    with patch("tools.app.server.get_change_timeline", return_value=timeline_no_diff):
+    with patch("agent.app.specialists.change.fetch_change_timeline", return_value=timeline_no_diff):
         dossier = await specialist.investigate(alert, config)
     assert dossier.anomaly_detected is False
 
@@ -698,7 +698,7 @@ async def test_generic_genuine_change_detection():
             "action": "revision_create",
         }]
     }
-    with patch("tools.app.server.get_change_timeline", return_value=timeline_outside_window):
+    with patch("agent.app.specialists.change.fetch_change_timeline", return_value=timeline_outside_window):
         dossier = await specialist.investigate(alert, config)
     assert dossier.anomaly_detected is False
 
@@ -714,7 +714,7 @@ async def test_generic_genuine_change_detection():
             "differs_from_previous": False,
         }]
     }
-    with patch("tools.app.server.get_change_timeline", return_value=timeline_traffic_shift):
+    with patch("agent.app.specialists.change.fetch_change_timeline", return_value=timeline_traffic_shift):
         dossier = await specialist.investigate(alert, config)
     assert dossier.anomaly_detected is False
 

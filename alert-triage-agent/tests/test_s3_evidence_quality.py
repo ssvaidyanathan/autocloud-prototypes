@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 from google.api_core import exceptions as gexc
 import pytest
 
+from agent.app.tools.tools_client import ToolsNotConfigured
 from agent.app.config import AgentConfig, reset_agent_settings
 from agent.app.contracts.alert import AlertEvent
 from agent.app.specialists import telemetry_reads
@@ -70,7 +71,7 @@ def cfg(tmp_path):
 @pytest.fixture(autouse=True)
 def no_tools_timeline():
     # The agent image does not ship ata-tools; keep tests off any live change timeline.
-    with patch("tools.app.server.get_change_timeline", side_effect=ImportError("not in agent image")):
+    with patch("agent.app.specialists.change.fetch_change_timeline", side_effect=ToolsNotConfigured("TOOLS_URL is not set")):
         yield
 
 
@@ -405,16 +406,18 @@ async def test_change_failed_audit_read_is_not_no_deployments(cfg):
 
 @pytest.mark.asyncio
 async def test_change_failed_admin_api_status_is_recorded(cfg):
-    config = cfg.model_copy(update={"is_local": False})
-    resp = MagicMock(status_code=403)
-    creds = MagicMock(valid=True, token="t")
+    # ata-tools reads the Cloud Run Admin API; its HTTP 403 is a per-source error in the timeline.
+    config = cfg.model_copy(update={"is_local": False, "tools_url": "https://tools.example.run.app"})
+    timeline = {"changes": [
+        {"source": "cloud_run", "error": "Cloud Run Admin API services list returned HTTP 403"},
+    ]}
     with patch("google.cloud.logging.Client") as log_cls, \
-         patch("google.auth.default", return_value=(creds, "p")), \
-         patch("requests.get", return_value=resp):
+         patch("agent.app.specialists.change.fetch_change_timeline", return_value=timeline):
         log_cls.return_value.list_entries.return_value = []
         dossier = await ChangeSpecialist(metric_client=MagicMock()).investigate(_orders_alert(), config)
     joined = " ".join(dossier.findings)
-    assert "Cloud Run Admin API returned HTTP 403" in joined
+    assert ("change timeline unavailable: Cloud Run revision history source failed "
+            "(Cloud Run Admin API services list returned HTTP 403)") in joined
     assert "No Cloud Run revision deployments detected" not in joined
 
 

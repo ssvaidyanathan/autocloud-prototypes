@@ -1613,6 +1613,19 @@ class SynthesizerAgent:
                     f"Apigee proxy {origin} switched from revision {switch.get('previous_revision')} to "
                     f"{switch.get('new_revision')} in the window; it is attributed only when the new revision brought SpikeArrest faults"
                 )
+            elif self._is_apigee_proxy(origin):
+                # A deployment of the origin proxy in the window (ata-tools Apigee deployment
+                # history) is not "no change"; it is attributed only from access-log evidence.
+                deploys = [
+                    d for d in chg.metrics.get("apigee_deployments_in_window") or []
+                    if isinstance(d, dict) and d.get("proxy") == origin
+                ]
+                if deploys:
+                    listed = ", ".join(f"revision {d.get('revision')} deployed {d.get('timestamp')}" for d in deploys)
+                    not_assessed = (
+                        f"Apigee proxy {origin} {listed} in the window (Apigee deployment history); it is "
+                        "attributed only when the new revision brought SpikeArrest faults"
+                    )
         if not_assessed:
             value = f"Not assessed ({not_assessed}; change attribution not assessed)"
             logger.info("Change-Induced: %s", value)

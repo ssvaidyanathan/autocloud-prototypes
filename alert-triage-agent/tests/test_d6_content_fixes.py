@@ -128,7 +128,7 @@ async def test_change_specialist_detects_service_update():
         ]
     }
 
-    with patch("tools.app.server.get_change_timeline", return_value=fake_timeline):
+    with patch("agent.app.specialists.change.fetch_change_timeline", return_value=fake_timeline):
         dossier = await specialist.investigate(alert, config)
 
     assert dossier.anomaly_detected is True

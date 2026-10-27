@@ -33,18 +33,26 @@ def get_default_http_client() -> Optional[Any]:
     return _default_http_client
 
 
+def fetch_id_token(audience: str) -> str:
+    """Google-signed ID token of the runtime service account for ``audience``.
+
+    On Cloud Run the token comes from the metadata server. Raises on failure; callers decide
+    whether a missing token is fatal. Used for ata-bridge and ata-tools calls.
+    """
+    import google.auth.transport.requests
+    import google.oauth2.id_token
+
+    req = google.auth.transport.requests.Request()
+    return google.oauth2.id_token.fetch_id_token(req, audience.rstrip("/"))
+
+
 def _get_auth_headers(bridge_url: str, config: AgentConfig) -> dict[str, str]:
     """Generate authorization headers for bridge instruction calls."""
     if config.is_local:
         return {"Authorization": "Bearer valid-agent-token"}
 
     try:
-        import google.auth.transport.requests
-        import google.oauth2.id_token
-
-        req = google.auth.transport.requests.Request()
-        aud = bridge_url.rstrip("/")
-        token = google.oauth2.id_token.fetch_id_token(req, aud)
+        token = fetch_id_token(bridge_url)
         return {"Authorization": f"Bearer {token}"}
     except Exception as exc:
         logger.warning("Failed to fetch Google ID token for bridge instruction: %s", exc)

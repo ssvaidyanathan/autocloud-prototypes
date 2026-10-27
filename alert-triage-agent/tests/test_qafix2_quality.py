@@ -68,32 +68,29 @@ def _alert() -> AlertEvent:
 
 
 def _cfg(**kw) -> AgentConfig:
-    return AgentConfig(project_id=PROJECT, region=REGION, is_local=False, **kw)
+    return AgentConfig(project_id=PROJECT, region=REGION, is_local=False,
+                       tools_url="https://tools.example.run.app", **kw)
 
 
-class _Resp:
-    def __init__(self, payload: dict):
-        self.status_code = 200
-        self._payload = payload
-
-    def json(self) -> dict:
-        return self._payload
-
-
-def _admin_api_get(url, headers=None, timeout=None):
-    if url.endswith("/revisions"):
-        return _Resp({"revisions": S5_REVISIONS})
-    return _Resp({"services": [S5_SERVICE]})
+# The ata-tools get_change_timeline entry for the S5 deploy (as tools/app/server.py builds it
+# from the Cloud Run Admin API revisions above: previous_revision is the previously *created* one).
+S5_TIMELINE = {"changes": [{
+    "source": "cloud_run", "service_name": SERVICE, "revision_name": S5_REV,
+    "previous_revision": RETIRED_NEWER_REV, "timestamp": S5_CREATED, "is_serving": True,
+    "differs_from_previous": True, "is_traffic_shift": False, "action": "revision_deploy",
+    "details": {
+        "image": S5_REVISIONS[0]["containers"][0]["image"], "prev_image": S5_REVISIONS[1]["containers"][0]["image"],
+        "env_diff": [{"name": "DB_USER", "value": "invalid-iam-user"}], "is_serving": True,
+        "differs_from_previous": True, "is_traffic_shift": False, "previous_revision": RETIRED_NEWER_REV,
+    },
+}]}
 
 
 async def _s5_change_dossier(client) -> EvidenceDossier:
-    """Run ChangeSpecialist on the live code path: tools timeline absent (not shipped in the
-    agent image), direct Cloud Run Admin API, audit-log query returning nothing."""
-    creds = SimpleNamespace(valid=True, token="t")
+    """Run ChangeSpecialist on the live code path: the ata-tools change timeline (remote MCP call,
+    stubbed at the client seam) and an audit-log query returning nothing."""
     logging_client = SimpleNamespace(list_entries=lambda **kw: [])
-    with patch("tools.app.server.get_change_timeline", side_effect=ImportError("not shipped")), \
-            patch("google.auth.default", return_value=(creds, PROJECT)), \
-            patch("requests.get", side_effect=_admin_api_get), \
+    with patch("agent.app.specialists.change.fetch_change_timeline", return_value=S5_TIMELINE), \
             patch("google.cloud.logging.Client", return_value=logging_client):
         return await ChangeSpecialist(metric_client=client).investigate(_alert(), _cfg())
 
@@ -249,7 +246,7 @@ def test_synthesizer_never_names_a_revision_without_traffic_evidence(caplog):
 def test_local_mode_without_a_client_reports_traffic_history_not_queried(caplog):
     import asyncio
 
-    with patch("tools.app.server.get_change_timeline", return_value={"changes": [{
+    with patch("agent.app.specialists.change.fetch_change_timeline", return_value={"changes": [{
         "source": "cloud_run", "service_name": SERVICE, "revision_name": S5_REV,
         "previous_revision": RETIRED_NEWER_REV, "timestamp": S5_CREATED,
         "is_serving": True, "differs_from_previous": True,

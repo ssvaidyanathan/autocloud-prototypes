@@ -12,6 +12,7 @@ from ..config import AgentConfig
 from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
 from ..request_count import REQUEST_COUNT_METRIC, request_count_filter, request_count_series
+from ..tools.tools_client import ToolsCallError, ToolsNotConfigured, fetch_change_timeline
 from .base import BaseSpecialist, EvidenceDossier
 from .telemetry_reads import (
     CHANGE_SOURCES_KEY,
@@ -27,16 +28,138 @@ logger = logging.getLogger(__name__)
 
 # Cloud Run audit-log entries read per investigation (one page).
 AUDIT_LOG_MAX_ENTRIES = 20
-# "No deployments" finding when the change sources covered Cloud Run only. The synthesizer
-# replaces it when the Apigee access log was read (see _reconcile_change_history).
+# Look-back of the change timeline before the alert.
+CHANGE_WINDOW_HOURS = 2
+# Change source / gap labels. The synthesizer lists change sources in Change-Induced.
+TIMELINE_SOURCE = "ata-tools change timeline"
+CLOUD_RUN_HISTORY = "Cloud Run revision history"
+APIGEE_HISTORY = "Apigee deployment history"
+NO_CLOUD_RUN_CHANGES_FINDING = (
+    "No Cloud Run revision deployments detected in the 2-hour window prior to alert onset."
+)
+# Finding of a dossier whose change sources covered Cloud Run only. The ChangeSpecialist no
+# longer emits it (the ata-tools timeline covers Apigee deployments, or its failure is stated);
+# the synthesizer still rewrites it from the Apigee access log (see _reconcile_change_history).
 NO_CLOUD_RUN_DEPLOYMENTS_FINDING = (
     "No Cloud Run revision deployments detected in the 2-hour window prior to alert onset "
     "(Apigee proxy deployment history not queried)."
 )
 
 
-class _SourceAbsent(Exception):
-    """The change source is not part of this deployment (not a failed read)."""
+def _minutes_before(ts: Any, now: datetime) -> int:
+    """Whole minutes from ``ts`` to ``now``; -1 when unknown or after ``now``."""
+    dt = _parse_ts(ts)
+    if dt is None or dt > now:
+        return -1
+    return max(0, int((now - dt).total_seconds() / 60))
+
+
+def timeline_source_errors(timeline: dict[str, Any]) -> dict[str, str]:
+    """Per-source errors inside a get_change_timeline result: {label: error text}."""
+    errors: dict[str, list[str]] = {}
+    for chg in timeline.get("changes", []):
+        if not isinstance(chg, dict) or not chg.get("error"):
+            continue
+        label = APIGEE_HISTORY if str(chg.get("source", "")).startswith("apigee") else CLOUD_RUN_HISTORY
+        where = chg.get("service_name") or chg.get("api_name")
+        text = " ".join(str(chg["error"]).split())[:200]
+        errors.setdefault(label, []).append(f"{where}: {text}" if where else text)
+    return {label: "; ".join(texts) for label, texts in errors.items()}
+
+
+def timeline_cloud_run_changes(timeline: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    """Cloud Run revision and service changes of a get_change_timeline result, as change records."""
+    changes: list[dict[str, Any]] = []
+    for chg in timeline.get("changes", []):
+        if not isinstance(chg, dict) or chg.get("error"):
+            continue
+        source = str(chg.get("source") or "")
+        if not source.startswith("cloud_run"):  # cloud_run (revision), cloud_run_service
+            continue
+        details = chg.get("details") if isinstance(chg.get("details"), dict) else {}
+        is_traffic_shift = bool(
+            chg.get("is_traffic_shift")
+            or chg.get("action") == "traffic_shift"
+            or details.get("is_traffic_shift")
+            or chg.get("differs_from_previous") is False
+            or details.get("differs_from_previous") is False
+        )
+        differs = chg.get("differs_from_previous")
+        if differs is None:
+            differs = details.get("differs_from_previous")
+        is_serving = chg.get("is_serving")
+        if is_serving is None:
+            is_serving = details.get("is_serving")
+        # The timeline's previous_revision is the previously *created* revision, which is
+        # not necessarily the one that served traffic (see previous_serving_revision).
+        prev_rev = chg.get("previous_revision") or details.get("previous_revision")
+        changes.append({
+            "service": chg.get("service_name"),
+            "revision": chg.get("revision_name") or str(chg.get("revision", "")),
+            "previous_created_revision": prev_rev,
+            "timestamp": chg.get("timestamp"),
+            "deployed_minutes_ago": _minutes_before(chg.get("timestamp"), now),
+            "change_type": "traffic_shift" if is_traffic_shift else (
+                "service_update" if source == "cloud_run_service" else "revision_deploy"
+            ),
+            "action": "traffic_shift" if is_traffic_shift else chg.get("action", "deployment"),
+            "is_serving": is_serving,
+            "is_traffic_shift": is_traffic_shift,
+            "differs_from_previous": differs,
+            "details": details,
+            "status": "Ready",
+        })
+    return changes
+
+
+def timeline_apigee_deployments(timeline: dict[str, Any], now: datetime) -> Optional[dict[str, Any]]:
+    """Apigee deployment history of a get_change_timeline result, or None if that source failed.
+
+    "in_window": deployments of the stack's proxies started in the window (newest first);
+    "current": every deployed revision of the stack's proxies with its deploy time;
+    "scope": the Apigee org/environment/proxies ata-tools queried.
+    """
+    if APIGEE_HISTORY in timeline_source_errors(timeline):
+        return None
+    in_window = []
+    for chg in timeline.get("changes", []):
+        if isinstance(chg, dict) and chg.get("source") == "apigee_deployment" and not chg.get("error"):
+            in_window.append({
+                "proxy": chg.get("api_name"),
+                "revision": str(chg.get("revision", "")),
+                "environment": chg.get("environment"),
+                "timestamp": chg.get("timestamp"),
+                "deployed_minutes_ago": _minutes_before(chg.get("timestamp"), now),
+            })
+    apigee = timeline.get("apigee") if isinstance(timeline.get("apigee"), dict) else {}
+    current = [
+        {"proxy": d.get("api_name"), "revision": str(d.get("revision", "")), "timestamp": d.get("timestamp")}
+        for d in apigee.get("deployments", []) or []
+        if isinstance(d, dict)
+    ]
+    scope_parts = []
+    if apigee.get("org"):
+        scope_parts.append(f"org {apigee['org']}")
+    if apigee.get("environment"):
+        scope_parts.append(f"environment {apigee['environment']}")
+    if apigee.get("proxy_prefix"):
+        scope_parts.append(f"proxies {apigee['proxy_prefix']}*")
+    return {"in_window": in_window, "current": current, "scope": ", ".join(scope_parts)}
+
+
+def apigee_history_text(history: dict[str, Any]) -> str:
+    """One sentence stating the Apigee deployment history read from the change timeline."""
+    scope = f" ({history['scope']})" if history.get("scope") else ""
+    if history["in_window"]:
+        deployed = "; ".join(
+            f"proxy {d['proxy']} revision {d['revision']} deployed {d['timestamp']}"
+            + (f" ({d['deployed_minutes_ago']}m before alert onset)" if d["deployed_minutes_ago"] >= 0 else " (after alert onset)")
+            for d in history["in_window"]
+        )
+        return f"Apigee deployment history{scope}: {deployed}."
+    current = ", ".join(f"{d['proxy']} revision {d['revision']} since {d['timestamp']}" for d in history["current"])
+    tail = f"; deployed: {current}" if current else ""
+    return f"Apigee deployment history{scope}: no proxy deployments in the 2-hour window prior to alert onset{tail}."
 
 
 # Evaluate genuine changes within the 2-hour window:
@@ -204,6 +327,67 @@ class ChangeSpecialist(BaseSpecialist):
             config.rollback_traffic_lookback_minutes,
         )
 
+    @staticmethod
+    def _timeline_unavailable(
+        metrics: dict[str, Any],
+        findings: list[str],
+        evidence_items: list[EvidenceItem],
+        *,
+        source: str,
+        target: str,
+        reason: str,
+        not_assessed: str,
+    ) -> None:
+        """State loudly that (part of) the change timeline could not be read."""
+        text = f"change timeline unavailable: {reason}"
+        logger.error("%s (%s for %s)", text, source, target)
+        record_unavailable(metrics, source=source, target=target, reason=text, affects_change_detection=True)
+        metrics.setdefault("change_timeline_errors", []).append(text)
+        content = f"{text}. {not_assessed} not assessed; change attribution not assessed."
+        findings.append(content)
+        evidence_items.append(EvidenceItem(headline="Change timeline unavailable", content=content))
+
+    async def _read_change_timeline(
+        self,
+        alert: AlertEvent,
+        config: AgentConfig,
+        metrics: dict[str, Any],
+        findings: list[str],
+        evidence_items: list[EvidenceItem],
+    ) -> Optional[dict[str, Any]]:
+        """The ata-tools change timeline, or None when it was not read (failure stated)."""
+        try:
+            timeline = await fetch_change_timeline(config, window_hours=CHANGE_WINDOW_HOURS)
+        except ToolsNotConfigured as exc:
+            if config.is_local:
+                logger.info("TOOLS_URL not set (local mode): ata-tools change timeline not queried")
+                return None
+            reason = exc.reason
+        except ToolsCallError as exc:
+            reason = exc.reason
+        except Exception as exc:  # any other failure is stated the same way
+            reason = f"{type(exc).__name__}: {' '.join(str(exc).split())[:200]}"
+        else:
+            errors = timeline_source_errors(timeline)
+            for label in (CLOUD_RUN_HISTORY, APIGEE_HISTORY):
+                if label in errors:
+                    self._timeline_unavailable(
+                        metrics, findings, evidence_items,
+                        source=f"{TIMELINE_SOURCE} ({label})", target=alert.resource_name,
+                        reason=f"{label} source failed ({errors[label]})",
+                        not_assessed=("Apigee proxy deployment history was" if label == APIGEE_HISTORY
+                                      else "Cloud Run revision history was"),
+                    )
+                else:
+                    record_change_source(metrics, f"{TIMELINE_SOURCE} ({label})")
+            return timeline
+        self._timeline_unavailable(
+            metrics, findings, evidence_items,
+            source=TIMELINE_SOURCE, target=alert.resource_name, reason=reason,
+            not_assessed="Apigee proxy deployment history and Cloud Run revision history were",
+        )
+        return None
+
     async def investigate(
         self,
         alert: AlertEvent,
@@ -213,11 +397,9 @@ class ChangeSpecialist(BaseSpecialist):
         evidence_items: list[EvidenceItem] = []
         metrics: dict[str, Any] = {}
         queries_executed: dict[str, list[str]] = {
-            "cloud_run_admin": [
-                f'gcloud run revisions list --service="{alert.resource_name}" --project="{config.project_id}"'
-            ],
-            "apigee_deployments": [
-                f'GET /v1/organizations/{config.project_id}/environments/prod/deployments'
+            "ata_tools": [
+                f"MCP tools/call get_change_timeline(window_hours={CHANGE_WINDOW_HOURS}, "
+                f"project_id={config.project_id}, region={config.region}) on {config.tools_url or 'ata-tools (TOOLS_URL not set)'}"
             ],
         }
 
@@ -228,244 +410,16 @@ class ChangeSpecialist(BaseSpecialist):
             except Exception:
                 pass
 
-        recent_changes: list[dict[str, Any]] = []
-        # Apigee deployment history is only covered by the tools timeline; the direct fallbacks
-        # below query Cloud Run alone, so a "no deployments" finding must say which it covered.
-        apigee_queried = False
-
-        # 1. First attempt querying via tools fastmcp server if available. The agent image
-        # does not ship the tools package, so ImportError means "source not present", not a
-        # failed read; any other error is a failed read and is recorded as such.
-        try:
-            from tools.app.server import get_change_timeline
-        except ImportError:
-            get_change_timeline = None
-        try:
-            if get_change_timeline is None:
-                raise _SourceAbsent()
-            tl = get_change_timeline(window_hours=2, project_id=config.project_id, region=config.region)
-            apigee_queried = not any(
-                c.get("source") == "apigee" and c.get("error") for c in tl.get("changes", [])
-            )
-            record_change_source(metrics, "ata-tools change timeline")
-            for chg in tl.get("changes", []):
-                svc = chg.get("service_name") or chg.get("api_name")
-                rev = chg.get("revision_name") or str(chg.get("revision", ""))
-                ts_str = chg.get("timestamp")
-                deployed_min = -1
-                if ts_str:
-                    try:
-                        dep_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                        if dep_dt > now:
-                            deployed_min = -1
-                        else:
-                            deployed_min = max(0, int((now - dep_dt).total_seconds() / 60))
-                    except Exception:
-                        pass
-                is_traffic_shift = bool(
-                    chg.get("is_traffic_shift")
-                    or chg.get("action") == "traffic_shift"
-                    or chg.get("details", {}).get("is_traffic_shift")
-                    or chg.get("differs_from_previous") is False
-                    or chg.get("details", {}).get("differs_from_previous") is False
-                )
-                differs = chg.get("differs_from_previous")
-                if differs is None:
-                    differs = chg.get("details", {}).get("differs_from_previous")
-                is_serving = chg.get("is_serving")
-                if is_serving is None:
-                    is_serving = chg.get("details", {}).get("is_serving")
-                # The timeline's previous_revision is the previously *created* revision, which is
-                # not necessarily the one that served traffic (see previous_serving_revision).
-                prev_rev = chg.get("previous_revision") or chg.get("details", {}).get("previous_revision")
-
-                recent_changes.append({
-                    "service": svc,
-                    "revision": rev,
-                    "previous_created_revision": prev_rev,
-                    "timestamp": ts_str,
-                    "deployed_minutes_ago": deployed_min,
-                    "change_type": "traffic_shift" if is_traffic_shift else ("service_update" if chg.get("source") == "cloud_run_service" else "revision_deploy"),
-                    "action": "traffic_shift" if is_traffic_shift else chg.get("action", "deployment"),
-                    "is_serving": is_serving,
-                    "is_traffic_shift": is_traffic_shift,
-                    "differs_from_previous": differs,
-                    "details": chg.get("details", {}),
-                    "status": "Ready",
-                })
-        except (_SourceAbsent, ImportError):
-            logger.debug("Tools get_change_timeline not available in this image; querying Cloud Run directly")
-        except Exception as e:
-            logger.warning("Tools get_change_timeline query failed: %s", e)
-            record_unavailable(
-                metrics, source="change timeline (ata-tools get_change_timeline)", target=alert.resource_name,
-                reason=f"change timeline read failed ({type(e).__name__})", affects_change_detection=True,
-            )
-
-        # 2. Self-contained Cloud Run Admin API query (runs directly inside Cloud Run container)
-        if not recent_changes and not config.is_local:
-            try:
-                import google.auth
-                from google.auth.transport.requests import Request as GoogleAuthRequest
-                import requests
-
-                creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-                if not creds.valid:
-                    creds.refresh(GoogleAuthRequest())
-                headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
-
-                cutoff = now - timedelta(hours=2)
-                services_url = f"https://run.googleapis.com/v2/projects/{config.project_id}/locations/{config.region}/services"
-                resp = requests.get(services_url, headers=headers, timeout=15)
-                if resp.status_code != 200:
-                    record_unavailable(
-                        metrics, source="Cloud Run Admin API services list", target=config.region,
-                        reason=f"Cloud Run Admin API returned HTTP {resp.status_code}",
-                        affects_change_detection=True,
-                    )
-                if resp.status_code == 200:
-                    record_change_source(metrics, "Cloud Run Admin API revision history")
-                    services = resp.json().get("services", [])
-                    for svc in services:
-                        svc_full_name = svc.get("name", "")
-                        svc_short = svc_full_name.split("/")[-1]
-
-                        # Query revisions for the service
-                        rev_url = f"https://run.googleapis.com/v2/{svc_full_name}/revisions"
-                        rev_resp = requests.get(rev_url, headers=headers, timeout=15)
-                        new_revisions_in_window = []
-                        all_service_revs = []
-                        if rev_resp.status_code != 200:
-                            record_unavailable(
-                                metrics, source="Cloud Run Admin API revisions list", target=svc_short,
-                                reason=f"Cloud Run Admin API returned HTTP {rev_resp.status_code}",
-                                affects_change_detection=True,
-                            )
-                        if rev_resp.status_code == 200:
-                            all_service_revs = rev_resp.json().get("revisions", [])
-                            for rev in all_service_revs:
-                                ctime_str = rev.get("createTime", "")
-                                if ctime_str:
-                                    try:
-                                        ctime = datetime.fromisoformat(ctime_str.replace("Z", "+00:00"))
-                                        if ctime >= cutoff and ctime <= now:
-                                            new_revisions_in_window.append(rev)
-                                    except Exception:
-                                        pass
-
-                        # Determine active serving revision
-                        traffic_list = svc.get("traffic", []) or []
-                        serving_rev_names = set()
-                        for tr in traffic_list:
-                            if tr.get("percent", 0) > 0 and tr.get("revision"):
-                                serving_rev_names.add(tr["revision"].split("/")[-1])
-                        if not serving_rev_names:
-                            latest_ready = svc.get("latestReadyRevision", "")
-                            if latest_ready:
-                                serving_rev_names.add(latest_ready.split("/")[-1])
-
-                        # Sort revisions descending by createTime to identify previous revision
-                        def _rev_time_key(r: dict[str, Any]) -> str:
-                            return str(r.get("createTime") or "")
-                        sorted_revs = sorted(all_service_revs, key=_rev_time_key, reverse=True)
-
-                        if new_revisions_in_window:
-                            for rev in new_revisions_in_window:
-                                rev_short = rev.get("name", "").split("/")[-1]
-                                ctime_str = rev.get("createTime", "")
-                                dep_min = -1
-                                if ctime_str:
-                                    try:
-                                        ctime = datetime.fromisoformat(ctime_str.replace("Z", "+00:00"))
-                                        if ctime > now:
-                                            dep_min = -1
-                                        else:
-                                            dep_min = max(0, int((now - ctime).total_seconds() / 60))
-                                    except Exception:
-                                        pass
-                                is_serving = rev_short in serving_rev_names
-
-                                # Previously created revision (used only for the image/env diff;
-                                # it is not necessarily the revision that served traffic)
-                                prev_rev_name = None
-                                prev_img = None
-                                prev_env = []
-                                for idx, r in enumerate(sorted_revs):
-                                    if r.get("name", "").split("/")[-1] == rev_short and idx + 1 < len(sorted_revs):
-                                        prev_r = sorted_revs[idx + 1]
-                                        prev_rev_name = prev_r.get("name", "").split("/")[-1]
-                                        prev_img = (prev_r.get("containers") or [{}])[0].get("image")
-                                        prev_env = (prev_r.get("containers") or [{}])[0].get("env", [])
-                                        break
-
-                                cur_img = (rev.get("containers") or [{}])[0].get("image")
-                                cur_env = (rev.get("containers") or [{}])[0].get("env", [])
-                                differs = (cur_img != prev_img) or (cur_env != prev_env) or (prev_rev_name is None)
-                                is_traffic_shift = not differs
-
-                                if not any(c.get("service") == svc_short and c.get("revision") == rev_short for c in recent_changes):
-                                    recent_changes.append({
-                                        "service": svc_short,
-                                        "revision": rev_short,
-                                        "previous_created_revision": prev_rev_name,
-                                        "timestamp": ctime_str,
-                                        "deployed_minutes_ago": dep_min,
-                                        "change_type": "traffic_shift" if is_traffic_shift else "revision_deploy",
-                                        "action": "traffic_shift" if is_traffic_shift else "revision_create",
-                                        "is_serving": is_serving,
-                                        "is_traffic_shift": is_traffic_shift,
-                                        "differs_from_previous": differs,
-                                        "details": {
-                                            "image": cur_img,
-                                            "prev_image": prev_img,
-                                            "env_diff": [e for e in cur_env if e not in prev_env],
-                                            "scaling": rev.get("scaling"),
-                                            "is_serving": is_serving,
-                                            "is_traffic_shift": is_traffic_shift,
-                                            "differs_from_previous": differs,
-                                            "previous_created_revision": prev_rev_name,
-                                        },
-                                        "status": "Ready",
-                                    })
-                        has_serving_new_rev = any(
-                            rev.get("name", "").split("/")[-1] in serving_rev_names
-                            for rev in new_revisions_in_window
-                        )
-                        if not has_serving_new_rev and svc.get("updateTime"):
-                            # Traffic shift or metadata update to existing revision - not a deployment change
-                            svc_update_str = svc.get("updateTime", "")
-                            try:
-                                svc_dt = datetime.fromisoformat(svc_update_str.replace("Z", "+00:00"))
-                                if svc_dt >= cutoff:
-                                    dep_min = max(0, int((now - svc_dt).total_seconds() / 60))
-                                    template_rev = (svc.get("template", {}) or {}).get("revision") or svc.get("latestReadyRevision", "").split("/")[-1]
-                                    if not any(c.get("service") == svc_short and c.get("revision") == template_rev for c in recent_changes):
-                                        recent_changes.append({
-                                            "service": svc_short,
-                                            "revision": template_rev,
-                                            "timestamp": svc_update_str,
-                                            "deployed_minutes_ago": dep_min,
-                                            "change_type": "traffic_shift",
-                                            "action": "traffic_shift",
-                                            "is_traffic_shift": True,
-                                            "differs_from_previous": False,
-                                            "details": {
-                                                "action": "traffic_shift",
-                                                "is_traffic_shift": True,
-                                                "updateTime": svc_update_str,
-                                                "differs_from_previous": False,
-                                                "note": "Traffic shifted to existing revision without new revision creation",
-                                            },
-                                            "status": "Ready",
-                                        })
-                            except Exception:
-                                pass
-            except Exception as e:
-                logger.warning("Direct Cloud Run Admin API change query failed: %s", e)
-                record_unavailable(
-                    metrics, source="Cloud Run Admin API revision history", target=config.region,
-                    reason=f"Cloud Run Admin API read failed ({type(e).__name__})", affects_change_detection=True,
-                )
+        # 1. Change timeline from the deployed ata-tools service: Cloud Run revision history and
+        # Apigee deployment history. There is no fallback: when it cannot be read, the report
+        # says so and change attribution is not assessed.
+        timeline = await self._read_change_timeline(alert, config, metrics, findings, evidence_items)
+        recent_changes = timeline_cloud_run_changes(timeline, now) if timeline else []
+        apigee_deployments = timeline_apigee_deployments(timeline, now) if timeline else None
+        if apigee_deployments is not None:
+            metrics["apigee_deployments_in_window"] = apigee_deployments["in_window"]
+            metrics["apigee_deployments_current"] = apigee_deployments["current"]
+            metrics["apigee_deployment_scope"] = apigee_deployments["scope"]
 
         # 3. Direct Cloud Logging audit query for Services.ReplaceService / UpdateService events
         if not config.is_local:
@@ -580,35 +534,35 @@ class ChangeSpecialist(BaseSpecialist):
             )
         elif metrics.get(UNAVAILABLE_KEY):
             # A change source could not be read: "no deployments" would be an unverified claim.
-            gaps = "; ".join(gap_text(g) for g in metrics[UNAVAILABLE_KEY])
-            content = f"Change detection incomplete: {gaps}; change attribution not assessed."
-            findings.append(content)
-            evidence_items.append(EvidenceItem(headline="Deployment History Analysis (incomplete)", content=content))
+            # Change timeline gaps are already stated ("change timeline unavailable: ...").
+            other = [g for g in metrics[UNAVAILABLE_KEY] if not str(g.get("source", "")).startswith(TIMELINE_SOURCE)]
+            if other:
+                gaps = "; ".join(gap_text(g) for g in other)
+                content = f"Change detection incomplete: {gaps}; change attribution not assessed."
+                findings.append(content)
+                evidence_items.append(EvidenceItem(headline="Deployment History Analysis (incomplete)", content=content))
         elif not metrics.get(CHANGE_SOURCES_KEY):
-            # Nothing was read (local run without ata-tools): no finding either way.
+            # Nothing was read (local run without TOOLS_URL): no finding either way.
             content = (
-                "Change history not queried: no change source was available (ata-tools change timeline "
-                "absent; Cloud Run Admin API and audit log are not queried in local mode; Apigee proxy "
-                "deployment history not queried); change attribution not assessed."
+                "Change history not queried: no change source was available (TOOLS_URL not set in local "
+                "mode, so the ata-tools change timeline with Cloud Run revision and Apigee deployment "
+                "history was not read; the Cloud Run audit log is not read in local mode); change "
+                "attribution not assessed."
             )
             findings.append(content)
             evidence_items.append(EvidenceItem(headline="Deployment History Analysis (not queried)", content=content))
         else:
-            if apigee_queried:
-                findings.append("No configuration or revision deployments detected in the 2-hour window prior to alert onset.")
-                content = "No recent deployments detected; incident is not attributable to a recent change event."
-            else:
-                findings.append(NO_CLOUD_RUN_DEPLOYMENTS_FINDING)
-                content = (
-                    "No recent Cloud Run deployments detected. Apigee proxy deployment history was not "
-                    "queried; proxy revision changes come from the Apigee access log."
-                )
-            evidence_items.append(
-                EvidenceItem(
-                    headline="Deployment History Analysis",
-                    content=content,
-                )
-            )
+            findings.append(NO_CLOUD_RUN_CHANGES_FINDING)
+            evidence_items.append(EvidenceItem(
+                headline="Deployment History Analysis",
+                content=f"No recent Cloud Run deployments detected ({TIMELINE_SOURCE}: {CLOUD_RUN_HISTORY}).",
+            ))
+
+        # Apigee deployment history is stated whenever it was read (it is never omitted silently).
+        if apigee_deployments is not None:
+            text = apigee_history_text(apigee_deployments)
+            findings.append(text)
+            evidence_items.append(EvidenceItem(headline="Apigee Deployment History", content=text))
 
         mins = metrics.get("minutes_since_deploy", 999)
         proximity_bonus = 0.15 if mins <= 15 else (0.10 if mins <= 30 else (0.05 if mins <= 60 else (0.02 if mins <= 120 else 0.0)))
