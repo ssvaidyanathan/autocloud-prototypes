@@ -123,7 +123,7 @@ The agent calls the tools service (`<prefix>-tools`) over MCP with an ID token t
 | Docker | **Not needed.** Every image is built with Cloud Build. | n/a |
 | jq | **Not needed.** | n/a |
 | Credentials | `gcloud auth login` **and** `gcloud auth application-default login` (the schema proxy, the reset and the preflight use ADC). | [Step 0](#step-0-project-checks-and-authentication) |
-| Deployer IAM | `roles/owner` on the project. Without Owner: `roles/editor`, `roles/resourcemanager.projectIamAdmin`, `roles/run.admin`, `roles/secretmanager.admin`, `roles/cloudsql.admin`, and `roles/iam.serviceAccountUser` on the build and Apigee SAs (list yourself in the foundation variable `deployer_members`, [Step 4](#step-4-foundation)). | [Step 0](#step-0-project-checks-and-authentication) |
+| Deployer IAM | `roles/owner` on the project. Without Owner: `roles/editor`, `roles/resourcemanager.projectIamAdmin`, `roles/iam.roleAdmin` (the foundation creates the custom role `<prefix>ApigeeDeployReader`), `roles/run.admin`, `roles/secretmanager.admin`, `roles/cloudsql.admin`, and `roles/iam.serviceAccountUser` on the build and Apigee SAs (list yourself in the foundation variable `deployer_members`, [Step 4](#step-4-foundation)). | [Step 0](#step-0-project-checks-and-authentication) |
 | Apigee IAM | `roles/apigee.admin` on the Apigee organization's project (`APIGEE_ORG`): it creates TargetServers, proxies, the API product, developer and app. Provisioning a new organization needs Owner on that project. | [Step 1](#step-1-apigee-organization-environment-and-hostname) |
 | ServiceNow | An instance URL (`https://...`) and an integration user with the `itil` role (incident and attachment tables). A free Personal Developer Instance works. | Log in to the instance. |
 | macOS only | If Python reports `CERTIFICATE_VERIFY_FAILED`: `export SSL_CERT_FILE=/etc/ssl/cert.pem` | n/a |
@@ -798,7 +798,7 @@ There is no separate automated test-suite count to compare against. The deployme
   - `returned HTTP 403` from `<prefix>-tools`: the agent-to-tools binding is missing (Step 12), or `EXPECTED_AUDIENCE` on the tools service is not the agent's `TOOLS_URL` (run Step 11 again);
   - `unreachable` or `timed out`: check `TOOLS_URL` on the agent and that `<prefix>-tools` is serving;
   - `Apigee deployment history source failed (APIGEE_ENV not set in ata-tools)`: run Step 11 again with `APIGEE_ENV` exported;
-  - `Apigee deployments list returned HTTP 403`: `<prefix>-agent-sa` lacks `roles/apigee.readOnlyAdmin` in the `APIGEE_ORG` project. The foundation grants it in `PROJECT_ID` only.
+  - `Apigee deployments list returned HTTP 403`: `<prefix>-agent-sa` lacks the custom role `<prefix>ApigeeDeployReader` (`apigee.deployments.list`, `apigee.proxyrevisions.get`) in the `APIGEE_ORG` project. The foundation creates and grants it in `PROJECT_ID` only. Do not grant `roles/apigee.readOnlyAdmin` instead: it also reads every developer app key in the org.
 - The bridge logs show ServiceNow 401: the secrets still hold `placeholder`, or the credentials are wrong. Run `./scripts/set-secrets.sh`, then `./scripts/deploy-stage1.sh --only triage`, so that a new bridge revision reads them.
 
 ---

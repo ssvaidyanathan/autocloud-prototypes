@@ -169,7 +169,7 @@ Each stack has **six** service accounts, all created by the foundation Terraform
 | | `roles/iam.serviceAccountUser` on itself (the OIDC identity of its triage tasks) | foundation | |
 | | `roles/run.invoker` on `<prefix>-agent` | triage-iam | |
 | `<prefix>-agent-sa` (also runs `<prefix>-tools`) | `roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer` (project) | foundation | Read-only on the monitored infrastructure. |
-| | `roles/apigee.readOnlyAdmin` (project): Apigee deployments for the change timeline | foundation | |
+| | custom role `<prefix>ApigeeDeployReader` (project): `apigee.deployments.list` and `apigee.proxyrevisions.get` only, for the change timeline and proxy bundles. Not `roles/apigee.readOnlyAdmin`, which reads every developer app key in the org. Teardown soft-deletes the role; a redeploy within 7 days undeletes it, later set `apigee_reader_role_suffix` | foundation | |
 | | `roles/aiplatform.user` (project): Gemini gray-zone scoring | foundation | |
 | | `roles/storage.objectUser` on `gs://<project>-<prefix>-incidents` | foundation | Its only data writes. |
 | | `roles/cloudtasks.enqueuer` on `<prefix>-timer-queue` | foundation | |
