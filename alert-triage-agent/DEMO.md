@@ -43,7 +43,7 @@ Follow this section to execute scenarios directly from your laptop.
      | python3 -c "import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])" > ".${NAME_PREFIX}-api-key"
    chmod 600 ".${NAME_PREFIX}-api-key"
    ```
-   The scenario scripts read `.${NAME_PREFIX}-api-key` and the Apigee values in `.${NAME_PREFIX}-apigee.env` (written by `deploy-apigee-proxies.sh`); `ATA_API_KEY` overrides the key file. TODO(scen-lane): confirm when the scenario lane lands. The key files are gitignored.
+   The scenario scripts read `.${NAME_PREFIX}-api-key` and the Apigee values in `.${NAME_PREFIX}-apigee.env` (written by `deploy-apigee-proxies.sh`); `ATA_API_KEY` overrides the key file. The key files are gitignored.
 
 5. **Verify Baseline Health:**
    ```bash

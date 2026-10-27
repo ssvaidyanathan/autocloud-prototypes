@@ -16,7 +16,8 @@
 #   database       Terraform database
 #   schema         demo/db/schema.sql with the GRANT to the IAM DB user, via cloud-sql-proxy
 #   applications   Terraform applications (inventory and orders with the built images)
-#   inventory-pin  scripts/repin-inventory.sh prepare --initial / write-pin --initial / switch
+#   inventory-pin  scripts/repin-inventory.sh prepare --initial / write-pin --initial / switch,
+#                  then scripts/set-demo-instance-caps.sh --apply (service-level instance caps)
 #   triage         tools, bridge, agent deploy.sh with the built images
 #   triage-iam     Terraform triage-iam (run.invoker of agent, bridge, tools)
 #   apigee         scripts/deploy-apigee-proxies.sh
@@ -343,7 +344,8 @@ phase_applications() {
 }
 
 # First pin of the inventory baseline (ata-s3's repin-inventory.sh): candidate with no traffic,
-# verified; pin file written; 100% traffic to it.
+# verified; pin file written; 100% traffic to it. Then the demo services' instance caps
+# (set-demo-instance-caps.sh --apply; Terraform cannot set the service-level limit).
 phase_inventory_pin() {
     local repin="${SCRIPT_DIR}/repin-inventory.sh" out_file line revision digest
     [ -x "${repin}" ] || [ -f "${repin}" ] || die "${repin} not found: the first inventory pin needs scripts/repin-inventory.sh (prepare --initial)."
@@ -362,7 +364,9 @@ phase_inventory_pin() {
     bash "${repin}" write-pin --revision "${revision}" --digest "${digest}" --initial \
         || die "repin-inventory.sh write-pin --initial failed."
     bash "${repin}" switch || die "repin-inventory.sh switch failed."
-    echo "    pinned ${revision} (${digest}). Commit scripts/scenarios/inventory-pin.env in your clone."
+    echo "    pinned ${revision} (${digest}). Commit scripts/scenarios/inventory-pin.${NAME_PREFIX}.env in your clone."
+    bash "${SCRIPT_DIR}/set-demo-instance-caps.sh" --apply \
+        || die "set-demo-instance-caps.sh --apply failed (output above). The pin is in place; fix the cause and re-run scripts/set-demo-instance-caps.sh --apply, then resume with --from triage."
 }
 
 phase_triage() {
@@ -411,7 +415,8 @@ phase_hints() {
         applications) echo "    gcloud run services list --project=${P} --region=${R} --filter=\"metadata.name~^${N}-\"" ;;
         inventory-pin)
             echo "    scripts/repin-inventory.sh status"
-            echo "    git diff scripts/scenarios/inventory-pin.env   # commit it" ;;
+            echo "    scripts/set-demo-instance-caps.sh   # dry run: caps already applied"
+            echo "    git status scripts/scenarios/inventory-pin.${N}.env   # commit it" ;;
         triage)
             echo "    gcloud run services describe ${N}-agent --project=${P} --region=${R} --format=\"yaml(spec.template.spec.containers[0].env)\""
             echo "    gcloud run services describe ${N}-bridge --project=${P} --region=${R} --format=\"value(status.url)\"" ;;

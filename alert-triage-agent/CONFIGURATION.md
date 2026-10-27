@@ -134,7 +134,7 @@ Demo script settings (scripts/scenarios/common.sh):
 | :--- | :--- | :--- |
 | `ATA_DEMO_MAX_INSTANCES` | `1` | Max Cloud Run instances of the demo services (service and revision level). Keep equal to Terraform `demo_max_instance_count`. |
 | `ATA_INVENTORY_RESTOCK_BASELINE` | `item-101=1000,...,item-105=1000` | Stock that `reset-scenarios.sh` sets via `POST /admin/restock` before each scenario (`<id>=<stock>`, stock >= 1). |
-| `ATA_INVENTORY_PIN_FILE` | `scripts/scenarios/inventory-pin.<prefix>.env` (TODO(scen-lane): per-prefix name) | The inventory pin (revision, digest, previous pin). Change it with `scripts/repin-inventory.sh`. |
+| `ATA_INVENTORY_PIN_FILE` | `scripts/scenarios/inventory-pin.<prefix>.env` | The inventory pin (revision, digest, previous pin). Change it with `scripts/repin-inventory.sh`. |
 | `ATA_ARTIFACT_REGISTRY_HOST` | `<REGION>-docker.pkg.dev` | Artifact Registry host of the `<prefix>-docker` repository. |
 | `INVENTORY_SERVICE_URL` | *Cloud Run URL* | Internal Cloud Run URL of inventory service called by orders API. |
 
