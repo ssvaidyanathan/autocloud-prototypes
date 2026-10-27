@@ -287,6 +287,7 @@ class CloudRunSpecialist(BaseSpecialist):
                 is_audit_log,
                 is_application_or_request_log,
                 format_single_line_log_excerpt,
+                parse_access_log_line,
             )
 
             log_client = google.cloud.logging.Client(project=config.project_id)
@@ -328,6 +329,11 @@ class CloudRunSpecialist(BaseSpecialist):
                                 entry_lat_ms = float(lat_str)
                         except ValueError:
                             pass
+
+                if not req_path and isinstance(getattr(entry, "payload", None), str):
+                    access = parse_access_log_line(entry.payload)
+                    if access:
+                        _, req_path, status_code = access
 
                 if hasattr(entry, "payload") and isinstance(entry.payload, dict):
                     if not req_path:

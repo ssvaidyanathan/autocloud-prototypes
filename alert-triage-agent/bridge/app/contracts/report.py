@@ -609,7 +609,9 @@ class InvestigationReport(BaseModel):
         if self.observations:
             raw_obs = [o.strip() for o in re.split(r"\s*\|\s*|\s*;\s*", self.observations) if o.strip()]
             for o in raw_obs:
-                cleaned_o = re.sub(r"\[.*?\]\s*", "", o).strip()
+                # Drop bracketed tags, but keep redaction tokens and log timestamps: removing
+                # them garbled log excerpts ('[REDACTED_IP]:50318' became ':50318').
+                cleaned_o = re.sub(r"\[(?!REDACTED_)(?!\d{4}-\d{2}-\d{2}T)[^\]]*\]\s*", "", o).strip()
                 if cleaned_o:
                     obs_lines.append(f"  - {cleaned_o}")
         if not obs_lines:

@@ -179,3 +179,153 @@ def test_apply_group_alerts_stays_idempotent_with_incident_ids():
     report = apply_group_alerts(report, [dict(a) for a in S2_ALERTS])
     assert report.observations == once
     assert report.alert_count() == 3
+
+
+# ---------------------------------------------------------------------------------------
+# Bug 4: uvicorn INFO access lines on stderr are stored by Cloud Run as severity ERROR
+# ---------------------------------------------------------------------------------------
+
+from datetime import datetime, timezone  # noqa: E402
+
+from agent.app.specialists.logs import (  # noqa: E402
+    format_single_line_log_excerpt,
+    parse_access_log_line,
+    parse_embedded_level,
+)
+
+STDERR_LOG = "projects/cloud-assist-fde-2/logs/run.googleapis.com%2Fstderr"
+REQUESTS_LOG = "projects/cloud-assist-fde-2/logs/run.googleapis.com%2Frequests"
+
+
+class _Entry:
+    def __init__(self, payload, severity="ERROR", log_name=STDERR_LOG, http_request=None):
+        self.log_name = log_name
+        self.severity = severity
+        self.timestamp = datetime(2026, 10, 27, 7, 42, 5, tzinfo=timezone.utc)
+        self.http_request = http_request
+        self.payload = payload
+
+
+def test_s2_200_ok_access_line_is_not_an_error_excerpt():
+    entry = _Entry('INFO:     10.1.2.3:37442 - "GET /items HTTP/1.1" 200 OK')
+    assert format_single_line_log_excerpt(entry) is None
+
+
+def test_s1_500_access_line_is_labelled_error_without_info_prefix():
+    entry = _Entry('INFO:     10.1.2.3:50318 - "POST /items/reserve HTTP/1.1" 500 Internal Server Error')
+    line = format_single_line_log_excerpt(entry)
+    assert line is not None
+    assert line.startswith("[2026-10-27T07:42:05Z] ERROR HTTP 500 /items/reserve - ")
+    assert "INFO:" not in line
+    assert "[REDACTED_IP]:50318" in line
+    assert "10.1.2.3" not in line
+
+
+def test_stderr_info_message_without_status_is_not_an_error():
+    assert format_single_line_log_excerpt(_Entry("INFO:     Shutting down")) is None
+    assert format_single_line_log_excerpt(_Entry("WARNING: slow query 1200ms")) is None
+
+
+def test_genuine_error_lines_are_kept():
+    # Traceback text on stderr with no level of its own keeps the entry severity.
+    tb = format_single_line_log_excerpt(_Entry("Traceback (most recent call last): ValueError: boom"))
+    assert tb is not None and tb.split(" ")[1] == "ERROR"
+    # A line declaring ERROR itself.
+    err = format_single_line_log_excerpt(_Entry("ERROR:    Exception in ASGI application", severity="INFO"))
+    assert err is not None and " ERROR - Exception in ASGI application" in err
+    # Request log with a 5xx status.
+    req = format_single_line_log_excerpt(
+        _Entry(None, severity="ERROR", log_name=REQUESTS_LOG,
+               http_request={"requestUrl": "https://x.run.app/items", "status": 503})
+    )
+    assert req is not None and "ERROR HTTP 503 /items" in req
+
+
+def test_request_log_4xx_or_2xx_with_error_severity_is_not_an_error_excerpt():
+    for status in (200, 404, 429):
+        entry = _Entry(None, severity="ERROR", log_name=REQUESTS_LOG,
+                       http_request={"requestUrl": "https://x.run.app/items", "status": status})
+        assert format_single_line_log_excerpt(entry) is None
+
+
+def test_parsers():
+    assert parse_embedded_level("INFO:     x") == "INFO"
+    assert parse_embedded_level("warn: x") == "WARNING"
+    assert parse_embedded_level("no level here") is None
+    assert parse_access_log_line('1.2.3.4:1 - "GET /items?x=1 HTTP/1.1" 200 OK') == ("GET", "/items", 200)
+    assert parse_access_log_line("no request") is None
+
+
+def test_description_keeps_redaction_token_and_timestamp_in_log_excerpt():
+    excerpt = (
+        "Log excerpt (ata-inventory-api): [2026-10-27T07:12:01Z] ERROR HTTP 500 /items/reserve - "
+        '[REDACTED_IP]:50318 - "POST /items/reserve HTTP/1.1" 500 Internal Server Error'
+    )
+    desc = _report(observations=f"first | {excerpt}").build_structured_description()
+    assert "[2026-10-27T07:12:01Z]" in desc
+    assert "[REDACTED_IP]:50318" in desc
+    assert " :50318" not in desc
+
+
+async def _cloud_run_dossier_with_stderr(payloads: list[str], policy: str):
+    from unittest.mock import MagicMock, patch
+
+    from agent.app.config import AgentConfig
+    from agent.app.specialists.cloud_run import CloudRunSpecialist
+
+    entries = []
+    for p in payloads:
+        e = MagicMock()
+        e.log_name = STDERR_LOG
+        e.payload = p
+        e.text_payload = None
+        e.http_request = None
+        e.severity = "ERROR"
+        e.timestamp = datetime(2026, 10, 27, 7, 42, 5, tzinfo=timezone.utc)
+        entries.append(e)
+    alert = AlertEvent(
+        incident_id="0.oeb4hxzrsiqu",
+        policy_name=policy,
+        resource_name="ata-inventory-api",
+        started_at="2026-10-27T07:40:49Z",
+    )
+    config = AgentConfig(project_id="test-proj", region="test-region", is_local=True)
+    with patch("google.cloud.logging.Client") as log_cls, \
+         patch("google.cloud.monitoring_v3.MetricServiceClient") as metric_cls:
+        log_cls.return_value.list_entries.return_value = entries
+        metric_cls.return_value.list_time_series.return_value = []
+        return await CloudRunSpecialist().investigate(alert, config)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_s2_cloud_run_sample_logs_exclude_200_access_lines():
+    dossier = await _cloud_run_dossier_with_stderr(
+        ['INFO:     10.1.2.3:37442 - "GET /items HTTP/1.1" 200 OK', "INFO:     Shutting down"],
+        "ata-inventory-latency",
+    )
+    content = "\n".join(e.content for e in dossier.evidence_items)
+    assert "200 OK" not in content
+    assert "Sample Logs (excluding /admin/*):\n- N/A (not captured)" in content
+    # The synthesizer then shows no log excerpt rather than a mislabelled one.
+    obs = SynthesizerAgent()._synthesize_observations([dossier], AlertEvent(
+        incident_id="0.oeb4hxzrsiqu", policy_name="ata-inventory-latency",
+        resource_name="ata-inventory-api", started_at="2026-10-27T07:40:49Z",
+    ))
+    assert "Log excerpt" not in obs
+
+
+@pytest.mark.asyncio
+async def test_s1_cloud_run_sample_logs_keep_500_and_drop_admin_lines():
+    dossier = await _cloud_run_dossier_with_stderr(
+        [
+            'INFO:     10.1.2.3:50318 - "POST /items/reserve HTTP/1.1" 500 Internal Server Error',
+            'INFO:     10.1.2.3:50319 - "POST /admin/fault HTTP/1.1" 500 Internal Server Error',
+        ],
+        "ata-inventory-5xx",
+    )
+    content = "\n".join(e.content for e in dossier.evidence_items)
+    assert "ERROR HTTP 500 /items/reserve" in content
+    assert "/admin/fault" not in content

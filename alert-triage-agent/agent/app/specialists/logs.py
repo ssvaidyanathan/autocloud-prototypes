@@ -53,6 +53,36 @@ def is_application_or_request_log(entry: Any) -> bool:
     return False
 
 
+# Level prefix written by Python logging / uvicorn ("INFO:     ...", "ERROR: ...").
+EMBEDDED_LEVEL_PATTERN = re.compile(r'^\s*(DEBUG|INFO|NOTICE|WARNING|WARN|ERROR|CRITICAL)\s*:\s*', re.IGNORECASE)
+# Access-log request and status ('"GET /items HTTP/1.1" 200 OK').
+ACCESS_LINE_PATTERN = re.compile(r'"([A-Z]+) (\S+) HTTP/[0-9.]+"\s+(\d{3})\b')
+
+ERROR_SEVERITIES = ("ERROR", "CRITICAL", "ALERT", "EMERGENCY")
+
+
+def parse_embedded_level(text: str) -> Optional[str]:
+    """Return the log level a text line declares itself (e.g. 'INFO'), or None."""
+    m = EMBEDDED_LEVEL_PATTERN.match(text or "")
+    if not m:
+        return None
+    level = m.group(1).upper()
+    return "WARNING" if level == "WARN" else level
+
+
+def parse_access_log_line(text: str) -> Optional[tuple[str, str, int]]:
+    """Return (method, path, status) from an access-log text line, or None."""
+    m = ACCESS_LINE_PATTERN.search(text or "")
+    if not m:
+        return None
+    path = m.group(2)
+    try:
+        path = urlparse(path).path or path
+    except Exception:
+        pass
+    return m.group(1), path, int(m.group(3))
+
+
 def format_single_line_log_excerpt(entry: Any) -> Optional[str]:
     """Format log entry as ONE clean line: timestamp, severity, status, path/message <= 200 chars.
 
@@ -90,16 +120,37 @@ def format_single_line_log_excerpt(entry: Any) -> Optional[str]:
     elif isinstance(payload, str):
         msg = payload
 
-    is_status_500 = False
-    try:
-        if status_code is not None and int(status_code) >= 500:
-            is_status_500 = True
-    except (ValueError, TypeError):
-        pass
+    # Cloud Run stores everything written to stderr as ERROR, including uvicorn's INFO access
+    # lines. The level and status a line states about itself win over the entry severity.
+    embedded_level = parse_embedded_level(msg) if isinstance(msg, str) else None
+    if embedded_level:
+        msg = EMBEDDED_LEVEL_PATTERN.sub("", msg, count=1)
+    if status_code is None and isinstance(msg, str):
+        access = parse_access_log_line(msg)
+        if access:
+            _, access_path, status_code = access
+            if not req_path:
+                req_path = access_path
 
-    is_sev_error = sev_upper in ["ERROR", "CRITICAL", "ALERT", "EMERGENCY"]
-    if not (is_status_500 or is_sev_error):
+    status_num: Optional[int] = None
+    try:
+        if status_code is not None:
+            status_num = int(status_code)
+    except (ValueError, TypeError):
+        status_num = None
+
+    if status_num is not None:
+        # A request line is an error only when it failed on the server side.
+        if status_num < 500:
+            return None
+        sev_upper = "ERROR"
+    elif embedded_level:
+        if embedded_level not in ERROR_SEVERITIES:
+            return None
+        sev_upper = embedded_level
+    elif sev_upper not in ERROR_SEVERITIES:
         return None
+    is_status_500 = status_num is not None
 
     # Timestamp formatting
     ts_str = ""
@@ -112,7 +163,7 @@ def format_single_line_log_excerpt(entry: Any) -> Optional[str]:
 
     clean_path = sanitize_log_text(req_path)
     clean_msg = sanitize_log_text(msg)
-    status_str = f"HTTP {status_code}" if status_code else ("HTTP 500" if is_status_500 else "")
+    status_str = f"HTTP {status_num}" if is_status_500 else ""
 
     parts = []
     if ts_str:
@@ -153,4 +204,6 @@ __all__ = [
     "is_application_or_request_log",
     "sanitize_log_text",
     "format_single_line_log_excerpt",
+    "parse_access_log_line",
+    "parse_embedded_level",
 ]
