@@ -3,6 +3,7 @@ dispatcher:
   - triage-playbook
   - cloud-run-troubleshooting
   - gke-troubleshooting
+  - k8s-change-correlation
   - cloud-sql-troubleshooting
 
 logs:
@@ -13,6 +14,7 @@ metrics:
 
 changes:
   - change-correlation
+  - k8s-change-correlation
 
 resources:
   - cloud-run-troubleshooting

@@ -24,6 +24,7 @@ from ..tools.metrics import (
     compare_to_baseline,
     list_alert_policies,
     list_open_alerts,
+    query_gke_metrics,
     query_time_series,
 )
 from .base import BaseSpecialist, SkillTracker, run_sync
@@ -125,6 +126,7 @@ class MetricsSpecialist(BaseSpecialist):
             FunctionTool(compare_to_baseline),
             FunctionTool(list_alert_policies),
             FunctionTool(list_open_alerts),
+            FunctionTool(query_gke_metrics),
         ]
         self.adk_tools = adk_tools
 
@@ -212,12 +214,19 @@ class MetricsSpecialist(BaseSpecialist):
                 kwargs["client"] = self.client
             return list_open_alerts(**kwargs)
 
+        @functools.wraps(query_gke_metrics)
+        def _bound_query_gke_metrics(**kwargs: Any) -> Any:
+            if "client" not in kwargs and self.client is not None:
+                kwargs["client"] = self.client
+            return query_gke_metrics(**kwargs)
+
         tools: list[Any] = [
             skill_toolset,
             FunctionTool(_bound_query_time_series),
             FunctionTool(_bound_compare_to_baseline),
             FunctionTool(_bound_list_alert_policies),
             FunctionTool(_bound_list_open_alerts),
+            FunctionTool(_bound_query_gke_metrics),
         ]
 
         instruction = get_agent_yaml_config().get_instruction("metrics_specialist")

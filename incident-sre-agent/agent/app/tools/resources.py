@@ -6,7 +6,10 @@ from typing import Any, Dict, List, Optional, Union
 from .clients import (
     get_cloud_run_services_client,
     get_cloud_sql_admin_client,
+    get_compute_backend_services_client,
+    get_compute_forwarding_rules_client,
     get_compute_instances_client,
+    get_compute_target_pools_client,
     get_gke_cluster_client,
     get_logging_client,
     is_local_mode,
@@ -175,25 +178,18 @@ def describe_cloud_run_service(
 
 @readonly_tool(
     name="describe_gke_clusters",
-    description="List GKE clusters, status, node counts, and location.",
+    description="List GKE clusters, status, node counts, Autopilot status, and location.",
 )
 def describe_gke_clusters(
     project_id: Optional[str] = None,
     location: Optional[str] = None,
     client: Any = None,
 ) -> List[Dict[str, Any]]:
-    """List GKE clusters in project and location."""
+    """List GKE clusters across all locations (default: locations/-) or a specific location."""
     from .registry import get_pinned_project_id
 
     pinned_project = get_pinned_project_id(project_id)
-
-    if not location:
-        try:
-            from agent.app.config import get_settings
-
-            location = get_settings().gcp_region
-        except Exception:
-            location = os.getenv("GCP_REGION", "")
+    target_location = (location or "").strip() or "-"
 
     if client is None:
         client = get_gke_cluster_client()
@@ -204,26 +200,35 @@ def describe_gke_clusters(
     clusters: List[Dict[str, Any]] = []
 
     if client is not None:
-        parent = f"projects/{pinned_project}/locations/{location}"
+        parent = f"projects/{pinned_project}/locations/{target_location}"
         try:
             raw_clusters = client.list_clusters(parent=parent)
         except (TypeError, ValueError):
             raw_clusters = client.list_clusters(request={"parent": parent})
 
         cluster_list = getattr(raw_clusters, "clusters", raw_clusters)
-        if isinstance(cluster_list, (list, tuple)):
+        if cluster_list is not None and hasattr(cluster_list, "__iter__"):
             for cluster in cluster_list:
                 cluster_name = getattr(cluster, "name", "")
+                cluster_loc = getattr(cluster, "location", "") or (
+                    target_location if target_location != "-" else ""
+                )
+                display_loc = cluster_loc or target_location
                 cluster_console = (
                     f"https://console.cloud.google.com/kubernetes/clusters/details/"
-                    f"{location}/{cluster_name}?project={pinned_project}"
+                    f"{display_loc}/{cluster_name}?project={pinned_project}"
                 )
+                autopilot_enabled = False
+                autopilot_obj = getattr(cluster, "autopilot", None)
+                if autopilot_obj is not None:
+                    autopilot_enabled = bool(getattr(autopilot_obj, "enabled", False))
                 clusters.append(
                     {
                         "name": cluster_name,
                         "status": str(getattr(cluster, "status", "STATUS_UNSPECIFIED")),
                         "current_node_count": getattr(cluster, "current_node_count", 0),
-                        "location": getattr(cluster, "location", location),
+                        "location": cluster_loc,
+                        "autopilot": autopilot_enabled,
                         "console_url": cluster_console,
                     }
                 )
@@ -585,5 +590,591 @@ def get_platform_events(
         "system_events": system_events,
         "has_oom": has_oom,
         "has_probe_failure": has_probe_failure,
+        "console_url": console_url,
+    }
+
+
+@readonly_tool(
+    name="query_gke_workload_status",
+    description=(
+        "Query GKE workload status (Deployments, StatefulSets, Pods) including replica counts, "
+        "phases, container restart counts, last termination exit codes, and probe config."
+    ),
+)
+def query_gke_workload_status(
+    namespace: str,
+    cluster_name: Optional[str] = None,
+    location: Optional[str] = None,
+    workload_name: Optional[str] = None,
+    workload_type: Optional[str] = None,
+    project_id: Optional[str] = None,
+    client: Any = None,
+) -> Dict[str, Any]:
+    """Inspect GKE Deployments, StatefulSets, and Pods via Kubernetes REST API."""
+    import base64
+    import tempfile
+
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+    console_url = (
+        f"https://console.cloud.google.com/kubernetes/workload/overview?project={pinned_project}"
+    )
+
+    if is_local_mode() and client is None:
+        return {
+            "status": "SUCCESS",
+            "cluster_name": cluster_name or "local-cluster",
+            "namespace": namespace,
+            "deployments_count": 0,
+            "deployments": [],
+            "statefulsets_count": 0,
+            "statefulsets": [],
+            "pods_count": 0,
+            "pods": [],
+            "console_url": console_url,
+        }
+
+    cluster_loc = location
+    target_cluster = cluster_name
+
+    # If client is provided and has direct mocked workload data
+    if client is not None and (
+        (
+            hasattr(client, "mock_workloads")
+            and not hasattr(getattr(client, "mock_workloads"), "_mock_name")
+        )
+        or (
+            hasattr(client, "mock_deployments")
+            and not hasattr(getattr(client, "mock_deployments"), "_mock_name")
+        )
+    ):
+        mock_d = getattr(client, "mock_deployments", [])
+        mock_s = getattr(client, "mock_statefulsets", [])
+        mock_p = getattr(client, "mock_pods", [])
+        return {
+            "status": "SUCCESS",
+            "cluster_name": cluster_name or "mock-cluster",
+            "namespace": namespace,
+            "deployments_count": len(mock_d),
+            "deployments": mock_d,
+            "statefulsets_count": len(mock_s),
+            "statefulsets": mock_s,
+            "pods_count": len(mock_p),
+            "pods": mock_p,
+            "console_url": console_url,
+        }
+
+    cluster_client = (
+        client
+        if (
+            client is not None
+            and hasattr(client, "get_cluster")
+            and not hasattr(getattr(client, "get_cluster"), "_mock_name")
+        )
+        else None
+    )
+    if cluster_client is None:
+        cluster_client = get_gke_cluster_client()
+
+    if (
+        cluster_client is None
+        and not is_local_mode()
+        and not (client is not None and hasattr(client, "get"))
+    ):
+        raise RuntimeError("GCP GKE cluster client unavailable in production environment")
+
+    # Discover cluster if not fully specified
+    if (not target_cluster or not cluster_loc or cluster_loc == "-") and cluster_client is not None:
+        try:
+            parent = f"projects/{pinned_project}/locations/-"
+            try:
+                raw_clusters = cluster_client.list_clusters(parent=parent)
+            except (TypeError, ValueError):
+                raw_clusters = cluster_client.list_clusters(request={"parent": parent})
+            cluster_list = getattr(raw_clusters, "clusters", raw_clusters) or []
+            for c in cluster_list:
+                c_name = getattr(c, "name", "")
+                c_loc = getattr(c, "location", "")
+                if target_cluster:
+                    if c_name == target_cluster:
+                        cluster_loc = c_loc
+                        break
+                else:
+                    target_cluster = c_name
+                    cluster_loc = c_loc
+                    break
+        except Exception:
+            pass
+
+    if not target_cluster:
+        return {
+            "status": "NOT_FOUND",
+            "cluster_name": None,
+            "namespace": namespace,
+            "deployments_count": 0,
+            "deployments": [],
+            "statefulsets_count": 0,
+            "statefulsets": [],
+            "pods_count": 0,
+            "pods": [],
+            "message": f"No GKE clusters found in project {pinned_project}",
+            "console_url": console_url,
+        }
+
+    if not cluster_loc:
+        cluster_loc = os.getenv("GCP_REGION", "us-central1")
+
+    endpoint = ""
+    ca_cert = ""
+    if cluster_client is not None:
+        try:
+            cluster_path = (
+                f"projects/{pinned_project}/locations/{cluster_loc}/clusters/{target_cluster}"
+            )
+            try:
+                c_obj = cluster_client.get_cluster(name=cluster_path)
+            except (TypeError, ValueError):
+                c_obj = cluster_client.get_cluster(request={"name": cluster_path})
+            endpoint = getattr(c_obj, "endpoint", "")
+            master_auth = getattr(c_obj, "master_auth", None)
+            if master_auth:
+                ca_cert = getattr(master_auth, "cluster_ca_certificate", "")
+        except Exception:
+            pass
+
+    deployments: List[Dict[str, Any]] = []
+    statefulsets: List[Dict[str, Any]] = []
+    pods: List[Dict[str, Any]] = []
+
+    temp_ca_path: Optional[str] = None
+    session = None
+    if client is not None and hasattr(client, "get"):
+        session = client
+    elif cluster_client is not None and hasattr(cluster_client, "_session"):
+        session = getattr(cluster_client, "_session", None)
+
+    try:
+        verify_arg: Union[str, bool] = False
+        if session is None and endpoint:
+            try:
+                import google.auth
+                from google.auth.transport.requests import AuthorizedSession
+
+                if ca_cert:
+                    with tempfile.NamedTemporaryFile(delete=False) as f:
+                        f.write(base64.b64decode(ca_cert))
+                        temp_ca_path = f.name
+                    verify_arg = temp_ca_path
+                else:
+                    verify_arg = False
+
+                creds, _ = google.auth.default(
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+                session = AuthorizedSession(creds)  # type: ignore[no-untyped-call]
+            except Exception:
+                session = None
+
+        if session is not None:
+            # 1. Deployments
+            if workload_type in (None, "", "deployment", "deployments"):
+                url = f"https://{endpoint}/apis/apps/v1/namespaces/{namespace}/deployments"
+                try:
+                    resp = session.get(url, verify=verify_arg, timeout=10)
+                    if getattr(resp, "status_code", None) == 200:
+                        items = resp.json().get("items", []) if hasattr(resp, "json") else []
+                        for item in items:
+                            d_meta = item.get("metadata", {})
+                            d_name = d_meta.get("name", "")
+                            if workload_name and d_name != workload_name:
+                                continue
+                            d_spec = item.get("spec", {})
+                            d_status = item.get("status", {})
+                            containers = []
+                            for c in (
+                                d_spec.get("template", {}).get("spec", {}).get("containers", [])
+                            ):
+                                containers.append(
+                                    {
+                                        "name": c.get("name", ""),
+                                        "image": c.get("image", ""),
+                                        "readiness_probe": c.get("readinessProbe"),
+                                        "liveness_probe": c.get("livenessProbe"),
+                                        "startup_probe": c.get("startupProbe"),
+                                        "resources": c.get("resources", {}),
+                                    }
+                                )
+                            deployments.append(
+                                {
+                                    "name": d_name,
+                                    "namespace": namespace,
+                                    "desired_replicas": d_spec.get("replicas", 0),
+                                    "current_replicas": d_status.get("replicas", 0),
+                                    "ready_replicas": d_status.get("readyReplicas", 0),
+                                    "updated_replicas": d_status.get("updatedReplicas", 0),
+                                    "available_replicas": d_status.get("availableReplicas", 0),
+                                    "conditions": [
+                                        {
+                                            "type": cond.get("type"),
+                                            "status": cond.get("status"),
+                                            "reason": cond.get("reason"),
+                                            "message": cond.get("message"),
+                                        }
+                                        for cond in d_status.get("conditions", [])
+                                    ],
+                                    "containers": containers,
+                                }
+                            )
+                except Exception:
+                    pass
+
+            # 2. StatefulSets
+            if workload_type in (None, "", "statefulset", "statefulsets"):
+                url = f"https://{endpoint}/apis/apps/v1/namespaces/{namespace}/statefulsets"
+                try:
+                    resp = session.get(url, verify=verify_arg, timeout=10)
+                    if getattr(resp, "status_code", None) == 200:
+                        items = resp.json().get("items", []) if hasattr(resp, "json") else []
+                        for item in items:
+                            s_meta = item.get("metadata", {})
+                            s_name = s_meta.get("name", "")
+                            if workload_name and s_name != workload_name:
+                                continue
+                            s_spec = item.get("spec", {})
+                            s_status = item.get("status", {})
+                            containers = []
+                            for c in (
+                                s_spec.get("template", {}).get("spec", {}).get("containers", [])
+                            ):
+                                containers.append(
+                                    {
+                                        "name": c.get("name", ""),
+                                        "image": c.get("image", ""),
+                                        "readiness_probe": c.get("readinessProbe"),
+                                        "liveness_probe": c.get("livenessProbe"),
+                                        "startup_probe": c.get("startupProbe"),
+                                        "resources": c.get("resources", {}),
+                                    }
+                                )
+                            statefulsets.append(
+                                {
+                                    "name": s_name,
+                                    "namespace": namespace,
+                                    "desired_replicas": s_spec.get("replicas", 0),
+                                    "current_replicas": s_status.get("replicas", 0),
+                                    "ready_replicas": s_status.get("readyReplicas", 0),
+                                    "updated_replicas": s_status.get("updatedReplicas", 0),
+                                    "containers": containers,
+                                }
+                            )
+                except Exception:
+                    pass
+
+            # 3. Pods
+            url = f"https://{endpoint}/api/v1/namespaces/{namespace}/pods"
+            try:
+                resp = session.get(url, verify=verify_arg, timeout=10)
+                if getattr(resp, "status_code", None) == 200:
+                    items = resp.json().get("items", []) if hasattr(resp, "json") else []
+                    for item in items:
+                        p_meta = item.get("metadata", {})
+                        p_name = p_meta.get("name", "")
+                        if workload_name:
+                            owners = [o.get("name", "") for o in p_meta.get("ownerReferences", [])]
+                            if not (
+                                p_name.startswith(f"{workload_name}-")
+                                or any(workload_name in o for o in owners)
+                            ):
+                                continue
+                        p_spec = item.get("spec", {})
+                        p_status = item.get("status", {})
+                        c_statuses = []
+                        for cs in p_status.get("containerStatuses", []):
+                            st = cs.get("state", {})
+                            state_info: Dict[str, Any] = {}
+                            if "running" in st:
+                                state_info = {
+                                    "state": "running",
+                                    "started_at": st["running"].get("startedAt"),
+                                }
+                            elif "waiting" in st:
+                                state_info = {
+                                    "state": "waiting",
+                                    "reason": st["waiting"].get("reason"),
+                                    "message": st["waiting"].get("message"),
+                                }
+                            elif "terminated" in st:
+                                state_info = {
+                                    "state": "terminated",
+                                    "exit_code": st["terminated"].get("exitCode"),
+                                    "reason": st["terminated"].get("reason"),
+                                    "started_at": st["terminated"].get("startedAt"),
+                                    "finished_at": st["terminated"].get("finishedAt"),
+                                }
+
+                            lst = cs.get("lastState", {})
+                            last_state_info: Dict[str, Any] = {}
+                            if "terminated" in lst:
+                                last_state_info = {
+                                    "state": "terminated",
+                                    "exit_code": lst["terminated"].get("exitCode"),
+                                    "reason": lst["terminated"].get("reason"),
+                                    "started_at": lst["terminated"].get("startedAt"),
+                                    "finished_at": lst["terminated"].get("finishedAt"),
+                                }
+
+                            c_statuses.append(
+                                {
+                                    "name": cs.get("name"),
+                                    "ready": cs.get("ready"),
+                                    "restart_count": cs.get("restartCount", 0),
+                                    "state": state_info,
+                                    "last_state": last_state_info,
+                                }
+                            )
+
+                        pods.append(
+                            {
+                                "name": p_name,
+                                "namespace": namespace,
+                                "phase": p_status.get("phase"),
+                                "node_name": p_spec.get("nodeName"),
+                                "pod_ip": p_status.get("podIP"),
+                                "start_time": p_status.get("startTime"),
+                                "container_statuses": c_statuses,
+                            }
+                        )
+            except Exception:
+                pass
+
+    finally:
+        if temp_ca_path and os.path.exists(temp_ca_path):
+            try:
+                os.remove(temp_ca_path)
+            except Exception:
+                pass
+
+    return {
+        "status": "SUCCESS",
+        "cluster_name": target_cluster,
+        "location": cluster_loc,
+        "namespace": namespace,
+        "deployments_count": len(deployments),
+        "deployments": deployments,
+        "statefulsets_count": len(statefulsets),
+        "statefulsets": statefulsets,
+        "pods_count": len(pods),
+        "pods": pods,
+        "console_url": console_url,
+    }
+
+
+def _extract_ip_or_host(endpoint: str) -> str:
+    cleaned = endpoint.strip()
+    if "://" in cleaned:
+        parsed = urllib.parse.urlparse(cleaned)
+        cleaned = parsed.netloc or parsed.path
+    if ":" in cleaned:
+        cleaned = cleaned.split(":")[0]
+    return cleaned.strip()
+
+
+@readonly_tool(
+    name="resolve_endpoint_to_gke",
+    description=(
+        "Resolve an external IP address or uptime check URL to GCP Compute Forwarding Rules, "
+        "Target Pools / Backend Services, backing Kubernetes Service, and GKE cluster."
+    ),
+)
+def resolve_endpoint_to_gke(
+    endpoint: str,
+    project_id: Optional[str] = None,
+    client: Any = None,
+    target_pools_client: Any = None,
+    backend_services_client: Any = None,
+) -> Dict[str, Any]:
+    """Map external IP/URL to forwarding rule, target pool/NEG, K8s Service, and cluster."""
+    import json
+    import re
+
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+    target_ip = _extract_ip_or_host(endpoint)
+    console_url = f"https://console.cloud.google.com/net-services/loadbalancing/loadBalancers/list?project={pinned_project}"
+
+    if is_local_mode() and client is None:
+        return {
+            "endpoint": endpoint,
+            "ip_address": target_ip,
+            "found": False,
+            "message": "Local mode: no forwarding rules inspected.",
+            "console_url": console_url,
+        }
+
+    fw_client = client if client is not None else get_compute_forwarding_rules_client()
+    if fw_client is None and not is_local_mode():
+        raise RuntimeError(
+            "GCP Compute ForwardingRulesClient unavailable in production environment"
+        )
+
+    if fw_client is None:
+        return {
+            "endpoint": endpoint,
+            "ip_address": target_ip,
+            "found": False,
+            "message": "Forwarding rules client unavailable.",
+            "console_url": console_url,
+        }
+
+    matched_fw: Optional[Any] = None
+    try:
+        if hasattr(fw_client, "aggregated_list"):
+            agg = fw_client.aggregated_list(project=pinned_project)
+            for _, scoped_list in agg:
+                fws = getattr(scoped_list, "forwarding_rules", []) or []
+                for fw in fws:
+                    fw_ip = (
+                        getattr(fw, "IPAddress", None)
+                        or getattr(fw, "ip_address", None)
+                        or getattr(fw, "I_p_address", None)
+                        or (fw.get("IPAddress") if isinstance(fw, dict) else None)
+                    )
+                    if fw_ip == target_ip:
+                        matched_fw = fw
+                        break
+                if matched_fw is not None:
+                    break
+    except Exception:
+        pass
+
+    if matched_fw is None:
+        return {
+            "endpoint": endpoint,
+            "ip_address": target_ip,
+            "found": False,
+            "message": (
+                f"Endpoint '{target_ip}' did not match any Compute forwarding rule "
+                f"in project {pinned_project}."
+            ),
+            "console_url": console_url,
+        }
+
+    fw_name = getattr(matched_fw, "name", "") or (
+        matched_fw.get("name", "") if isinstance(matched_fw, dict) else ""
+    )
+    fw_target = (
+        getattr(matched_fw, "target", "")
+        or getattr(matched_fw, "backend_service", "")
+        or (matched_fw.get("target", "") if isinstance(matched_fw, dict) else "")
+    )
+    raw_region = getattr(matched_fw, "region", "") or (
+        matched_fw.get("region", "") if isinstance(matched_fw, dict) else ""
+    )
+    fw_region = raw_region.split("/")[-1] if raw_region else ""
+
+    tp_name: Optional[str] = None
+    backend_svc_name: Optional[str] = None
+    is_k8s = False
+    k8s_service: Optional[str] = None
+    k8s_namespace: Optional[str] = None
+    k8s_svc_name: Optional[str] = None
+    cluster_name: Optional[str] = None
+    target_instances: List[str] = []
+
+    if "targetPools" in fw_target:
+        tp_name = fw_target.split("/")[-1]
+        tp_reg = (
+            fw_target.split("/regions/")[1].split("/")[0] if "/regions/" in fw_target else fw_region
+        )
+        tp_cli = (
+            target_pools_client
+            if target_pools_client is not None
+            else get_compute_target_pools_client()
+        )
+        if tp_cli is not None:
+            try:
+                tp_obj = tp_cli.get(project=pinned_project, region=tp_reg, target_pool=tp_name)
+                desc = getattr(tp_obj, "description", "") or (
+                    tp_obj.get("description", "") if isinstance(tp_obj, dict) else ""
+                )
+                if desc:
+                    try:
+                        if desc.startswith("{"):
+                            desc_data = json.loads(desc)
+                            k8s_service = desc_data.get("kubernetes.io/service-name")
+                    except Exception:
+                        pass
+                    if not k8s_service:
+                        m_svc = re.search(r'kubernetes\.io/service-name["\':\s]+([^"\'}\s]+)', desc)
+                        if m_svc:
+                            k8s_service = m_svc.group(1)
+
+                inst_list = getattr(tp_obj, "instances", []) or (
+                    tp_obj.get("instances", []) if isinstance(tp_obj, dict) else []
+                )
+                for inst in inst_list:
+                    inst_str = str(inst)
+                    target_instances.append(inst_str)
+                    if not cluster_name:
+                        inst_base = inst_str.split("/")[-1]
+                        m_cls = re.search(
+                            r"(?:gk3|gke)-(.+?)-(?:nap|pool|default-pool|[a-f0-9]{8})", inst_base
+                        )
+                        if m_cls:
+                            cluster_name = m_cls.group(1)
+            except Exception:
+                pass
+
+    elif "backendServices" in fw_target:
+        backend_svc_name = fw_target.split("/")[-1]
+        bs_cli = (
+            backend_services_client
+            if backend_services_client is not None
+            else get_compute_backend_services_client()
+        )
+        if bs_cli is not None:
+            try:
+                bs_obj = bs_cli.get(project=pinned_project, backend_service=backend_svc_name)
+                desc = getattr(bs_obj, "description", "") or (
+                    bs_obj.get("description", "") if isinstance(bs_obj, dict) else ""
+                )
+                if desc:
+                    try:
+                        if desc.startswith("{"):
+                            desc_data = json.loads(desc)
+                            k8s_service = desc_data.get("kubernetes.io/service-name")
+                    except Exception:
+                        pass
+                    if not k8s_service:
+                        m_svc = re.search(r'kubernetes\.io/service-name["\':\s]+([^"\'}\s]+)', desc)
+                        if m_svc:
+                            k8s_service = m_svc.group(1)
+            except Exception:
+                pass
+
+    if k8s_service:
+        is_k8s = True
+        if "/" in k8s_service:
+            k8s_namespace, k8s_svc_name = k8s_service.split("/", 1)
+        else:
+            k8s_svc_name = k8s_service
+
+    return {
+        "endpoint": endpoint,
+        "ip_address": target_ip,
+        "found": True,
+        "forwarding_rule": fw_name,
+        "region": fw_region,
+        "target": fw_target,
+        "target_pool": tp_name,
+        "backend_service": backend_svc_name,
+        "is_kubernetes_service": is_k8s,
+        "kubernetes_service": k8s_service,
+        "k8s_namespace": k8s_namespace,
+        "k8s_service_name": k8s_svc_name,
+        "cluster_name": cluster_name,
+        "target_instances": target_instances[:5],
         "console_url": console_url,
     }

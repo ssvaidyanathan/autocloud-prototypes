@@ -7,6 +7,7 @@ from .changes import (
 from .common import get_candidate_service_names
 from .logs import (
     aggregate_requests,
+    get_gke_workload_events,
     list_log_names,
     query_logs,
     query_request_logs,
@@ -16,6 +17,7 @@ from .metrics import (
     compare_to_baseline,
     list_alert_policies,
     list_open_alerts,
+    query_gke_metrics,
     query_time_series,
 )
 from .registry import (
@@ -30,6 +32,8 @@ from .resources import (
     describe_compute_instances,
     describe_gke_clusters,
     get_platform_events,
+    query_gke_workload_status,
+    resolve_endpoint_to_gke,
 )
 
 __all__ = [
@@ -38,6 +42,7 @@ __all__ = [
     "default_registry",
     "readonly_tool",
     "query_logs",
+    "get_gke_workload_events",
     "query_request_logs",
     "aggregate_requests",
     "summarize_error_groups",
@@ -46,6 +51,7 @@ __all__ = [
     "compare_to_baseline",
     "list_alert_policies",
     "list_open_alerts",
+    "query_gke_metrics",
     "query_audit_logs",
     "diff_revisions",
     "list_cloud_run_revisions",
@@ -55,5 +61,7 @@ __all__ = [
     "describe_gke_clusters",
     "describe_compute_instances",
     "describe_cloud_sql_instances",
+    "query_gke_workload_status",
+    "resolve_endpoint_to_gke",
     "get_candidate_service_names",
 ]

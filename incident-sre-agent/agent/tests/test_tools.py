@@ -13,6 +13,7 @@ from agent.app.tools.common import get_candidate_service_names
 from agent.app.tools.logs import (
     _is_probe_or_infra_noise,
     aggregate_requests,
+    get_gke_workload_events,
     list_log_names,
     query_logs,
     query_request_logs,
@@ -22,6 +23,7 @@ from agent.app.tools.metrics import (
     compare_to_baseline,
     list_alert_policies,
     list_open_alerts,
+    query_gke_metrics,
     query_time_series,
 )
 from agent.app.tools.resources import (
@@ -30,6 +32,8 @@ from agent.app.tools.resources import (
     describe_compute_instances,
     describe_gke_clusters,
     get_platform_events,
+    query_gke_workload_status,
+    resolve_endpoint_to_gke,
 )
 
 # ============================================================================
@@ -107,6 +111,64 @@ def test_list_log_names() -> None:
     logs = list_log_names(project_id="test-proj", client=mock_client)
     assert len(logs) == 2
     assert "cloudaudit.googleapis.com%2Factivity" in logs
+
+
+def test_get_gke_workload_events() -> None:
+    mock_client = MagicMock()
+
+    # 1. Kubernetes Warning Event (Killing / OOMKilled)
+    entry_event = MagicMock()
+    entry_event.timestamp = datetime(2026, 10, 26, 21, 30, 22, tzinfo=timezone.utc)
+    entry_event.log_name = "projects/test-proj/logs/events"
+    entry_event.json_payload = {
+        "reason": "Killing",
+        "message": "Stopping container app; pod was terminated",
+        "type": "Warning",
+        "involvedObject": {
+            "name": "service-alpha-pod-xyz",
+            "kind": "Pod",
+        },
+    }
+
+    # 2. k8s.io Cloud Audit Log (Deployments scale patch)
+    entry_audit = MagicMock()
+    entry_audit.timestamp = datetime(2026, 10, 26, 21, 30, 21, tzinfo=timezone.utc)
+    entry_audit.log_name = "projects/test-proj/logs/cloudaudit.googleapis.com%2Factivity"
+    entry_audit.proto_payload = {
+        "methodName": "io.k8s.apps.v1.deployments.scale.patch",
+        "resourceName": "apps/v1/namespaces/test-ns/deployments/test-workload/scale",
+        "authenticationInfo": {
+            "principalEmail": "scaler-sa@test-proj.iam.gserviceaccount.com",
+        },
+    }
+
+    mock_client.list_entries.return_value = [entry_event, entry_audit]
+
+    res = get_gke_workload_events(
+        cluster_name="test-cluster",
+        namespace="test-ns",
+        workload_name="test-workload",
+        project_id="test-proj",
+        client=mock_client,
+    )
+
+    assert res["cluster_name"] == "test-cluster"
+    assert res["namespace"] == "test-ns"
+    # entry_audit matched test-workload; entry_event had other-workload-pod-xyz
+    assert res["total_events"] == 1
+    assert res["events"][0]["event_type"] == "audit_activity"
+    assert res["events"][0]["action"] == "scale"
+    assert "scaler-sa@test-proj.iam.gserviceaccount.com" in res["events"][0]["message"]
+    assert "https://console.cloud.google.com/logs/query" in res["console_url"]
+
+    # Without workload_name filter: both events returned
+    res_all = get_gke_workload_events(
+        cluster_name="test-cluster",
+        namespace="test-ns",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert res_all["total_events"] == 2
 
 
 # ============================================================================
@@ -350,6 +412,14 @@ def test_describe_gke_compute_and_sql_instances() -> None:
     assert len(clusters) == 1
     assert clusters[0]["name"] == "prod-cluster"
     assert clusters[0]["status"] == "RUNNING"
+    mock_client.list_clusters.assert_called_with(parent="projects/test-proj/locations/-")
+
+    # Explicit location
+    clusters_explicit = describe_gke_clusters(
+        project_id="test-proj", location="us-west1", client=mock_client
+    )
+    assert len(clusters_explicit) == 1
+    mock_client.list_clusters.assert_called_with(parent="projects/test-proj/locations/us-west1")
 
     # Compute Engine
     inst = MagicMock()
@@ -1060,3 +1130,221 @@ def test_get_platform_events_client_disambiguation() -> None:
     )
     assert res["total_events"] == 0
     assert mock_logging_client.list_entries.called
+
+
+def test_query_gke_metrics_restart_count() -> None:
+    mock_client = MagicMock()
+    ts = MagicMock()
+    ts.resource.labels = {
+        "cluster_name": "test-cluster",
+        "namespace_name": "test-ns",
+        "pod_name": "test-pod-abc",
+        "container_name": "app",
+    }
+    pt1 = MagicMock()
+    pt1.value.int64_value = 5
+    pt1.interval.end_time = datetime(2026, 10, 26, 21, 35, 0, tzinfo=timezone.utc)
+    pt2 = MagicMock()
+    pt2.value.int64_value = 2
+    pt2.interval.end_time = datetime(2026, 10, 26, 21, 30, 0, tzinfo=timezone.utc)
+    ts.points = [pt1, pt2]
+    mock_client.list_time_series.return_value = [ts]
+
+    res = query_gke_metrics(
+        metric_type="restart_count",
+        cluster_name="test-cluster",
+        namespace="test-ns",
+        project_id="test-proj",
+        client=mock_client,
+    )
+
+    assert res["metric_type"] == "restart_count"
+    assert res["total_series"] == 1
+    assert res["series"][0]["pod_name"] == "test-pod-abc"
+    assert res["series"][0]["latest_value"] == 5.0
+    assert res["series"][0]["max_value"] == 5.0
+    assert 'resource.type = "k8s_container"' in res["query_filter"]
+
+
+def test_query_gke_metrics_autoscaler() -> None:
+    mock_client = MagicMock()
+    mock_client.list_time_series.return_value = []
+
+    res = query_gke_metrics(
+        metric_type="autoscaler_pending_pods",
+        cluster_name="test-cluster",
+        project_id="test-proj",
+        client=mock_client,
+    )
+    assert res["metric_type"] == "autoscaler_pending_pods"
+    assert 'resource.type = "k8s_cluster"' in res["query_filter"]
+
+
+def test_query_gke_workload_status_mock_session() -> None:
+    mock_session = MagicMock()
+
+    deployments_data = {
+        "items": [
+            {
+                "metadata": {"name": "order-api-deployment"},
+                "spec": {
+                    "replicas": 1,
+                    "template": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "app",
+                                    "image": "gcr.io/test-proj/order-api:v2",
+                                    "readinessProbe": {
+                                        "httpGet": {"path": "/healthz", "port": 8080},
+                                        "initialDelaySeconds": 15,
+                                    },
+                                    "startupProbe": None,
+                                    "resources": {"limits": {"memory": "512Mi"}},
+                                }
+                            ]
+                        }
+                    },
+                },
+                "status": {
+                    "replicas": 1,
+                    "readyReplicas": 0,
+                    "updatedReplicas": 1,
+                    "conditions": [
+                        {
+                            "type": "Available",
+                            "status": "False",
+                            "reason": "MinimumReplicasUnavailable",
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+
+    statefulsets_data: dict[str, Any] = {"items": []}
+
+    pods_data = {
+        "items": [
+            {
+                "metadata": {
+                    "name": "order-api-deployment-789-xyz",
+                    "ownerReferences": [{"name": "order-api-deployment"}],
+                },
+                "spec": {"nodeName": "node-pool-1-123"},
+                "status": {
+                    "phase": "Running",
+                    "podIP": "10.4.1.20",
+                    "startTime": "2026-10-26T21:33:00Z",
+                    "containerStatuses": [
+                        {
+                            "name": "app",
+                            "ready": False,
+                            "restartCount": 2,
+                            "state": {"running": {"startedAt": "2026-10-26T21:33:05Z"}},
+                            "lastState": {
+                                "terminated": {
+                                    "exitCode": 137,
+                                    "reason": "OOMKilled",
+                                    "startedAt": "2026-10-26T21:30:00Z",
+                                    "finishedAt": "2026-10-26T21:32:50Z",
+                                }
+                            },
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+
+    def _mock_get(url: str, **kwargs: Any) -> Any:
+        resp = MagicMock()
+        resp.status_code = 200
+        if "deployments" in url:
+            resp.json.return_value = deployments_data
+        elif "statefulsets" in url:
+            resp.json.return_value = statefulsets_data
+        elif "pods" in url:
+            resp.json.return_value = pods_data
+        return resp
+
+    mock_session.get.side_effect = _mock_get
+
+    res = query_gke_workload_status(
+        namespace="order-ns",
+        cluster_name="test-cluster",
+        location="us-central1",
+        project_id="test-proj",
+        client=mock_session,
+    )
+
+    assert res["status"] == "SUCCESS"
+    assert res["deployments_count"] == 1
+    dep = res["deployments"][0]
+    assert dep["name"] == "order-api-deployment"
+    assert dep["desired_replicas"] == 1
+    assert dep["ready_replicas"] == 0
+    assert dep["containers"][0]["readiness_probe"]["httpGet"]["path"] == "/healthz"
+    assert dep["containers"][0]["startup_probe"] is None
+
+    assert res["pods_count"] == 1
+    pod = res["pods"][0]
+    assert pod["name"] == "order-api-deployment-789-xyz"
+    assert pod["phase"] == "Running"
+    cs = pod["container_statuses"][0]
+    assert cs["ready"] is False
+    assert cs["restart_count"] == 2
+    assert cs["last_state"]["exit_code"] == 137
+    assert cs["last_state"]["reason"] == "OOMKilled"
+
+
+def test_resolve_endpoint_to_gke_found() -> None:
+    mock_fw_client = MagicMock()
+    fw = MagicMock()
+    fw.name = "fw-order-rule"
+    fw.IPAddress = "198.51.100.10"
+    fw.target = "https://www.googleapis.com/compute/v1/projects/test-proj/regions/us-west1/targetPools/tp-order-svc"
+    fw.region = "https://www.googleapis.com/compute/v1/projects/test-proj/regions/us-west1"
+
+    scoped_item = MagicMock()
+    scoped_item.forwarding_rules = [fw]
+    mock_fw_client.aggregated_list.return_value = [("regions/us-west1", scoped_item)]
+
+    mock_tp_client = MagicMock()
+    tp = MagicMock()
+    tp.description = '{"kubernetes.io/service-name":"order-ns/order-api-svc"}'
+    tp.instances = [
+        "https://www.googleapis.com/compute/v1/projects/test-proj/zones/us-west1-a/instances/gk3-test-cluster-nap-1234-abc"
+    ]
+    mock_tp_client.get.return_value = tp
+
+    res = resolve_endpoint_to_gke(
+        endpoint="http://198.51.100.10:8080/health",
+        project_id="test-proj",
+        client=mock_fw_client,
+        target_pools_client=mock_tp_client,
+    )
+
+    assert res["found"] is True
+    assert res["ip_address"] == "198.51.100.10"
+    assert res["forwarding_rule"] == "fw-order-rule"
+    assert res["target_pool"] == "tp-order-svc"
+    assert res["is_kubernetes_service"] is True
+    assert res["kubernetes_service"] == "order-ns/order-api-svc"
+    assert res["k8s_namespace"] == "order-ns"
+    assert res["k8s_service_name"] == "order-api-svc"
+    assert res["cluster_name"] == "test-cluster"
+
+
+def test_resolve_endpoint_to_gke_not_found() -> None:
+    mock_fw_client = MagicMock()
+    mock_fw_client.aggregated_list.return_value = []
+
+    res = resolve_endpoint_to_gke(
+        endpoint="203.0.113.99",
+        project_id="test-proj",
+        client=mock_fw_client,
+    )
+
+    assert res["found"] is False
+    assert "did not match" in res["message"]
