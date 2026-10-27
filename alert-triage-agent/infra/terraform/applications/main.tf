@@ -92,7 +92,15 @@ resource "google_cloud_run_v2_service" "inventory_api" {
     # pinned baseline revision with --revision-suffix=pin-<UTC time>, and inventory traffic is
     # routed to that revision by name. Without this, the next apply would plan
     # "revision = <pin> -> null" and create a new, unpinned revision with the same config
-    # (live ata rollout 2026-10-27). Image, env and template.scaling stay managed.
+    # (live ata rollout 2026-10-27).
+    # Consequence: while a named pin serves, a template change (image, env, template.scaling,
+    # inventory_mock_db, demo_max_instance_count) is still shown as a plan diff but CANNOT be
+    # applied: the provider sends the whole template under the existing pin name, and Cloud
+    # Run rejects a revision name that exists with a different configuration. Change the
+    # inventory template through scripts/repin-inventory.sh (prepare deploys the new image and
+    # settings as a new pinned revision; write-pin; switch), then keep these variables equal to
+    # what the pin runs. deploy-stage1.sh passes the pinned image as inventory_image and refuses
+    # an image that differs from the pin (DEPLOY.md, Step 9).
     ignore_changes = [client, client_version, scaling, template[0].revision]
   }
 }

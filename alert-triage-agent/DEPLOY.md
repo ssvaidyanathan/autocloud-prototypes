@@ -568,8 +568,12 @@ gcloud run services list --project="${PROJECT_ID}" --region="${REGION}" --filter
 
 It lists `<prefix>-inventory-api` and `<prefix>-orders-api` with URLs.
 
+**The inventory image once the stack has a pin.** On the first run there is no `scripts/scenarios/inventory-pin.<prefix>.env` yet: the phase passes the image built in Step 6, and Step 10 pins it. After that, the phase always passes the pinned image (`<repo>/<prefix>-inventory-api@<PIN_INVENTORY_DIGEST>`) and prints `inventory_image: the pinned image ...`. If `INVENTORY_IMAGE` (exported, or in the images file) names another image, for example a rebuild from Step 6 or an images file from before a re-pin, the phase stops before Terraform runs with `INVENTORY_IMAGE disagrees with the inventory pin` and both values. Change the inventory image only with `scripts/repin-inventory.sh` ([§4.3](#43-re-pinning-the-inventory-baseline-and-pruning-revisions)). The applications root ignores the pinned revision's name, so while a pin serves, Terraform cannot apply any change to the inventory template: not the image, the env, `inventory_mock_db` or `demo_max_instance_count`. The plan shows the change, and the apply fails with `revision ... with different configuration`. Make such a change through a re-pin, whose candidate gets the new image and `ATA_DEMO_MAX_INSTANCES`. Then keep the Terraform variables equal to what the pin runs.
+
 **If it fails:**
 - `Run the images phase (--only images) or export them`: the images file is missing, for example because the images were built in another clone. Run Step 6.
+- `INVENTORY_IMAGE disagrees with the inventory pin`: nothing was applied. To keep the current pin, unset `INVENTORY_IMAGE`, and set the `INVENTORY_IMAGE=` line of `.deploy-state/${PROJECT_ID}-${NAME_PREFIX}-images.env` to the pinned image the message prints, or delete that line. To serve the new image, re-pin ([§4.3](#43-re-pinning-the-inventory-baseline-and-pruning-revisions)).
+- `revision ... with different configuration` on `<prefix>-inventory-api`: a Terraform change to the inventory template while a pin serves (see above). Re-pin instead, or revert the variable.
 - `service account ... does not exist`: Step 4 did not complete for this prefix.
 
 ---

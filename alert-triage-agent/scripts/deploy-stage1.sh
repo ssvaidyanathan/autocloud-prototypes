@@ -378,10 +378,62 @@ phase_schema() {
 # deletion_protection is not passed: the root's default (true) protects an operator's stack. A
 # test or throwaway stack exports TF_VAR_deletion_protection=false or sets it in the root's
 # terraform.tfvars; teardown-stack.sh sets false itself before its destroy.
+#
+# The inventory image (R2, fresh-rev-delta): once the stack has an inventory pin
+# (scripts/scenarios/inventory-pin.${NAME_PREFIX}.env, or ATA_INVENTORY_PIN_FILE), the pinned
+# digest is what serves, and the applications root ignores template[0].revision (the pin's
+# name). Any template change Terraform applied under that name would fail at Cloud Run
+# ("revision ... with different configuration"), and before that ignore it silently created an
+# unpinned revision. So with a pin, inventory_image is ALWAYS the pinned image
+# (<repo>/<prefix>-inventory-api@<pin digest>). If INVENTORY_IMAGE (exported or from the
+# images file) names a different image, this phase fails before terraform runs: the inventory
+# image changes only through scripts/repin-inventory.sh (prepare --image-digest, write-pin,
+# switch; DEPLOY.md, "Re-pinning the inventory baseline"). Without a pin (a fresh stack's
+# first run) the built image is used, and the inventory-pin phase pins it.
 phase_applications() {
-    need_images INVENTORY_IMAGE ORDERS_IMAGE
+    local pin inventory_image
+    pin="$(inventory_pin_image)" || die "cannot read the inventory pin of stack '${NAME_PREFIX}' (errors above)."
+    if [ -n "${pin}" ]; then
+        need_images ORDERS_IMAGE
+        if [ -n "${INVENTORY_IMAGE:-}" ] && [ "${INVENTORY_IMAGE}" != "${pin}" ]; then
+            die "INVENTORY_IMAGE disagrees with the inventory pin of stack '${NAME_PREFIX}':
+    INVENTORY_IMAGE: ${INVENTORY_IMAGE} (exported, or from ${IMAGES_FILE})
+    pinned image:    ${pin} ($(inventory_pin_file))
+  Applying it would change the image that serves without a re-pin, and Cloud Run would reject
+  the template change under the pinned revision name. Nothing was applied.
+  - To serve a new inventory image: scripts/repin-inventory.sh prepare --image-digest <digest>,
+    then write-pin and switch (DEPLOY.md, 'Re-pinning the inventory baseline').
+  - To re-apply with the current pin: unset INVENTORY_IMAGE, and set the INVENTORY_IMAGE line of
+    ${IMAGES_FILE} to ${pin} (or delete that line)."
+        fi
+        echo "    inventory_image: the pinned image ${pin} ($(inventory_pin_file))"
+        inventory_image="${pin}"
+    else
+        need_images INVENTORY_IMAGE ORDERS_IMAGE
+        echo "    inventory_image: no inventory pin for stack '${NAME_PREFIX}' yet; using the built image ${INVENTORY_IMAGE} (the inventory-pin phase pins it)"
+        inventory_image="${INVENTORY_IMAGE}"
+    fi
     tf_apply applications ${TF_LABEL_VARS[@]+"${TF_LABEL_VARS[@]}"} \
-        -var "inventory_image=${INVENTORY_IMAGE}" -var "orders_image=${ORDERS_IMAGE}"
+        -var "inventory_image=${inventory_image}" -var "orders_image=${ORDERS_IMAGE}"
+}
+
+# The stack's inventory pin file: the path common.sh reads (ATA_INVENTORY_PIN_FILE overrides it).
+inventory_pin_file() {
+    printf '%s\n' "${ATA_INVENTORY_PIN_FILE:-${SCRIPT_DIR}/scenarios/inventory-pin.${NAME_PREFIX}.env}"
+}
+
+# Print the pinned inventory image (<repo>/<prefix>-inventory-api@sha256:...), or nothing when
+# the stack has no pin file yet. The file is read and validated by common.sh itself (the one
+# strict reader), in a separate bash process; the per-run PINNED_INVENTORY_* overrides of the
+# scenario scripts are ignored here, since what serves is what the file says. An invalid file fails.
+inventory_pin_image() {
+    # shellcheck disable=SC2016  # the script is for the child bash; $1 is common.sh there
+    env -u PINNED_INVENTORY_DIGEST -u PINNED_INVENTORY_REVISION -u PINNED_INVENTORY_IMAGE \
+        -u APIGEE_HOST -u APIGEE_ORG -u APIGEE_ENV INVENTORY_PIN_OPTIONAL=true \
+        "${BASH:-bash}" -c 'source "$1" >&2
+if [ "${INVENTORY_PIN_PRESENT}" = "true" ]; then
+    printf "%s@%s\n" "${PINNED_INVENTORY_IMAGE_BASE}" "${PIN_INVENTORY_DIGEST}"
+fi' inventory-pin "${SCRIPT_DIR}/scenarios/common.sh"
 }
 
 # First pin of the inventory baseline (ata-s3's repin-inventory.sh): candidate with no traffic,

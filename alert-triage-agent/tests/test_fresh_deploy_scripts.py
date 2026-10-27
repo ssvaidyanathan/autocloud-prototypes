@@ -225,7 +225,7 @@ def stack(tmp_path):
         env = {k: v for k, v in os.environ.items() if not re.match(
             r"^(PROJECT_ID|REGION|NAME_PREFIX|ENVIRONMENT|OWNER|SERVICENOW_.*|APIGEE_.*|GCP_.*|TFSTATE_BUCKET|"
             r"PROJECT_NUMBER|VERIFIER_SA|.*_IMAGE|IMAGE_TAG|ASSUME_YES|PGPASSWORD|BRIDGE_URL|AGENT_URL|TOOLS_URL|"
-            r"MODEL_NAME|GEMINI_LOCATION|AUTO_RESOLVE_ON_RECOVERY|DEPLOY_STATE_DIR|ATA_STACK_DIR)$", k)}
+            r"MODEL_NAME|GEMINI_LOCATION|AUTO_RESOLVE_ON_RECOVERY|DEPLOY_STATE_DIR|ATA_STACK_DIR|ATA_INVENTORY_PIN_FILE)$", k)}
         env.update(PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", STUB_DIR=str(stub_dir),
                    PROJECT_ID="fresh-proj", REGION="us-central1", NAME_PREFIX="atat", ENVIRONMENT="test",
                    OWNER="team-x", SERVICENOW_INSTANCE_URL="https://dev1.service-now.com", APIGEE_ENV="eval",
@@ -498,6 +498,108 @@ def test_resume_without_image_refs_fails_with_the_fix(stack):
     assert "image ref(s) unknown: INVENTORY_IMAGE ORDERS_IMAGE" in res.stderr
     assert "--only images" in res.stderr
     assert not [c for c in calls if c[0] == "terraform" and "apply" in c]
+
+
+# --- applications phase vs the inventory pin (fresh-rev-delta R2) ----------------------------
+# The fixture pin and images below are this test's own values; the per-stack pin is written
+# under the tmp copy of the tree, never read from the checkout.
+INV_REPO = "us-central1-docker.pkg.dev/fresh-proj/atat-docker/atat-inventory-api"
+PIN_DIGEST = "sha256:" + "1" * 64
+OTHER_DIGEST = "sha256:" + "2" * 64
+
+
+def _write_stack_pin(stack, digest=PIN_DIGEST):
+    """The stack's pin at its default path in the tmp tree (scripts/scenarios/inventory-pin.atat.env)."""
+    pin = stack.work / "scripts" / "scenarios" / "inventory-pin.atat.env"
+    pin.write_text(f"PIN_INVENTORY_REVISION=atat-inventory-api-pin-20260101000000\nPIN_INVENTORY_DIGEST={digest}\n")
+    return pin
+
+
+def _write_images(stack, inventory_digest):
+    state = stack.work / ".deploy-state"
+    state.mkdir(exist_ok=True)
+    lines = [f"ORDERS_IMAGE=us-central1-docker.pkg.dev/fresh-proj/atat-docker/atat-orders-api@sha256:{'3' * 64}"]
+    if inventory_digest:
+        lines.append(f"INVENTORY_IMAGE={INV_REPO}@{inventory_digest}")
+    (state / "fresh-proj-atat-images.env").write_text("\n".join(lines) + "\n")
+
+
+def _applications(stack, **env):
+    assert stack("bootstrap-tfstate.sh", "--write-backend-only")[0].returncode == 0
+    res, calls = stack("deploy-stage1.sh", "--yes", "--only", "applications", **env)
+    applies = [c for c in calls if c[:3] == ["terraform", "applications", "apply"]]
+    inv = [a for c in applies for a in c if a.startswith("inventory_image=")]
+    return res, applies, inv
+
+
+@pytest.mark.parametrize("images_digest", [PIN_DIGEST, None], ids=["images-file-agrees", "no-inventory-in-images-file"])
+def test_applications_passes_the_pinned_image_when_the_stack_has_a_pin(stack, images_digest):
+    _write_stack_pin(stack)
+    _write_images(stack, images_digest)
+    res, applies, inv = _applications(stack)
+    assert res.returncode == 0, _out(res)
+    assert inv == [f"inventory_image={INV_REPO}@{PIN_DIGEST}"]
+    assert f"the pinned image {INV_REPO}@{PIN_DIGEST}" in res.stdout
+
+
+@pytest.mark.parametrize("source", ["images-file", "exported"])
+def test_applications_fails_loudly_when_the_image_disagrees_with_the_pin(stack, source):
+    _write_stack_pin(stack)
+    env = {}
+    if source == "images-file":
+        _write_images(stack, OTHER_DIGEST)
+    else:
+        _write_images(stack, PIN_DIGEST)
+        env["INVENTORY_IMAGE"] = f"{INV_REPO}@{OTHER_DIGEST}"
+    res, applies, inv = _applications(stack, **env)
+    assert res.returncode == 1
+    assert applies == [], "nothing may be applied when the image and the pin disagree"
+    assert "INVENTORY_IMAGE disagrees with the inventory pin of stack 'atat'" in res.stderr
+    assert f"INVENTORY_IMAGE: {INV_REPO}@{OTHER_DIGEST}" in res.stderr
+    assert f"pinned image:    {INV_REPO}@{PIN_DIGEST}" in res.stderr
+    assert "scripts/repin-inventory.sh prepare --image-digest" in res.stderr
+
+
+def test_applications_uses_the_built_image_when_the_stack_has_no_pin(stack):
+    """A fresh stack's first run: no pin yet; the inventory-pin phase pins the built image."""
+    assert not (stack.work / "scripts" / "scenarios" / "inventory-pin.atat.env").exists()
+    _write_images(stack, OTHER_DIGEST)
+    res, applies, inv = _applications(stack)
+    assert res.returncode == 0, _out(res)
+    assert inv == [f"inventory_image={INV_REPO}@{OTHER_DIGEST}"]
+    assert "no inventory pin for stack 'atat' yet" in res.stdout
+
+
+def test_applications_without_a_pin_still_needs_the_inventory_image(stack):
+    _write_images(stack, None)
+    res, applies, _ = _applications(stack)
+    assert res.returncode == 1 and applies == []
+    assert "image ref(s) unknown: INVENTORY_IMAGE" in res.stderr
+
+
+def test_applications_honours_ata_inventory_pin_file_and_rejects_an_invalid_pin(stack, tmp_path):
+    pin = tmp_path / "elsewhere.env"
+    pin.write_text(f"PIN_INVENTORY_REVISION=atat-inventory-api-pin-1\nPIN_INVENTORY_DIGEST={OTHER_DIGEST}\n")
+    _write_images(stack, None)
+    res, _, inv = _applications(stack, ATA_INVENTORY_PIN_FILE=str(pin))
+    assert res.returncode == 0, _out(res)
+    assert inv == [f"inventory_image={INV_REPO}@{OTHER_DIGEST}"]
+    pin.write_text("PIN_INVENTORY_REVISION=atat-inventory-api-pin-1\nPIN_INVENTORY_DIGEST=sha256:nothex\n")
+    res, applies, _ = _applications(stack, ATA_INVENTORY_PIN_FILE=str(pin))
+    assert res.returncode == 1 and applies == []
+    assert "is not sha256:<64 hex>" in res.stderr
+    assert "cannot read the inventory pin of stack 'atat'" in res.stderr
+
+
+def test_applications_never_passes_an_inventory_image_other_than_the_pin(stack):
+    """Review R2.3: across every way the image can be given, a pinned stack's apply gets the pin or nothing."""
+    _write_stack_pin(stack)
+    for images_digest, exported in [(PIN_DIGEST, None), (None, None), (OTHER_DIGEST, None),
+                                    (PIN_DIGEST, f"{INV_REPO}@{OTHER_DIGEST}"), (None, f"{INV_REPO}@{PIN_DIGEST}"),
+                                    (None, f"other-host/p/r/atat-inventory-api@{PIN_DIGEST}")]:
+        _write_images(stack, images_digest)
+        _, _, inv = _applications(stack, INVENTORY_IMAGE=exported)
+        assert inv in ([], [f"inventory_image={INV_REPO}@{PIN_DIGEST}"]), (images_digest, exported, inv)
 
 
 def test_refuses_another_stacks_backend(stack):
