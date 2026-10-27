@@ -109,6 +109,20 @@ def _alert_field(a: dict[str, Any], *keys: str) -> Optional[str]:
     return None
 
 
+def format_alert_trigger_line(
+    policy: str,
+    resource: str,
+    started_at: str,
+    state: str,
+    incident_id: Optional[str] = None,
+) -> str:
+    """One observation line per alert. The incident id keeps two alerts of one policy on one
+    resource (e.g. one per metric series) distinguishable; it matches the description's alert
+    list and the Cloud Monitoring console link."""
+    inc = f", incident {incident_id}" if incident_id else ""
+    return f"Cloud Monitoring policy '{policy}' triggered on '{resource}' at {started_at} (state: {state}{inc})"
+
+
 def apply_group_alerts(report: InvestigationReport, group_alerts: list[Any]) -> InvestigationReport:
     """Make the report reflect every alert of the incident group, not just the triggering one.
 
@@ -148,12 +162,24 @@ def apply_group_alerts(report: InvestigationReport, group_alerts: list[Any]) -> 
             continue
         policy = _alert_field(a, "policy_name", "policy") or "unknown"
         resource = _alert_field(a, "component", "resource_name", "resource") or "unknown"
-        line = (
-            f"{CORRELATED_ALERT_PREFIX} Cloud Monitoring policy '{policy}' triggered on '{resource}'"
-            f" at {_alert_field(a, 'started_at') or 'unknown'} (state: {_alert_field(a, 'state') or 'open'})"
+        inc_id = _alert_field(a, "incident_id")
+        line = f"{CORRELATED_ALERT_PREFIX} " + format_alert_trigger_line(
+            policy,
+            resource,
+            _alert_field(a, "started_at") or "unknown",
+            _alert_field(a, "state") or "open",
+            inc_id,
         )
-        marker = f"{CORRELATED_ALERT_PREFIX} Cloud Monitoring policy '{policy}' triggered on '{resource}'"
-        if marker not in obs and line not in new_lines:
+        # Keyed by incident id: a second alert of the same policy on the same resource gets
+        # its own line. Without an id, fall back to policy and resource.
+        if inc_id:
+            present = any(
+                o.startswith(CORRELATED_ALERT_PREFIX) and f"incident {inc_id})" in o
+                for o in split_observations(obs)
+            )
+        else:
+            present = f"{CORRELATED_ALERT_PREFIX} Cloud Monitoring policy '{policy}' triggered on '{resource}'" in obs
+        if not present and line not in new_lines:
             new_lines.append(line)
     if new_lines:
         items = split_observations(obs)
@@ -1333,7 +1359,11 @@ class SynthesizerAgent:
 
         # 1. Alert trigger item
         started_at = alert.started_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        obs_items.append(f"Cloud Monitoring policy '{alert.policy_name}' triggered on '{alert.resource_name}' at {started_at} (state: {alert.state})")
+        obs_items.append(
+            format_alert_trigger_line(
+                alert.policy_name, alert.resource_name, started_at, alert.state, alert.incident_id
+            )
+        )
 
         # 2. Metric evidence items
         for d in dossiers:

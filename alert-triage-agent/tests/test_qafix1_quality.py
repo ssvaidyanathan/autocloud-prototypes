@@ -89,3 +89,93 @@ def test_description_without_path_omits_line_instead_of_guessing():
     assert "Dependency Path" not in desc
     assert "Client -> Ingress" not in desc
     assert "ata-orders-v1 -> ata-orders-api -> ata-inventory-v1 -> ata-inventory-api" not in desc
+
+
+# ---------------------------------------------------------------------------------------
+# Bug 2: two alerts of one policy on one resource (S2: one per response_code series)
+# ---------------------------------------------------------------------------------------
+
+from agent.app.contracts.alert import AlertEvent  # noqa: E402
+from agent.app.specialists.synthesizer import apply_group_alerts, format_alert_trigger_line  # noqa: E402
+
+
+def _s2_alert(inc_id: str, policy: str, resource: str, started_at: str) -> dict:
+    return {
+        "incident_id": inc_id,
+        "policy": policy,
+        "policy_name": policy,
+        "resource": resource,
+        "resource_name": resource,
+        "component": resource,
+        "signal": "latency",
+        "state": "open",
+        "started_at": started_at,
+    }
+
+
+S2_ALERTS = [
+    _s2_alert("0.oeb4hxzrsiqu", "ata-inventory-latency", "ata-inventory-api", "2026-10-27T07:40:49Z"),
+    _s2_alert("0.oeb4hxzrsiqp", "ata-inventory-latency", "ata-inventory-api", "2026-10-27T07:40:49Z"),
+    _s2_alert("0.oeb4j8ur7t63", "ata-orders-latency", "ata-orders-api", "2026-10-27T07:42:24Z"),
+]
+
+
+def _s2_report() -> InvestigationReport:
+    primary = S2_ALERTS[0]
+    trigger = format_alert_trigger_line(
+        primary["policy"], primary["resource"], primary["started_at"], "open", primary["incident_id"]
+    )
+    return _report(
+        group_id="ata-inventory-latency-ata-inventory-api-20261027t074049z",
+        observations=f"{trigger} | HTTP 5xx error rate reached 0.0% (33 rpm) on ata-inventory-api",
+        priority="P2",
+        alerts=[dict(primary)],
+    )
+
+
+def test_trigger_observation_carries_incident_id():
+    alert = AlertEvent(
+        incident_id="0.oeb4hxzrsiqu",
+        policy_name="ata-inventory-latency",
+        resource_name="ata-inventory-api",
+        started_at="2026-10-27T07:40:49Z",
+        state="open",
+    )
+    obs = SynthesizerAgent()._synthesize_observations([], alert)
+    assert obs.split(" | ")[0] == (
+        "Cloud Monitoring policy 'ata-inventory-latency' triggered on 'ata-inventory-api' "
+        "at 2026-10-27T07:40:49Z (state: open, incident 0.oeb4hxzrsiqu)"
+    )
+
+
+def test_same_policy_same_resource_alert_lines_are_distinguishable():
+    report = apply_group_alerts(_s2_report(), [dict(a) for a in S2_ALERTS])
+    items = report.observations.split(" | ")
+    alert_lines = [i for i in items if "Cloud Monitoring policy" in i]
+    assert len(alert_lines) == 3
+    assert len(set(alert_lines)) == 3
+    # Stripping the correlated prefix must not make two lines identical (the S2 work note did).
+    assert len({ln.replace("Correlated alert: ", "") for ln in alert_lines}) == 3
+    for a in S2_ALERTS:
+        assert sum(f"incident {a['incident_id']})" in ln for ln in alert_lines) == 1
+    # The title count still equals the alerts in the group.
+    assert report.alert_count() == 3
+    assert report.build_short_description().endswith("(3 alerts)")
+    html = report.build_executive_summary_html()
+    for a in S2_ALERTS:
+        assert a["incident_id"] in html
+
+
+def test_third_alert_of_same_policy_is_not_dropped():
+    extra = _s2_alert("0.third", "ata-inventory-latency", "ata-inventory-api", "2026-10-27T07:41:00Z")
+    report = apply_group_alerts(_s2_report(), [dict(a) for a in S2_ALERTS] + [extra])
+    assert "incident 0.third)" in report.observations
+    assert report.alert_count() == 4
+
+
+def test_apply_group_alerts_stays_idempotent_with_incident_ids():
+    report = apply_group_alerts(_s2_report(), [dict(a) for a in S2_ALERTS])
+    once = report.observations
+    report = apply_group_alerts(report, [dict(a) for a in S2_ALERTS])
+    assert report.observations == once
+    assert report.alert_count() == 3
