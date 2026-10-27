@@ -1,0 +1,23 @@
+# gitleaks configuration (issue #46).
+# Extends the default gitleaks ruleset; it does not replace any rule. The only
+# change is a narrow allowlist on generic-api-key for non-secret resource names.
+# Auto-loaded by `gitleaks detect --source .` (as run by gitleaks-action).
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "alert-triage-agent resource names (issue #46): Apigee proxies ata-apigee-<name>-v<N>, Cloud Run revisions ata-<name>-api-<5 digits>-<suffix>"
+regexTarget = "secret"
+regexes = [
+  # Apigee API proxy names, e.g. ata-apigee-orders-v1. Non-secret resource
+  # identifiers used as topology nodes in alert-triage-agent (issue #46).
+  '''^ata-apigee-[a-z]+-v[0-9]+$''',
+  # Cloud Run revision names, e.g. ata-inventory-api-00003-prev, optionally with
+  # the traffic percentage from `--to-revisions=REVISION=PERCENT`. Non-secret
+  # resource identifiers in alert-triage-agent tests and docs (issue #46).
+  '''^ata-[a-z]+-api-[0-9]{5}-[a-z0-9]{3,4}(?:=[0-9]{1,3})?$''',
+]
