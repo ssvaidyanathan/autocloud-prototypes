@@ -276,3 +276,102 @@ def test_lookback_is_configurable_with_a_sane_default(monkeypatch):
     assert AgentConfig().rollback_traffic_lookback_minutes == 30
     monkeypatch.setenv("ROLLBACK_TRAFFIC_LOOKBACK_MINUTES", "45")
     assert AgentConfig().rollback_traffic_lookback_minutes == 45
+
+
+# ---------------------------------------------------------------------------------------
+# Bug 2: recovery note states what is known, never implies a fix
+# ---------------------------------------------------------------------------------------
+
+from agent.app import recovery  # noqa: E402
+
+
+class _CodeSeriesClient:
+    """request_count series per (service, response_code)."""
+
+    def __init__(self, by_service: dict[str, dict[str, list[int]]], error: Exception | None = None):
+        self.by_service = by_service
+        self.error = error
+        self.calls = []
+
+    def list_time_series(self, request=None, **kw):
+        import re as _re
+
+        self.calls.append(request)
+        if self.error:
+            raise self.error
+        svc = _re.search(r'service_name = "([^"]+)"', request.filter).group(1)
+        return [
+            SimpleNamespace(
+                metric=SimpleNamespace(labels={"response_code": code}),
+                points=[SimpleNamespace(value=SimpleNamespace(int64_value=c)) for c in counts],
+            )
+            for code, counts in self.by_service.get(svc, {}).items()
+        ]
+
+
+# S5 group: latency (inventory), inventory-5xx, orders-5xx; last close 09:59:53Z.
+S5_GROUP_ALERTS = [
+    {"incident_id": "0.oeb70rdzff26", "resource_name": "ata-inventory-api", "state": "closed"},
+    {"incident_id": "0.oeb71clke0b0", "resource_name": "ata-inventory-api", "state": "closed"},
+    {"incident_id": "0.oeb72jihl76i", "resource_name": "ata-orders-api", "state": "closed"},
+]
+S5_RECOVERED = datetime(2026, 10, 27, 10, 0, 13, tzinfo=timezone.utc).timestamp()
+S5_NOTE_AT = S5_RECOVERED + 180
+
+
+def _note(alerts, client=None, error_factory=False):
+    cfg = AgentConfig(project_id=PROJECT, region=REGION, is_local=True)
+    recovery.set_recovery_metric_client_factory(
+        (lambda s: (_ for _ in ()).throw(RuntimeError("no creds"))) if error_factory else (lambda s: client)
+    )
+    try:
+        return recovery.recovery_note_for_group(alerts, S5_RECOVERED, S5_NOTE_AT, 180, cfg)
+    finally:
+        recovery.set_recovery_metric_client_factory(None)
+
+
+def test_s5_recovery_note_says_alerts_closed_with_no_traffic_and_asks_for_verification():
+    client = _CodeSeriesClient({})  # traffic generator stopped: no request_count points
+    note = _note(S5_GROUP_ALERTS, client)
+
+    assert note.startswith("Monitoring alerts closed: all 3 alerts of this incident closed by 2026-10-27T10:00:13Z")
+    assert "Monitoring recovered" not in note
+    assert "no recurrence" not in note and "verify the fix" not in note
+    assert "not proof of a fix" in note
+    window = "between 2026-10-27T09:55:13Z and 2026-10-27T10:03:13Z"
+    assert f"Cloud Monitoring recorded no requests on ata-inventory-api {window}" in note
+    assert f"no requests on ata-orders-api {window}" in note
+    assert "(missing data)" in note
+    assert note.endswith("A human must verify the remediation (for example, that the faulty change was reverted "
+                         "or the injected fault was cleared) before resolving this incident.")
+    # One query per distinct Cloud Run service, not per alert.
+    assert len(client.calls) == 2
+
+
+def test_recovery_note_states_measured_traffic_and_5xx_when_requests_continue():
+    client = _CodeSeriesClient({"ata-inventory-api": {"200": [40, 41], "500": [2, 1]}})
+    note = _note(S5_GROUP_ALERTS[:2], client)
+    assert "ata-inventory-api received 84 requests between" in note and "3 with HTTP 5xx" in note
+    assert "A human must verify the remediation" in note
+
+
+def test_recovery_note_does_not_measure_non_cloud_run_resources():
+    note = _note([{"incident_id": "0.db", "resource_name": "ata-inventory-db"}], _CodeSeriesClient({}))
+    assert note.startswith("Monitoring alerts closed: the alert of this incident")
+    assert "not measured for ata-inventory-db (not a Cloud Run service)" in note
+    assert "no requests" not in note
+
+
+def test_recovery_note_query_failure_and_missing_client_are_stated(caplog):
+    with caplog.at_level(logging.WARNING):
+        failed = _note(S5_GROUP_ALERTS[:1], _CodeSeriesClient({}, error=RuntimeError("denied")))
+        no_client = _note(S5_GROUP_ALERTS[:1], error_factory=True)
+    assert "not checked for ata-inventory-api: the query failed (RuntimeError)" in failed
+    assert "not checked for ata-inventory-api: no Cloud Monitoring client is available" in no_client
+    assert any("Recovery traffic check" in r.getMessage() for r in caplog.records)
+
+
+def test_recovery_lookback_is_configurable(monkeypatch):
+    assert AgentConfig().recovery_traffic_lookback_seconds == 300
+    monkeypatch.setenv("RECOVERY_TRAFFIC_LOOKBACK_SECONDS", "600")
+    assert AgentConfig().recovery_traffic_lookback_seconds == 600

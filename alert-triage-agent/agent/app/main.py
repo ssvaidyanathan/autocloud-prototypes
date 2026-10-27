@@ -31,6 +31,7 @@ from .grouping.manager import GroupingManager
 from .grouping.models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument
 from .grouping.store import OKFStore, read_okf, update_okf_atomically
 from .grouping.suppression import format_late_alert_work_note
+from .recovery import recovery_note_for_group
 from .specialists.origin_selection import alert_event_from_entry
 from .specialists.synthesizer import SynthesizerAgent, apply_group_alerts
 from .timers.scheduler import schedule_delayed_timer
@@ -632,11 +633,8 @@ def _mark_recovered_without_resolving(
             reason=f"group_status_{claimed_doc.status}",
         )
 
-    alert_count = len(claimed_doc.alerts)
-    note = (
-        f"Monitoring recovered at {recovered_iso}: all {alert_count} alerts closed and the "
-        f"{int(COOLING_WINDOW_SECONDS)}s cool-down passed with no recurrence. "
-        "No remediation was recorded by the agent. Please verify the fix and resolve this incident."
+    note = recovery_note_for_group(
+        list(claimed_doc.alerts or []), recovered_epoch, now, int(COOLING_WINDOW_SECONDS), settings
     )
     logger.info(
         "JSON_DECISION: auto_resolve_on_recovery=false; not resolving ServiceNow ticket %s for group %s; "

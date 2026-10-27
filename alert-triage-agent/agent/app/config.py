@@ -57,6 +57,10 @@ class AgentConfig(BaseSettings):
     # many minutes before the new revision was created (Cloud Monitoring request_count by
     # revision). A rollback target is named only when exactly one revision served.
     rollback_traffic_lookback_minutes: int = Field(default=30, alias="ROLLBACK_TRAFFIC_LOOKBACK_MINUTES", ge=1)
+    # Recovery note: request_count of the group's Cloud Run services is read from this many
+    # seconds before the last alert closed until the note is written, to state whether the
+    # close coincided with traffic stopping (missing data).
+    recovery_traffic_lookback_seconds: int = Field(default=300, alias="RECOVERY_TRAFFIC_LOOKBACK_SECONDS", ge=0)
 
     @property
     def effective_incidents_bucket(self) -> str:

@@ -162,9 +162,12 @@ def test_cooling_expiry_posts_note_and_does_not_resolve(base_cfg, monkeypatch, c
     assert new_notes[0].sys_id == SYS_ID
     recovered_iso = store.read(group_id).recovered_at
     assert new_notes[0].work_note == (
-        f"Monitoring recovered at {recovered_iso}: all 1 alerts closed and the 180s cool-down passed "
-        "with no recurrence. No remediation was recorded by the agent. "
-        "Please verify the fix and resolve this incident."
+        f"Monitoring alerts closed: the alert of this incident closed by {recovered_iso} and none reopened "
+        "during the 180s cool-down. An alert also closes when its service stops receiving traffic, so a "
+        "close is not proof of a fix; the agent recorded no remediation. Traffic around the close was not "
+        "checked for ata-orders-api: no Cloud Monitoring client is available. A human must verify the "
+        "remediation (for example, that the faulty change was reverted or the injected fault was cleared) "
+        "before resolving this incident."
     )
 
     doc = store.read(group_id)
