@@ -188,6 +188,66 @@ def test_build_sa_can_get_the_build_bucket():
             assert "storage." not in proj, proj
 
 
+def _cloud_run_services(root):
+    main_tf = (TF_DIR / root / "main.tf").read_text()
+    return re.findall(r'resource "google_cloud_run_v2_service" "([^"]+)" \{(.*?)\n\}', main_tf, re.S)
+
+
+def test_cloud_run_deletion_protection_is_a_variable_defaulting_to_true():
+    """D10: provider 6.x defaults google_cloud_run_v2_service.deletion_protection to true. The
+    applications root keeps that safe default as var.deletion_protection (bool, default true);
+    a throwaway stack overrides it, and teardown-stack.sh sets false before its destroy. The
+    interim hardcoded false must not come back."""
+    block = _variable_block((TF_DIR / "applications" / "variables.tf").read_text(), "deletion_protection")
+    assert re.search(r"^\s*type\s*=\s*bool\s*$", block, re.M), block
+    assert re.search(r"^\s*default\s*=\s*true\s*$", block, re.M), block
+    assert re.search(r'^\s*description\s*=\s*".+"', block, re.M), block
+    services = _cloud_run_services("applications")
+    assert sorted(name for name, _ in services) == ["inventory_api", "orders_api"]
+    for name, body in services:
+        assert re.findall(r"^\s*deletion_protection\s*=\s*(.+?)\s*$", body, re.M) == ["var.deletion_protection"], name
+    for root in ROOTS:
+        if root != "applications":
+            assert not _cloud_run_services(root), root
+
+
+def test_tfvars_example_documents_the_false_override_commented_out():
+    example = (TF_DIR / "applications" / "terraform.tfvars.example").read_text()
+    assert re.search(r"^# deletion_protection = false$", example, re.M)
+    assert not re.search(r"^deletion_protection", example, re.M), "the example must keep the safe default"
+
+
+def test_docs_describe_the_override_and_keep_the_pre_fix_workaround():
+    deploy = (REPO_ROOT / "DEPLOY.md").read_text()
+    assert deploy.count("TF_VAR_deletion_protection=false") >= 2  # second stack, applications step
+    teardown = deploy[deploy.index("## 5. Teardown"):deploy.index("## 6. Verify")]
+    assert "-var deletion_protection=false" in teardown
+    assert "terraform state rm google_cloud_run_v2_service.inventory_api" in teardown
+    assert "TF_VAR_deletion_protection=false" in (REPO_ROOT / "README.md").read_text()
+
+
+TERRAFORM = shutil.which(os.environ.get("ATA_TEST_TERRAFORM", "terraform"))
+
+
+@pytest.mark.skipif(not TERRAFORM, reason="terraform not on PATH (set ATA_TEST_TERRAFORM)")
+def test_cloud_run_deletion_protection_plans_true_by_default_and_false_when_overridden(tmp_path):
+    """Plan both values against a mocked provider (applications/tests/deletion_protection.tftest.hcl):
+    default true on both services, -var deletion_protection=false on both. No credentials, no API
+    calls; init downloads the google provider."""
+    work = tmp_path / "applications"
+    shutil.copytree(TF_DIR / "applications", work, ignore=shutil.ignore_patterns(".terraform*", "backend.hcl", "*.tfvars"))
+    env = dict(os.environ, TF_IN_AUTOMATION="1", CHECKPOINT_DISABLE="1")
+    init = subprocess.run([TERRAFORM, "init", "-backend=false", "-input=false", "-no-color"], cwd=work, env=env,
+                          capture_output=True, text=True, timeout=300)
+    assert init.returncode == 0, init.stdout + init.stderr
+    res = subprocess.run([TERRAFORM, "test", "-no-color"], cwd=work, env=env, capture_output=True, text=True, timeout=300)
+    out = res.stdout + res.stderr
+    assert res.returncode == 0, out
+    assert 'run "default_protects_both_services"... pass' in out, out
+    assert 'run "false_override_reaches_both_services"... pass' in out, out
+    assert "2 passed, 0 failed" in out, out
+
+
 def test_stack_label_everywhere_labels_are_set():
     foundation = (TF_DIR / "foundation" / "main.tf").read_text()
     assert re.search(r"common_labels = \{[^}]*stack\s+= var\.name_prefix", foundation, re.S)

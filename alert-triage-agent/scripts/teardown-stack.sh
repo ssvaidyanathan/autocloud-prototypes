@@ -16,7 +16,10 @@
 #   1. scripts/teardown-apigee.sh --apply --yes (proxies, product, app, developer, TargetServers)
 #   2. terraform destroy observability, then triage-iam
 #   3. delete Cloud Run ${NAME_PREFIX}-agent, -bridge, -tools (script-made, not in Terraform)
-#   4. terraform destroy applications, then database
+#   4. terraform destroy applications, then database. Before the applications destroy: a
+#      targeted apply with -var deletion_protection=false on exactly the two Cloud Run services
+#      (the root defaults to true). Its plan reuses the services' refreshed configuration and
+#      must change nothing but deletion_protection, else the teardown stops before any destroy.
 #   5. empty gs://${PROJECT_ID}-${NAME_PREFIX}-incidents (all versions) and -build
 #   6. delete every package in Artifact Registry ${NAME_PREFIX}-docker
 #   7. terraform destroy foundation
@@ -52,7 +55,7 @@ while [ "$#" -gt 0 ]; do
         --confirm-prefix)
             [ "$#" -ge 2 ] || { echo "--confirm-prefix needs a value" >&2; exit 1; }
             CONFIRM_PREFIX="$2"; shift 2 ;;
-        -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1 (see --help)" >&2; exit 1 ;;
     esac
 done
@@ -126,11 +129,10 @@ fi
 # --- Terraform ------------------------------------------------------------------
 TF_VARS=(-var "project_id=${PROJECT_ID}" -var "region=${REGION}" -var "name_prefix=${P}")
 
-tf_destroy() {
-    local root="$1" dir="${REPO_ROOT}/infra/terraform/$1" hcl
-    shift
-    hcl="${dir}/backend.hcl"
-    echo "--> terraform destroy ${root}"
+# tf_backend <root>: write the root's backend.hcl if it is missing (apply only), and refuse
+# one that belongs to another prefix or bucket.
+tf_backend() {
+    local root="$1" hcl="${REPO_ROOT}/infra/terraform/$1/backend.hcl"
     if [ ! -f "${hcl}" ]; then
         local bucket_args=()
         if [ -n "${TFSTATE_BUCKET:-}" ]; then bucket_args=(--bucket "${TFSTATE_BUCKET}"); fi
@@ -145,12 +147,156 @@ tf_destroy() {
         grep -Fq "prefix = \"${P}/${root}\"" "${hcl}" || die "${hcl} is not for NAME_PREFIX=${P}."
         grep -Fq "bucket = \"${STATE_BUCKET}\"" "${hcl}" || die "${hcl} does not use bucket ${STATE_BUCKET}."
     fi
+}
+
+tf_destroy() {
+    local root="$1" dir="${REPO_ROOT}/infra/terraform/$1"
+    shift
+    echo "--> terraform destroy ${root}"
+    tf_backend "${root}"
     if [ "${APPLY}" = "true" ]; then
         (cd "${dir}" && terraform init -input=false -reconfigure -backend-config=backend.hcl \
             && terraform destroy -input=false -auto-approve ${TF_VARS[@]+"${TF_VARS[@]}"} "$@")
     else
         echo "    [dry-run] (cd infra/terraform/${root} && terraform init -reconfigure -backend-config=backend.hcl && terraform destroy -auto-approve ${TF_VARS[*]} $*)"
     fi
+}
+
+# --- Cloud Run deletion protection (applications root) ------------------------------
+# The two services take deletion_protection from var.deletion_protection (default true), and the
+# provider refuses to destroy a service while its state holds true. A targeted apply with
+# -var deletion_protection=false writes false into state first; this works for a stack applied
+# before the variable existed too (its state holds the provider default, true).
+# The provider's update PATCHes the whole service from the planned values (it has no shortcut for
+# this Terraform-only field). So the plan takes the images, labels and settings from the refreshed
+# state, and it must change nothing but deletion_protection: anything else stops the teardown.
+APP_SERVICES=(google_cloud_run_v2_service.inventory_api google_cloud_run_v2_service.orders_api)
+# The image variables are required by the root but play no part in a destroy.
+APP_VARS=(-var "environment=${ENVIRONMENT:-demo}" -var "inventory_image=unused-on-destroy" -var "orders_image=unused-on-destroy")
+
+# Reads `terraform show -json <plan>` on stdin. Line 1: the service addresses whose refreshed state
+# has deletion_protection other than false ("-" if none). Then name=value for every variable that
+# reproduces the services' current configuration. Exits 2 if a service is not <prefix>-*.
+TF_READ_SERVICES='
+import json, sys
+prefix = sys.argv[1]
+plan = json.load(sys.stdin)
+mod = ((plan.get("prior_state") or {}).get("values") or {}).get("root_module") or {}
+res = {r.get("address"): r.get("values") or {} for r in mod.get("resources") or []}
+inv, ords = "google_cloud_run_v2_service.inventory_api", "google_cloud_run_v2_service.orders_api"
+want = {inv: prefix + "-inventory-api", ords: prefix + "-orders-api"}
+found = [a for a in (inv, ords) if a in res]
+for a in found:
+    if res[a].get("name") != want[a]:
+        sys.stderr.write("ERROR: %s in state is named %r, not %r.\n" % (a, res[a].get("name"), want[a]))
+        sys.exit(2)
+print(" ".join(a for a in found if res[a].get("deletion_protection") is not False) or "-")
+def first(v, key):
+    return (v.get(key) or [{}])[0]
+def container(v):
+    return first(first(v, "template"), "containers")
+out = []
+if inv in res:
+    out.append(("inventory_image", container(res[inv]).get("image")))
+    env = {e.get("name"): e.get("value") for e in container(res[inv]).get("env") or []}
+    out.append(("inventory_mock_db", env.get("ATA_INVENTORY_MOCK_DB")))
+if ords in res:
+    out.append(("orders_image", container(res[ords]).get("image")))
+if found:
+    svc = res[found[0]]
+    labels = svc.get("labels") or {}
+    out += [("environment", labels.get("env")), ("owner", labels.get("owner")),
+            ("demo_max_instance_count", first(first(svc, "template"), "scaling").get("max_instance_count"))]
+for name, value in out:
+    if value is not None:
+        print("%s=%s" % (name, value))
+'
+
+# Reads `terraform show -json <plan>` on stdin; argv: the allowed addresses. Exits 1 unless every
+# change is an in-place update of an allowed address that changes only deletion_protection to false.
+TF_CHECK_UNPROTECT_PLAN='
+import json, sys
+allowed = set(sys.argv[1:])
+plan = json.load(sys.stdin)
+def unknown(x):
+    if isinstance(x, dict):
+        return any(unknown(v) for v in x.values())
+    if isinstance(x, list):
+        return any(unknown(v) for v in x)
+    return x is True
+bad, updated = [], 0
+for rc in plan.get("resource_changes") or []:
+    change = rc.get("change") or {}
+    actions = change.get("actions") or []
+    if actions in (["no-op"], ["read"]):
+        continue
+    address = rc.get("address")
+    if address not in allowed or actions != ["update"]:
+        bad.append("%s: %s" % (address, "/".join(actions)))
+        continue
+    before, after, unk = change.get("before") or {}, change.get("after") or {}, change.get("after_unknown") or {}
+    diff = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k) or unknown(unk.get(k)))
+    if diff != ["deletion_protection"] or after.get("deletion_protection") is not False:
+        bad.append("%s: changes %s" % (address, ", ".join(diff) or "nothing"))
+        continue
+    updated += 1
+for line in bad:
+    sys.stderr.write("    plan change other than deletion_protection=false: %s\n" % line)
+if bad:
+    sys.exit(1)
+print("    plan check: %d service(s), only deletion_protection -> false" % updated)
+'
+
+tf_unprotect_services() {
+    local dir="${REPO_ROOT}/infra/terraform/applications" tmp read_out protected line addr
+    local targets=() derived_vars=() protected_addrs=()
+    echo "--> terraform apply applications: deletion_protection=false on ${APP_SERVICES[*]} (targeted)"
+    tf_backend applications
+    if [ "${APPLY}" != "true" ]; then
+        echo "    [dry-run] (cd infra/terraform/applications && terraform init -reconfigure -backend-config=backend.hcl && terraform plan -target ${APP_SERVICES[0]} -target ${APP_SERVICES[1]} ${TF_VARS[*]} ${APP_VARS[*]} -var deletion_protection=false -out <read plan>)"
+        echo "    [dry-run] terraform show -json <read plan>: the services in state, and their images, labels and settings"
+        echo "    [dry-run] terraform plan -target <each service whose state has deletion_protection=true> ${TF_VARS[*]} <those values> -var deletion_protection=false -out <plan>"
+        echo "    [dry-run]   (stops unless the plan changes only deletion_protection to false)"
+        echo "    [dry-run] terraform apply <plan>"
+        return 0
+    fi
+    for addr in ${APP_SERVICES[@]+"${APP_SERVICES[@]}"}; do targets+=(-target "${addr}"); done
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/${P}-unprotect.XXXXXX")"
+    (cd "${dir}" && terraform init -input=false -reconfigure -backend-config=backend.hcl >/dev/null \
+        && terraform plan -input=false ${targets[@]+"${targets[@]}"} ${TF_VARS[@]+"${TF_VARS[@]}"} \
+            ${APP_VARS[@]+"${APP_VARS[@]}"} -var "deletion_protection=false" -out="${tmp}/read.tfplan" >/dev/null) \
+        || { rm -rf "${tmp}"; die "cannot read the applications state (terraform plan above)."; }
+    read_out="$(cd "${dir}" && terraform show -json "${tmp}/read.tfplan" | python3 -c "${TF_READ_SERVICES}" "${P}")" \
+        || { rm -rf "${tmp}"; die "cannot read the Cloud Run services from the applications state."; }
+    protected="$(printf '%s\n' "${read_out}" | head -n 1)"
+    if [ "${protected}" = "-" ]; then
+        rm -rf "${tmp}"
+        echo "    no service in state has deletion_protection=true: nothing to change."
+        return 0
+    fi
+    targets=()
+    for addr in ${protected}; do
+        case " ${APP_SERVICES[*]} " in
+            *" ${addr} "*) targets+=(-target "${addr}"); protected_addrs+=("${addr}") ;;
+            *) rm -rf "${tmp}"; die "unexpected address '${addr}'." ;;
+        esac
+    done
+    while IFS= read -r line; do
+        if [ -n "${line}" ]; then derived_vars+=(-var "${line}"); fi
+    done <<EOF
+$(printf '%s\n' "${read_out}" | tail -n +2)
+EOF
+    # The plan is printed: it must show only deletion_protection = true -> false.
+    (cd "${dir}" && terraform plan -input=false ${targets[@]+"${targets[@]}"} ${TF_VARS[@]+"${TF_VARS[@]}"} \
+        ${APP_VARS[@]+"${APP_VARS[@]}"} ${derived_vars[@]+"${derived_vars[@]}"} -var "deletion_protection=false" \
+        -out="${tmp}/unprotect.tfplan") \
+        || { rm -rf "${tmp}"; die "terraform plan (deletion_protection=false) failed."; }
+    (cd "${dir}" && terraform show -json "${tmp}/unprotect.tfplan") | python3 -c "${TF_CHECK_UNPROTECT_PLAN}" \
+            ${protected_addrs[@]+"${protected_addrs[@]}"} \
+        || { rm -rf "${tmp}"; die "the deletion_protection plan changes more than deletion_protection (above); nothing was applied. Remove the services by hand (DEPLOY.md section 5, T2), then run the teardown again."; }
+    (cd "${dir}" && terraform apply -input=false "${tmp}/unprotect.tfplan") \
+        || { rm -rf "${tmp}"; die "terraform apply (deletion_protection=false) failed."; }
+    rm -rf "${tmp}"
 }
 
 # --- Steps ----------------------------------------------------------------------
@@ -186,8 +332,8 @@ done
 
 echo ""
 echo "=== 4. Terraform applications, database ==="
-# The image variables are required by the root but play no part in a destroy.
-tf_destroy applications -var "environment=${ENVIRONMENT:-demo}" -var "inventory_image=unused-on-destroy" -var "orders_image=unused-on-destroy"
+tf_unprotect_services
+tf_destroy applications ${APP_VARS[@]+"${APP_VARS[@]}"}
 tf_destroy database
 
 echo ""

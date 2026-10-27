@@ -622,7 +622,7 @@ Reset injected faults, clear database sleep connections, restore Apigee proxies,
 
 ## 15. Teardown & Clean Up
 
-The teardown is [DEPLOY.md §5](DEPLOY.md#5-teardown), in the order that completes: the Apigee resources (`scripts/teardown-apigee.sh`), then the observability, triage-iam, applications, database and foundation roots (emptying the incidents bucket first), and the state bucket last. [DEPLOY.md §6](DEPLOY.md#6-verify-that-nothing-is-left) lists the commands that confirm nothing of the stack is left.
+The teardown is [DEPLOY.md §5](DEPLOY.md#5-teardown), in the order that completes: the Apigee resources (`scripts/teardown-apigee.sh`), then the observability, triage-iam, applications, database and foundation roots (emptying the incidents bucket first), and the state bucket last. Before the applications destroy, it turns off the Cloud Run services' deletion protection with a targeted apply. The plan of that apply may change only `deletion_protection`. The applications root defaults `deletion_protection` to `true`; a test or throwaway stack can set `TF_VAR_deletion_protection=false` ([DEPLOY.md §2.3](DEPLOY.md#23-second-stack-in-an-existing-project-and-apigee-organization)). [DEPLOY.md §6](DEPLOY.md#6-verify-that-nothing-is-left) lists the commands that confirm nothing of the stack is left.
 
 ---
 

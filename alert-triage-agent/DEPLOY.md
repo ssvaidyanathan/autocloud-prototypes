@@ -181,7 +181,8 @@ Every phase reads the same exported variables, and there are **no defaults** for
 | `APIGEE_ORG`, `APIGEE_ENV`, `APIGEE_HOST` | `triage` (tools), `apigee`, `verify`, the scenarios and the teardown. |
 | `VERIFIER_SA` | `triage` (bridge), only when exported ([§4.6](#46-read-only-ticket-verification-endpoint)). `VERIFIER_SA=none` removes it from the service. |
 | Optional | `AUTO_RESOLVE_ON_RECOVERY`, `MODEL_NAME`, `GEMINI_LOCATION` (agent, passed only when exported); `IMAGE_TAG` (image tag; default: the git commit); `TFSTATE_BUCKET` (custom state bucket name); `PGPASSWORD` (postgres password for `schema`; default: a new random one); `SCHEMA_PROXY_PORT` (default 54329); `ATA_STACK_DIR` (directory of the stack-local files `.<prefix>-api-key`, `.<prefix>-apigee.env` and `.deploy-state/`; default `alert-triage-agent/`); `DEPLOY_STATE_DIR` (default `${ATA_STACK_DIR}/.deploy-state/`). |
-| Extra Terraform variables | For example `deployer_members`: put them in a `terraform.tfvars` in that root, which Terraform loads automatically. |
+| Extra Terraform variables | For example `deployer_members`: put them in a `terraform.tfvars` in that root, which Terraform loads automatically. Or export `TF_VAR_<name>`, which every root reads. |
+| `TF_VAR_deletion_protection` | Optional, `applications` only. Default `true`. Set `false` only for a test or throwaway stack ([§2.3](#23-second-stack-in-an-existing-project-and-apigee-organization)). |
 
 ### 2.3 Second stack in an existing project and Apigee organization
 
@@ -207,6 +208,7 @@ Rules:
 
   `applications` also needs the image variables that the phase passes. Use the phase's own output for that root.
 - Both stacks may use the same ServiceNow instance. Their tickets then share a queue and differ only in the group IDs and the `<prefix>-*` names in the text.
+- **Deletion protection.** The applications root's variable `deletion_protection` (default `true`) protects `<prefix>-inventory-api` and `<prefix>-orders-api` from `terraform destroy`. Keep the default for a stack that stays. A test or throwaway stack can set it to `false`: put `export TF_VAR_deletion_protection=false` in its inputs file, or `deletion_protection = false` in `infra/terraform/applications/terraform.tfvars`. `deploy-stage1.sh` does not pass the variable, so either one takes effect. The teardown does not need it: it sets `false` itself before the destroy ([§5](#5-teardown)).
 
 ---
 
@@ -550,7 +552,7 @@ It lists the user `<prefix>-inventory-sa@<project>.iam` of type `CLOUD_IAM_SERVI
 
 ### Step 9: applications
 
-**Purpose:** Terraform root `infra/terraform/applications` deploys `<prefix>-inventory-api` and `<prefix>-orders-api` on Cloud Run from the digests built in Step 6, with their invoker IAM (orders to inventory, Apigee SA to both). Both run with at most `demo_max_instance_count` instances (default 1).
+**Purpose:** Terraform root `infra/terraform/applications` deploys `<prefix>-inventory-api` and `<prefix>-orders-api` on Cloud Run from the digests built in Step 6, with their invoker IAM (orders to inventory, Apigee SA to both). Both run with at most `demo_max_instance_count` instances (default 1). Both have `deletion_protection = true` unless `TF_VAR_deletion_protection=false` is set ([§2.3](#23-second-stack-in-an-existing-project-and-apigee-organization)).
 
 ```bash
 ./scripts/deploy-stage1.sh --only applications
@@ -967,7 +969,7 @@ It works in this order, so that each step can complete:
 1. `teardown-apigee.sh --apply --yes`: the `<prefix>-*` proxies (every deployed revision undeployed, then deleted), app, developer, product and TargetServers. The proxies run as the Apigee SA, so they go first.
 2. `terraform destroy` of observability, then triage-iam.
 3. Delete the Cloud Run services `<prefix>-agent`, `<prefix>-bridge` and `<prefix>-tools`. The deploy scripts created them, not Terraform.
-4. `terraform destroy` of applications (the inventory and orders services, with every revision the re-pin and the scenarios created), then database.
+4. `terraform destroy` of applications (the inventory and orders services, with every revision the re-pin and the scenarios created), then database. First, the services' deletion protection is turned off. The root defaults `deletion_protection` to `true`, and the provider refuses to destroy a service while its state holds `true`. The script reads the two services from the refreshed state. For each one still protected, it runs a targeted `terraform plan -target google_cloud_run_v2_service.<name> -var deletion_protection=false`, using the images, labels and settings the service has now. The plan is printed. Then the script checks it: it must change nothing but `deletion_protection` (`true` to `false`) on those two addresses. If it does, the script applies it; if not, it stops before any destroy. The provider sends the service's whole configuration with that update, so a plan that changed anything else would also change the live service. The apply writes `false` into the state. This also works for a stack applied before the variable existed: its state holds the provider default `true`, and the targeted apply replaces it the same way.
 5. Empty `gs://<project>-<prefix>-incidents` and `gs://<project>-<prefix>-build`, all versions. The foundation creates the incidents bucket with `force_destroy = false`, so it must be empty before step 7.
 6. Delete every package in the Artifact Registry repository `<prefix>-docker`.
 7. `terraform destroy` of foundation: the SAs, queues, secrets, buckets, the webhook channel and the repository. The project APIs stay enabled (`disable_on_destroy = false`), because other workloads may use them.
@@ -997,6 +999,19 @@ It asks you to type `NAME_PREFIX` (`--confirm-prefix <prefix>` instead makes it 
 
   ```bash
   (cd infra/terraform/database && terraform init -reconfigure -backend-config=backend.hcl && terraform state rm google_sql_user.inventory_iam_user)
+  ```
+
+- The deletion protection step stops with `the deletion_protection plan changes more than deletion_protection`: the services' live configuration differs from what the root would plan, for example an environment variable that a `gcloud run services update` added. Or the applications destroy fails with `cannot destroy service without setting deletion_protection=false`: the teardown that ran has no deletion protection step, for example a clone from before the variable was added. The state then still holds `true`. In either case, delete the two services, which also removes their invoker bindings, and drop the root's five resources from the state. Then run T2 again:
+
+  ```bash
+  for s in inventory-api orders-api; do
+    gcloud run services delete "${NAME_PREFIX}-${s}" --project="${PROJECT_ID}" --region="${REGION}" --quiet
+  done
+  (cd infra/terraform/applications && terraform init -reconfigure -backend-config=backend.hcl && \
+    terraform state rm google_cloud_run_v2_service.inventory_api google_cloud_run_v2_service.orders_api \
+      google_cloud_run_v2_service_iam_member.inventory_invoker_orders \
+      google_cloud_run_v2_service_iam_member.inventory_invoker_apigee \
+      google_cloud_run_v2_service_iam_member.orders_invoker_apigee)
   ```
 
 - The foundation destroy fails with `the bucket you tried to delete is not empty`: an object was written after step 5, for example by a late alert. Run T2 again.

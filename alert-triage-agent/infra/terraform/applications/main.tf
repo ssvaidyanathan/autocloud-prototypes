@@ -21,6 +21,9 @@ resource "google_cloud_run_v2_service" "inventory_api" {
   location = var.region
   project  = var.project_id
   ingress  = "INGRESS_TRAFFIC_ALL"
+  # Default true (var.deletion_protection). scripts/teardown-stack.sh sets it false with a
+  # targeted apply before its destroy; a throwaway stack may set it false from the start.
+  deletion_protection = var.deletion_protection
 
   labels = {
     app        = "alert-triage-agent"
@@ -97,6 +100,9 @@ resource "google_cloud_run_v2_service" "orders_api" {
   location = var.region
   project  = var.project_id
   ingress  = "INGRESS_TRAFFIC_ALL"
+  # Default true (var.deletion_protection). scripts/teardown-stack.sh sets it false with a
+  # targeted apply before its destroy; a throwaway stack may set it false from the start.
+  deletion_protection = var.deletion_protection
 
   labels = {
     app        = "alert-triage-agent"

@@ -375,6 +375,9 @@ phase_schema() {
     echo "    schema applied; ${iam_user} has SELECT, UPDATE on inventory_items."
 }
 
+# deletion_protection is not passed: the root's default (true) protects an operator's stack. A
+# test or throwaway stack exports TF_VAR_deletion_protection=false or sets it in the root's
+# terraform.tfvars; teardown-stack.sh sets false itself before its destroy.
 phase_applications() {
     need_images INVENTORY_IMAGE ORDERS_IMAGE
     tf_apply applications ${TF_LABEL_VARS[@]+"${TF_LABEL_VARS[@]}"} \

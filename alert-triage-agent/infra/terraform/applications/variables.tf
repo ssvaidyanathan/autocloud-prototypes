@@ -56,3 +56,9 @@ variable "demo_max_instance_count" {
     error_message = "demo_max_instance_count must be a whole number >= 1."
   }
 }
+
+variable "deletion_protection" {
+  type        = bool
+  default     = true
+  description = "deletion_protection of both Cloud Run services (<name_prefix>-inventory-api, <name_prefix>-orders-api). Default true, the provider 6.x default: `terraform destroy` and any apply that would delete or replace a service fail while state holds true. A test or throwaway stack may set false (TF_VAR_deletion_protection=false or terraform.tfvars). scripts/teardown-stack.sh does not need that: before its destroy it runs a targeted apply with -var deletion_protection=false on exactly the two services, which writes false into state, including for a stack applied before this variable existed."
+}
