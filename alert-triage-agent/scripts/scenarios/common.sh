@@ -17,21 +17,22 @@ export MOCK_MODE="${MOCK_MODE:-false}"
 # Incident bucket
 export INCIDENTS_BUCKET="${INCIDENTS_BUCKET:-${PROJECT_ID}-${NAME_PREFIX}-incidents}"
 
-# Logging helpers
+# Logging helpers. printf, not echo -e: portable to any POSIX sh/BSD echo, and a message's
+# own backslashes and % signs are printed as they are.
 log_info() {
-    echo -e "\033[1;34m[INFO]\033[0m $*"
+    printf '\033[1;34m[INFO]\033[0m %s\n' "$*"
 }
 
 log_success() {
-    echo -e "\033[1;32m[SUCCESS]\033[0m $*"
+    printf '\033[1;32m[SUCCESS]\033[0m %s\n' "$*"
 }
 
 log_warn() {
-    echo -e "\033[1;33m[WARN]\033[0m $*"
+    printf '\033[1;33m[WARN]\033[0m %s\n' "$*"
 }
 
 log_error() {
-    echo -e "\033[1;31m[ERROR]\033[0m $*"
+    printf '\033[1;31m[ERROR]\033[0m %s\n' "$*"
 }
 
 # Deterministic Pinned Demo Images and Revisions
