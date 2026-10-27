@@ -37,7 +37,44 @@ log_error() {
 # Deterministic Pinned Demo Images and Revisions
 export PINNED_INVENTORY_DIGEST="${PINNED_INVENTORY_DIGEST:-sha256:24b07eaa50db6d226889607116f0dd43693df5e1f597867a79e0f86e3d7767ce}"
 export PINNED_INVENTORY_IMAGE="${PINNED_INVENTORY_IMAGE:-us-west1-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${NAME_PREFIX}-inventory-api@${PINNED_INVENTORY_DIGEST}}"
-export PINNED_INVENTORY_REVISION="${PINNED_INVENTORY_REVISION:-ata-inventory-api-00070-6nq}"
+# PINNED_INVENTORY_REVISION must be a revision whose image is PINNED_INVENTORY_DIGEST
+# and whose config is the healthy baseline (correct DB user, no DEPLOY_TAG).
+# Older revisions run code where GET on /admin/* performs the fault action.
+export PINNED_INVENTORY_REVISION="${PINNED_INVENTORY_REVISION:-ata-inventory-api-00073-9vb}"
+
+# Fail loudly unless PINNED_INVENTORY_REVISION runs PINNED_INVENTORY_DIGEST.
+verify_pinned_inventory_revision() {
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        return 0
+    fi
+    local actual
+    actual="$(gcloud run revisions describe "${PINNED_INVENTORY_REVISION}" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --format="value(status.imageDigest)" 2>/dev/null || true)"
+    actual="${actual##*@}"
+    if [ "${actual}" != "${PINNED_INVENTORY_DIGEST}" ]; then
+        log_error "Pinned revision ${PINNED_INVENTORY_REVISION} runs '${actual:-<not found>}', expected ${PINNED_INVENTORY_DIGEST}." >&2
+        log_error "Fix PINNED_INVENTORY_REVISION/PINNED_INVENTORY_DIGEST in scripts/scenarios/common.sh before running scenarios." >&2
+        return 1
+    fi
+}
+
+# Fail loudly unless ata-inventory-api serves 100% from PINNED_INVENTORY_REVISION.
+verify_inventory_serving_pinned() {
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        return 0
+    fi
+    local traffic
+    traffic="$(gcloud run services describe "${NAME_PREFIX}-inventory-api" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --format="csv[no-heading](status.traffic.revisionName,status.traffic.percent)" 2>/dev/null || true)"
+    if [ "${traffic}" != "${PINNED_INVENTORY_REVISION},100" ]; then
+        log_error "${NAME_PREFIX}-inventory-api traffic is '${traffic:-<unknown>}', expected ${PINNED_INVENTORY_REVISION}=100." >&2
+        return 1
+    fi
+}
 
 # Duration Parser (supports Xm, Xs, or raw seconds)
 parse_duration() {

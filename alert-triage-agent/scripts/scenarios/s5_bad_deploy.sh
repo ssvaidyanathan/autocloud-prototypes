@@ -26,6 +26,7 @@ revert_s5() {
         log_info "[MOCK/DRY-RUN] Reverted S5 to pinned revision."
         return 0
     fi
+    verify_pinned_inventory_revision || return 1
     # 1. Direct traffic back to the exact pinned revision
     gcloud run services update-traffic "${NAME_PREFIX}-inventory-api" \
         --project="${PROJECT_ID}" \

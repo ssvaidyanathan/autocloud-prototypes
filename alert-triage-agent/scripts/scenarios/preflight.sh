@@ -71,6 +71,12 @@ if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
     log_info "    [MOCK/DRY-RUN] Microservice admin endpoints simulated OK."
 else
     # 1a. Inventory API health & admin endpoints
+    # The GET probes below are only harmless on the pinned code; never send them elsewhere.
+    if ! verify_pinned_inventory_revision || ! verify_inventory_serving_pinned; then
+        log_error "FATAL: ata-inventory-api is not on the pinned baseline; refusing to probe admin endpoints."
+        exit 1
+    fi
+    log_success "      Serving pinned revision ${PINNED_INVENTORY_REVISION} (${PINNED_INVENTORY_DIGEST})"
     log_info "    Probing ata-inventory-api (${INV_URL})..."
     INV_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
         "${AUTH_HEADER_INV[@]}" "${INV_URL}/health" || echo "000")

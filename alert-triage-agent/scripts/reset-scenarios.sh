@@ -408,6 +408,9 @@ PYEOF
 
 log_info "=== Starting Scenario Fault Cleanup & Baseline Restoration ==="
 
+# Refuse to restore traffic to a pinned revision that does not run the pinned image.
+verify_pinned_inventory_revision || exit 1
+
 INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
 ORD_URL="$(resolve_service_url "${NAME_PREFIX}-orders-api" "https://ata-orders-api-4klvlqnmpa-uw.a.run.app")"
 BRIDGE_URL="$(resolve_service_url "${NAME_PREFIX}-bridge" "https://ata-bridge-185099261133.us-west1.run.app")"
@@ -534,6 +537,8 @@ fi
 # 9. Admin Fault Injection Preflight Verification
 log_info "--> 9. Verifying admin fault injection endpoints exist on deployed inventory service..."
 if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
+    # The GET probes below are only harmless on the pinned code; never send them elsewhere.
+    verify_inventory_serving_pinned || exit 1
     STATUS_LEAK=$(curl -s -o /dev/null -w "%{http_code}" "${AUTH_HEADER_INV[@]}" "${INV_URL}/admin/leak-connections" || echo "000")
     STATUS_INJECT=$(curl -s -o /dev/null -w "%{http_code}" "${AUTH_HEADER_INV[@]}" "${INV_URL}/admin/fault/inject" || echo "000")
 
