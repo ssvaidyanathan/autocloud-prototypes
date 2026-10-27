@@ -5,8 +5,10 @@ fault action on GET /admin/*, so a stale pin turns preflight/reset probes into l
 """
 
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -112,10 +114,22 @@ def _source_with_pin(tmp_path, pin_text, guard='echo "PIN=${PINNED_INVENTORY_REV
 GOOD_PIN = f"PIN_INVENTORY_REVISION={PINNED_REVISION}\nPIN_INVENTORY_DIGEST={PINNED_DIGEST}\n"
 
 
+def _committed_pin():
+    """PIN_* values of the committed ata pin (stack data: it changes with each live re-pin)."""
+    return dict(line.split("=", 1) for line in PIN_FILE.read_text().splitlines()
+                if line and not line.startswith("#"))
+
+
 def test_committed_pin_file_is_the_default_pin():
-    text = PIN_FILE.read_text()
-    assert f"PIN_INVENTORY_REVISION={PINNED_REVISION}\n" in text
-    assert f"PIN_INVENTORY_DIGEST={PINNED_DIGEST}\n" in text
+    pin = _committed_pin()
+    assert set(pin) == {"PIN_INVENTORY_REVISION", "PIN_INVENTORY_DIGEST",
+                        "PIN_INVENTORY_PREVIOUS_REVISION", "PIN_INVENTORY_PREVIOUS_DIGEST"}
+    assert re.fullmatch(r"ata-inventory-api-[a-z0-9-]+", pin["PIN_INVENTORY_REVISION"])
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", pin["PIN_INVENTORY_DIGEST"])
+    # It parses with the real loader (the strict checks are covered with temp pins below).
+    res = _source_default_pin(Path(tempfile.mkdtemp()), "ata", guard='echo "${PINNED_INVENTORY_REVISION} ${PINNED_INVENTORY_DIGEST}"')
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == f"{pin['PIN_INVENTORY_REVISION']} {pin['PIN_INVENTORY_DIGEST']}"
 
 
 def test_pin_is_read_from_the_pin_file(tmp_path):
@@ -194,7 +208,7 @@ def test_pin_file_is_per_prefix():
 def test_default_pin_path_follows_the_prefix(tmp_path):
     res = _source_default_pin(tmp_path, "ata", guard='echo "${INVENTORY_PIN_FILE} ${PINNED_INVENTORY_REVISION}"')
     assert res.returncode == 0, res.stderr
-    assert res.stdout.strip() == f"{PIN_FILE} {PINNED_REVISION}"
+    assert res.stdout.strip() == f"{PIN_FILE} {_committed_pin()['PIN_INVENTORY_REVISION']}"
 
 
 def test_new_prefix_without_pin_file_says_to_run_prepare_initial(tmp_path):
