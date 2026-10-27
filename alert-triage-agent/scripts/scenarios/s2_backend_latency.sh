@@ -140,10 +140,9 @@ else
             break
         fi
 
-        # A Ctrl-C (SIGINT to the whole process group) also kills the foreground child, which
-        # exits 130. Under set -e that would abort the run and the EXIT trap would undo the
-        # fault. So when STOP_TRAFFIC is set, end the loop and finish normally (DEMO.md).
-        CURRENT_EPOCH=$(date +%s) || { rc=$?; [ "${STOP_TRAFFIC}" = "true" ] && break; exit "${rc}"; }
+        # Ctrl-C hits every child too (exit 130): end the loop and finish normally (see
+        # traffic_interrupted in common.sh). Any other failure is an error: the EXIT trap cleans up.
+        CURRENT_EPOCH=$(date +%s) || { rc=$?; traffic_interrupted "${rc}" && break; exit "${rc}"; }
         ELAPSED=$((CURRENT_EPOCH - START_EPOCH))
         if [ ${ELAPSED} -ge ${HOLD_SECS} ]; then
             break

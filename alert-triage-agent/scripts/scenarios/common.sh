@@ -375,6 +375,19 @@ check_cloud_run_auth() {
     return 0
 }
 
+# Scenario traffic loops: true when a Ctrl-C asked the loop to stop. Usage:
+# traffic_interrupted [<exit code of the child just run>].
+# A terminal Ctrl-C sends SIGINT to the whole foreground process group, so the loop's
+# children (curl, sleep, date) die with it, exit 130. A command substitution's subshell does
+# not inherit the script's INT trap: it dies of SIGINT before an inner `|| echo` runs, and
+# under set -e the failed assignment aborted the run, so the EXIT trap undid the fault (QA r3).
+# So each child in a loop is followed by a check: the INT/TERM trap set STOP_TRAFFIC, or the
+# child exited 130 (the trap may not have run yet). The loop then ends and the scenario
+# finishes normally (DEMO.md: "Press Ctrl-C ... to safely stop traffic early and view next steps").
+traffic_interrupted() {
+    [ "${STOP_TRAFFIC:-false}" = "true" ] || [ "${1:-0}" -eq 130 ]
+}
+
 # After a scenario aborted with an inventory app fault injected, reset the fault as
 # reset-scenarios.sh does: POST ${INV_URL}/admin/fault/reset, with AUTH_HEADER when set.
 # Usage: reset_inventory_fault_after_abort <fault description>. Uses INV_URL and AUTH_HEADER.

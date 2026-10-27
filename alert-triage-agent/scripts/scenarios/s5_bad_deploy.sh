@@ -195,10 +195,9 @@ else
             break
         fi
 
-        # A Ctrl-C (SIGINT to the whole process group) also kills the foreground child, which
-        # exits 130. Under set -e that would abort the run and the EXIT trap would revert the
-        # bad deploy. So when STOP_TRAFFIC is set, end the loop and finish normally (DEMO.md).
-        CURRENT_EPOCH=$(date +%s) || { rc=$?; [ "${STOP_TRAFFIC}" = "true" ] && break; exit "${rc}"; }
+        # Ctrl-C hits every child too (exit 130): end the loop and finish normally (see
+        # traffic_interrupted in common.sh). Any other failure is an error: the EXIT trap cleans up.
+        CURRENT_EPOCH=$(date +%s) || { rc=$?; traffic_interrupted "${rc}" && break; exit "${rc}"; }
         ELAPSED=$((CURRENT_EPOCH - START_EPOCH))
         if [ ${ELAPSED} -ge ${HOLD_SECS} ]; then
             break
@@ -206,12 +205,14 @@ else
 
         STATUS_INV=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
             ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
-            "https://${APIGEE_HOST}/ata/inventory/v1/items" || echo "000")
+            "https://${APIGEE_HOST}/ata/inventory/v1/items") || { rc=$?; traffic_interrupted "${rc}" && break; STATUS_INV="000"; }
+        traffic_interrupted && break
         STATUS_ORD=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
             ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
             -H "Content-Type: application/json" -X POST \
             "https://${APIGEE_HOST}/ata/orders/v1/orders" \
-            -d '{"item_id":"item-101","quantity":1}' || echo "000")
+            -d '{"item_id":"item-101","quantity":1}') || { rc=$?; traffic_interrupted "${rc}" && break; STATUS_ORD="000"; }
+        traffic_interrupted && break
 
         TOTAL_REQUESTS=$((TOTAL_REQUESTS + 2))
         if [ "${STATUS_INV}" = "500" ]; then
