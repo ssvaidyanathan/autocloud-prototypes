@@ -112,12 +112,32 @@ def test_demo_services_cap_instances_and_scale_to_zero(rname):
 
 def test_applications_ignore_changes_cover_only_client_bookkeeping():
     """ignore_changes must not hide real config drift (image, env, template)."""
-    lists = re.findall(r"ignore_changes\s*=\s*\[([^\]]*)\]", APPS_MAIN_TF.read_text())
+    text = APPS_MAIN_TF.read_text()
+    lists = re.findall(r"ignore_changes\s*=\s*\[(.*)\]", text)
 
-    assert lists, "expected client/client_version to be ignored on the Cloud Run services"
-    for raw in lists:
+    assert len(lists) == 2, "expected client/client_version to be ignored on the Cloud Run services"
+    expected = {
         # scaling = the service-level block (not template.scaling), which this config does not manage.
-        assert {item.strip() for item in raw.split(",") if item.strip()} == {"client", "client_version", "scaling"}
+        # template[0].revision (inventory only) = the revision NAME of the re-pinned baseline.
+        "inventory_api": {"client", "client_version", "scaling", "template[0].revision"},
+        "orders_api": {"client", "client_version", "scaling"},
+    }
+    for rname, items in expected.items():
+        block = _resource_block(text, "google_cloud_run_v2_service", rname)
+        (raw,) = re.findall(r"ignore_changes\s*=\s*\[(.*)\]", block)
+        assert {item.strip() for item in raw.split(",") if item.strip()} == items
+
+
+def test_inventory_ignores_only_the_pinned_revision_name_not_its_config():
+    """The re-pin names the baseline revision (pin-<UTC time>) and routes traffic to it by name.
+    Terraform must not plan "revision = <pin> -> null" (a new, unpinned revision; live ata
+    rollout 2026-10-27), but image, env and template scaling must stay managed."""
+    block = _resource_block(APPS_MAIN_TF.read_text(), "google_cloud_run_v2_service", "inventory_api")
+    (raw,) = re.findall(r"ignore_changes\s*=\s*\[(.*)\]", block)
+    items = {item.strip() for item in raw.split(",") if item.strip()}
+    assert "template[0].revision" in items
+    assert not any(i in items for i in ("template", "template[0]", "template[0].containers", "template[0].scaling"))
+    assert 'suffix="pin-' in (REPO_ROOT / "scripts/repin-inventory.sh").read_text()
 
 
 def test_inventory_deploy_script_sets_exactly_the_complete_baseline_env():

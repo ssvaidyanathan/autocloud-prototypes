@@ -88,7 +88,12 @@ resource "google_cloud_run_v2_service" "inventory_api" {
     # affect revisions; the demo scripts update this service via gcloud.
     # scaling is the service-level block (not template.scaling), which this
     # config does not manage; provider 6.x reports its zero defaults as drift.
-    ignore_changes = [client, client_version, scaling]
+    # template[0].revision is the revision NAME only: scripts/repin-inventory.sh creates the
+    # pinned baseline revision with --revision-suffix=pin-<UTC time>, and inventory traffic is
+    # routed to that revision by name. Without this, the next apply would plan
+    # "revision = <pin> -> null" and create a new, unpinned revision with the same config
+    # (live ata rollout 2026-10-27). Image, env and template.scaling stay managed.
+    ignore_changes = [client, client_version, scaling, template[0].revision]
   }
 }
 

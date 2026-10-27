@@ -73,11 +73,18 @@ if name == "gcloud":
         else:
             print("{}")
     elif args[:2] == ["builds", "submit"]:
-        print(os.environ["ISO_BUILD_DIGEST"])
+        # Like real gcloud: the build log streams on stdout (no machine-readable digest line).
+        print("----- REMOTE BUILD OUTPUT -----")
+        print("Digest: sha256:" + "0" * 64)
+        print("latest: digest: " + os.environ["ISO_BUILD_DIGEST"] + " size: 1993")
+        print("DONE")
     elif args[:3] == ["monitoring", "policies", "list"]:
         print("[]")
     elif args[:3] == ["sql", "instances", "describe"]:
         print("RUNNABLE")
+    elif args[:3] == ["artifacts", "docker", "images"] and "@" not in args[4]:
+        # Describe by tag right after a build: the digest just pushed.
+        print(os.environ["ISO_BUILD_DIGEST"])
     elif args[:3] == ["artifacts", "docker", "images"]:
         ar = os.environ.get("ISO_AR", "notfound")
         if ar == "found":
