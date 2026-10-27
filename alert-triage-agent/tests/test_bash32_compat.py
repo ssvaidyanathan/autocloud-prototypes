@@ -28,11 +28,11 @@ STUB = '#!/bin/sh\necho "$0 $*" >> "$ATA_TEST_CALLS"\n{body}\n'
 
 @pytest.fixture
 def stub_bin(tmp_path):
-    """PATH dir with `bash` -> TEST_BASH and logging gcloud/gsutil/curl stubs (gcloud prints nothing)."""
+    """PATH dir with `bash` -> TEST_BASH and logging gcloud/curl stubs (gcloud prints nothing)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "bash").symlink_to(TEST_BASH)
-    for name, body in [("gcloud", ""), ("gsutil", ""), ("curl", 'echo 200')]:
+    for name, body in [("gcloud", ""), ("curl", 'echo 200')]:
         stub = bin_dir / name
         stub.write_text(STUB.format(body=body))
         stub.chmod(0o755)
@@ -149,6 +149,32 @@ def test_scenario_mock_and_dry_run_need_no_key(sc, mode, tmp_path, stub_bin):
     res = run([SCRIPTS_DIR / "scenarios" / sc, mode, "--hold", "0s"], tmp_path, script_env(stub_bin, tmp_path))
     assert res.returncode == 0, res.stdout + res.stderr
     assert "NEXT STEPS" in res.stdout
+
+
+@pytest.mark.parametrize("mode", ["--mock", "--dry-run"])
+@pytest.mark.parametrize("sc", SCENARIOS)
+def test_scenario_mock_and_dry_run_skip_the_key_check(sc, mode, tmp_path, stub_bin):
+    """Mock/dry-run never call Apigee: no key, or an empty key file, is not an error there."""
+    scripts = isolated_scripts(tmp_path)
+    shutil.copytree(SCRIPTS_DIR.parent / "demo" / "apigee", scripts.parent / "demo" / "apigee")  # S3 reads it
+    (tmp_path / ".ata-api-key").write_text("\n")
+    res = run([scripts / "scenarios" / sc, mode, "--hold", "0s"], tmp_path, script_env(stub_bin, tmp_path))
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "NEXT STEPS" in res.stdout
+    assert "Apigee consumer API key" not in res.stdout + res.stderr
+
+
+@pytest.mark.parametrize("mode", ["MOCK_MODE", "DRY_RUN"])
+def test_resolve_api_key_prints_nothing_in_mock_and_dry_run(mode, tmp_path, stub_bin):
+    """No placeholder key: mock/dry-run resolve to an empty key without reading any key source."""
+    scripts = isolated_scripts(tmp_path)
+    (tmp_path / ".ata-api-key").write_text("\n")
+    probe = tmp_path / "probe.sh"
+    probe.write_text(f'set -euo pipefail\nSCRIPT_DIR="{scripts}/scenarios"\n'
+                     f'source "{scripts}/scenarios/common.sh"\nresolve_api_key\necho RESOLVED\n')
+    res = run([probe], tmp_path, script_env(stub_bin, tmp_path, **{mode: "true"}))
+    assert (res.returncode, res.stdout, res.stderr) == (0, "RESOLVED\n", "")
 
 
 # --- Live code paths with empty arrays under set -u ------------------------------

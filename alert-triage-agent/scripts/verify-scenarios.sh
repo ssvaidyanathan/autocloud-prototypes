@@ -55,7 +55,11 @@ fi
 # 3. Check GCS OKF Incident Files
 log_info "--> 3. Inspecting GCS OKF Incident Files (gs://${INCIDENTS_BUCKET}/knowledge/incident-manager/)..."
 if [ "${MOCK_MODE}" = "false" ] && [ "${DRY_RUN}" = "false" ]; then
-    INCIDENTS=$(gsutil ls "gs://${INCIDENTS_BUCKET}/knowledge/incident-manager/*.md" 2>/dev/null || echo "")
+    if ! INCIDENTS=$(gcs_run ls "gs://${INCIDENTS_BUCKET}/knowledge/incident-manager/*.md"); then
+        log_error "FATAL: could not list gs://${INCIDENTS_BUCKET}/knowledge/incident-manager/." >&2
+        gcs_error_hint
+        exit 1
+    fi
     if [ -n "${INCIDENTS}" ]; then
         log_info "    Found active incident Markdown files in GCS:"
         echo "${INCIDENTS}" | head -n 5

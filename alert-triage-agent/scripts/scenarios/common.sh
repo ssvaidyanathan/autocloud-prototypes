@@ -177,6 +177,33 @@ restore_inventory_pinned_baseline() {
 to_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 to_upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 
+# Run `gcloud storage <args>` (gcloud CLI credentials; no gsutil). A URL that matches no
+# objects is not an error: gcloud storage reports it as "matched no objects" with a
+# non-zero exit, and gcs_run returns 0 with empty output for it. Any other failure
+# (auth, permission, missing bucket, gcloud not installed) prints gcloud's error on
+# stderr and returns gcloud's exit status. stdout is gcloud's stdout.
+gcs_run() {
+    local err_file rc=0
+    err_file="$(mktemp "${TMPDIR:-/tmp}/ata-gcs.XXXXXX")"
+    gcloud storage "$@" 2>"${err_file}" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        if grep -q "matched no objects" "${err_file}"; then
+            rc=0
+        else
+            cat "${err_file}" >&2
+        fi
+    fi
+    rm -f "${err_file}"
+    return "${rc}"
+}
+
+# Next step after a failed gcloud storage call on the incidents bucket.
+gcs_error_hint() {
+    log_error "gcloud storage uses your gcloud CLI login. Check the active account with 'gcloud auth list'," >&2
+    log_error "that it can read and write gs://${INCIDENTS_BUCKET} (roles/storage.objectAdmin), and that" >&2
+    log_error "INCIDENTS_BUCKET/PROJECT_ID are right; then rerun this script." >&2
+}
+
 # Duration Parser (supports Xm, Xs, or raw seconds)
 parse_duration() {
     local val="$1"
@@ -189,11 +216,17 @@ parse_duration() {
     fi
 }
 
-# Print the Apigee consumer API key on stdout, or fail loudly. Never prints an empty key.
-# Lookup order: $ATA_API_KEY, ./.ata-api-key, alert-triage-agent/.ata-api-key, repo root
-# .ata-api-key. The first key file that exists is used; an empty one is an error, not
-# a reason to try the next location. Mock/dry-run use a placeholder when none is found.
+# Print the Apigee consumer API key on stdout, or fail loudly. In live mode it never
+# prints an empty key. Lookup order: $ATA_API_KEY, ./.ata-api-key,
+# alert-triage-agent/.ata-api-key, repo root .ata-api-key. The first key file that exists
+# is used; an empty one is an error, not a reason to try the next location.
+# Mock/dry-run never call Apigee, so they need no key: it prints nothing and succeeds
+# without looking anywhere (callers send no x-api-key header for an empty key).
 resolve_api_key() {
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        return 0
+    fi
+
     if [ -n "${ATA_API_KEY:-}" ]; then
         echo "${ATA_API_KEY}"
         return 0
@@ -212,11 +245,6 @@ resolve_api_key() {
             return 1
         fi
     done
-
-    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
-        echo "mock-apigee-api-key"
-        return 0
-    fi
 
     log_error "Apigee consumer API key not found." >&2
     api_key_help >&2

@@ -336,13 +336,13 @@ Run the automated result checker to inspect OKF incident files in GCS and valida
 ### 2. View Raw GCS OKF Incident Files
 Inspect active incident Markdown files stored in Cloud Storage under `knowledge/incident-manager/`:
 ```bash
-gsutil ls -l gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/
-gsutil cat gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/<incident-filename>.md
+gcloud storage ls -l gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/
+gcloud storage cat gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/<incident-filename>.md
 ```
 
 Archived incidents from scenario resets are moved to:
 ```bash
-gsutil ls -l gs://cloud-assist-fde-2-ata-incidents/archive/
+gcloud storage ls -l gs://cloud-assist-fde-2-ata-incidents/archive/
 ```
 
 Each file contains YAML frontmatter:

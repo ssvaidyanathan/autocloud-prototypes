@@ -16,7 +16,7 @@
 # 5. Restore Cloud Run service configuration if S5 was deployed
 # 6. Wait for open ATA alerts to close & quiet period (Apigee metric lag window)
 # 7. Archive active OKF incident files and clean leftover root storage
-# 8. Verify healthy 200 responses across all services and 0 active bridge groups
+# 8. Verify healthy 200 responses across all services and 0 active incident groups
 # 9. Admin fault injection preflight verification
 # ==============================================================================
 
@@ -341,6 +341,88 @@ PYEOF
     done
 }
 
+# --- Step 7/8: incident bucket housekeeping (gcloud storage via gcs_run) ----------
+# Each function returns non-zero after logging the error and a hint. "No matching
+# objects" is a normal empty result, never an error.
+
+ACTIVE_INCIDENTS_URL_SUFFIX="knowledge/incident-manager/*.md"
+
+count_lines() { printf '%s\n' "$1" | grep -c .; }
+
+# Move every active incident file (knowledge/incident-manager/*.md) to archive/.
+archive_active_incidents() {
+    local src="gs://${INCIDENTS_BUCKET}/${ACTIVE_INCIDENTS_URL_SUFFIX}"
+    local dst="gs://${INCIDENTS_BUCKET}/archive/"
+    local active
+    if ! active="$(gcs_run ls "${src}")"; then
+        log_error "FATAL: could not list ${src}; incident files were NOT archived." >&2
+        gcs_error_hint
+        return 1
+    fi
+    if [ -z "${active}" ]; then
+        log_info "    No active incident files found in knowledge/incident-manager/."
+        return 0
+    fi
+    log_info "    Moving $(count_lines "${active}") active incident file(s) to ${dst}..."
+    if ! gcs_run mv "${src}" "${dst}" > /dev/null; then
+        log_error "FATAL: gcloud storage mv ${src} ${dst} failed; incident files were NOT archived." >&2
+        gcs_error_hint
+        return 1
+    fi
+    log_success "    Active incident files moved from knowledge/incident-manager/ to archive/."
+}
+
+# Delete leftover root copies (gs://BUCKET/*.md) from older agent versions.
+clean_root_copies() {
+    local src="gs://${INCIDENTS_BUCKET}/*.md"
+    local copies
+    if ! copies="$(gcs_run ls "${src}")"; then
+        log_error "FATAL: could not list ${src}; leftover root copies were NOT removed." >&2
+        gcs_error_hint
+        return 1
+    fi
+    if [ -z "${copies}" ]; then
+        log_info "    No leftover root incident copies in gs://${INCIDENTS_BUCKET}/."
+        return 0
+    fi
+    log_info "    Deleting $(count_lines "${copies}") leftover root incident copies in gs://${INCIDENTS_BUCKET}/..."
+    if ! gcs_run rm "${src}" > /dev/null; then
+        log_error "FATAL: gcloud storage rm ${src} failed; leftover root copies were NOT removed." >&2
+        gcs_error_hint
+        return 1
+    fi
+    log_success "    Leftover root copies removed."
+}
+
+# Remove reports/verify_highlighting_001.html if present.
+remove_verify_report() {
+    local report="gs://${INCIDENTS_BUCKET}/reports/verify_highlighting_001.html"
+    if ! gcs_run rm "${report}" > /dev/null; then
+        log_error "FATAL: gcloud storage rm ${report} failed." >&2
+        gcs_error_hint
+        return 1
+    fi
+}
+
+# Incident groups live in knowledge/incident-manager/ (the bridge is stateless), so
+# "0 active incident groups" means that prefix holds no incident files after step 7.
+verify_no_active_incident_groups() {
+    local src="gs://${INCIDENTS_BUCKET}/${ACTIVE_INCIDENTS_URL_SUFFIX}"
+    local active
+    if ! active="$(gcs_run ls "${src}")"; then
+        log_error "FATAL: could not list ${src} to verify 0 active incident groups." >&2
+        gcs_error_hint
+        return 1
+    fi
+    if [ -n "${active}" ]; then
+        log_error "FATAL: $(count_lines "${active}") incident file(s) still active after archiving:" >&2
+        printf '%s\n' "${active}" >&2
+        log_error "Move them by hand with: gcloud storage mv '${src}' gs://${INCIDENTS_BUCKET}/archive/" >&2
+        return 1
+    fi
+    log_success "    Verified 0 active incident groups (knowledge/incident-manager/ is empty)."
+}
+
 # Sourced (tests): define the functions above without running the reset.
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     return 0
@@ -353,7 +435,6 @@ verify_pinned_inventory_revision || exit 1
 
 INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
 ORD_URL="$(resolve_service_url "${NAME_PREFIX}-orders-api" "https://ata-orders-api-4klvlqnmpa-uw.a.run.app")"
-BRIDGE_URL="$(resolve_service_url "${NAME_PREFIX}-bridge" "https://ata-bridge-185099261133.us-west1.run.app")"
 ID_TOKEN_INV="$(resolve_id_token "${INV_URL}")"
 AUTH_HEADER_INV=()
 if [ -n "${ID_TOKEN_INV}" ] && [ "${ID_TOKEN_INV}" != "mock-id-token" ]; then
@@ -364,12 +445,6 @@ ID_TOKEN_ORD="$(resolve_id_token "${ORD_URL}")"
 AUTH_HEADER_ORD=()
 if [ -n "${ID_TOKEN_ORD}" ] && [ "${ID_TOKEN_ORD}" != "mock-id-token" ]; then
     AUTH_HEADER_ORD=(-H "Authorization: Bearer ${ID_TOKEN_ORD}")
-fi
-
-ID_TOKEN_BRIDGE="$(resolve_id_token "${BRIDGE_URL}")"
-AUTH_HEADER_BRIDGE=()
-if [ -n "${ID_TOKEN_BRIDGE}" ] && [ "${ID_TOKEN_BRIDGE}" != "mock-id-token" ]; then
-    AUTH_HEADER_BRIDGE=(-H "Authorization: Bearer ${ID_TOKEN_BRIDGE}")
 fi
 
 # 1. Reset Faults on Cloud Run Demo Apps
@@ -419,25 +494,9 @@ wait_for_open_alerts
 # 7. Archive Active Incident Files & Clean Leftover Root Storage
 log_info "--> 7. Archiving OKF incident files from knowledge/incident-manager/ to archive/..."
 if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
-    # Move active incident markdown files to archive/
-    ACTIVE_INCIDENTS=$(gsutil ls "gs://${INCIDENTS_BUCKET}/knowledge/incident-manager/*.md" 2>/dev/null || true)
-    if [ -n "${ACTIVE_INCIDENTS}" ]; then
-        gsutil -m mv "gs://${INCIDENTS_BUCKET}/knowledge/incident-manager/*.md" "gs://${INCIDENTS_BUCKET}/archive/" 2>/dev/null || true
-        log_success "    Active incident files moved from knowledge/incident-manager/ to archive/."
-    else
-        log_info "    No active incident files found in knowledge/incident-manager/."
-    fi
-
-    # Delete any leftover root copies in gs://${INCIDENTS_BUCKET}/*.md
-    ROOT_COPIES=$(gsutil ls "gs://${INCIDENTS_BUCKET}/*.md" 2>/dev/null || true)
-    if [ -n "${ROOT_COPIES}" ]; then
-        log_info "    Deleting leftover root incident copies in gs://${INCIDENTS_BUCKET}/..."
-        gsutil -m rm "gs://${INCIDENTS_BUCKET}/*.md" 2>/dev/null || true
-        log_success "    Leftover root copies removed."
-    fi
-
-    # Remove reports/verify_highlighting_001.html if present
-    gsutil rm "gs://${INCIDENTS_BUCKET}/reports/verify_highlighting_001.html" 2>/dev/null || true
+    archive_active_incidents || exit 1
+    clean_root_copies || exit 1
+    remove_verify_report || exit 1
 else
     log_info "    Archive and cleanup simulation completed."
 fi
@@ -451,19 +510,16 @@ if [ -n "${API_KEY}" ]; then
 fi
 
 if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
-    HEALTH_INV=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "https://${APIGEE_HOST}/ata/inventory/v1/health" || echo "200")
-    HEALTH_ORD=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "https://${APIGEE_HOST}/ata/orders/v1/health" || echo "200")
-    log_info "    Inventory Health: HTTP ${HEALTH_INV}"
-    log_info "    Orders Health:    HTTP ${HEALTH_ORD}"
-
-    # Verify bridge has zero active groups from reset response
-    ACTIVE_COUNT=$(echo "${BRIDGE_RESET_RESP:-}" | python3 -c "import sys, json; raw=sys.stdin.read().strip(); data=json.loads(raw) if raw.startswith('{') else {}; print(data.get('active_groups', 0))" 2>/dev/null || echo "0")
-    if [ "${ACTIVE_COUNT}" != "0" ]; then
-        log_warn "    Active groups remaining on bridge: ${ACTIVE_COUNT}. Forcing reset..."
-        curl -s -X POST ${AUTH_HEADER_BRIDGE[@]+"${AUTH_HEADER_BRIDGE[@]}"} "${BRIDGE_URL}/reset" > /dev/null 2>&1 || true
-    else
-        log_success "    Bridge active groups verified: 0 active groups."
+    # curl -w prints 000 when the request itself fails.
+    HEALTH_INV=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "https://${APIGEE_HOST}/ata/inventory/v1/health" || true)
+    HEALTH_ORD=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "https://${APIGEE_HOST}/ata/orders/v1/health" || true)
+    log_info "    Inventory Health: HTTP ${HEALTH_INV:-000}"
+    log_info "    Orders Health:    HTTP ${HEALTH_ORD:-000}"
+    if [ "${HEALTH_INV:-000}" != "200" ] || [ "${HEALTH_ORD:-000}" != "200" ]; then
+        log_warn "    A health endpoint did not return HTTP 200 (see above)."
     fi
+
+    verify_no_active_incident_groups || exit 1
 fi
 
 # 9. Admin Fault Injection Preflight Verification

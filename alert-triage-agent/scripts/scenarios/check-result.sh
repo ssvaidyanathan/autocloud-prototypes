@@ -231,18 +231,32 @@ else:
     ]
     file_uris = []
     for sp in search_paths:
+        # gcloud storage (gcloud CLI credentials). "matched no objects" is an empty prefix,
+        # any other failure is fatal: never report 0 incidents because the listing failed.
         try:
-            out = subprocess.check_output(["gsutil", "ls", sp], stderr=subprocess.DEVNULL, text=True)
-            for line in out.splitlines():
-                line = line.strip()
-                if line.endswith(".md"):
-                    file_uris.append(line)
-        except Exception:
-            continue
+            res = subprocess.run(["gcloud", "storage", "ls", sp], capture_output=True, text=True)
+        except OSError as exc:
+            print(f"[ERROR] could not run gcloud storage ls {sp}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if res.returncode != 0:
+            if "matched no objects" in res.stderr:
+                continue
+            print(f"[ERROR] gcloud storage ls {sp} failed (exit {res.returncode}):\n{res.stderr.strip()}", file=sys.stderr)
+            print("[ERROR] Check the active account with 'gcloud auth list' and its access to the bucket.", file=sys.stderr)
+            sys.exit(1)
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if line.endswith(".md"):
+                file_uris.append(line)
 
     for uri in file_uris:
         try:
-            content = subprocess.check_output(["gsutil", "cat", uri], stderr=subprocess.DEVNULL, text=True)
+            res = subprocess.run(["gcloud", "storage", "cat", uri], capture_output=True, text=True)
+            if res.returncode != 0:
+                # e.g. moved to archive/ by a reset between ls and cat
+                print(f"[WARN] gcloud storage cat {uri} failed, skipping it: {res.stderr.strip()}", file=sys.stderr)
+                continue
+            content = res.stdout
             data = extract_frontmatter(content)
             if not data or data.get("type") != "incident":
                 continue

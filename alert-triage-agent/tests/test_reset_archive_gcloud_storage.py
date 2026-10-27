@@ -1,0 +1,349 @@
+"""reset-scenarios.sh step 7/8 (and the other incident-bucket readers) use gcloud storage
+and fail loudly.
+
+Step 7 used `gsutil ... 2>/dev/null || true` and logged success either way, so a missing
+gsutil or rejected credentials left resolved incidents in knowledge/incident-manager/
+while the reset reported success. Step 8 "verified" 0 active groups from a variable
+nothing set.
+
+A fake `gcloud` (FAKE_GCLOUD) serves `gcloud storage ls/mv/rm/cat` from a local
+directory, with gcloud's own "matched no objects" errors, and fails the commands listed
+in ATA_FAKE_GCS_FAIL the way rejected credentials do. reset-scenarios.sh is sourced
+(which defines its functions without running the reset). Scripts run under
+ATA_TEST_BASH, as in test_bash32_compat.py.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
+RESET_SCRIPT = SCRIPTS_DIR / "reset-scenarios.sh"
+TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
+BUCKET = "proj-ata-incidents"
+AUTH_ERROR = "HTTPError 401: Invalid Credentials"
+
+FAKE_GCLOUD = '''#!{python} -I
+import fnmatch, os, shutil, sys
+
+args = sys.argv[1:]
+with open(os.environ["ATA_TEST_CALLS"], "a") as log:
+    log.write("gcloud " + " ".join(args) + "\\n")
+if args[:1] != ["storage"]:
+    sys.exit(0)  # other gcloud calls print nothing
+cmd, urls = args[1], args[2:]
+root = os.environ["ATA_FAKE_GCS_ROOT"]
+
+if cmd in os.environ.get("ATA_FAKE_GCS_FAIL", "").split(","):
+    sys.stderr.write("ERROR: (gcloud.storage.%s) {auth_error}\\n" % cmd)
+    sys.exit(1)
+
+def local(url):
+    return os.path.join(root, url[len("gs://"):])
+
+def matches(url):
+    folder, pattern = os.path.split(local(url))
+    if not os.path.isdir(folder):
+        return []
+    return sorted(os.path.join(folder, n) for n in os.listdir(folder)
+                  if os.path.isfile(os.path.join(folder, n)) and fnmatch.fnmatchcase(n, pattern))
+
+def no_match(url):
+    if cmd == "ls":
+        sys.stderr.write("ERROR: (gcloud.storage.ls) One or more URLs matched no objects.\\n")
+    else:
+        sys.stderr.write("ERROR: (gcloud.storage.%s) The following URLs matched no objects or files:\\n-%s\\n"
+                         % (cmd, url))
+    sys.exit(1)
+
+if cmd == "mv":
+    srcs, dst = urls[:-1], local(urls[-1])
+    found = [p for u in srcs for p in matches(u)] or no_match(srcs[0])
+    os.makedirs(dst, exist_ok=True)
+    for p in found:
+        sys.stderr.write("Copying %s\\n" % p)
+        shutil.move(p, os.path.join(dst, os.path.basename(p)))
+    sys.exit(0)
+found = matches(urls[0]) or no_match(urls[0])
+for p in found:
+    if cmd == "ls":
+        print("gs://" + os.path.relpath(p, root))
+    elif cmd == "rm":
+        sys.stderr.write("Removing %s\\n" % p)
+        os.remove(p)
+    elif cmd == "cat":
+        sys.stdout.write(open(p).read())
+'''
+
+
+@pytest.fixture
+def gcs(tmp_path):
+    """(stub bin dir, local bucket root); the bucket starts empty."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "bash").symlink_to(TEST_BASH)
+    gcloud = bin_dir / "gcloud"
+    gcloud.write_text(FAKE_GCLOUD.format(python=sys.executable, auth_error=AUTH_ERROR))
+    gcloud.chmod(0o755)
+    root = tmp_path / "gcs"
+    (root / BUCKET).mkdir(parents=True)
+    return bin_dir, root
+
+
+def put(root, name, text="x\n"):
+    path = root / BUCKET / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def names(root, prefix):
+    folder = root / BUCKET / prefix
+    return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
+
+
+def env_for(tmp_path, gcs, fail="", **extra):
+    bin_dir, root = gcs
+    env = {k: v for k, v in os.environ.items() if k not in ("ATA_API_KEY", "INCIDENTS_BUCKET")}
+    env.update(PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", ATA_TEST_CALLS=str(tmp_path / "calls"),
+               ATA_FAKE_GCS_ROOT=str(root), ATA_FAKE_GCS_FAIL=fail,
+               MOCK_MODE="false", DRY_RUN="false", PROJECT_ID="proj")
+    env.update(extra)
+    return env
+
+
+def run_reset_functions(tmp_path, gcs, *functions, fail=""):
+    """Source reset-scenarios.sh and run `f || exit 1` for each function, like the reset does."""
+    probe = tmp_path / "probe.sh"
+    body = "".join(f"{f} || exit 1\n" for f in functions)
+    probe.write_text(f'set -euo pipefail\nsource "{RESET_SCRIPT}"\n{body}echo PROBE_DONE\n')
+    return subprocess.run([TEST_BASH, str(probe)], cwd=str(tmp_path), env=env_for(tmp_path, gcs, fail),
+                          capture_output=True, text=True, timeout=60, check=False)
+
+
+def gcloud_calls(tmp_path):
+    log = tmp_path / "calls"
+    return log.read_text().splitlines() if log.exists() else []
+
+
+# --- Step 7: archive -------------------------------------------------------------
+
+STEP7 = ("archive_active_incidents", "clean_root_copies", "remove_verify_report")
+STEP7_AND_8 = STEP7 + ("verify_no_active_incident_groups",)
+
+
+def test_archive_moves_active_incidents_and_verifies_zero_groups(tmp_path, gcs):
+    _, root = gcs
+    for inc in ("INC0010316", "INC0010317"):
+        put(root, f"knowledge/incident-manager/{inc}.md")
+    put(root, "knowledge/incident-manager/notes.txt")
+    put(root, "archive/INC0010001.md")
+
+    res = run_reset_functions(tmp_path, gcs, *STEP7_AND_8)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert names(root, "knowledge/incident-manager") == ["notes.txt"]
+    assert names(root, "archive") == ["INC0010001.md", "INC0010316.md", "INC0010317.md"]
+    assert "Moving 2 active incident file(s)" in res.stdout
+    assert "Active incident files moved from knowledge/incident-manager/ to archive/." in res.stdout
+    assert "Verified 0 active incident groups" in res.stdout
+    assert f"gcloud storage mv gs://{BUCKET}/knowledge/incident-manager/*.md gs://{BUCKET}/archive/" \
+        in gcloud_calls(tmp_path)
+    assert res.stderr == ""
+
+
+def test_nothing_to_archive_is_success(tmp_path, gcs):
+    """An empty bucket: every ls/rm matches nothing, which is not an error."""
+    _, root = gcs
+    res = run_reset_functions(tmp_path, gcs, *STEP7_AND_8)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "PROBE_DONE" in res.stdout
+    assert "No active incident files found in knowledge/incident-manager/." in res.stdout
+    assert "No leftover root incident copies" in res.stdout
+    assert "Verified 0 active incident groups" in res.stdout
+    assert "moved" not in res.stdout
+    assert not any(" mv " in c for c in gcloud_calls(tmp_path))
+    assert res.stderr == ""
+
+
+def test_root_copies_and_verify_report_are_removed(tmp_path, gcs):
+    _, root = gcs
+    put(root, "INC0010318.md")
+    put(root, "INC0010319.md")
+    put(root, "reports/verify_highlighting_001.html")
+    put(root, "reports/keep.html")
+
+    res = run_reset_functions(tmp_path, gcs, *STEP7)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Deleting 2 leftover root incident copies" in res.stdout
+    assert "Leftover root copies removed." in res.stdout
+    assert not list((root / BUCKET).glob("*.md"))
+    assert names(root, "reports") == ["keep.html"]
+
+
+@pytest.mark.parametrize("fail, archived, message", [
+    ("ls", False, "could not list gs://{b}/knowledge/incident-manager/*.md; incident files were NOT archived"),
+    ("mv", False, "gcloud storage mv gs://{b}/knowledge/incident-manager/*.md gs://{b}/archive/ failed"),
+    ("rm", True, "gcloud storage rm gs://{b}/*.md failed; leftover root copies were NOT removed"),
+])
+def test_archive_failure_is_fatal_and_never_reports_success(tmp_path, gcs, fail, archived, message):
+    _, root = gcs
+    put(root, "knowledge/incident-manager/INC0010316.md")
+    put(root, "INC0010318.md")
+
+    res = run_reset_functions(tmp_path, gcs, *STEP7_AND_8, fail=fail)
+
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert "PROBE_DONE" not in res.stdout
+    assert message.format(b=BUCKET) in res.stderr
+    assert AUTH_ERROR in res.stderr, "gcloud's own error is shown"
+    assert "gcloud auth list" in res.stderr and "roles/storage.objectAdmin" in res.stderr
+    # The only success line is the archive itself, and only when the mv really ran.
+    assert res.stdout.count("[SUCCESS]") == (1 if archived else 0)
+    assert ("moved from knowledge/incident-manager/" in res.stdout) is archived
+    assert names(root, "archive") == (["INC0010316.md"] if archived else [])
+    assert "Verified 0 active incident groups" not in res.stdout
+
+
+def test_missing_gcloud_is_fatal(tmp_path, gcs):
+    bin_dir, _ = gcs
+    probe = tmp_path / "probe.sh"
+    probe.write_text(f'set -euo pipefail\nsource "{RESET_SCRIPT}"\n'
+                     "archive_active_incidents || exit 1\necho PROBE_DONE\n")
+    # PATH holds only bash and coreutils: no gcloud anywhere.
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "bash").symlink_to(TEST_BASH)
+    for tool in ("dirname", "mktemp", "grep", "cat", "rm", "tr", "date"):
+        (tools / tool).symlink_to(shutil.which(tool))
+    env = env_for(tmp_path, gcs, PATH=str(tools))
+    res = subprocess.run([TEST_BASH, str(probe)], cwd=str(tmp_path), env=env,
+                         capture_output=True, text=True, timeout=60, check=False)
+
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert "incident files were NOT archived" in res.stderr
+    assert "gcloud" in res.stderr and "not found" in res.stderr
+    assert "PROBE_DONE" not in res.stdout
+
+
+# --- Step 8: 0 active incident groups ----------------------------------------------
+
+
+def test_verify_fails_when_incidents_remain(tmp_path, gcs):
+    _, root = gcs
+    put(root, "knowledge/incident-manager/INC0010316.md")
+    put(root, "knowledge/incident-manager/INC0010317.md")
+
+    res = run_reset_functions(tmp_path, gcs, "verify_no_active_incident_groups")
+
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert "2 incident file(s) still active after archiving" in res.stderr
+    assert f"gs://{BUCKET}/knowledge/incident-manager/INC0010316.md" in res.stderr
+    assert "Verified 0 active incident groups" not in res.stdout
+
+
+def test_verify_fails_when_listing_fails(tmp_path, gcs):
+    res = run_reset_functions(tmp_path, gcs, "verify_no_active_incident_groups", fail="ls")
+
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert "could not list" in res.stderr and "to verify 0 active incident groups" in res.stderr
+    assert AUTH_ERROR in res.stderr
+    assert "Verified 0 active incident groups" not in res.stdout
+
+
+# --- The reset wires them in, and nothing uses gsutil ------------------------------
+
+
+def test_reset_steps_7_and_8_exit_on_failure():
+    text = RESET_SCRIPT.read_text()
+    main = text.split('if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then', 1)[1]
+    step7 = main.split("# 7. Archive", 1)[1].split("# 8. ", 1)[0]
+    step8 = main.split("# 8. ", 1)[1].split("# 9. ", 1)[0]
+    for fn in STEP7:
+        assert f"    {fn} || exit 1\n" in step7
+    assert "    verify_no_active_incident_groups || exit 1\n" in step8
+    assert "|| true" not in step7
+    assert 'echo "200"' not in step8, "a failed health probe must not read as HTTP 200"
+    assert "BRIDGE_RESET_RESP" not in text
+
+
+@pytest.mark.parametrize("script", sorted(SCRIPTS_DIR.rglob("*.sh")), ids=lambda p: str(p.relative_to(SCRIPTS_DIR)))
+def test_no_gsutil_in_scripts(script):
+    bad = [f"{n}: {line.strip()}" for n, line in enumerate(script.read_text().splitlines(), 1)
+           if re.search(r"\bgsutil\b", line) and not line.lstrip().startswith("#")]
+    assert not bad, "\n".join(bad)
+
+
+# --- verify-scenarios.sh and check-result.sh read the bucket the same way ------------
+
+
+def run_script(tmp_path, gcs, cmd, fail=""):
+    return subprocess.run([TEST_BASH, *map(str, cmd)], cwd=str(tmp_path), env=env_for(tmp_path, gcs, fail),
+                          capture_output=True, text=True, timeout=60, check=False)
+
+
+INCIDENT_MD = """---
+type: incident
+group_id: grp-1
+timestamp: "2026-10-27T01:00:00Z"
+origin: ata-inventory-api
+servicenow_number: INC0010316
+status: RESOLVED
+---
+body
+"""
+
+
+def test_check_result_lists_active_and_archived_incidents(tmp_path, gcs):
+    _, root = gcs
+    put(root, "knowledge/incident-manager/INC0010316.md", INCIDENT_MD)
+    put(root, "archive/INC0010317.md", INCIDENT_MD.replace("INC0010316", "INC0010317"))
+
+    res = run_script(tmp_path, gcs, [SCRIPTS_DIR / "scenarios" / "check-result.sh"])
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Found 2 incident group(s) in GCS" in res.stdout
+    assert "INC0010316" in res.stdout and "INC0010317" in res.stdout
+
+
+def test_check_result_empty_bucket_is_zero_incidents(tmp_path, gcs):
+    res = run_script(tmp_path, gcs, [SCRIPTS_DIR / "scenarios" / "check-result.sh"])
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Found 0 incident group(s) in GCS" in res.stdout
+
+
+def test_check_result_listing_failure_is_fatal(tmp_path, gcs):
+    _, root = gcs
+    put(root, "knowledge/incident-manager/INC0010316.md", INCIDENT_MD)
+
+    res = run_script(tmp_path, gcs, [SCRIPTS_DIR / "scenarios" / "check-result.sh"], fail="ls")
+
+    assert res.returncode != 0, res.stdout + res.stderr
+    assert f"gcloud storage ls gs://{BUCKET}/knowledge/incident-manager/*.md failed" in res.stderr
+    assert AUTH_ERROR in res.stderr
+    assert "Found 0 incident group(s)" not in res.stdout
+
+
+@pytest.mark.parametrize("fail, rc, text", [
+    ("", 0, "No active incident files currently in storage"),
+    ("ls", 1, "could not list gs://proj-ata-incidents/knowledge/incident-manager/"),
+])
+def test_verify_scenarios_gcs_step(tmp_path, gcs, fail, rc, text):
+    script = SCRIPTS_DIR / "verify-scenarios.sh"
+    probe = tmp_path / "probe.sh"
+    # Run only step 3 of verify-scenarios.sh: its lines from "# 3." up to "# 4.".
+    lines = script.read_text().split("# 3. Check GCS OKF Incident Files", 1)[1].split("# 4. ", 1)[0]
+    probe.write_text(f'set -euo pipefail\nSCRIPT_DIR="{SCRIPTS_DIR}"\n'
+                     f'source "{SCRIPTS_DIR}/scenarios/common.sh"\n{lines}\necho PROBE_DONE\n')
+
+    res = run_script(tmp_path, gcs, [probe], fail=fail)
+
+    assert res.returncode == rc, res.stdout + res.stderr
+    assert text in res.stdout + res.stderr
