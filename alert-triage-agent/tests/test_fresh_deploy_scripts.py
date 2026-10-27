@@ -405,8 +405,17 @@ def test_schema_with_pgpassword_does_not_reset_the_password(stack):
 
 def test_schema_fails_loudly_without_psql(stack, tmp_path):
     (tmp_path / "bin" / "psql").unlink()
+    # Hermetic: the system dirs are mirrored without psql, so a psql installed on the
+    # test machine (e.g. /usr/bin/psql) cannot satisfy the check.
+    sysbin = tmp_path / "sysbin-no-psql"
+    sysbin.mkdir()
+    for d in ("/usr/bin", "/bin"):
+        for entry in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            if entry == "psql" or (sysbin / entry).exists():
+                continue
+            (sysbin / entry).symlink_to(os.path.join(d, entry))
     res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema",
-                       PATH=f"{tmp_path / 'bin'}{os.pathsep}/usr/bin{os.pathsep}/bin")
+                       PATH=f"{tmp_path / 'bin'}{os.pathsep}{sysbin}")
     assert res.returncode == 1
     assert "psql not on PATH" in res.stderr
 

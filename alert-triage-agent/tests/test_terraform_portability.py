@@ -171,6 +171,23 @@ def test_bridge_and_agent_grants_are_scoped_to_the_stack():
     assert 'resource "google_service_account_iam_member" "bridge_sa_service_account_user"' in main_tf
 
 
+def test_build_sa_can_get_the_build_bucket():
+    """gcloud builds submit --service-account --gcs-source-staging-dir/--gcs-log-dir needs
+    storage.buckets.get for the build SA on the build bucket (objectAdmin lacks it): the
+    first atat images phase failed with 'invalid bucket ... does not have access'."""
+    main_tf = (TF_DIR / "foundation" / "main.tf").read_text()
+    block = re.search(r'resource "google_storage_bucket_iam_member" "build_bucket_reader" \{.*?\n\}', main_tf, re.S)
+    assert block, "build SA has no bucket-level read grant on the build bucket"
+    body = block.group(0)
+    assert "google_storage_bucket.build.name" in body
+    assert "roles/storage.legacyBucketReader" in body
+    assert "build_sa.email" in body
+    # Bucket-scoped, never project-wide.
+    for proj in re.findall(r'resource "google_project_iam_member" "[^"]+" \{.*?\n\}', main_tf, re.S):
+        if "build_sa.email" in proj:
+            assert "storage." not in proj, proj
+
+
 def test_stack_label_everywhere_labels_are_set():
     foundation = (TF_DIR / "foundation" / "main.tf").read_text()
     assert re.search(r"common_labels = \{[^}]*stack\s+= var\.name_prefix", foundation, re.S)

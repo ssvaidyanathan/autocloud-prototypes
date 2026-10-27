@@ -177,6 +177,116 @@ def parse_iso(ts_str):
 
 since_dt = parse_iso(since_str) if since_str else None
 
+# Standard-library parser for the block-style YAML subset the agent writes (yaml.safe_dump):
+# nested mappings, lists of scalars and of mappings, quoted and wrapped scalars. Used when
+# PyYAML is not installed (the operator scripts need only the standard library), so the
+# alerts, their labels and the blast radius are still read instead of silently dropped.
+_FM_KEY = re.compile(r"""^[^\s:'"-][^:]*:(\s|$)""")
+
+
+def _fm_scalar(v):
+    v = v.strip()
+    if v in ("null", "~"):
+        return None
+    if v in ("true", "false"):
+        return v == "true"
+    if v == "[]":
+        return []
+    if v == "{}":
+        return {}
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+        return v[1:-1].replace("''", "'") if v[0] == "'" else v[1:-1]
+    if re.fullmatch(r"[-+]?[0-9]+", v):
+        return int(v)
+    if re.fullmatch(r"[-+]?([0-9]+\.[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?", v):
+        return float(v)
+    return v
+
+
+def _fm_tokens(fm_text):
+    # [indent, text, continuation_column, has_inline_value]: a deeper-indented line after an
+    # inline value continues it (a wrapped scalar). For "key: value" the value belongs to the
+    # key's column; for a scalar list item "- value" to the dash's column.
+    tokens = []
+    for raw in fm_text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        text = raw.strip()
+        if tokens and tokens[-1][3] and indent > tokens[-1][2]:
+            tokens[-1][1] += " " + text
+            continue
+        if text.startswith("- ") and not _FM_KEY.match(text[2:]):
+            tokens.append([indent, text, indent, True])
+            continue
+        body, col = (text[2:], indent + 2) if text.startswith("- ") else (text, indent)
+        value = body.partition(":")[2].strip()
+        tokens.append([indent, text, col, value != "" and not re.fullmatch(r"&\S+", value)])
+    return tokens
+
+
+def _fm_parse(tokens, i, indent):
+    if tokens[i][1].startswith("- ") or tokens[i][1] == "-":
+        items = []
+        while i < len(tokens) and tokens[i][0] == indent and (tokens[i][1].startswith("- ") or tokens[i][1] == "-"):
+            body = tokens[i][1][2:]
+            if not body:
+                i += 1
+                value, i = _fm_parse(tokens, i, tokens[i][0])
+                items.append(value)
+            elif _FM_KEY.match(body):
+                tokens[i] = [indent + 2, body, indent + 2, tokens[i][3]]
+                value, i = _fm_mapping(tokens, i, indent + 2)
+                items.append(value)
+            else:
+                items.append(_fm_scalar(body))
+                i += 1
+        return items, i
+    return _fm_mapping(tokens, i, indent)
+
+
+_FM_ANCHORS = {}
+
+
+def _fm_mapping(tokens, i, indent):
+    data = {}
+    while i < len(tokens) and tokens[i][0] == indent and not tokens[i][1].startswith("- "):
+        key, _, value = tokens[i][1].partition(":")
+        key, value = key.strip().strip("'\""), value.strip()
+        anchor = None
+        if value.startswith("&"):  # safe_dump anchors a repeated object: "key: &id001"
+            anchor, _, value = value[1:].partition(" ")
+            value = value.strip()
+        i += 1
+        if value.startswith("*"):  # ... and refers to it again: "key: *id001"
+            if value[1:] not in _FM_ANCHORS:
+                raise ValueError(f"unknown YAML alias {value!r}")
+            data[key] = _FM_ANCHORS[value[1:]]
+        elif value:
+            data[key] = _fm_scalar(value)
+        elif i < len(tokens) and (tokens[i][0] > indent or (tokens[i][0] == indent and tokens[i][1].startswith("- "))):
+            data[key], i = _fm_parse(tokens, i, tokens[i][0])
+        else:
+            data[key] = None
+        if anchor:
+            _FM_ANCHORS[anchor] = data[key]
+    return data, i
+
+
+def parse_frontmatter_stdlib(fm_text):
+    _FM_ANCHORS.clear()
+    tokens = _fm_tokens(fm_text)
+    if not tokens:
+        return {}
+    data, end = _fm_parse(tokens, 0, tokens[0][0])
+    if end != len(tokens) or not isinstance(data, dict):
+        raise ValueError(f"unsupported YAML near: {tokens[min(end, len(tokens) - 1)][1][:80]!r}")
+    return data
+
+
+_YAML_WARNED = []
+
+
 def extract_frontmatter(content):
     if not content.startswith("---"):
         return None
@@ -184,18 +294,15 @@ def extract_frontmatter(content):
     if len(parts) < 3:
         return None
     fm_text = parts[1]
-    data = {}
     try:
         import yaml
-        data = yaml.safe_load(fm_text) or {}
-    except Exception:
-        # Fallback simple line parsing
-        for line in fm_text.splitlines():
-            line = line.strip()
-            if ":" in line and not line.startswith("-"):
-                k, v = line.split(":", 1)
-                data[k.strip()] = v.strip().strip("'\"")
-    return data
+    except ImportError:
+        if not _YAML_WARNED:
+            print("[INFO] PyYAML is not installed: reading the incident frontmatter with the built-in parser.",
+                  file=sys.stderr)
+            _YAML_WARNED.append(True)
+        return parse_frontmatter_stdlib(fm_text)
+    return yaml.safe_load(fm_text) or {}
 
 def get_incident_files_mock():
     return [
@@ -288,7 +395,8 @@ else:
                 "blast_radius": data.get("blast_radius", []),
                 "labels": data.get("labels", {})
             })
-        except Exception:
+        except Exception as exc:
+            print(f"[WARN] could not read {uri}, skipping it: {exc}", file=sys.stderr)
             continue
 
 print(f"\nFound {len(incidents)} incident group(s) in GCS:\n")
