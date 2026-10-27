@@ -692,6 +692,8 @@ done
 
 The script prints the exact list before it changes anything, and stops on any non-2xx management API response.
 
+It is safe to re-run, and `scripts/reset-scenarios.sh` runs it on every reset. A proxy is imported as a new revision and deployed only when the rendered bundle differs from the revision deployed in `APIGEE_ENV`. The deployed revision's bundle (`GET .../revisions/<n>?format=bundle`) is compared file by file; in the root `apiproxy/<proxy>.xml`, the metadata Apigee regenerates on export is ignored. An unchanged proxy is logged (`<proxy>: deployed revision N matches the rendered bundle; not redeployed.`), so it adds no revision and no deployment to the agent's change window. If the check cannot decide (the read fails, the proxy is not deployed, it has several deployments, or a different service account, or it is not `READY`), the script prints a `WARNING` and imports and deploys anyway. TargetServers, the product and the developer are read first and not written when they already hold the wanted values.
+
 ```bash
 ./scripts/deploy-stage1.sh --only apigee
 ```
