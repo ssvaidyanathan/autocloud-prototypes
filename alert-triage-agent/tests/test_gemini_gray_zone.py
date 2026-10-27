@@ -151,7 +151,8 @@ def test_agent_image_installs_google_genai():
     deps = tomllib.loads((ROOT / "agent/pyproject.toml").read_text())["project"]["dependencies"]
     genai = [d for d in deps if re.match(r"google-genai\b", d)]
     assert genai, deps
-    assert re.search(r">=\s*1\.\d+.*<\s*3", genai[0]), f"google-genai must be pinned to a compatible range: {genai[0]}"
+    # sec L7: 2.x only. GenerateContentConfig(response_schema=<pydantic>) is the 2.x API surface.
+    assert re.fullmatch(r'"?google-genai>=2\.33,<3"?', genai[0].strip()), f"google-genai must be >=2.33,<3: {genai[0]}"
 
 
 # --- success ---------------------------------------------------------------------------------
