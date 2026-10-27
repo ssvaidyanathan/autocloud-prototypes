@@ -1,6 +1,5 @@
 """FastAPI Application for ata-inventory-api."""
 
-import logging
 from typing import Dict, Optional
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field

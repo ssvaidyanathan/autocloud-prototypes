@@ -1,6 +1,5 @@
 """Database connection and fault injection management for ata-inventory-api."""
 
-import os
 import time
 import logging
 from typing import List, Dict, Any, Optional

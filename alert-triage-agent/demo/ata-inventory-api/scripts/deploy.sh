@@ -5,7 +5,7 @@
 # Deploys the pinned image (scripts/scenarios/inventory-pin.env) and routes 100% of
 # traffic to the new revision. To move the demo baseline to new code, do NOT use this
 # script: use scripts/repin-inventory.sh (no-traffic candidate, verify, then switch;
-# DEPLOY.md, "Re-pinning ata-inventory-api").
+# DEPLOY.md, "Re-pinning the inventory baseline").
 #
 # Env and limits come from scripts/scenarios/common.sh, so this script, Terraform and the
 # scenario restore agree: ATA_INVENTORY_* only (no DB_USER/MOCK_DB aliases), at most
@@ -55,6 +55,11 @@ if [ "${BUILD_IMAGE:-false}" = "true" ]; then
 fi
 
 # 2. Deploy to Cloud Run using pinned image
+# --set-env-vars on purpose: the env is replaced by the COMPLETE inventory env,
+# INVENTORY_BASELINE_ENV_VARS (common.sh: the five ATA_INVENTORY_* variables). The test
+# test_applications_terraform_drift.py keeps that set equal to Terraform's inventory env.
+# Replacing (not --update-env-vars) removes stale variables such as the legacy DB_USER /
+# MOCK_DB aliases. A new inventory variable goes into INVENTORY_BASELINE_ENV_VARS and main.tf.
 echo "Deploying Cloud Run service ${SERVICE_NAME} using pinned image..."
 gcloud run deploy "${SERVICE_NAME}" \
     --project="${PROJECT_ID}" \

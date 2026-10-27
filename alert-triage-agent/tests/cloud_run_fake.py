@@ -167,6 +167,9 @@ elif args[:3] == ["run", "services", "update-traffic"]:
     save()
 elif args[:3] == ["run", "revisions", "describe"]:
     rev = args[3]
+    if "revisions-describe" in state["fail"]:
+        print("ERROR: (gcloud.run.revisions.describe) PERMISSION_DENIED: permission denied", file=sys.stderr)
+        sys.exit(1)
     if rev not in state["revisions"]:
         print(f"ERROR: revision {rev} not found", file=sys.stderr)
         sys.exit(1)
@@ -174,6 +177,8 @@ elif args[:3] == ["run", "revisions", "describe"]:
         print(json.dumps(revision_doc(rev)))
     elif fmt == "value(status.imageDigest)":
         print(revision_doc(rev)["status"]["imageDigest"])
+    elif fmt == "value(metadata.name)":
+        print(rev)
     else:
         sys.exit(f"fake gcloud: unhandled revisions describe format {fmt}")
 elif args[:3] == ["run", "revisions", "list"]:
@@ -282,6 +287,22 @@ def live_like_state():
         "http": {INV_URL: healthy_http(INV_URL), ORD_URL: healthy_http(ORD_URL),
                  "https://repin-candidate---inv.example": healthy_http("candidate")},
     }
+
+
+def fresh_project_state():
+    """A fresh project: inventory deployed by Terraform/deploy.sh, serving its latest
+    revision; the repo's pin (00073-9vb) is not a revision here."""
+    state = live_like_state()
+    first = "ata-inventory-api-00001-abc"
+    del state["revisions"][OLD_PIN]
+    state["revisions"][first] = {"service": INV, "image": f"{IMAGE_BASE}@{NEW_DIGEST}", "digest": NEW_DIGEST,
+                                 "env": dict(BASELINE_ENV), "max": "1", "min": "0", "ready": True,
+                                 "created": "2026-10-28T00:00:00Z"}
+    state["services"][INV]["traffic"] = [{"revisionName": first, "percent": 100, "latestRevision": True}]
+    state["services"][INV]["template"]["env"] = dict(BASELINE_ENV)
+    state["services"][INV]["latest"] = first
+    state["counter"] = 1
+    return state
 
 
 def write_pin(path, rev, digest, prev_rev="", prev_digest=""):

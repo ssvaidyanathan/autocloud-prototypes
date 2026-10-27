@@ -14,7 +14,7 @@ import pytest
 
 from tests.cloud_run_fake import (
     BASELINE_ENV, IMAGE_BASE, INV, INV_URL, NEW_DIGEST, OLD_DIGEST, OLD_PIN, REPO_ROOT,
-    FakeCloud, live_like_state, write_pin,
+    FakeCloud, fresh_project_state, live_like_state, write_pin,
 )
 
 REPIN = REPO_ROOT / "scripts" / "repin-inventory.sh"
@@ -318,3 +318,57 @@ def test_no_mock_or_dry_run_mode(cloud, mode):
     assert res.returncode != 0
     assert "no mock/dry-run mode" in res.stderr
     assert cloud.calls() == []
+
+
+# --- first pin on a fresh project (--initial) -----------------------------------------
+
+
+def test_initial_pin_on_a_fresh_project_end_to_end(tmp_path):
+    cloud = FakeCloud(tmp_path, fresh_project_state())
+
+    res = cloud.run([REPIN, "prepare", "--initial", "--image-digest", NEW_DIGEST])
+    assert res.returncode == 0, res.stdout + res.stderr
+    cand = candidate_name(cloud)
+    assert cand not in [r for r, _ in cloud.serving()] and cloud.tags() == []
+    assert f"write-pin --revision {cand} --digest {NEW_DIGEST} --initial" in res.stdout
+
+    res = cloud.run([REPIN, "write-pin", "--revision", cand, "--digest", NEW_DIGEST, "--initial"])
+    assert res.returncode == 0, res.stdout + res.stderr
+    text = cloud.pin_file.read_text()
+    assert f"PIN_INVENTORY_REVISION={cand}\n" in text
+    assert "PIN_INVENTORY_PREVIOUS_REVISION=\n" in text  # nothing to roll back to here
+
+    res = cloud.run([REPIN, "switch"])
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert cloud.serving() == [(cand, 100)]
+
+
+def test_prepare_without_initial_on_a_fresh_project_points_to_initial(tmp_path):
+    cloud = FakeCloud(tmp_path, fresh_project_state())
+    res = cloud.run([REPIN, "prepare", "--image-digest", NEW_DIGEST])
+    assert res.returncode != 0
+    assert "prepare --initial" in res.stderr
+    assert cloud.calls(["run", "services", "update"]) == []
+
+
+@pytest.mark.parametrize("command", [
+    ["prepare", "--initial", "--image-digest", NEW_DIGEST],
+    ["write-pin", "--initial", "--revision", "ata-inventory-api-00001-abc", "--digest", NEW_DIGEST],
+])
+def test_initial_is_refused_when_a_pin_exists(cloud, command):
+    before = cloud.pin_file.read_text()
+    res = cloud.run([REPIN, *command])
+    assert res.returncode != 0
+    assert "--initial: a pin exists" in res.stderr
+    assert cloud.calls(["run", "services", "update"]) == []
+    assert cloud.pin_file.read_text() == before
+
+
+def test_initial_refuses_when_it_cannot_tell_whether_a_pin_exists(tmp_path):
+    state = fresh_project_state()
+    state["fail"] = ["revisions-describe"]
+    cloud = FakeCloud(tmp_path, state)
+    res = cloud.run([REPIN, "prepare", "--initial", "--image-digest", NEW_DIGEST])
+    assert res.returncode != 0
+    assert "cannot tell whether" in res.stderr and "PERMISSION_DENIED" in res.stderr
+    assert cloud.calls(["run", "services", "update"]) == []

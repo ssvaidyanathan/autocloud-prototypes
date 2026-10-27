@@ -117,3 +117,10 @@ def test_applications_ignore_changes_cover_only_client_bookkeeping():
     assert lists, "expected client/client_version to be ignored on the Cloud Run services"
     for raw in lists:
         assert {item.strip() for item in raw.split(",") if item.strip()} == {"client", "client_version"}
+
+
+def test_inventory_deploy_script_sets_exactly_the_complete_baseline_env():
+    """deploy.sh replaces the env (--set-env-vars) with the complete baseline set, nothing else."""
+    text = (REPO_ROOT / "demo/ata-inventory-api/scripts/deploy.sh").read_text()
+    assert re.findall(r'--(?:set|update)-env-vars="([^"]+)"', text) == ["${INVENTORY_BASELINE_ENV_VARS}"]
+    assert "--set-env-vars=" in text

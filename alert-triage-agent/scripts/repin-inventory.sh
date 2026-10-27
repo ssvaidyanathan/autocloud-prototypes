@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Re-pin ata-inventory-api: move the demo baseline to a new revision, safely.
+# Re-pin <prefix>-inventory-api: move the demo baseline to a new revision, safely.
 #
 # The pin (revision + image digest) lives in scripts/scenarios/inventory-pin.env. Every
 # scenario, reset and preflight restores and checks traffic against it. Re-pinning is:
@@ -15,11 +15,15 @@
 #                 the database path and the admin probes.
 #   rollback      Traffic back to PIN_INVENTORY_PREVIOUS_REVISION and the pin file swapped
 #                 back. Commit the file.
+#
+# First pin on a fresh project (no pinned revision exists there yet): `prepare --initial`
+# and `write-pin --initial` (no previous pin is kept), then `switch`. --initial fails loudly
+# if the pinned revision in the pin file exists in this project.
 #   status        Read-only report: pin, traffic, pinned revision vs baseline, instance caps.
 #
 # Baseline of a pinned revision: image digest of the pin, ATA_INVENTORY_* env only (no
 # DB_USER/MOCK_DB aliases), max instances DEMO_MAX_INSTANCES (ATA_DEMO_MAX_INSTANCES,
-# default 1), min instances 0, Ready. See DEPLOY.md, "Re-pinning ata-inventory-api".
+# default 1), min instances 0, Ready. See DEPLOY.md, "Re-pinning the inventory baseline".
 #
 # Fails loudly at every step; never moves traffic unless asked (switch / rollback), and
 # never rolls back on its own. bash 3.2 and BSD userland compatible.
@@ -36,8 +40,9 @@ SERVICE="${NAME_PREFIX}-inventory-api"
 BASELINE_PY="${SCRIPT_DIR}/scenarios/inventory_baseline.py"
 # Temporary traffic tag of the candidate (removed before prepare exits).
 CANDIDATE_TAG="${ATA_REPIN_TAG:-repin-candidate}"
-# Demo item the database check expects in GET /items.
-EXPECTED_ITEM="${ATA_REPIN_EXPECTED_ITEM:-item-101}"
+# Demo item the database check expects in GET /items: the first restock baseline item.
+validate_restock_baseline || exit 1
+EXPECTED_ITEM="${INVENTORY_RESTOCK_BASELINE%%=*}"
 
 usage() {
     cat <<EOF
@@ -51,12 +56,15 @@ Commands:
   prepare --image-digest sha256:<hex> Same, with an image already in Artifact Registry
   write-pin --revision <rev> --digest sha256:<hex>
                                       Verify <rev> (read-only) and rewrite the pin file
+  prepare|write-pin ... --initial     First pin on a fresh project: no existing pin needed
+                                      (refused if the pinned revision exists here)
   switch                              Route 100% of traffic to the pinned revision and verify
   rollback                            Route 100% to PIN_INVENTORY_PREVIOUS_REVISION, swap the pin back
 
 Pin file: ${INVENTORY_PIN_FILE}
 Env: ATA_DEMO_MAX_INSTANCES (default 1), ATA_REPIN_TAG (default repin-candidate),
-     ATA_REPIN_EXPECTED_ITEM (default item-101), PROJECT_ID, REGION, NAME_PREFIX.
+     ATA_INVENTORY_RESTOCK_BASELINE (its first item must be listed by GET /items),
+     PROJECT_ID, REGION, NAME_PREFIX, ATA_ARTIFACT_REGISTRY_HOST (default <REGION>-docker.pkg.dev).
 EOF
 }
 
@@ -95,7 +103,7 @@ http_get() {
     if [ -n "${token}" ]; then
         auth=(-H "Authorization: Bearer ${token}")
     fi
-    body_file="$(mktemp "${TMPDIR:-/tmp}/ata-repin.XXXXXX")"
+    body_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-repin.XXXXXX")"
     out="$(curl -s -o "${body_file}" -w "%{http_code}" --connect-timeout 5 --max-time 60 \
         ${auth[@]+"${auth[@]}"} "${base}${path}" 2>/dev/null)" || out="000"
     HTTP_STATUS="${out}"
@@ -133,6 +141,35 @@ verify_http() {
         fi
     done
     return "${failed}"
+}
+
+# Fail loudly unless the pin file's revision does NOT exist in this project (for --initial).
+# Any describe error other than "not found" is fatal: it cannot prove there is no pin.
+require_no_existing_pin() {
+    local err_file rc=0
+    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-repin.XXXXXX")"
+    gcloud run revisions describe "${PIN_INVENTORY_REVISION}" --project="${PROJECT_ID}" --region="${REGION}" \
+        --format="value(metadata.name)" >/dev/null 2>"${err_file}" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        rm -f "${err_file}"
+        die "--initial: a pin exists: ${PIN_INVENTORY_REVISION} (from ${INVENTORY_PIN_FILE}) is a revision in ${PROJECT_ID}/${REGION}. Re-pin without --initial."
+    fi
+    if ! grep -qi "not found\|could not be found\|NOT_FOUND" "${err_file}"; then
+        cat "${err_file}" >&2
+        rm -f "${err_file}"
+        die "--initial: cannot tell whether ${PIN_INVENTORY_REVISION} exists (gcloud error above); nothing changed."
+    fi
+    rm -f "${err_file}"
+    log_info "    No pinned revision in ${PROJECT_ID}/${REGION} (${PIN_INVENTORY_REVISION} not found): first pin."
+}
+
+# Fail loudly if revision $1 receives traffic (service JSON on stdin).
+expect_no_traffic() {
+    local rev="$1" serving
+    serving="$(python3 "${BASELINE_PY}" serving)" || return 1
+    case " $(printf '%s' "${serving}" | awk '{print $1}' | tr '\n' ' ') " in
+        *" ${rev} "*) log_error "${rev} receives traffic: ${serving}" >&2; return 1 ;;
+    esac
 }
 
 # Rewrite the pin file atomically (temp file in the same directory, then mv).
@@ -194,7 +231,7 @@ cmd_status() {
         log_warn "${off} item(s) off baseline." >&2
         return 1
     fi
-    log_success "ata-inventory-api is on the pinned baseline."
+    log_success "${SERVICE} is on the pinned baseline."
 }
 
 # --- prepare -------------------------------------------------------------------------
@@ -222,9 +259,10 @@ remove_candidate_tag() {
 }
 
 cmd_prepare() {
-    local image_tag="" digest="" suffix candidate svc_json tag_url
+    local image_tag="" digest="" suffix candidate svc_json tag_url initial=false next_flag=""
     while [ $# -gt 0 ]; do
         case "$1" in
+            --initial) initial=true; next_flag=" --initial"; shift ;;
             --image-tag) [ $# -ge 2 ] || die "--image-tag needs a value"; image_tag="$2"; shift 2 ;;
             --image-tag=*) image_tag="${1#*=}"; shift ;;
             --image-digest) [ $# -ge 2 ] || die "--image-digest needs a value"; digest="$2"; shift 2 ;;
@@ -248,11 +286,18 @@ cmd_prepare() {
     fi
     require_no_pin_override
 
-    log_info "=== Re-pin prepare: ${SERVICE} (current pin ${PIN_INVENTORY_REVISION}) ==="
-    log_info "--> 1. Checking traffic is 100% on the current pin (the baseline stays serving)..."
-    svc_json="$(service_json)" || die "cannot describe ${SERVICE}."
-    expect_serving "${PIN_INVENTORY_REVISION}" <<<"${svc_json}" \
-        || die "traffic is not 100% on ${PIN_INVENTORY_REVISION}; run ./scripts/reset-scenarios.sh first."
+    if [ "${initial}" = "true" ]; then
+        log_info "=== Re-pin prepare --initial: first pin of ${SERVICE} ==="
+        log_info "--> 1. Checking there is no pin in this project..."
+        require_no_existing_pin
+        svc_json="$(service_json)" || die "cannot describe ${SERVICE}: deploy it first (applications Terraform or demo/ata-inventory-api/scripts/deploy.sh)."
+    else
+        log_info "=== Re-pin prepare: ${SERVICE} (current pin ${PIN_INVENTORY_REVISION}) ==="
+        log_info "--> 1. Checking traffic is 100% on the current pin (the baseline stays serving)..."
+        svc_json="$(service_json)" || die "cannot describe ${SERVICE}."
+        expect_serving "${PIN_INVENTORY_REVISION}" <<<"${svc_json}" \
+            || die "traffic is not 100% on ${PIN_INVENTORY_REVISION}; run ./scripts/reset-scenarios.sh first (first pin of a fresh project: prepare --initial)."
+    fi
     if python3 "${BASELINE_PY}" tag-url --tag="${CANDIDATE_TAG}" <<<"${svc_json}" >/dev/null 2>&1; then
         die "traffic tag ${CANDIDATE_TAG} already exists on ${SERVICE} (an earlier prepare?). Remove it: gcloud run services update-traffic ${SERVICE} --project=${PROJECT_ID} --region=${REGION} --remove-tags=${CANDIDATE_TAG}"
     fi
@@ -290,9 +335,14 @@ cmd_prepare() {
         || die "${candidate} is not a valid baseline revision (above). It has no traffic; prune it later."
     log_success "    digest, ATA_INVENTORY_* env, no aliases, max ${DEMO_MAX_INSTANCES}, min 0, Ready."
     svc_json="$(service_json)" || die "cannot describe ${SERVICE}."
-    expect_serving "${PIN_INVENTORY_REVISION}" <<<"${svc_json}" \
-        || die "traffic moved off ${PIN_INVENTORY_REVISION} during the deploy (above)."
-    log_success "    Traffic still 100% on ${PIN_INVENTORY_REVISION}; ${candidate} has 0%."
+    if [ "${initial}" = "true" ]; then
+        expect_no_traffic "${candidate}" <<<"${svc_json}" || die "${candidate} receives traffic despite --no-traffic (above)."
+        log_success "    ${candidate} has 0% (serving unchanged)."
+    else
+        expect_serving "${PIN_INVENTORY_REVISION}" <<<"${svc_json}" \
+            || die "traffic moved off ${PIN_INVENTORY_REVISION} during the deploy (above)."
+        log_success "    Traffic still 100% on ${PIN_INVENTORY_REVISION}; ${candidate} has 0%."
+    fi
 
     log_info "--> 5. Verifying ${candidate} over HTTP through its tag URL (GET only)..."
     tag_url="$(python3 "${BASELINE_PY}" tag-url --tag="${CANDIDATE_TAG}" <<<"${svc_json}")" \
@@ -305,13 +355,18 @@ cmd_prepare() {
     log_info "--> 6. Removing the temporary tag..."
     remove_candidate_tag || die "could not remove tag ${CANDIDATE_TAG}."
     trap - EXIT
-    verify_inventory_serving_pinned || die "traffic is not 100% on ${PIN_INVENTORY_REVISION} after removing the tag."
+    if [ "${initial}" = "true" ]; then
+        svc_json="$(service_json)" || die "cannot describe ${SERVICE}."
+        expect_no_traffic "${candidate}" <<<"${svc_json}" || die "${candidate} receives traffic after removing the tag (above)."
+    else
+        verify_inventory_serving_pinned || die "traffic is not 100% on ${PIN_INVENTORY_REVISION} after removing the tag."
+    fi
 
     log_success "=== Candidate verified: ${candidate} (${digest}); serving is unchanged ==="
     cat <<EOF
 
-NEXT (see DEPLOY.md, "Re-pinning ata-inventory-api"):
-  $0 write-pin --revision ${candidate} --digest ${digest}
+NEXT (see DEPLOY.md, "Re-pinning the inventory baseline"):
+  $0 write-pin --revision ${candidate} --digest ${digest}${next_flag}
   git add scripts/scenarios/inventory-pin.env && git commit -m "chore(inventory): pin ${candidate}"
   $0 switch
 EOF
@@ -320,9 +375,10 @@ EOF
 # --- write-pin -----------------------------------------------------------------------
 
 cmd_write_pin() {
-    local rev="" digest=""
+    local rev="" digest="" initial=false
     while [ $# -gt 0 ]; do
         case "$1" in
+            --initial) initial=true; shift ;;
             --revision) [ $# -ge 2 ] || die "--revision needs a value"; rev="$2"; shift 2 ;;
             --revision=*) rev="${1#*=}"; shift ;;
             --digest) [ $# -ge 2 ] || die "--digest needs a value"; digest="$2"; shift 2 ;;
@@ -336,11 +392,19 @@ cmd_write_pin() {
     if [ "${rev}" = "${PIN_INVENTORY_REVISION}" ]; then
         die "${rev} is already the pin."
     fi
+    if [ "${initial}" = "true" ]; then
+        require_no_existing_pin
+    fi
     log_info "--> Verifying ${rev} (read-only)..."
     inventory_revision_matches_baseline "${rev}" "${digest}" \
         || die "${rev} is not a valid baseline revision (above); the pin is unchanged."
-    write_pin_file "${rev}" "${digest}" "${PIN_INVENTORY_REVISION}" "${PIN_INVENTORY_DIGEST}"
-    log_success "Pin file updated: ${rev} (${digest}); previous ${PIN_INVENTORY_PREVIOUS_REVISION}."
+    if [ "${initial}" = "true" ]; then
+        # The old pin is not a revision here: there is nothing to roll back to.
+        write_pin_file "${rev}" "${digest}" "" ""
+    else
+        write_pin_file "${rev}" "${digest}" "${PIN_INVENTORY_REVISION}" "${PIN_INVENTORY_DIGEST}"
+    fi
+    log_success "Pin file updated: ${rev} (${digest}); previous ${PIN_INVENTORY_PREVIOUS_REVISION:-<none>}."
     cat <<EOF
 
 NEXT: commit the pin, then switch traffic:

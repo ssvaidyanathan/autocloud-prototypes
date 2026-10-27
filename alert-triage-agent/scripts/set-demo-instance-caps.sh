@@ -8,12 +8,12 @@
 # applies to only part of the traffic.
 #
 # What (only where the live value differs):
-#   - Service level, ata-inventory-api and ata-orders-api: `gcloud run services update
+#   - Service level, <prefix>-inventory-api and <prefix>-orders-api: `gcloud run services update
 #     --max=N`. Covers every revision, including a pinned revision created before the cap,
 #     and creates NO revision. (Not in google provider 5.x, so Terraform cannot set it.)
-#   - Revision level, ata-orders-api: `--max-instances=N --min-instances=0`. Orders serves
+#   - Revision level, <prefix>-orders-api: `--max-instances=N --min-instances=0`. Orders serves
 #     its latest revision, so the new revision serves at once. Terraform declares the same
-#     values (demo_max_instance_count). ata-inventory-api's revision level comes with the
+#     values (demo_max_instance_count). <prefix>-inventory-api's revision level comes with the
 #     re-pin (scripts/repin-inventory.sh): its traffic is pinned by name.
 # Min instances stay 0 (scale to zero; min-instances=1 is not approved).
 #
@@ -127,4 +127,4 @@ if [ "${failed}" -gt 0 ]; then
     exit 1
 fi
 log_success "=== Demo instance caps verified: max ${DEMO_MAX_INSTANCES}, min 0 ==="
-log_info "ata-inventory-api's pinned revision gets its own revision-level cap with the re-pin (scripts/repin-inventory.sh)."
+log_info "${NAME_PREFIX}-inventory-api's pinned revision gets its own revision-level cap with the re-pin (scripts/repin-inventory.sh)."
