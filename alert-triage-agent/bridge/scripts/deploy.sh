@@ -7,12 +7,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BRIDGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=SCRIPTDIR/../../scripts/cloud-run-deploy-lib.sh
+source "${BRIDGE_DIR}/../scripts/cloud-run-deploy-lib.sh"
 
-PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-cloud-assist-fde-2}}"
-REGION="${REGION:-${GCP_REGION:-us-west1}}"
+PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-}}"
+REGION="${REGION:-${GCP_REGION:-}}"
+require_project_and_region || exit 1
 NAME_PREFIX="${NAME_PREFIX:-ata}"
 SERVICE_NAME="${NAME_PREFIX}-bridge"
-IMAGE_TAG="us-west1-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${SERVICE_NAME}:latest"
+IMAGE_TAG="${REGION}-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${SERVICE_NAME}:latest"
 BRIDGE_SA="${NAME_PREFIX}-bridge-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 ENVIRONMENT="${ENVIRONMENT:-demo}"
 OWNER="${OWNER:-sre-prototypes}"
@@ -20,7 +23,7 @@ OWNER="${OWNER:-sre-prototypes}"
 # Resolve SERVICENOW_INSTANCE_URL if not provided in environment
 if [ -z "${SERVICENOW_INSTANCE_URL:-}" ]; then
     if [ -f "${BRIDGE_DIR}/../infra/terraform/foundation/terraform.tfvars" ]; then
-        SERVICENOW_INSTANCE_URL=$(grep -E '^\s*servicenow_instance_url\s*=' "${BRIDGE_DIR}/../infra/terraform/foundation/terraform.tfvars" | sed -E 's/.*=\s*"([^"]+)".*/\1/' || true)
+        SERVICENOW_INSTANCE_URL=$(grep -E '^[[:space:]]*servicenow_instance_url[[:space:]]*=' "${BRIDGE_DIR}/../infra/terraform/foundation/terraform.tfvars" | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' || true)
     fi
     if [ -z "${SERVICENOW_INSTANCE_URL:-}" ]; then
         SERVICENOW_INSTANCE_URL=$(gcloud run services describe "${SERVICE_NAME}" --project="${PROJECT_ID}" --region="${REGION}" --format="yaml(spec.template.spec.containers[0].env)" 2>/dev/null | grep -A1 "name: SERVICENOW_INSTANCE_URL" | grep "value:" | awk '{print $2}' || true)
@@ -32,20 +35,21 @@ if [ -z "${SERVICENOW_INSTANCE_URL:-}" ]; then
     exit 1
 fi
 
-# Resolve PROJECT_NUMBER (numeric GCP project number) if not provided in environment.
-# The bridge builds its Cloud Run URL ID-token audience from it and refuses to start without it.
-if [ -z "${PROJECT_NUMBER:-}" ]; then
-    PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)" 2>/dev/null || true)"
-fi
+# Numeric GCP project number (env PROJECT_NUMBER, else `gcloud projects describe`): the bridge
+# accepts https://<prefix>-bridge-<number>.<region>.run.app as an ID-token audience and refuses
+# to start without it. Exits with "PROJECT_NUMBER is required" when it cannot be resolved.
+PROJECT_NUMBER="$(resolve_project_number)"
 
-if [ -z "${PROJECT_NUMBER:-}" ]; then
-    echo "PROJECT_NUMBER is required: set it or grant access to 'gcloud projects describe ${PROJECT_ID}'" >&2
-    exit 1
-fi
-
-# Resolve AGENT_URL if not provided in environment
+# URLs: an exported value wins; else the service's status.url; else (not deployed yet) its
+# deterministic URL. A failed lookup stops the deploy; no URL is hardcoded.
 if [ -z "${AGENT_URL:-}" ]; then
-    AGENT_URL="$(gcloud run services describe "${NAME_PREFIX}-agent" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)" 2>/dev/null || echo "https://${NAME_PREFIX}-agent-${PROJECT_NUMBER}.${REGION}.run.app")"
+    AGENT_URL="$(service_url_or_deterministic "${NAME_PREFIX}-agent")"
+fi
+# The bridge's own status.url (the agent mints its ID tokens for it). Required by the bridge.
+# On a first deploy the service has no status.url yet: start with the deterministic URL and
+# set the real one after the deploy (below).
+if [ -z "${BRIDGE_URL:-}" ]; then
+    BRIDGE_URL="$(service_url_or_deterministic "${SERVICE_NAME}")"
 fi
 
 echo "==================================================================="
@@ -62,9 +66,13 @@ gcloud builds submit "${BRIDGE_DIR}" \
 # 2. Deploy to Cloud Run
 # A single bridge instance is sufficient for this prototype; the bridge holds no grouping state (grouping, timers and suppression live in the agent).
 echo "Deploying Cloud Run service ${SERVICE_NAME}..."
-ENV_VARS="PROJECT_ID=${PROJECT_ID},PROJECT_NUMBER=${PROJECT_NUMBER},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${PROJECT_ID}-${NAME_PREFIX}-incidents,TASKS_QUEUE=${NAME_PREFIX}-triage-queue,AGENT_URL=${AGENT_URL},SERVICENOW_INSTANCE_URL=${SERVICENOW_INSTANCE_URL}"
+# --update-env-vars changes only the variables listed here and keeps every other variable
+# already on the service (e.g. VERIFIER_SA when it is not exported). --set-env-vars would
+# replace the whole list. The list uses "|" as the delimiter (gcloud's ^|^ prefix), because
+# VERIFIER_SA is a comma-separated list.
+ENV_VARS="^|^PROJECT_ID=${PROJECT_ID}|PROJECT_NUMBER=${PROJECT_NUMBER}|NAME_PREFIX=${NAME_PREFIX}|REGION=${REGION}|INCIDENTS_BUCKET=${PROJECT_ID}-${NAME_PREFIX}-incidents|TASKS_QUEUE=${NAME_PREFIX}-triage-queue|AGENT_URL=${AGENT_URL}|BRIDGE_URL=${BRIDGE_URL}|SERVICENOW_INSTANCE_URL=${SERVICENOW_INSTANCE_URL}"
 if [ -n "${VERIFIER_SA:-}" ]; then
-    ENV_VARS="${ENV_VARS},VERIFIER_SA=${VERIFIER_SA}"
+    ENV_VARS="${ENV_VARS}|VERIFIER_SA=${VERIFIER_SA}"
 fi
 
 gcloud run deploy "${SERVICE_NAME}" \
@@ -75,8 +83,16 @@ gcloud run deploy "${SERVICE_NAME}" \
     --allow-unauthenticated \
     --max-instances=1 \
     --labels="app=alert-triage-agent,component=${NAME_PREFIX}-bridge,role=triage-system,tier=platform,env=${ENVIRONMENT},managed-by=script,owner=${OWNER}" \
-    --set-env-vars="${ENV_VARS}" \
-    --set-secrets="WEBHOOK_TOKEN=${NAME_PREFIX}-webhook-token:latest,SERVICENOW_USERNAME=${NAME_PREFIX}-servicenow-username:latest,SERVICENOW_PASSWORD=${NAME_PREFIX}-servicenow-password:latest"
+    --update-env-vars="${ENV_VARS}" \
+    --update-secrets="WEBHOOK_TOKEN=${NAME_PREFIX}-webhook-token:latest,SERVICENOW_USERNAME=${NAME_PREFIX}-servicenow-username:latest,SERVICENOW_PASSWORD=${NAME_PREFIX}-servicenow-password:latest"
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)")"
+DETERMINISTIC_URL="https://${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app"
+if [ "${SERVICE_URL}" != "${BRIDGE_URL}" ] && [ "${SERVICE_URL}" != "${DETERMINISTIC_URL}" ]; then
+    echo "Setting BRIDGE_URL=${SERVICE_URL} (the service's status.url; it was ${BRIDGE_URL})..."
+    gcloud run services update "${SERVICE_NAME}" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --update-env-vars="BRIDGE_URL=${SERVICE_URL}"
+fi
 echo "Successfully deployed ${SERVICE_NAME}: ${SERVICE_URL}"

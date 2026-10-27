@@ -109,6 +109,19 @@ scenario_name() {
 SCENARIO_STATUS=()
 SCENARIO_DURATION=()
 
+# Ctrl-C stops the whole run. A terminal Ctrl-C sends SIGINT to the foreground process
+# group: this driver, the running scenario and tee. The scenario's own INT trap stops its
+# traffic and it finishes normally (next steps; the fault stays injected for inspection).
+# Bash runs this trap once that pipeline has finished. The driver then runs no further
+# scenario and no reset, marks the rest SKIPPED, prints the summary with the reset command
+# and exits 130. tee_log ignores SIGINT so the scenario's output after the Ctrl-C is kept.
+INTERRUPTED=false
+trap 'INTERRUPTED=true' INT TERM
+
+tee_log() {
+    ( trap '' INT; exec tee -a "${LOG_FILE}" )
+}
+
 # Initial Environment Cleanup
 log_info "Performing pre-run baseline reset..."
 "${SCRIPT_DIR}/reset-scenarios.sh" >> "${LOG_FILE}" 2>&1 || true
@@ -116,15 +129,21 @@ log_info "Performing pre-run baseline reset..."
 # Preflight Health Verification
 if [ "${SKIP_PREFLIGHT:-false}" != "true" ]; then
     log_info "Executing preflight health check before scenario execution..."
-    "${SCRIPT_DIR}/scenarios/preflight.sh" 2>&1 | tee -a "${LOG_FILE}" || {
-        log_error "FATAL: Preflight health checks failed! Halting scenario driver."
-        exit 1
+    "${SCRIPT_DIR}/scenarios/preflight.sh" 2>&1 | tee_log || {
+        if [ "${INTERRUPTED}" != "true" ]; then
+            log_error "FATAL: Preflight health checks failed! Halting scenario driver."
+            exit 1
+        fi
     }
 fi
 
 idx=-1
 for sc in ${SCENARIOS_TO_RUN[@]+"${SCENARIOS_TO_RUN[@]}"}; do
     idx=$((idx + 1))
+    if [ "${INTERRUPTED}" = "true" ]; then
+        SCENARIO_STATUS[idx]="SKIPPED"
+        continue
+    fi
     sc_clean="$(to_lower "${sc}")"
     sc_upper="$(to_upper "${sc}")"
     sc_name="$(scenario_name "${sc_clean}" "Unknown Scenario")"
@@ -145,12 +164,18 @@ for sc in ${SCENARIOS_TO_RUN[@]+"${SCENARIOS_TO_RUN[@]}"}; do
 
     START_T=$(date +%s)
     set +e
-    "${resolved_script}" 2>&1 | tee -a "${LOG_FILE}"
+    "${resolved_script}" 2>&1 | tee_log
     EXIT_CODE=$?
     set -e
     END_T=$(date +%s)
     DUR=$((END_T - START_T))
     SCENARIO_DURATION[idx]="${DUR}s"
+
+    if [ "${INTERRUPTED}" = "true" ]; then
+        log_warn "Scenario ${sc_upper} interrupted by Ctrl-C (exit code ${EXIT_CODE}, ${DUR}s). No further scenario and no reset will run."
+        SCENARIO_STATUS[idx]="INTERRUPTED"
+        continue
+    fi
 
     if [ ${EXIT_CODE} -eq 0 ]; then
         log_success "Scenario ${sc_upper} completed successfully (${DUR}s)."
@@ -185,6 +210,9 @@ for sc in ${SCENARIOS_TO_RUN[@]+"${SCENARIOS_TO_RUN[@]}"}; do
     sc_clean="$(to_lower "${sc}")"
     desc="$(scenario_name "${sc_clean}" "Unknown")"
     status="${SCENARIO_STATUS[idx]:-UNKNOWN}"
+    if [ "${status}" = "UNKNOWN" ] && [ "${INTERRUPTED}" = "true" ]; then
+        status="SKIPPED"  # not reached: the run stopped (Ctrl-C) before it
+    fi
     dur="${SCENARIO_DURATION[idx]:-0s}"
     printf "%-8s %-45s %-12s %-10s\n" "$(to_upper "${sc}")" "${desc:0:43}" "${status}" "${dur}"
     if [ "${status}" != "PASSED" ]; then
@@ -192,6 +220,13 @@ for sc in ${SCENARIOS_TO_RUN[@]+"${SCENARIOS_TO_RUN[@]}"}; do
     fi
 done
 echo "==================================================================="
+
+if [ "${INTERRUPTED}" = "true" ]; then
+    log_warn "Run interrupted by Ctrl-C. The environment was NOT reset: the interrupted scenario's fault may still be injected."
+    log_warn "Reset it before running another scenario: ./scripts/reset-scenarios.sh"
+    log_warn "Log: ${LOG_FILE}"
+    exit 130
+fi
 
 if [ ${TOTAL_FAILED} -eq 0 ]; then
     log_success "All executed scenarios passed successfully!"

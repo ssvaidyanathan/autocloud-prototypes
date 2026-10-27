@@ -147,47 +147,47 @@ The system integrates with ServiceNow via the Table and Attachment APIs:
 sequenceDiagram
     participant Monitoring as Cloud Monitoring
     participant Bridge as ata-bridge
-    participant Tasks as Cloud Tasks (triage + timer queues)
     participant Agent as ata-agent
     participant OKF as GCS Incident Store (OKF)
-    participant Telemetry as GCP APIs & ata-tools
+    participant Telemetry as GCP telemetry APIs
     participant ServiceNow as ServiceNow
 
-    Monitoring->>Bridge: POST /webhook/monitoring (HTTP Basic Auth)
-    Bridge->>Tasks: Enqueue alert (ata-triage-queue)
-    Bridge-->>Monitoring: 202 Accepted
-
-    Tasks->>Agent: POST /triage (OIDC)
-    Note over Agent: Duplicate check, then correlation scoring<br/>(Gemini only for gray-zone scores 35-65)
-    Agent->>OKF: Create or update incident group (if_generation_match)
-    Agent->>Tasks: New group: schedule settle (120s) and max-wait (300s) timers (ata-timer-queue)
-
-    Tasks->>Agent: POST /timer/wake (settle or max-wait)
-    alt Deadline not yet reached, or group no longer open
-        Agent-->>Tasks: 200 OK, ignored (no-op)
-    else Deadline reached
-        Agent->>OKF: Set status INVESTIGATING
-        Agent->>Telemetry: Run specialists in parallel (Cloud Run, Apigee, Cloud SQL, Change)
-        Telemetry-->>Agent: Metrics, logs, revision and deploy history
-        Agent->>Bridge: POST /instructions/ticket/create (OIDC)
-        Bridge->>ServiceNow: Create incident and attach HTML dossier
-        Bridge-->>Agent: sys_id, ticket number
-        Agent->>OKF: Record ticket, set TICKETED (or COOLING_DOWN)
-    end
+    Monitoring->>Bridge: Alert webhook (POST /webhook/monitoring)
+    Bridge->>Agent: Dispatch via Cloud Tasks (POST /triage)
+    Agent->>OKF: Correlate: create group (OPEN) or attach alert
+    Note over Agent: Settle timer fires (POST /timer/wake)
+    Agent->>Telemetry: Investigate (origin chosen from all group alerts via topology)
+    Agent->>Bridge: POST /instructions/ticket/create
+    Bridge->>ServiceNow: Create incident, attach HTML report
+    Agent->>OKF: Record ticket (TICKETED)
+    Note over Monitoring,Agent: Late alert: same webhook and /triage path
+    Agent->>Bridge: Work note and title/priority refresh
+    Bridge->>ServiceNow: Update incident
+    Note over Agent: All alerts closed, 180s cool-down passed (RECOVERED)
+    Agent->>Bridge: POST /instructions/ticket/work-note (recovery note)
+    Bridge->>ServiceNow: "Verify and resolve" work note (ticket stays In Progress)
 ```
 
 Paths not shown in the diagram:
 
+- **Transport and auth**: Cloud Monitoring calls `ata-bridge` with HTTP Basic Auth, and the bridge answers 202 once the alert is enqueued on `ata-triage-queue`. Cloud Tasks calls the agent with an OIDC token. Delayed wakes come from `ata-timer-queue`. The agent calls the bridge's `/instructions/ticket/*` endpoints with a Google ID token. Correlation uses Gemini only for gray-zone scores (35-65). Group writes use GCS generation preconditions (`if_generation_match`). A new group gets a settle timer (120s) and a max-wait timer (300s). A wake before the deadline, or for a group that is no longer open, is ignored. Otherwise the group becomes `INVESTIGATING` and the specialists (Cloud Run, Apigee, Cloud SQL, Change) run in parallel. If every alert has already closed when the ticket is created, the group is set to `COOLING_DOWN` instead of `TICKETED`.
 - **Filtering and duplicates**: `ata-bridge` drops non-`ata` alerts with HTTP 200 and does no deduplication. `ata-agent` suppresses repeat alerts for an already-active policy and resource by appending them to the existing incident group.
 - **Timer extension**: Each alert that attaches to an open group resets the settle deadline to 120s after that alert's arrival, capped at the 300s max-wait deadline. A wake that arrives more than 2.0s before the group's current deadline is ignored.
-- **Late alerts**: Alerts that correlate to an already-ticketed (or cooling-down) group are added to the ServiceNow ticket as work notes (`POST /instructions/ticket/work-note`). A recent repeat (within 30 minutes) of a policy and resource already in the group is caught by the duplicate check instead: it is appended to the incident group only, with no work note.
+- **Origin selection**: The investigation does not start from the first alert. It picks the origin from all of the group's alerts using [`topology/TOPOLOGY.md`](topology/TOPOLOGY.md). A service is explained by a degraded service it depends on, unless that service's onset is more than `ORIGIN_ONSET_TOLERANCE_SECONDS` (default 300) later than its own. Candidates are ranked: unexplained services first, then by how many other alerting services they explain, then by earliest onset, then by arrival order. Gateway-enforced rejections (HTTP 429, client auth) are never explained by a backend. Specialist evidence can still move the origin further upstream, for example to the database.
+- **Low traffic**: On a latency incident, if the origin received fewer than `LOW_TRAFFIC_RPM` (default 5) requests per minute in the investigation window, the report says the latency may come from a few slow requests, such as a cold start, rather than a service-wide degradation. No statement is made when the request volume was not measured.
+- **Late alerts**: An alert that attaches to an already-ticketed (or cooling-down) group is added to the ServiceNow ticket as a work note (`POST /instructions/ticket/work-note`). A cooling-down group returns to `TICKETED`. The ticket is then refreshed with `POST /instructions/ticket/update-fields`:
+  - The title is rebuilt from the group, so its alert count matches the group.
+  - The priority is raised when a group alert's `severity` label is higher than the priority already applied. It is never lowered automatically.
+  - Each change is logged and comes with a work note naming the new alerts, the old and new title, and any escalation.
+
+  An alert attached while the investigation ran, but not listed in the created ticket, also gets a work note once the ticket exists. An alert of a signal type the ticketed group does not have yet opens a new group instead, if its onset is more than `LATE_NEW_SIGNAL_MAX_ONSET_GAP_SECONDS` (default 600) after the group's first alert. A recent repeat (within 30 minutes) of a policy and resource already in the group is caught by the duplicate check instead: it is appended to the incident group only, with no work note.
 - **Cool-down and resolution**: When every alert in a ticketed group has closed (or all are already closed when the ticket is created), the group enters `COOLING_DOWN` and a 180s cooling timer is scheduled. A new alert that attaches during cool-down returns the group to `TICKETED`. If none arrives before that timer fires, what happens depends on `AUTO_RESOLVE_ON_RECOVERY`:
-  - `false` (default): the agent does **not** resolve the ticket. Monitoring recovery is not proof of a fix, because low traffic can hide a fault that is still there. The agent posts one work note (`POST /instructions/ticket/work-note`): "Monitoring alerts closed: all <N> alerts of this incident closed by <time> and none reopened during the 180s cool-down. An alert also closes when its service stops receiving traffic, so a close is not proof of a fix; the agent recorded no remediation. <traffic facts> A human must verify the remediation (...) before resolving this incident." The traffic facts come from Cloud Monitoring `run.googleapis.com/request_count` for each affected Cloud Run service, from `RECOVERY_TRAFFIC_LOOKBACK_SECONDS` before the last close until the note is written: either "recorded no requests ... (missing data)", or the request and HTTP 5xx counts, or "not checked" with the reason. The alert state itself carries no close reason. The ServiceNow incident stays In Progress, and the group moves to the terminal `RECOVERED` state. Like `RESOLVED`, a `RECOVERED` group takes no new alerts, so a later alert opens a new group. A retried cooling wake posts no second note.
-  - When alerts close in the demo: latency and 5xx alerts close shortly after a scenario's traffic stops once the Terraform `alert_evaluation_missing_data` (`EVALUATION_MISSING_DATA_INACTIVE`) change is applied (before that, a latency series without data waits for `auto_close`, 1800s). S4's connections alert closes only after `reset-scenarios.sh` releases the leaked connections. Expected timing per scenario: [DEMO.md §1.2](DEMO.md#12-scenario-by-scenario-guide-s1-through-s5).
+  - `false` (default): the agent does **not** resolve the ticket. Monitoring recovery is not proof of a fix: an alert also closes when its service stops receiving traffic. The agent moves the group to the terminal `RECOVERED` state, then posts one work note (`POST /instructions/ticket/work-note`): "Monitoring alerts closed: all <N> alerts of this incident closed by <time> and none reopened during the 180s cool-down. An alert also closes when its service stops receiving traffic, so a close is not proof of a fix; the agent recorded no remediation. <traffic facts> A human must verify the remediation (...) before resolving this incident." The traffic facts come from Cloud Monitoring `run.googleapis.com/request_count` for each affected Cloud Run service, from `RECOVERY_TRAFFIC_LOOKBACK_SECONDS` before the last close until the note is written. They read either "recorded no requests ... (missing data)", or the request and HTTP 5xx counts, or "not checked" with the reason. The alert state itself carries no close reason. After the note is posted, `recovery_note_posted_at` is recorded; if posting fails, the group goes back to `COOLING_DOWN` so the timer retries the wake. The ServiceNow incident stays In Progress. Like `RESOLVED`, a `RECOVERED` group takes no new alerts, so a later alert opens a new group. A retried cooling wake posts no second note.
+  - When alerts close in the demo: latency and 5xx alerts close after a scenario's traffic stops, because the policies treat missing data as not violating (Terraform `alert_evaluation_missing_data`, `EVALUATION_MISSING_DATA_INACTIVE`). Without that setting, a latency series without data waits for the policy's `auto_close`. S4's connections alert closes only after `reset-scenarios.sh` releases the leaked connections. Expected timing per scenario: [DEMO.md §1.2](DEMO.md#12-scenario-by-scenario-guide-s1-through-s5).
   - `true`: the agent calls `POST /instructions/ticket/resolve` and marks the group `RESOLVED`.
 
-  An unticketed group with an explicit suppression reason has no ServiceNow incident, so it is marked `RESOLVED` whatever the flag says.
-- **Investigation fallback**: If the multi-agent investigation raises an error, the agent falls back to a single-pass report (`generate_investigation_report`) and still creates the ticket.
+  An unticketed group with an explicit suppression reason has no ServiceNow incident, so it is marked `RESOLVED` whatever the flag says. An unticketed group without one is marked `DEGRADED` instead of resolved.
+- **Investigation fallback**: If the multi-agent investigation raises an error, the agent falls back to a single-pass report (`generate_investigation_report`) on the topology-selected origin alert. That report is marked degraded, and the ticket is still created.
 
 ### Topology as Single Source of Truth (`TOPOLOGY.md`)
 
@@ -273,10 +273,10 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 | **Incidents Bucket** | `INCIDENTS_BUCKET` | `${PROJECT_ID}-${NAME_PREFIX}-incidents` | GCS bucket for persistent Open Knowledge File (OKF) storage. |
 | **Incident Store Path** | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` | Local or mounted directory path for active OKF incident files. |
 | **Fallback Store Path**| `FALLBACK_STORE_PATH` | `/tmp/knowledge/incident-manager` | Fallback path when primary mount is unavailable. |
-| **Bridge Service URL** | `BRIDGE_URL` | `http://localhost:8080` | URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`). |
+| **Bridge Service URL** | `BRIDGE_URL` | `http://localhost:8080` | On `ata-agent`: URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`). On `ata-bridge`: its own `status.url`, an accepted ID-token audience (required unless `IS_LOCAL=true`; see [CONFIGURATION.md §1.1](CONFIGURATION.md#11-bridge-service-ata-bridge)). |
 | **Agent Service URL**  | `AGENT_URL` | `http://localhost:8080` | URL of `ata-agent` called by Cloud Tasks at `POST /triage`. |
 | **Triage Queue Name**  | `TASKS_QUEUE` | `ata-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |
-| **Timer Queue Name**   | `TIMER_QUEUE` | `ata-timer-queue` | Dedicated Cloud Tasks queue for delayed settle/cool-down timers. |
+| **Timer Queue Name**   | `TIMER_QUEUE_NAME` | `ata-timer-queue` | Dedicated Cloud Tasks queue for delayed settle/cool-down timers. |
 | **Gemini Reasoning**   | `MODEL_NAME` | `gemini-3.8-flash` | Gemini model used strictly for gray-zone correlation (scores 35–65). |
 | **ServiceNow URL**     | `SERVICENOW_INSTANCE_URL` | *None* | **Configuration (NOT a secret)**: Base URL of ServiceNow instance (e.g. `https://<instance>.service-now.com`). |
 | **ServiceNow Caller**  | `SERVICENOW_CALLER` | `ATA Integration` | Caller ID populated on created ServiceNow incident records. |
@@ -547,6 +547,8 @@ cd ../../..
 7. `ata-cloudsql-connections-critical`: Cloud SQL `ata-inventory-db` connection count > 20 backends.
 8. `ata-cloudsql-cpu-high`: Cloud SQL `ata-inventory-db` CPU utilization > 85%.
 
+Every policy closes an open incident whose condition has received no data for `alert_auto_close_secs` (Terraform variable, default 1800 s, at least 1800: Cloud Monitoring's 30-minute minimum).
+
 ---
 
 ### Step 6: Triage Tier Services Deployment
@@ -730,6 +732,16 @@ for dir in foundation database applications observability; do
   (cd "infra/terraform/$dir" && terraform init -backend=false && terraform validate)
 done
 ```
+
+**CI:** [`.github/workflows/alert-triage-agent-ci.yml`](../.github/workflows/alert-triage-agent-ci.yml) runs on pull requests and pushes to `main` that touch `alert-triage-agent/**`. It has a read-only token, no secrets, and actions pinned to commit SHAs. It runs:
+- the full `pytest tests` suite on Linux (bash 5);
+- the script tests (`test_bash32_compat.py`, `test_macos_userland.py`, `test_run_all_*.py`, `test_deploy_scripts_env_vars.py`) on macOS with `/bin/bash` 3.2 and the BSD userland;
+- ShellCheck on every script (fails on errors; warnings are listed);
+- `terraform fmt -check -recursive` and `validate` for each stack (Terraform 1.9.8).
+
+Ruff and mypy are not part of CI.
+
+To run the scripts under bash 3.2 locally, put a bash 3.2 binary first on `PATH` (named `bash`) and set `ATA_TEST_BASH` to it, then run `pytest tests`.
 
 ---
 

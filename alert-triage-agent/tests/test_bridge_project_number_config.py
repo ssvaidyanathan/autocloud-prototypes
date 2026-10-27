@@ -23,6 +23,8 @@ from bridge.app.config import BridgeConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_NUMBER = "123456789012"
+# BRIDGE_URL is required too (tests/test_bridge_url_config.py); set it where the bridge must be fully configured.
+BRIDGE_URL = "https://ata-bridge-abcdefghij-uw.a.run.app"
 
 
 def _request(token: str = "real-token") -> Request:
@@ -84,20 +86,20 @@ def test_empty_project_number_counts_as_unset():
 def test_project_number_audience_built_from_config_is_accepted(monkeypatch):
     aud = f"https://ata-bridge-{PROJECT_NUMBER}.us-west1.run.app"
     _patch_token(monkeypatch, {"email": _agent_email(), "aud": aud})
-    claims = asyncio.run(bridge_auth.verify_agent_caller(_request(), _cfg(PROJECT_NUMBER=PROJECT_NUMBER)))
+    claims = asyncio.run(bridge_auth.verify_agent_caller(_request(), _cfg(PROJECT_NUMBER=PROJECT_NUMBER, BRIDGE_URL=BRIDGE_URL)))
     assert claims["aud"] == aud
 
 
 def test_other_project_number_audience_is_rejected(monkeypatch):
     _patch_token(monkeypatch, {"email": _agent_email(), "aud": "https://ata-bridge-999999999999.us-west1.run.app"})
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(bridge_auth.verify_agent_caller(_request(), _cfg(PROJECT_NUMBER=PROJECT_NUMBER)))
+        asyncio.run(bridge_auth.verify_agent_caller(_request(), _cfg(PROJECT_NUMBER=PROJECT_NUMBER, BRIDGE_URL=BRIDGE_URL)))
     assert exc.value.status_code == 403
 
 
 def test_request_base_url_audience_still_accepted(monkeypatch):
     _patch_token(monkeypatch, {"email": _agent_email(), "aud": "https://internal.example"})
-    claims = asyncio.run(bridge_auth.verify_agent_caller(_request(), _cfg(PROJECT_NUMBER=PROJECT_NUMBER)))
+    claims = asyncio.run(bridge_auth.verify_agent_caller(_request(), _cfg(PROJECT_NUMBER=PROJECT_NUMBER, BRIDGE_URL=BRIDGE_URL)))
     assert claims["aud"] == "https://internal.example"
 
 
@@ -137,7 +139,7 @@ def test_startup_fails_without_project_number_when_not_local(monkeypatch):
 
 
 def test_startup_ok_with_project_number(monkeypatch):
-    _run_lifespan(_cfg(PROJECT_NUMBER=PROJECT_NUMBER), monkeypatch)
+    _run_lifespan(_cfg(PROJECT_NUMBER=PROJECT_NUMBER, BRIDGE_URL=BRIDGE_URL), monkeypatch)
 
 
 def test_startup_ok_without_project_number_in_local_mode(monkeypatch):
@@ -149,10 +151,12 @@ def test_startup_ok_without_project_number_in_local_mode(monkeypatch):
 
 def test_deploy_script_resolves_and_passes_project_number():
     script = (ROOT / "bridge" / "scripts" / "deploy.sh").read_text()
-    assert 'gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)"' in script
-    assert "PROJECT_NUMBER is required" in script
+    lib = (ROOT / "scripts" / "cloud-run-deploy-lib.sh").read_text()
+    assert 'PROJECT_NUMBER="$(resolve_project_number)"' in script
+    assert 'gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)"' in lib
+    assert "PROJECT_NUMBER is required" in lib
     env_line = next(line for line in script.splitlines() if line.startswith("ENV_VARS="))
-    assert "PROJECT_NUMBER=${PROJECT_NUMBER}" in env_line
+    assert "|PROJECT_NUMBER=${PROJECT_NUMBER}|" in env_line
 
 
 def test_no_project_number_literal_in_bridge_app_or_deploy_script():

@@ -77,3 +77,14 @@ variable "latency_duration_secs" {
     error_message = "latency_duration_secs must be a multiple of 60 (the alignment period) and at least 60."
   }
 }
+
+variable "alert_auto_close_secs" {
+  type        = number
+  default     = 1800
+  description = "alert_strategy.auto_close of every ata-* alert policy, in seconds: an open incident whose condition receives no data for this long is closed. With alert_evaluation_missing_data = EVALUATION_MISSING_DATA_INACTIVE the latency and 5xx incidents close soon after their series stop reporting, so this mainly bounds the 429, Cloud SQL and any NO_OP/ACTIVE conditions. Cloud Monitoring requires at least 30 minutes (its default is 7 days)."
+
+  validation {
+    condition     = var.alert_auto_close_secs >= 1800 && floor(var.alert_auto_close_secs) == var.alert_auto_close_secs
+    error_message = "alert_auto_close_secs must be a whole number of seconds, at least 1800 (Cloud Monitoring's 30-minute minimum)."
+  }
+}

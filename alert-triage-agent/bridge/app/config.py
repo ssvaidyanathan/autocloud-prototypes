@@ -21,6 +21,11 @@ class BridgeConfig(BaseSettings):
     # (https://<prefix>-bridge-<number>.<region>.run.app), an accepted ID-token audience.
     # Required when not local: startup fails and auth returns 500 without it.
     project_number: Optional[str] = Field(default=None, alias="PROJECT_NUMBER")
+    # This bridge's own Cloud Run URL: the service's status.url, e.g. the hash-style
+    # https://<prefix>-bridge-<hash>-<region-code>.a.run.app. ata-agent mints its ID tokens for
+    # the URL it calls (agent BRIDGE_URL, set from this status.url), so it is an accepted
+    # audience. Required when not local. bridge/scripts/deploy.sh sets it.
+    bridge_url: Optional[str] = Field(default=None, alias="BRIDGE_URL")
     name_prefix: str = Field(default="ata", alias="NAME_PREFIX")
     region: str = Field(default="us-west1", alias="REGION")
     environment: str = Field(default="prod", alias="ENVIRONMENT")
@@ -61,11 +66,22 @@ class BridgeConfig(BaseSettings):
             raise ValueError(f"PROJECT_NUMBER must be the numeric GCP project number, got {value!r}")
         return str(value)
 
+    @field_validator("bridge_url", mode="before")
+    @classmethod
+    def _validate_bridge_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        url = str(value).rstrip("/")
+        if not re.fullmatch(r"https://[A-Za-z0-9.-]+", url):
+            raise ValueError(f"BRIDGE_URL must be the bridge's https Cloud Run URL without a path, got {value!r}")
+        return url
+
     def missing_required_settings(self) -> list[str]:
         """Settings without which a non-local bridge cannot authenticate callers correctly."""
         if self.is_local:
             return []
-        return ["PROJECT_NUMBER"] if self.project_number is None else []
+        required = {"PROJECT_NUMBER": self.project_number, "BRIDGE_URL": self.bridge_url}
+        return [name for name, value in required.items() if value is None]
 
     @property
     def effective_incidents_bucket(self) -> str:
