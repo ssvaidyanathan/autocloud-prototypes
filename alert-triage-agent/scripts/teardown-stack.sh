@@ -271,7 +271,8 @@ check() {
 monitoring_names() {
     local kind="$1" token
     token="$(gcloud auth print-access-token)" || die "gcloud auth print-access-token failed."
-    curl -sf -H "Authorization: Bearer ${token}" \
+    # Token in a curl config from a process substitution, not on curl's argv (`ps`).
+    curl -sf --config <(printf 'header = "Authorization: Bearer %s"\n' "${token}") \
         "https://monitoring.googleapis.com/v3/projects/${PROJECT_ID}/${kind}?pageSize=1000" \
         | python3 -c '
 import json, sys

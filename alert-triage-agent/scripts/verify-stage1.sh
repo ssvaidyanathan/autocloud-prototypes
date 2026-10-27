@@ -79,7 +79,6 @@ TOOLS_URL="$(service_url "${NAME_PREFIX}-tools")"
 
 ID_TOKEN="$(gcloud auth print-identity-token)" || { echo "ERROR: gcloud auth print-identity-token failed (gcloud auth login)." >&2; exit 1; }
 [ -n "${ID_TOKEN}" ] || { echo "ERROR: empty identity token." >&2; exit 1; }
-AUTH_HEADER=(-H "Authorization: Bearer ${ID_TOKEN}")
 
 # http <curl args...>: sets HTTP_CODE ("000" without a response) and HTTP_BODY.
 BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-verify.XXXXXX")"
@@ -95,7 +94,8 @@ echo "--- 1. /health ---"
 for pair in "inventory-api|${INVENTORY_URL}" "orders-api|${ORDERS_URL}" "agent|${AGENT_URL}" "bridge|${BRIDGE_URL}" "tools|${TOOLS_URL}"; do
     name="${NAME_PREFIX}-${pair%%|*}"
     url="${pair#*|}"
-    http ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} "${url}/health"
+    # ID token in a curl config from a process substitution, not on curl's argv (`ps`).
+    http --config <(printf 'header = "Authorization: Bearer %s"\n' "${ID_TOKEN}") "${url}/health"
     if [ "${HTTP_CODE}" = "200" ]; then
         echo "    ${name}: 200"
     else

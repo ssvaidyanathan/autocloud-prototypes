@@ -751,6 +751,26 @@ def test_teardown_nothing_left_passes_and_delete_state_is_last(stack):
     assert tf_foundation == len(muts) - 2
 
 
+def test_teardown_and_verify_keep_bearer_tokens_off_curl_argv(stack):
+    """sec L2: the access token (teardown monitoring listing) and the ID token (verify /health)
+    are in a curl config, never on argv."""
+    res, _ = _verify(stack)  # first: other scripts' runs replace verify-stage1.sh with a recorder
+    assert res.returncode == 0, _out(res)
+    health = [c for c in _curl_calls(stack) if c["argv"][-1].endswith("/health")]
+    assert len(health) == 5
+    for c in health:
+        assert "id-token" not in json.dumps(c["argv"]) and "Authorization" not in json.dumps(c["argv"])
+        assert [x["text"] for x in c["configs"]] == ['header = "Authorization: Bearer id-token"\n']
+    assert stack("bootstrap-tfstate.sh", "--write-backend-only")[0].returncode == 0
+    res, _ = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--delete-state")
+    assert res.returncode == 0, _out(res)
+    mon = [c for c in _curl_calls(stack) if "monitoring.googleapis.com" in json.dumps(c["argv"])]
+    assert mon
+    for c in mon:
+        assert "access-token" not in json.dumps(c["argv"]) and "Authorization" not in json.dumps(c["argv"])
+        assert [x["text"] for x in c["configs"]] == ['header = "Authorization: Bearer access-token"\n']
+
+
 @pytest.mark.parametrize("prefix", ["", "A", "ata-x", "toolongprefix1"])
 def test_teardown_guards_the_prefix(stack, prefix):
     res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", prefix, NAME_PREFIX=prefix)

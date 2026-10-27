@@ -137,9 +137,15 @@ while i < len(args):
     if a == "-X": method = args[i + 1]; i += 2; continue
     if a == "-o": out = args[i + 1]; i += 2; continue
     if a in ("-w", "-H", "-F"): i += 2; continue
+    if a == "--config":
+        with open(os.environ["STUB_CALLS"] + ".config", "a") as f:
+            f.write(open(args[i + 1]).read())
+        i += 2; continue
     if a == "-d": data = args[i + 1]; i += 2; continue
     if a.startswith("-"): i += 1; continue
     url = a; i += 1
+with open(os.environ["STUB_CALLS"] + ".argv", "a") as f:
+    f.write(json.dumps(args) + "\n")
 state_file = os.environ["STUB_STATE"]
 state = json.load(open(state_file)) if os.path.exists(state_file) else {"deleted": [], "created": []}
 with open(os.environ["STUB_CALLS"], "a") as f:
@@ -425,6 +431,16 @@ def test_deploy_existing_app_key_gets_product(env):
     res = run(DEPLOY, env)
     assert res.returncode == 0, res.stderr
     assert (Path(env["ALERT_TRIAGE_DIR"]) / ".atat-api-key").read_text() == "oldkey\n"
+
+
+def test_bearer_token_is_in_a_curl_config_never_on_argv(env):
+    """sec L2: `ps` must not show the OAuth token."""
+    res = run(DEPLOY, env)
+    assert res.returncode == 0, res.stderr
+    argv = Path(env["STUB_CALLS"] + ".argv").read_text()
+    assert argv and "stub-token" not in argv and "Authorization" not in argv
+    configs = Path(env["STUB_CALLS"] + ".config").read_text().splitlines()
+    assert configs and set(configs) == {'header = "Authorization: Bearer stub-token"'}
 
 
 def test_credential_bearing_failures_withhold_body_and_key(env):

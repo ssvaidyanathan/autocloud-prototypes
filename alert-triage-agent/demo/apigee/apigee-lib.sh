@@ -96,8 +96,11 @@ apigee_api() {
     shift 2
     apigee_guard_url "${url}"
     out="$(mktemp "${TMPDIR:-/tmp}/apigee-resp.XXXXXX")"
+    # The bearer token goes in a curl config read from a process substitution (builtin printf,
+    # bash 3.2 safe), so it is never on curl's argv where `ps` would show it.
     API_CODE="$(curl -sS -o "${out}" -w '%{http_code}' -X "${method}" \
-        -H "Authorization: Bearer ${APIGEE_TOKEN}" "$@" "${url}")" || API_CODE="000"
+        --config <(printf 'header = "Authorization: Bearer %s"\n' "${APIGEE_TOKEN}") \
+        "$@" "${url}")" || API_CODE="000"
     API_BODY="$(cat "${out}")"
     rm -f "${out}"
     case "${API_CODE}" in
