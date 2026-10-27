@@ -383,8 +383,11 @@ def test_terraform_foundation_agent_iam_roles():
 
     # Verify agent_sa association
     assert "serviceAccount:${google_service_account.agent_sa.email}" in main_tf
-    assert 'resource "google_project_iam_member" "agent_cloudtasks_enqueuer"' in main_tf
-    assert 'resource "google_project_iam_member" "agent_sa_service_account_user"' in main_tf
+    # Scoped to this stack: enqueue on its timer queue, act as the agent SA only.
+    assert 'resource "google_cloud_tasks_queue_iam_member" "agent_cloudtasks_enqueuer"' in main_tf
+    assert 'resource "google_service_account_iam_member" "agent_sa_service_account_user"' in main_tf
+    assert 'resource "google_project_iam_member" "agent_cloudtasks_enqueuer"' not in main_tf
+    assert 'resource "google_project_iam_member" "agent_sa_service_account_user"' not in main_tf
 
 
 def test_terraform_foundation_outputs():
@@ -398,24 +401,24 @@ def test_terraform_foundation_outputs():
     assert "value       = google_cloud_tasks_queue.timer_queue.id" in outputs_tf
 
 
-def test_terraform_applications_agent_invoker_roles():
-    """Verify agent_sa is granted roles/run.invoker on ata-agent and ata-bridge."""
+def test_terraform_triage_iam_agent_invoker_roles():
+    """The triage-tier invokers live in the triage-iam root (applied after the services exist), not in applications."""
+    triage_tf = (REPO_ROOT / "infra/terraform/triage-iam/main.tf").read_text()
     apps_main_tf = (REPO_ROOT / "infra/terraform/applications/main.tf").read_text()
 
-    assert 'data "google_service_account" "agent_sa"' in apps_main_tf
-    assert 'account_id = "${var.name_prefix}-agent-sa"' in apps_main_tf
+    # Agent SA and bridge SA on the agent, agent SA on the bridge and on tools.
+    for name in ("agent_invoker_bridge", "agent_invoker_agent", "bridge_invoker_agent", "tools_invoker_agent"):
+        assert f'resource "google_cloud_run_v2_service_iam_member" "{name}"' in triage_tf
+        # Forgotten from the applications state without destroying the live bindings.
+        if name != "tools_invoker_agent":
+            assert f'resource "google_cloud_run_v2_service_iam_member" "{name}"' not in apps_main_tf
+            assert f"from = google_cloud_run_v2_service_iam_member.{name}" in apps_main_tf
+    assert 'agent_service  = "${var.name_prefix}-agent"' in triage_tf
+    assert 'bridge_service = "${var.name_prefix}-bridge"' in triage_tf
+    assert 'tools_service  = "${var.name_prefix}-tools"' in triage_tf
+    assert "roles/run.invoker" in triage_tf
+    assert "destroy = false" in apps_main_tf
 
-    # Invoker on ata-agent
-    assert 'resource "google_cloud_run_v2_service_iam_member" "agent_invoker_agent"' in apps_main_tf
-    assert 'name     = "${var.name_prefix}-agent"' in apps_main_tf
-
-    # Invoker on ata-bridge
-    assert 'resource "google_cloud_run_v2_service_iam_member" "bridge_invoker_agent"' in apps_main_tf
-    assert 'name     = "${var.name_prefix}-bridge"' in apps_main_tf
-
-    # Role and member verification
-    assert "roles/run.invoker" in apps_main_tf
-    assert "serviceAccount:${data.google_service_account.agent_sa.email}" in apps_main_tf
 
 
 # ---------------------------------------------------------------------------

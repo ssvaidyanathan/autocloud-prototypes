@@ -61,27 +61,27 @@ def test_terraform_observability_contains_all_policies():
 
 
 def test_terraform_observability_channel_migration():
-    """Verify observability uses foundation remote state notification channel without secret access."""
+    """Observability notifies its own stack's foundation channel, without secret access or a state-bucket dependency."""
     main_tf = (REPO_ROOT / "infra/terraform/observability/main.tf").read_text()
     vars_tf = (REPO_ROOT / "infra/terraform/observability/variables.tf").read_text()
     outputs_tf = (REPO_ROOT / "infra/terraform/observability/outputs.tf").read_text()
 
     # 1. No secret manager access or channel creation in observability
     assert "google_secret_manager_secret_version" not in main_tf
-    assert "google_monitoring_notification_channel" not in main_tf
+    assert 'resource "google_monitoring_notification_channel"' not in main_tf
 
-    # 2. Remote state lookup for foundation
-    assert 'data "terraform_remote_state" "foundation"' in main_tf
-    assert 'bucket = "cloud-assist-fde-2-ata-tfstate"' in main_tf
-    assert 'prefix = "ata/foundation"' in main_tf
+    # 2. Lookup of this stack's channel (display name derived from name_prefix), no remote state
+    assert "terraform_remote_state" not in main_tf
+    assert 'data "google_monitoring_notification_channel" "bridge_webhook"' in main_tf
+    assert 'display_name = "${var.name_prefix}-bridge-webhook"' in main_tf
 
     # 3. Optional variable override defined
     assert 'variable "notification_channel_id"' in vars_tf
     assert "default     = null" in vars_tf
 
-    # 4. Local fallback to foundation output
+    # 4. Local resolves to the override or the looked-up channel
     assert "local.notification_channel_id" in main_tf
-    assert "data.terraform_remote_state.foundation.outputs.notification_channel_id" in main_tf
+    assert "data.google_monitoring_notification_channel.bridge_webhook[0].name" in main_tf
 
     # 5. All 8 alert policies use local.notification_channel_id
     matches = re.findall(r"notification_channels\s*=\s*\[local\.notification_channel_id\]", main_tf)
