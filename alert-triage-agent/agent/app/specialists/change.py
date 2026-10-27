@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 
 # Cloud Run audit-log entries read per investigation (one page).
 AUDIT_LOG_MAX_ENTRIES = 20
+# "No deployments" finding when the change sources covered Cloud Run only. The synthesizer
+# replaces it when the Apigee access log was read (see _reconcile_change_history).
+NO_CLOUD_RUN_DEPLOYMENTS_FINDING = (
+    "No Cloud Run revision deployments detected in the 2-hour window prior to alert onset "
+    "(Apigee proxy deployment history not queried)."
+)
 
 
 class _SourceAbsent(Exception):
@@ -592,10 +598,7 @@ class ChangeSpecialist(BaseSpecialist):
                 findings.append("No configuration or revision deployments detected in the 2-hour window prior to alert onset.")
                 content = "No recent deployments detected; incident is not attributable to a recent change event."
             else:
-                findings.append(
-                    "No Cloud Run revision deployments detected in the 2-hour window prior to alert onset "
-                    "(Apigee proxy deployment history not queried)."
-                )
+                findings.append(NO_CLOUD_RUN_DEPLOYMENTS_FINDING)
                 content = (
                     "No recent Cloud Run deployments detected. Apigee proxy deployment history was not "
                     "queried; proxy revision changes come from the Apigee access log."

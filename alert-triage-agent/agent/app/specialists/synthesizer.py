@@ -34,8 +34,15 @@ from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches
 from .apigee import ACCESS_LOG_NAME, SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_name
 from .cloud_sql import CloudSQLSpecialist
-from .change import ChangeSpecialist, is_genuine_change
-from .origin_selection import OriginSelection, alert_event_from_entry, onset_allows_explanation, select_origin
+from .change import NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_genuine_change
+from .origin_selection import (
+    OriginSelection,
+    alert_category,
+    alert_component,
+    alert_event_from_entry,
+    onset_allows_explanation,
+    select_origin,
+)
 from .telemetry_reads import (
     CHANGE_SOURCES_KEY,
     change_detection_incomplete_text,
@@ -411,6 +418,13 @@ def _merge_report_section(body: str, report_markdown: str) -> str:
     return f"{section}\n\n{remainder}" if remainder else section
 
 
+# Anomaly categories (correlation classifier) of the alerts that match an evidence signal.
+_SIGNAL_CATEGORIES: dict[str, set[str]] = {
+    "5xx": {"backend_5xx", "gateway_5xx"},
+    "latency": {"latency_504"},
+}
+
+
 class SynthesizerAgent:
     """Lead synthesizing agent coordinating specialists and generating final diagnostics."""
 
@@ -521,9 +535,16 @@ class SynthesizerAgent:
         # in this report only when the service is part of this incident: the origin, its blast
         # radius, or a service alerting in this group. Otherwise a concurrent, disjoint incident
         # on a shared upstream (S3: inventory 5xx under an orders 429) leaks into this ticket.
+        dependency_results = list(all_results[len(spec_tasks):])
+        dependent_dossiers = await self._investigate_db_dependents(alert, config, origin, blast_radius, dossiers)
+        if dependent_dossiers:
+            dossiers = dossiers + dependent_dossiers
+            dependency_results.extend(dependent_dossiers)
+        dossiers = self._reconcile_change_history(dossiers)
+        self._last_dossiers = dossiers
         all_dossiers = dossiers
         dossiers = self._scope_report_dossiers(
-            dossiers, all_results[len(spec_tasks):], origin, blast_radius, selection, group_id
+            dossiers, dependency_results, origin, blast_radius, selection, group_id
         )
 
         # Consolidate evidence and queries. Several dossiers can share an area (Cloud Run of
@@ -551,7 +572,10 @@ class SynthesizerAgent:
         recommendations = self._synthesize_recommendations(
             dossiers, origin, alert, region=config.region, project_id=config.project_id
         )
-        root_cause_text, confidence = self._determine_root_cause(dossiers, origin, alert, blast_radius=blast_radius)
+        self._last_group_alerts = group_alerts
+        root_cause_text, confidence = self._determine_root_cause(
+            dossiers, origin, alert, blast_radius=blast_radius, group_alerts=group_alerts
+        )
 
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         first_seen = alert.started_at or now_str
@@ -843,6 +867,48 @@ class SynthesizerAgent:
         return bool(comp) and str(comp.type).strip().lower() == "cloud run"
 
     @staticmethod
+    def _is_cloud_sql(service: str) -> bool:
+        try:
+            comp = get_loader().components.get(get_loader().canonicalize(service) or service)
+        except Exception as exc:
+            logger.warning("Topology component lookup failed for %s: %s", service, type(exc).__name__)
+            return False
+        return bool(comp) and str(comp.type).strip().lower() == "cloud sql"
+
+    async def _investigate_db_dependents(
+        self,
+        alert: AlertEvent,
+        config: AgentConfig,
+        origin: str,
+        blast_radius: list[str],
+        dossiers: list[EvidenceDossier],
+    ) -> list[EvidenceDossier]:
+        """Cloud Run dossiers of a database origin's dependents that were not investigated yet.
+
+        A database alert's investigation reads only the database, so the impact on the services
+        that call it (HTTP 5xx rate) was never measured (S4). For a Cloud SQL origin every Cloud
+        Run service in its blast radius is investigated here, so the report states their
+        measured rate. Apigee proxies are not Cloud Run services; the report states that their
+        rate was not measured.
+        """
+        if not self._is_cloud_sql(origin):
+            return []
+        investigated = {
+            d.target_resource for d in dossiers if d.specialist_name == "CloudRunSpecialist" and d.target_resource
+        }
+        targets = [
+            svc for svc in blast_radius
+            if svc != origin and svc not in investigated and self._is_cloud_run(svc)
+        ]
+        if not targets:
+            return []
+        logger.info("Database origin %s: measuring its Cloud Run dependents %s", origin, ", ".join(targets))
+        results = await asyncio.gather(
+            *(self.cloud_run_specialist.investigate(alert, config, target_service=svc) for svc in targets)
+        )
+        return list(results)
+
+    @staticmethod
     def _is_apigee_proxy(service: str) -> bool:
         try:
             comp = get_loader().components.get(get_loader().canonicalize(service) or service)
@@ -1055,6 +1121,54 @@ class SynthesizerAgent:
         return kept
 
     @staticmethod
+    def _reconcile_change_history(dossiers: list[EvidenceDossier]) -> list[EvidenceDossier]:
+        """Make the change dossier's deployment-history statement match the Apigee evidence.
+
+        The ChangeSpecialist says "Apigee proxy deployment history not queried" when its own
+        sources cover Cloud Run only, while the ApigeeSpecialist reads proxy revisions from the
+        access log, and Change-Induced lists that log as checked (S2, S3). The statement is
+        rewritten from the same dossiers Change-Induced is computed from: the access-log
+        sources read and any proxy revision switch found there.
+        """
+        chg = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist"), None)
+        if chg is None or NO_CLOUD_RUN_DEPLOYMENTS_FINDING not in chg.findings:
+            return dossiers
+        apigee = [d for d in dossiers if d.specialist_name == "ApigeeSpecialist"]
+        sources = [
+            src for d in apigee for src in (d.metrics.get(CHANGE_SOURCES_KEY) or [])
+            if str(src).startswith("Apigee access log")
+        ]
+        if not sources:
+            return dossiers
+        switches = [
+            (d.target_resource, d.metrics["proxy_revision_change"])
+            for d in apigee
+            if isinstance(d.metrics.get("proxy_revision_change"), dict)
+        ]
+        if switches:
+            apigee_text = "; ".join(
+                f"Apigee proxy {proxy} switched from revision {sw.get('previous_revision')} to "
+                f"{sw.get('new_revision')} (first served {sw.get('new_first_served_at')}, Apigee access log)"
+                for proxy, sw in switches
+            )
+        else:
+            apigee_text = "no Apigee proxy revision switch in " + ", ".join(sources)
+        statement = (
+            "No Cloud Run revision deployments detected in the 2-hour window prior to alert onset; "
+            f"{apigee_text}."
+        )
+        findings = [statement if f == NO_CLOUD_RUN_DEPLOYMENTS_FINDING else f for f in chg.findings]
+        items = [
+            item.model_copy(update={"content": statement})
+            if item.headline == "Deployment History Analysis" and "was not queried" in (item.content or "")
+            else item
+            for item in chg.evidence_items
+        ]
+        logger.info("Deployment history statement reconciled with the Apigee access log: %s", statement)
+        new_chg = dataclasses.replace(chg, findings=findings, evidence_items=items)
+        return [new_chg if d is chg else d for d in dossiers]
+
+    @staticmethod
     def _neutralize_change_dossier(chg: EvidenceDossier, verdict: dict[str, Any]) -> EvidenceDossier:
         """Copy of the change dossier marked not anomalous, carrying the not-implicated reason."""
         metrics = dict(chg.metrics)
@@ -1159,13 +1273,17 @@ class SynthesizerAgent:
         """Synthesize rich, operational problem statement based on real evidence."""
         started_at = alert.started_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         upstream = [b for b in blast_radius if b != origin]
-        upstream_str = f"upstream consumers ({', '.join(upstream)})" if upstream else "direct client ingress"
+        # The blast radius minus the origin: services that call the origin (directly or not).
+        upstream_str = f"dependent services ({', '.join(upstream)})" if upstream else "direct client ingress"
 
         metric_details = []
         is_sql = False
         is_apigee = False
         err_5xx_rate: Optional[str] = None
         err_5xx_pct: Optional[float] = None
+        # The origin's own measured 5xx rate: the only rate stated as the origin's (S1: the
+        # orders-api rate was quoted as inventory-api's when it was the last dossier read).
+        origin_5xx_rate: Optional[str] = None
         lat_p95_ms: Optional[float] = None
         # Statistic label of the origin's latency (e.g. per-minute mean), when the dossier records it.
         lat_stat: Optional[str] = None
@@ -1201,6 +1319,8 @@ class SynthesizerAgent:
                         err_5xx_pct = this_pct
                         if d.target_resource in upstream:
                             dependent_5xx[d.target_resource] = (str(raw_err), this_pct)
+                    if d.target_resource == origin:
+                        origin_5xx_rate = str(raw_err)
                 # Latency of the origin only: the root cause states the origin's value, and a
                 # dependent's (S2: orders-api 6638ms vs inventory-api 6546ms) must not replace it.
                 raw_lat = d.metrics.get("latency_p95_ms") if d.target_resource == origin else None
@@ -1226,16 +1346,27 @@ class SynthesizerAgent:
                     f"causing operational failures for {upstream_str} since {started_at}"
                 )
 
+        # Each 5xx rate is stated with its own service: the origin's in the rate parenthesis,
+        # measured non-zero rates of dependents after it.
+        origin_rate_disp = f" ({origin_5xx_rate})" if origin_5xx_rate else ""
+        origin_rate_gap = "" if origin_5xx_rate else f" (HTTP 5xx rate not measured on {origin})"
+        erroring_dependents = {svc: v for svc, v in dependent_5xx.items() if v[1] > 0}
+        dependent_rates = (
+            "; HTTP 5xx rate on dependent services: "
+            + ", ".join(f"{svc} {txt}" for svc, (txt, _) in sorted(erroring_dependents.items()))
+            if erroring_dependents
+            else ""
+        )
+
         # Distinguish 5xx-dominant vs latency-dominant failure mode
         is_policy_5xx = "5xx" in alert.policy_name.lower() or "500" in (alert.condition_name or "")
         is_5xx_dominant = (err_5xx_pct is not None and err_5xx_pct >= 5.0) or (is_policy_5xx and err_5xx_rate is not None)
 
         if origin != alert.resource_name:
             if is_5xx_dominant:
-                rate_disp = f" ({err_5xx_rate})" if err_5xx_rate else ""
                 return (
-                    f"Elevated upstream HTTP 5xx error rate{rate_disp} on {origin} causing cascading failures "
-                    f"for {upstream_str} since {started_at}"
+                    f"Elevated upstream HTTP 5xx error rate{origin_rate_disp} on {origin}{origin_rate_gap} causing cascading failures "
+                    f"for {upstream_str} since {started_at}{dependent_rates}"
                 )
             elif "latency" in alert.policy_name.lower() or "timeout" in alert.policy_name.lower() or (lat_p95_ms is not None and lat_p95_ms >= 2000.0):
                 lat_disp = _latency_disp(lat_p95_ms, lat_stat)
@@ -1254,11 +1385,9 @@ class SynthesizerAgent:
         if is_sql and ("db" in origin or "sql" in origin):
             metric_str = f" ({', '.join(metric_details)})" if metric_details else ""
             head = f"Database connection pool saturation{metric_str} on {origin} since {started_at}"
-            erroring = {svc: v for svc, v in dependent_5xx.items() if v[1] > 0}
-            if erroring:
+            if erroring_dependents:
                 # Only measured rates on topology dependents are stated, each with its value.
-                rates = ", ".join(f"{svc} {txt}" for svc, (txt, _) in sorted(erroring.items()))
-                return f"{head}; HTTP 5xx rate on dependent services: {rates}"
+                return f"{head}{dependent_rates}"
             unmeasured = [svc for svc in upstream if svc not in dependent_5xx]
             parts = []
             if dependent_5xx:
@@ -1274,10 +1403,9 @@ class SynthesizerAgent:
             )
 
         if is_5xx_dominant:
-            rate_disp = err_5xx_rate or "elevated"
             return (
-                f"Elevated HTTP 5xx error rate ({rate_disp}) on {origin} "
-                f"impacting {upstream_str} since {started_at}"
+                f"Elevated HTTP 5xx error rate{origin_rate_disp} on {origin}{origin_rate_gap} "
+                f"impacting {upstream_str} since {started_at}{dependent_rates}"
             )
         elif "latency" in alert.policy_name.lower() or "timeout" in alert.policy_name.lower() or (lat_p95_ms is not None and lat_p95_ms >= 2000.0):
             lat_disp = _latency_disp(lat_p95_ms, lat_stat)
@@ -1723,14 +1851,53 @@ class SynthesizerAgent:
 
         return ""
 
+    def _policy_matching_evidence(
+        self,
+        alert: AlertEvent,
+        group_alerts: Optional[list[dict[str, Any]]],
+        origin: str,
+        evidence_signal: Optional[str],
+    ) -> str:
+        """Policy to name in the root cause: the investigated alert's, unless its signal differs
+        from the evidence and another alert of the group on the origin matches the evidence.
+
+        S5: the group's first alert on the origin was ata-inventory-latency while the evidence
+        is HTTP 5xx; the root cause names ata-inventory-5xx then.
+        """
+        if not evidence_signal:
+            return alert.policy_name
+        wanted = _SIGNAL_CATEGORIES.get(evidence_signal, set())
+        own = alert_category({
+            "policy_name": alert.policy_name,
+            "signal": (alert.policy_user_labels or {}).get("signal") or (alert.labels or {}).get("signal"),
+        })
+        if own in wanted:
+            return alert.policy_name
+        for entry in group_alerts or []:
+            if not isinstance(entry, dict) or not self._same_node(alert_component(entry), origin):
+                continue
+            policy = entry.get("policy_name") or entry.get("policy")
+            if policy and alert_category(entry) in wanted:
+                logger.info(
+                    "Root cause names policy %s (matches the %s evidence on %s) instead of the investigated alert's %s",
+                    policy, evidence_signal, origin, alert.policy_name,
+                )
+                return str(policy)
+        return alert.policy_name
+
     def _determine_root_cause(
         self,
         dossiers: list[EvidenceDossier],
         origin: str,
         alert: AlertEvent,
         blast_radius: Optional[list[str]] = None,
+        group_alerts: Optional[list[dict[str, Any]]] = None,
     ) -> tuple[str, float]:
-        """Synthesize probable root cause statement and calibrated evidence-based confidence."""
+        """Synthesize probable root cause statement and calibrated evidence-based confidence.
+
+        ``group_alerts`` (the incident group's alerts) let the change branch name the origin's
+        policy that matches the evidence, rather than the investigated alert's policy.
+        """
         canon_origin = _canonicalize_node(origin)
         canon_alert = _canonicalize_node(alert.resource_name)
         upstream_deps = get_upstream_dependencies(canon_alert)
@@ -1800,10 +1967,13 @@ class SynthesizerAgent:
 
             # Check observed symptom: DB auth errors from app logs vs latency vs 5xx
             has_db_auth = _dossier_has_db_auth_error(cr_spec)
+            # Signal of the evidence in symptom_text; the policy named is one matching it.
+            evidence_signal: Optional[str] = None
             if has_db_auth:
                 err_rate = cr_spec.metrics.get("error_rate_5xx") if cr_spec else None
                 err_str = f" (HTTP 5xx error rate: {err_rate})" if err_rate and err_rate != "0.1%" and err_rate != "N/A (not captured)" else ""
                 symptom_text = f"database authentication failures in application logs{err_str}"
+                evidence_signal = "5xx" if err_str else None
             elif any(k in (alert.policy_name or "").lower() for k in ("latency", "timeout", "slow")):
                 lat = cr_spec.metrics.get("latency_p95_ms") if cr_spec else None
                 lat_str = (
@@ -1814,18 +1984,20 @@ class SynthesizerAgent:
                 symptom_text = f"elevated request latency{lat_str}"
             elif cr_spec and cr_spec.metrics.get("error_rate_5xx") and cr_spec.metrics["error_rate_5xx"] != "0.1%":
                 symptom_text = f"elevated HTTP 5xx error rate ({cr_spec.metrics['error_rate_5xx']})"
+                evidence_signal = "5xx"
             else:
                 symptom_text = f"operational failures under policy `{alert.policy_name}`"
+            policy = self._policy_matching_evidence(alert, group_alerts, origin, evidence_signal)
 
             if is_upstream:
                 root_cause_text = (
                     f"Recent {rev_desc} {target_phrase} at {deploy_time_str} (change detected) "
-                    f"triggered {symptom_text} cascading failures on caller `{alert.resource_name}` under policy `{alert.policy_name}`."
+                    f"triggered {symptom_text} cascading failures on caller `{alert.resource_name}` under policy `{policy}`."
                 )
             else:
                 root_cause_text = (
                     f"Recent {rev_desc} {target_phrase} at {deploy_time_str} (change detected) "
-                    f"triggered {symptom_text} under policy `{alert.policy_name}`."
+                    f"triggered {symptom_text} under policy `{policy}`."
                 )
             return root_cause_text, confidence
 
@@ -2077,6 +2249,36 @@ class SynthesizerAgent:
 
         return " | ".join(obs_items[:5])
 
+    @staticmethod
+    def _db_auth_log_action(dossiers: list[EvidenceDossier], origin: str) -> Optional[ActionItem]:
+        """Log query for the DB authentication failure the evidence came from, else None.
+
+        The search term is text of the log line the signature was detected in
+        (``db_auth_log_term``), so the query finds that evidence. Without such a term no
+        query is proposed: a guessed pattern can match none of the real lines.
+        """
+        cr = next(
+            (d for d in dossiers if d.specialist_name == "CloudRunSpecialist" and d.target_resource == origin),
+            None,
+        )
+        term = cr.metrics.get("db_auth_log_term") if cr is not None else None
+        if not isinstance(term, str) or not term.strip() or "'" in term:
+            if cr is not None and cr.metrics.get("has_db_auth_error"):
+                logger.info(
+                    "No log query proposed for the DB authentication failure on %s: no search term from the matched log line",
+                    origin,
+                )
+            return None
+        literal = term.strip().replace("\\", "\\\\").replace('"', '\\"')
+        return ActionItem(
+            title=f"Inspect container application logs on {origin} for the database authentication failure seen in the evidence",
+            command=(
+                f"gcloud logging read 'resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"{origin}\""
+                f" AND \"{literal}\"' --limit=30"
+            ),
+            verification="Confirm no new entries containing this text appear after the fix",
+        )
+
     def _synthesize_recommendations(
         self,
         dossiers: list[EvidenceDossier],
@@ -2165,7 +2367,7 @@ class SynthesizerAgent:
                     f" gcloud run revisions list --service={origin} --region={region}"
                 )
 
-            return [
+            actions = [
                 ActionItem(
                     title=rollback_title,
                     command=rollback_cmd,
@@ -2181,12 +2383,11 @@ class SynthesizerAgent:
                     command=config_check_cmd,
                     verification="Confirm database credentials, host, and Secret Manager references match expected values",
                 ),
-                ActionItem(
-                    title=f"Inspect container application logs on {origin} for database authentication failures",
-                    command=f"gcloud logging read 'resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"{origin}\" AND textPayload=~\"password|authentication|denied\"' --limit=30",
-                    verification="Confirm application establishes database connections successfully without authentication errors",
-                ),
             ]
+            log_action = self._db_auth_log_action(dossiers, origin)
+            if log_action is not None:
+                actions.append(log_action)
+            return actions
 
         # 2. Apigee SpikeArrest / Rate Limit
         is_apigee = (
@@ -2707,6 +2908,7 @@ class SynthesizerAgent:
                 origin=origin,
                 alert=alert,
                 blast_radius=report.blast_radius,
+                group_alerts=getattr(self, "_last_group_alerts", None),
             )
             report.probable_root_cause.text = new_text
             report.probable_root_cause.confidence = new_conf
@@ -2905,7 +3107,6 @@ class SynthesizerAgent:
             doc.project = config.project_id
             doc.origin = origin
             doc.blast_radius = merged_blast
-            doc.priority = report.priority
             doc.confidence = report.probable_root_cause.confidence
 
             # Upsert this alert by incident_id, keeping labels/component/signal already known.
@@ -2927,6 +3128,9 @@ class SynthesizerAgent:
             doc.alerts = [format_okf_alert_entry(a, valid_ts=doc.timestamp) for a in alerts_list]
             # The report section and the ticket must cover every alert of the group.
             apply_group_alerts(report, doc.alerts)
+            # After apply_group_alerts, which can raise the priority to the group's most severe
+            # alert: written before it, the file kept P2 while the ticket said P1.
+            doc.priority = report.priority
 
             report_markdown = self._build_report_markdown(report, doc.policy_name, origin, merged_blast, topology)
             doc.body = _merge_report_section(doc.body, report_markdown)

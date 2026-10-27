@@ -82,7 +82,9 @@ def test_structured_description_plain_text_zero_markdown(sample_report):
     assert "Dependency Path:" not in desc
     assert "Observations:" in desc
     assert "Recommended Actions:" in desc
-    assert "Rollback:" in desc
+    # No action names a rollback, so there is no generic "revert the latest change" line.
+    assert "Rollback:" not in desc
+    assert "Revert latest" not in desc
 
 
 def test_servicenow_adapter_table_api_and_attachment_success(sample_report):

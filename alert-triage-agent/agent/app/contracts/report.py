@@ -511,15 +511,22 @@ class InvestigationReport(BaseModel):
         return rm.get("signal") or (rm.get("labels") or {}).get("signal") or (rm.get("policy_user_labels") or {}).get("signal")
 
     def infer_issue_type(self) -> str:
-        """issue_type of the report, else inferred from summary keywords."""
+        """issue_type of the report, else derived from Change-Induced and summary keywords.
+
+        "change_induced" exactly when Change-Induced is "Yes (...)", so the two description
+        fields come from the same evidence: a summary that merely mentions a revision does not
+        make the issue change-induced, and an implicated change always does (S3: a proxy
+        revision change was "Change-Induced: Yes" next to "Issue Type: runtime_anomaly").
+        """
         issue_type = self.issue_type or self.raw_metadata.get("issue_type")
         if issue_type:
             return issue_type
+        change_ind = str(self.change_induced or self.raw_metadata.get("change_induced") or "")
+        if change_ind.startswith("Yes"):
+            return "change_induced"
         s_lower = (self.summary or "").lower()
         if any(k in s_lower for k in ["conn", "pool", "exhaust", "saturation"]):
             return "runtime_exhaustion"
-        if any(k in s_lower for k in ["deploy", "revision", "release"]):
-            return "change_induced"
         if "timeout" in s_lower or "latency" in s_lower:
             return "latency_spike"
         return "runtime_anomaly"
@@ -673,10 +680,9 @@ class InvestigationReport(BaseModel):
 
         if not action_lines:
             action_lines.append(f"  1. Review system telemetry and recent logs for {self.origin} (Verification: Confirm error rates return to normal)")
-        if not rollback_lines:
-            rollback_lines.append("  - Rollback: Revert latest configuration or revision change if degradation persists after verification.")
-
-        recs_str = "\n".join(action_lines) + "\n" + "\n".join(rollback_lines)
+        # A rollback line only comes from an action that names one; no generic "revert the
+        # latest change" line (it contradicted "no traffic change is recommended").
+        recs_str = "\n".join(action_lines + rollback_lines)
 
         # Topology path(s) computed by the agent from TOPOLOGY.md. Without one the line is
         # omitted: the blast radius is an unordered set and cannot stand in for a path.

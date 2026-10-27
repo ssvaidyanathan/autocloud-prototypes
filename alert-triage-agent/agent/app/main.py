@@ -43,7 +43,7 @@ from .grouping.stuck_investigation import (
 )
 from .recovery import recovery_note_for_group
 from .specialists.origin_selection import alert_event_from_entry
-from .specialists.synthesizer import SynthesizerAgent, apply_correlation_note, apply_group_alerts
+from .specialists.synthesizer import SynthesizerAgent, _priority_rank, apply_correlation_note, apply_group_alerts
 from .timers.scheduler import schedule_delayed_timer
 from .triage import (
     execute_multi_agent_investigation,
@@ -828,6 +828,16 @@ def _record_ticket_title(d: OKFDocument, report: InvestigationReport) -> None:
     """Store the title/priority the bridge built for the new ticket (late-alert updates start from it)."""
     d.ticket_short_description = report.build_short_description(max_length=TICKET_TITLE_MAX_LENGTH)
     d.ticket_priority = report.priority
+    # The file's priority follows the ticket's: alerts merged at ticket time can raise it.
+    # Only raised, never lowered automatically.
+    if _priority_rank(report.priority) < _priority_rank(d.priority):
+        logger.info("Group %s: priority %s -> %s (ticket priority)", d.group_id, d.priority, report.priority)
+        d.priority = report.priority
+    elif d.priority != report.priority:
+        logger.warning(
+            "Group %s: file priority %s is higher than the ticket priority %s; not lowered automatically",
+            d.group_id, d.priority, report.priority,
+        )
     d.ticket_title_problem = report.resolve_title_problem()
     d.ticket_origin = report.origin
 
