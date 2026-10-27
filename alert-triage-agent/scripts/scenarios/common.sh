@@ -38,7 +38,7 @@ log_error() {
 # --- ata-inventory-api baseline pin ----------------------------------------------------
 # The pinned revision and image digest live in ONE file, inventory-pin.env (next to this
 # script; ATA_INVENTORY_PIN_FILE overrides the path). Re-pinning is one documented step:
-# scripts/repin-inventory.sh (DEPLOY.md, "Re-pinning ata-inventory-api"). The env vars
+# scripts/repin-inventory.sh (DEPLOY.md, "Re-pinning the inventory baseline"). The env vars
 # PINNED_INVENTORY_DIGEST / PINNED_INVENTORY_REVISION still override the file for one run.
 COMMON_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export INVENTORY_PIN_FILE="${ATA_INVENTORY_PIN_FILE:-${COMMON_SH_DIR}/inventory-pin.env}"
@@ -111,13 +111,15 @@ read_inventory_pin_file() {
 }
 
 if ! read_inventory_pin_file "${INVENTORY_PIN_FILE}"; then
-    log_error "FATAL: cannot load the ata-inventory-api pin; fix ${INVENTORY_PIN_FILE} (see DEPLOY.md, 'Re-pinning ata-inventory-api')." >&2
+    log_error "FATAL: cannot load the ${NAME_PREFIX}-inventory-api pin; fix ${INVENTORY_PIN_FILE} (see DEPLOY.md, 'Re-pinning the inventory baseline')." >&2
     exit 1
 fi
 
 # Deterministic pinned demo image and revision.
 export PINNED_INVENTORY_DIGEST="${PINNED_INVENTORY_DIGEST:-${PIN_INVENTORY_DIGEST}}"
-export PINNED_INVENTORY_IMAGE_BASE="us-west1-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${NAME_PREFIX}-inventory-api"
+# Artifact Registry repo ${NAME_PREFIX}-docker is created in the stack's region (foundation).
+export ARTIFACT_REGISTRY_HOST="${ATA_ARTIFACT_REGISTRY_HOST:-${REGION}-docker.pkg.dev}"
+export PINNED_INVENTORY_IMAGE_BASE="${ARTIFACT_REGISTRY_HOST}/${PROJECT_ID}/${NAME_PREFIX}-docker/${NAME_PREFIX}-inventory-api"
 export PINNED_INVENTORY_IMAGE="${PINNED_INVENTORY_IMAGE:-${PINNED_INVENTORY_IMAGE_BASE}@${PINNED_INVENTORY_DIGEST}}"
 # PINNED_INVENTORY_REVISION must be a revision whose image is PINNED_INVENTORY_DIGEST
 # and whose config is the healthy baseline (correct DB user, no DEPLOY_TAG).
@@ -156,7 +158,7 @@ verify_pinned_inventory_revision() {
     actual="${actual##*@}"
     if [ "${actual}" != "${PINNED_INVENTORY_DIGEST}" ]; then
         log_error "Pinned revision ${PINNED_INVENTORY_REVISION} runs '${actual:-<not found>}', expected ${PINNED_INVENTORY_DIGEST}." >&2
-        log_error "Fix the pin in ${INVENTORY_PIN_FILE} (scripts/repin-inventory.sh; DEPLOY.md, 'Re-pinning ata-inventory-api') or unset PINNED_INVENTORY_REVISION/PINNED_INVENTORY_DIGEST overrides before running scenarios." >&2
+        log_error "Fix the pin in ${INVENTORY_PIN_FILE} (scripts/repin-inventory.sh; DEPLOY.md, 'Re-pinning the inventory baseline') or unset PINNED_INVENTORY_REVISION/PINNED_INVENTORY_DIGEST overrides before running scenarios." >&2
         return 1
     fi
 }
@@ -189,6 +191,53 @@ verify_inventory_serving_pinned() {
         log_error "If S5 was run, restore the baseline with: scripts/scenarios/s5_bad_deploy.sh --revert (or scripts/reset-scenarios.sh)." >&2
         return 1
     fi
+}
+
+# Demo stock that reset-scenarios.sh restores before every scenario (POST /admin/restock:
+# absolute values, idempotent). QA r3: stock ran out across runs (item-101..103 at 0), so
+# POST /orders returned HTTP 400. 1000 per item covers one scenario run with margin: a 7 min
+# hold sends at most ~525 orders to one item (S1: one order per 0.8 s loop), and reset runs
+# between scenarios. Format: <item id>=<stock>,... (every id must exist; stock >= 1).
+export INVENTORY_RESTOCK_BASELINE="${ATA_INVENTORY_RESTOCK_BASELINE:-item-101=1000,item-102=1000,item-103=1000,item-104=1000,item-105=1000}"
+
+# Fail loudly (return 1) unless INVENTORY_RESTOCK_BASELINE is a valid, non-empty list of
+# <id>=<stock> with unique ids ([A-Za-z0-9._-]) and whole-number stock >= 1.
+validate_restock_baseline() {
+    local entry id qty seen=" " old_ifs="${IFS}"
+    if [ -z "${INVENTORY_RESTOCK_BASELINE}" ]; then
+        log_error "ATA_INVENTORY_RESTOCK_BASELINE is empty (expected e.g. item-101=1000,item-102=1000)." >&2
+        return 1
+    fi
+    IFS=","
+    set -f
+    for entry in ${INVENTORY_RESTOCK_BASELINE}; do
+        id="${entry%%=*}"
+        qty="${entry#*=}"
+        case "${entry}" in
+            *=*) ;;
+            *) qty="" ;;
+        esac
+        case "${id}" in
+            ""|*[!A-Za-z0-9._-]*) qty="invalid-id" ;;
+        esac
+        case "${qty}" in
+            ""|*[!0-9]*|0*)
+                IFS="${old_ifs}"; set +f
+                log_error "Invalid ATA_INVENTORY_RESTOCK_BASELINE entry '${entry}' (expected <item id>=<whole number >= 1>)." >&2
+                return 1
+                ;;
+        esac
+        case "${seen}" in
+            *" ${id} "*)
+                IFS="${old_ifs}"; set +f
+                log_error "ATA_INVENTORY_RESTOCK_BASELINE lists ${id} twice." >&2
+                return 1
+                ;;
+        esac
+        seen="${seen}${id} "
+    done
+    IFS="${old_ifs}"
+    set +f
 }
 
 # Baseline env of the inventory revision template (S5 overwrites the DB user). Only the
@@ -415,6 +464,23 @@ resolve_service_url() {
     else
         echo "${default_url}"
     fi
+}
+
+# require_service_url <service>: the live URL of a Cloud Run service, with no fallback: a
+# live run fails loudly (return 1) when it cannot be read (a fixed fallback URL would point
+# at another project's service). Mock/dry-run print https://<service>.mock.invalid.
+require_service_url() {
+    local service_name="$1" url=""
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        echo "https://${service_name}.mock.invalid"
+        return 0
+    fi
+    url="$(gcloud run services describe "${service_name}" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)" 2>/dev/null || true)"
+    if [ -z "${url}" ]; then
+        log_error "Could not read the URL of Cloud Run service ${service_name} in ${PROJECT_ID}/${REGION} (gcloud run services describe failed or returned nothing). Is it deployed, and are you logged in?" >&2
+        return 1
+    fi
+    echo "${url}"
 }
 
 # Resolve Bearer Token for Cloud Run IAM Invocation

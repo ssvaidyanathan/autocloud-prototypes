@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Check Cloud Run JSON (from `gcloud ... describe --format=json`, on stdin) against the
-ata-inventory-api / demo baseline. Used by common.sh, preflight.sh, repin-inventory.sh
+<prefix>-inventory-api / demo baseline. Used by common.sh, preflight.sh, repin-inventory.sh
 and set-demo-instance-caps.sh. Read-only: it only parses what gcloud printed.
 
 Subcommands (exit 0 = matches, 1 = differs, 2 = unreadable input or bad arguments; the
@@ -17,12 +17,15 @@ differences or the error go to stderr, one line):
       set with `gcloud run services update --max`) is N.
   scaling --kind template|revision --max N
       Only the instance limits (maxScale == N, minScale 0/unset) of the service's revision
-      template, or of one revision. For ata-orders-api, which has no pinned env baseline.
+      template, or of one revision. For <prefix>-orders-api, which has no pinned env baseline.
   traffic --expect REV
       The serving split (traffic entries with percent > 0) is exactly REV at 100%. Tag-only
       entries (percent 0, e.g. a re-pin candidate's tag) are ignored.
   serving
       Print the revisions with percent > 0, one "revision percent" per line.
+  stock --expect ID=N,...
+      Inventory JSON (GET /items list, or POST /admin/restock {"items": [...]}): every
+      listed item exists with exactly that stock.
   tag-url --tag T
       Print the URL of traffic tag T (status.traffic[].url); exit 1 if the tag is absent.
 """
@@ -115,6 +118,20 @@ def check_traffic(doc, args):
     return [f"serving {shown} (want {args.expect}=100)"]
 
 
+def check_stock(doc, args):
+    items = doc["items"] if isinstance(doc, dict) else doc
+    stock = {}
+    for item in items:
+        stock[item["id"]] = item.get("stock")
+    diffs = []
+    for item_id, want in _pairs(args.expect).items():
+        if item_id not in stock:
+            diffs.append(f"{item_id} missing")
+        elif stock[item_id] != int(want):
+            diffs.append(f"{item_id} stock={stock[item_id]} (want {want})")
+    return diffs
+
+
 def check_service_max(doc, args):
     live = ((doc.get("metadata") or {}).get("annotations") or {}).get(SERVICE_MAX_SCALE)
     return [] if live == str(args.max) else [f"service-level maxScale={live} (want {args.max})"]
@@ -139,6 +156,8 @@ def main(argv):
     tr = sub.add_parser("traffic")
     tr.add_argument("--expect", required=True)
     sub.add_parser("serving")
+    st = sub.add_parser("stock")
+    st.add_argument("--expect", required=True)
     u = sub.add_parser("tag-url")
     u.add_argument("--tag", required=True)
     try:
@@ -162,7 +181,7 @@ def main(argv):
             return 0
         check = {"template": check_template, "revision": check_revision,
                  "service-max": check_service_max, "scaling": check_scaling,
-                 "traffic": check_traffic}[args.cmd]
+                 "traffic": check_traffic, "stock": check_stock}[args.cmd]
         diffs = check(doc, args)
     except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
         print(f"unreadable Cloud Run JSON for '{args.cmd}': {exc!r}", file=sys.stderr)
