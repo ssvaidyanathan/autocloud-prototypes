@@ -160,10 +160,10 @@ sequenceDiagram
     Tasks->>Agent: POST /triage (OIDC)
     Note over Agent: Duplicate check, then correlation scoring<br/>(Gemini only for gray-zone scores 35-65)
     Agent->>OKF: Create or update incident group (if_generation_match)
-    Agent->>Tasks: Schedule settle (120s) and max-wait (300s) timers (ata-timer-queue)
+    Agent->>Tasks: New group: schedule settle (120s) and max-wait (300s) timers (ata-timer-queue)
 
     Tasks->>Agent: POST /timer/wake (settle or max-wait)
-    alt Deadline not yet reached (e.g. settle extended by a later alert)
+    alt Deadline not yet reached, or group no longer open
         Agent-->>Tasks: 200 OK, ignored (no-op)
     else Deadline reached
         Agent->>OKF: Set status INVESTIGATING
@@ -179,9 +179,9 @@ sequenceDiagram
 Paths not shown in the diagram:
 
 - **Filtering and duplicates**: `ata-bridge` drops non-`ata` alerts with HTTP 200 and does no deduplication. `ata-agent` suppresses repeat alerts for an already-active policy and resource by appending them to the existing incident group.
-- **Timer extension**: Each alert that attaches to an open group pushes the settle deadline out by 120s, capped at the 300s max-wait deadline. A wake that arrives more than 2.0s before the group's current deadline is ignored.
-- **Late alerts**: Alerts that attach to an already-ticketed group are added to the ServiceNow ticket as work notes (`POST /instructions/ticket/work-note`).
-- **Cool-down and resolution**: When every alert in a group has closed, the group enters `COOLING_DOWN` and a 180s cooling timer is scheduled. If no new alert reopens the group before that timer fires, the agent calls `POST /instructions/ticket/resolve` and marks the group `RESOLVED`.
+- **Timer extension**: Each alert that attaches to an open group resets the settle deadline to 120s after that alert's arrival, capped at the 300s max-wait deadline. A wake that arrives more than 2.0s before the group's current deadline is ignored.
+- **Late alerts**: Alerts that correlate to an already-ticketed (or cooling-down) group are added to the ServiceNow ticket as work notes (`POST /instructions/ticket/work-note`). A recent repeat (within 30 minutes) of a policy and resource already in the group is caught by the duplicate check instead: it is appended to the incident group only, with no work note.
+- **Cool-down and resolution**: When every alert in a ticketed group has closed (or all are already closed when the ticket is created), the group enters `COOLING_DOWN` and a 180s cooling timer is scheduled. A new alert that attaches during cool-down returns the group to `TICKETED`. If none arrives before that timer fires, the agent calls `POST /instructions/ticket/resolve` and marks the group `RESOLVED`.
 - **Investigation fallback**: If the multi-agent investigation raises an error, the agent falls back to a single-pass report (`generate_investigation_report`) and still creates the ticket.
 
 ### Topology as Single Source of Truth (`TOPOLOGY.md`)
