@@ -261,8 +261,8 @@ phase_images() {
     # Local state, never committed.
     [ -f "${DEPLOY_STATE_DIR}/.gitignore" ] || printf '*\n' > "${DEPLOY_STATE_DIR}/.gitignore"
     : > "${IMAGES_FILE}"
-    build_one INVENTORY_IMAGE "${REPO_ROOT}/demo/ata-inventory-api" "${NAME_PREFIX}-inventory-api"
-    build_one ORDERS_IMAGE "${REPO_ROOT}/demo/ata-orders-api" "${NAME_PREFIX}-orders-api"
+    build_one INVENTORY_IMAGE "${REPO_ROOT}/demo/ata-inventory-api" "${NAME_PREFIX}-inventory-api"  # prefix-ok: repo directory name
+    build_one ORDERS_IMAGE "${REPO_ROOT}/demo/ata-orders-api" "${NAME_PREFIX}-orders-api"  # prefix-ok: repo directory name
     build_one AGENT_IMAGE "${REPO_ROOT}/agent" "${NAME_PREFIX}-agent"
     build_one BRIDGE_IMAGE "${REPO_ROOT}/bridge" "${NAME_PREFIX}-bridge"
     build_one TOOLS_IMAGE "${REPO_ROOT}/tools" "${NAME_PREFIX}-tools"

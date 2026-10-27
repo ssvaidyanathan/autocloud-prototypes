@@ -32,7 +32,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEMO_DIR="$(cd "${SCRIPT_DIR}/../demo/ata-inventory-api" && pwd)"
+DEMO_DIR="$(cd "${SCRIPT_DIR}/../demo/ata-inventory-api" && pwd)"  # prefix-ok: repo directory name
 # shellcheck source=scripts/scenarios/common.sh
 source "${SCRIPT_DIR}/scenarios/common.sh"
 
@@ -50,7 +50,7 @@ Usage: $0 <command> [options]
 
 Commands:
   status                              Read-only report (exit 1 if anything is off baseline)
-  prepare --image-tag <tag>           Build demo/ata-inventory-api with Cloud Build as
+  prepare --image-tag <tag>           Build the demo inventory API with Cloud Build as
                                       ${PINNED_INVENTORY_IMAGE_BASE}:<tag>,
                                       deploy it with NO traffic, verify, untag
   prepare --image-digest sha256:<hex> Same, with an image already in Artifact Registry
@@ -290,7 +290,7 @@ cmd_prepare() {
         log_info "=== Re-pin prepare --initial: first pin of ${SERVICE} ==="
         log_info "--> 1. Checking there is no pin in this project..."
         require_no_existing_pin
-        svc_json="$(service_json)" || die "cannot describe ${SERVICE}: deploy it first (applications Terraform or demo/ata-inventory-api/scripts/deploy.sh)."
+        svc_json="$(service_json)" || die "cannot describe ${SERVICE}: deploy it first (applications Terraform or demo/ata-inventory-api/scripts/deploy.sh)."  # prefix-ok: repo directory name
     else
         log_info "=== Re-pin prepare: ${SERVICE} (current pin ${PIN_INVENTORY_REVISION}) ==="
         log_info "--> 1. Checking traffic is 100% on the current pin (the baseline stays serving)..."

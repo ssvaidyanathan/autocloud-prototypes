@@ -1060,7 +1060,7 @@ if [ "${RESTOCK_ONLY}" = "true" ]; then
     INV_URL="$(require_service_url "${NAME_PREFIX}-inventory-api")"
     restock_inventory "${INV_URL}" || exit 1
     if [ "${ALERT_WINDOW_UNTIL}" -gt "$(date +%s)" ]; then
-        log_warn "A restock request was slow or failed (above): an ata-inventory latency/5xx alert can open within ${ALERT_LAG_SECS}s. Run ./scripts/reset-scenarios.sh before the next scenario." >&2
+        log_warn "A restock request was slow or failed (above): an ${NAME_PREFIX}-inventory latency/5xx alert can open within ${ALERT_LAG_SECS}s. Run ./scripts/reset-scenarios.sh before the next scenario." >&2
     fi
     log_success "=== Demo inventory restocked ==="
     exit 0

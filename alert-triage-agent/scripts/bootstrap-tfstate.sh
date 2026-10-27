@@ -55,7 +55,7 @@ ${STACKS}
 
 ${BOLD}Required${NC} (flag or environment variable, no defaults):
   -p, --project-id <id>     GCP project ID                 (PROJECT_ID)
-  -r, --region <region>     GCP region, e.g. us-central1   (REGION)
+  -r, --region <region>     GCP region of the stack        (REGION)
   -n, --name-prefix <pfx>   Resource name prefix, e.g. ata (NAME_PREFIX)
                             2-10 chars, [a-z][a-z0-9]*
 

@@ -11,7 +11,7 @@
 # missing value must not deploy into some other project or region.
 require_project_and_region() {
     if [ -z "${PROJECT_ID:-}" ] || [ -z "${REGION:-}" ]; then
-        echo "ERROR: PROJECT_ID (or GCP_PROJECT) and REGION (or GCP_REGION) are required, e.g. PROJECT_ID=my-project REGION=us-west1 ./scripts/deploy.sh" >&2
+        echo "ERROR: PROJECT_ID (or GCP_PROJECT) and REGION (or GCP_REGION) are required, e.g. PROJECT_ID=my-project REGION=us-west1 ./scripts/deploy.sh" >&2  # prefix-ok: example values
         return 1
     fi
 }
