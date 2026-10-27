@@ -671,8 +671,13 @@ def test_latency_and_5xx_policies_set_missing_data_behaviour_from_variable():
         block = _policy_block(main_tf, name)
         assert "evaluation_missing_data = var.alert_evaluation_missing_data" in block, name
         # The API requires duration >= 60s for evaluation_missing_data.
+        # Latency policies take it from var.latency_duration_secs (validated >= 60, see
+        # tests/test_stray_alerts.py); the others keep a literal.
         m = _re.search(r'duration\s*=\s*"(\d+)s"', block)
-        assert m and int(m.group(1)) >= 60, name
+        if name.endswith("_latency"):
+            assert 'duration                = "${var.latency_duration_secs}s"' in block, name
+        else:
+            assert m and int(m.group(1)) >= 60, name
     assert len(_re.findall(r"^\s*evaluation_missing_data\s*=", main_tf, _re.M)) == 5
     variables = (_OBS / "variables.tf").read_text()
     assert _re.search(

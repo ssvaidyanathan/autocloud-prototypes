@@ -66,3 +66,14 @@ variable "alert_evaluation_missing_data" {
     error_message = "alert_evaluation_missing_data must be EVALUATION_MISSING_DATA_INACTIVE, EVALUATION_MISSING_DATA_ACTIVE or EVALUATION_MISSING_DATA_NO_OP."
   }
 }
+
+variable "latency_duration_secs" {
+  type        = number
+  default     = 240
+  description = "Retest window (seconds) of the Cloud Run latency conditions: the per-service p99 must exceed the threshold in every evaluation for this long before an alert opens. Observed live on 2026-10-27 (60s alignment windows): a cold start (one ~5 s burst of slow requests) raised the p99 of 1 window (stray tickets INC0010327, INC0010328) or 2 windows (S5 deploy cold start under traffic); with 60s, 1 window opened an alert. Two adjacent windows can keep a sliding-window condition true for just under 180s, so 240s leaves a margin over that. Sustained latency still fires: S2 kept the p99 > 6500 ms for 8 consecutive windows. Values above ~360s would no longer fire for S2's 7-minute hold. Multiple of the 60s alignment period, >= 60s (evaluation_missing_data requires it)."
+
+  validation {
+    condition     = var.latency_duration_secs >= 60 && var.latency_duration_secs % 60 == 0
+    error_message = "latency_duration_secs must be a multiple of 60 (the alignment period) and at least 60."
+  }
+}

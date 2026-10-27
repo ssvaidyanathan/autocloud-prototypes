@@ -216,6 +216,7 @@ class CloudRunSpecialist(BaseSpecialist):
         # Telemetry extracted from real queries or recorded as N/A (not captured)
         error_rate_5xx_val: Optional[str] = None
         rpm_val: Optional[int] = None
+        total_requests_val: Optional[int] = None
         restarts_val: Optional[int] = None
         latency_p95_ms_val: Optional[float] = None
         earliest_anomaly_time: Optional[datetime] = None
@@ -267,6 +268,7 @@ class CloudRunSpecialist(BaseSpecialist):
                 rate_pct = (error_5xx_requests / total_requests) * 100.0
                 error_rate_5xx_val = f"{rate_pct:.1f}%"
                 rpm_val = int(total_requests / duration_minutes)
+                total_requests_val = int(total_requests)
 
             # Query Cloud Monitoring for request_latencies
             filter_lat_str = (
@@ -424,6 +426,9 @@ class CloudRunSpecialist(BaseSpecialist):
         # Assign real metrics or "N/A (not captured)"
         metrics["error_rate_5xx"] = error_rate_5xx_val if error_rate_5xx_val is not None else "N/A (not captured)"
         metrics["request_count_rpm"] = rpm_val if rpm_val is not None else "N/A (not captured)"
+        # Raw basis of request_count_rpm, so a report can state how few requests a value rests on.
+        metrics["request_count_total"] = total_requests_val if total_requests_val is not None else "N/A (not captured)"
+        metrics["request_window_minutes"] = round((end_time - start_time).total_seconds() / 60.0, 1)
         metrics["container_restarts"] = restarts_val if restarts_val is not None else "N/A (not captured)"
         metrics["latency_p95_ms"] = latency_p95_ms_val if latency_p95_ms_val is not None else "N/A (not captured)"
         metrics["target_latency_p95_ms"] = latency_p95_ms_val if latency_p95_ms_val is not None else "N/A (not captured)"
