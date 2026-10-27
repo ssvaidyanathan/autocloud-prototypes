@@ -1,16 +1,11 @@
-data "google_service_account" "inventory_sa" {
-  account_id = "${var.name_prefix}-inventory-sa"
-  project    = var.project_id
-}
-
-data "google_service_account" "orders_sa" {
-  account_id = "${var.name_prefix}-orders-sa"
-  project    = var.project_id
-}
-
-data "google_service_account" "apigee_sa" {
-  account_id = "${var.name_prefix}-apigee-sa"
-  project    = var.project_id
+# Runtime SAs are created by the foundation root. Their emails are deterministic,
+# so they are derived here instead of read back (no data lookup, no dependency on
+# the foundation state location). Foundation must be applied first; if it was
+# not, the Cloud Run apply fails loudly on the missing SA.
+locals {
+  inventory_sa_email = "${var.name_prefix}-inventory-sa@${var.project_id}.iam.gserviceaccount.com"
+  orders_sa_email    = "${var.name_prefix}-orders-sa@${var.project_id}.iam.gserviceaccount.com"
+  apigee_sa_email    = "${var.name_prefix}-apigee-sa@${var.project_id}.iam.gserviceaccount.com"
 }
 
 locals {
@@ -30,6 +25,7 @@ resource "google_cloud_run_v2_service" "inventory_api" {
 
   labels = {
     app        = "alert-triage-agent"
+    stack      = var.name_prefix
     component  = "${var.name_prefix}-inventory-api"
     role       = "demo-workload"
     tier       = "service"
@@ -39,7 +35,7 @@ resource "google_cloud_run_v2_service" "inventory_api" {
   }
 
   template {
-    service_account = data.google_service_account.inventory_sa.email
+    service_account = local.inventory_sa_email
 
     # One instance holds the fault state and leaked connections; see var.demo_max_instance_count.
     scaling {
@@ -95,7 +91,9 @@ resource "google_cloud_run_v2_service" "inventory_api" {
     # client/client_version record which tool last wrote the service (gcloud
     # stamps "gcloud"/<sdk version>). They are not configuration and do not
     # affect revisions; the demo scripts update this service via gcloud.
-    ignore_changes = [client, client_version]
+    # scaling is the service-level block (not template.scaling), which this
+    # config does not manage; provider 6.x reports its zero defaults as drift.
+    ignore_changes = [client, client_version, scaling]
   }
 }
 
@@ -110,6 +108,7 @@ resource "google_cloud_run_v2_service" "orders_api" {
 
   labels = {
     app        = "alert-triage-agent"
+    stack      = var.name_prefix
     component  = "${var.name_prefix}-orders-api"
     role       = "demo-workload"
     tier       = "service"
@@ -119,7 +118,7 @@ resource "google_cloud_run_v2_service" "orders_api" {
   }
 
   template {
-    service_account = data.google_service_account.orders_sa.email
+    service_account = local.orders_sa_email
 
     scaling {
       max_instance_count = var.demo_max_instance_count
@@ -143,8 +142,9 @@ resource "google_cloud_run_v2_service" "orders_api" {
   }
 
   lifecycle {
-    # See inventory_api: tool-of-last-write bookkeeping, not configuration.
-    ignore_changes = [client, client_version]
+    # See inventory_api: tool-of-last-write bookkeeping and the unmanaged
+    # service-level scaling block, not configuration.
+    ignore_changes = [client, client_version, scaling]
   }
 }
 
@@ -156,7 +156,7 @@ resource "google_cloud_run_v2_service_iam_member" "inventory_invoker_orders" {
   location = var.region
   name     = google_cloud_run_v2_service.inventory_api.name
   role     = "roles/run.invoker"
-  member   = "serviceAccount:${data.google_service_account.orders_sa.email}"
+  member   = "serviceAccount:${local.orders_sa_email}"
 }
 
 resource "google_cloud_run_v2_service_iam_member" "inventory_invoker_apigee" {
@@ -164,7 +164,7 @@ resource "google_cloud_run_v2_service_iam_member" "inventory_invoker_apigee" {
   location = var.region
   name     = google_cloud_run_v2_service.inventory_api.name
   role     = "roles/run.invoker"
-  member   = "serviceAccount:${data.google_service_account.apigee_sa.email}"
+  member   = "serviceAccount:${local.apigee_sa_email}"
 }
 
 resource "google_cloud_run_v2_service_iam_member" "orders_invoker_apigee" {
@@ -172,39 +172,31 @@ resource "google_cloud_run_v2_service_iam_member" "orders_invoker_apigee" {
   location = var.region
   name     = google_cloud_run_v2_service.orders_api.name
   role     = "roles/run.invoker"
-  member   = "serviceAccount:${data.google_service_account.apigee_sa.email}"
+  member   = "serviceAccount:${local.apigee_sa_email}"
 }
 
-data "google_service_account" "bridge_sa" {
-  account_id = "${var.name_prefix}-bridge-sa"
-  project    = var.project_id
+# The triage-tier invoker bindings (bridge SA and agent SA on the agent, agent SA
+# on the bridge and tools) moved to the triage-iam root, which is applied after
+# the triage services are deployed (they do not exist yet when this root is
+# applied). The removed blocks drop them from this root's state WITHOUT
+# destroying the live bindings; in a fresh project they are no-ops.
+removed {
+  from = google_cloud_run_v2_service_iam_member.agent_invoker_bridge
+  lifecycle {
+    destroy = false
+  }
 }
 
-data "google_service_account" "agent_sa" {
-  account_id = "${var.name_prefix}-agent-sa"
-  project    = var.project_id
+removed {
+  from = google_cloud_run_v2_service_iam_member.agent_invoker_agent
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "google_cloud_run_v2_service_iam_member" "agent_invoker_bridge" {
-  project  = var.project_id
-  location = var.region
-  name     = "${var.name_prefix}-agent"
-  role     = "roles/run.invoker"
-  member   = "serviceAccount:${data.google_service_account.bridge_sa.email}"
-}
-
-resource "google_cloud_run_v2_service_iam_member" "agent_invoker_agent" {
-  project  = var.project_id
-  location = var.region
-  name     = "${var.name_prefix}-agent"
-  role     = "roles/run.invoker"
-  member   = "serviceAccount:${data.google_service_account.agent_sa.email}"
-}
-
-resource "google_cloud_run_v2_service_iam_member" "bridge_invoker_agent" {
-  project  = var.project_id
-  location = var.region
-  name     = "${var.name_prefix}-bridge"
-  role     = "roles/run.invoker"
-  member   = "serviceAccount:${data.google_service_account.agent_sa.email}"
+removed {
+  from = google_cloud_run_v2_service_iam_member.bridge_invoker_agent
+  lifecycle {
+    destroy = false
+  }
 }

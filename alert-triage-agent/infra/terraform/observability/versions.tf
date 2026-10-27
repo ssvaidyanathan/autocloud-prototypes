@@ -1,15 +1,14 @@
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.9.0"
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
   }
-  backend "gcs" {
-    bucket = "cloud-assist-fde-2-ata-tfstate"
-    prefix = "ata/observability"
-  }
+  # Partial configuration: bucket and prefix come from backend.hcl, written by
+  # scripts/bootstrap-tfstate.sh (terraform init -backend-config=backend.hcl).
+  backend "gcs" {}
 }
 
 provider "google" {

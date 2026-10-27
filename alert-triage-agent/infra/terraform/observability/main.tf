@@ -1,13 +1,17 @@
-data "terraform_remote_state" "foundation" {
-  backend = "gcs"
-  config = {
-    bucket = "cloud-assist-fde-2-ata-tfstate"
-    prefix = "ata/foundation"
-  }
+# The bridge webhook channel is created by the foundation root. It is looked up
+# by its display name and type instead of being read from foundation's remote
+# state, so this root does not depend on where or how the foundation state is
+# stored. The data source fails if no channel, or more than one, matches.
+data "google_monitoring_notification_channel" "bridge_webhook" {
+  count = var.notification_channel_id == null ? 1 : 0
+
+  project      = var.project_id
+  display_name = "${var.name_prefix}-bridge-webhook"
+  type         = "webhook_basicauth"
 }
 
 locals {
-  notification_channel_id = var.notification_channel_id != null ? var.notification_channel_id : data.terraform_remote_state.foundation.outputs.notification_channel_id
+  notification_channel_id = var.notification_channel_id != null ? var.notification_channel_id : data.google_monitoring_notification_channel.bridge_webhook[0].name
 }
 
 # -------------------------------------------------------------
@@ -41,6 +45,7 @@ resource "google_monitoring_alert_policy" "orders_5xx" {
 
   user_labels = {
     app       = "alert-triage-agent"
+    stack     = "${var.name_prefix}"
     component = "${var.name_prefix}-orders-api"
     tier      = "service"
     signal    = "5xx"
@@ -80,6 +85,7 @@ resource "google_monitoring_alert_policy" "orders_latency" {
 
   user_labels = {
     app       = "alert-triage-agent"
+    stack     = "${var.name_prefix}"
     component = "${var.name_prefix}-orders-api"
     tier      = "service"
     signal    = "latency"
@@ -118,6 +124,7 @@ resource "google_monitoring_alert_policy" "inventory_5xx" {
 
   user_labels = {
     app       = "alert-triage-agent"
+    stack     = "${var.name_prefix}"
     component = "${var.name_prefix}-inventory-api"
     tier      = "service"
     signal    = "5xx"
@@ -157,6 +164,7 @@ resource "google_monitoring_alert_policy" "inventory_latency" {
 
   user_labels = {
     app       = "alert-triage-agent"
+    stack     = "${var.name_prefix}"
     component = "${var.name_prefix}-inventory-api"
     tier      = "service"
     signal    = "latency"
@@ -195,6 +203,7 @@ resource "google_monitoring_alert_policy" "apigee_orders_5xx" {
 
   user_labels = {
     app       = "alert-triage-agent"
+    stack     = "${var.name_prefix}"
     component = "${var.name_prefix}-orders-v1"
     tier      = "edge"
     signal    = "5xx"
@@ -232,6 +241,7 @@ resource "google_monitoring_alert_policy" "apigee_orders_429" {
 
   user_labels = {
     app       = "alert-triage-agent"
+    stack     = "${var.name_prefix}"
     component = "${var.name_prefix}-orders-v1"
     tier      = "edge"
     signal    = "rate-limit"
@@ -268,6 +278,7 @@ resource "google_monitoring_alert_policy" "cloudsql_connections" {
 
   user_labels = {
     app       = "alert-triage-agent"
+    stack     = "${var.name_prefix}"
     component = "${var.name_prefix}-inventory-db"
     tier      = "data"
     signal    = "connections"
@@ -304,6 +315,7 @@ resource "google_monitoring_alert_policy" "cloudsql_cpu" {
 
   user_labels = {
     app       = "alert-triage-agent"
+    stack     = "${var.name_prefix}"
     component = "${var.name_prefix}-inventory-db"
     tier      = "data"
     signal    = "cpu"

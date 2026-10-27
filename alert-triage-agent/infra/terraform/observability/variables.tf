@@ -1,25 +1,22 @@
 variable "project_id" {
   type        = string
-  default     = "cloud-assist-fde-2"
-  description = "Google Cloud project ID"
+  description = "Google Cloud project ID. No default: it identifies the target."
 }
 
 variable "region" {
   type        = string
-  default     = "us-west1"
-  description = "Google Cloud region"
+  description = "Google Cloud region (e.g. us-central1). No default: it identifies the target."
 }
 
 variable "name_prefix" {
   type        = string
   default     = "ata"
-  description = "Resource name prefix for alert policies"
-}
+  description = "Resource name prefix for all alert triage agent components: lowercase, starts with a letter, 2-10 characters of [a-z0-9]."
 
-variable "bridge_url" {
-  type        = string
-  default     = "https://ata-bridge-4klvlqnmpa-uw.a.run.app"
-  description = "Base URL of ata-bridge Cloud Run service"
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9]{1,9}$", var.name_prefix))
+    error_message = "name_prefix must be 2-10 characters, lowercase letters and digits only, starting with a letter (regex ^[a-z][a-z0-9]{1,9}$)."
+  }
 }
 
 variable "cloudsql_connections_threshold" {
@@ -31,7 +28,7 @@ variable "cloudsql_connections_threshold" {
 variable "notification_channel_id" {
   type        = string
   default     = null
-  description = "Notification channel resource name for ata-bridge webhook. If null, sourced from foundation remote state."
+  description = "Notification channel resource name for ata-bridge webhook. If null, the channel named <name_prefix>-bridge-webhook (type webhook_basicauth, created by the foundation root) is looked up."
 }
 
 variable "latency_per_series_aligner" {

@@ -15,12 +15,12 @@ resource "google_sql_database_instance" "inventory_db" {
 
     ip_configuration {
       ipv4_enabled = true
-      require_ssl  = false
       ssl_mode     = "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
     }
 
     user_labels = {
       app        = "alert-triage-agent"
+      stack      = var.name_prefix
       component  = "${var.name_prefix}-inventory-db"
       role       = "demo-workload"
       tier       = "data"
