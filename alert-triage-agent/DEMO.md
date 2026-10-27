@@ -42,9 +42,8 @@ Follow this section to execute scenarios directly from your laptop.
      "https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG}/developers/${NAME_PREFIX}-dev@example.com/apps/${NAME_PREFIX}-demo-app" \
      | python3 -c "import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])" > ".${NAME_PREFIX}-api-key"
    chmod 600 ".${NAME_PREFIX}-api-key"
-   export ATA_API_KEY="$(cat ".${NAME_PREFIX}-api-key")"
    ```
-   The scenario scripts read `ATA_API_KEY`, else `.ata-api-key` (TODO(scripts-lane): confirm the key file name for other prefixes). The key files are gitignored.
+   The scenario scripts read `.${NAME_PREFIX}-api-key` and the Apigee values in `.${NAME_PREFIX}-apigee.env` (written by `deploy-apigee-proxies.sh`); `ATA_API_KEY` overrides the key file. TODO(scripts-lane): confirm when the scenario lane lands. The key files are gitignored.
 
 5. **Verify Baseline Health:**
    ```bash

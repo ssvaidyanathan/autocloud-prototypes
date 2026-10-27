@@ -32,8 +32,8 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 | `SERVICENOW_PASSWORD` | *Loaded from Secret Manager* | Password for ServiceNow integration user. |
 | `SERVICENOW_CALLER` | `ATA Integration` | Caller ID / name populated on incident records. |
 | `SERVICENOW_ASSIGNMENT_GROUP` | `Cloud SRE Tier-2` | Assignment group for triage routing. |
-| `IS_LOCAL` | `false` | When `true`, enables mock storage and local adapters. |
-| `VERIFIER_SA` | *None* | Comma-separated emails allowed to call `/instructions/*` besides `<NAME_PREFIX>-agent-sa` and `<NAME_PREFIX>-bridge-sa` (e.g. operators using the read-only view endpoint, §3.1). No other caller is built in. `bridge/scripts/deploy.sh` passes it only when it is exported, so a redeploy without it keeps the value on the service. |
+| `IS_LOCAL` | `false` | When `true`, enables mock storage and local adapters. `bridge/scripts/deploy.sh` always sets `false`. |
+| `VERIFIER_SA` | *None* | Comma-separated emails allowed to call `/instructions/*` besides `<NAME_PREFIX>-agent-sa` and `<NAME_PREFIX>-bridge-sa` (e.g. operators using the read-only view endpoint, §3.1). No other caller is built in. `bridge/scripts/deploy.sh` passes it only when it is exported, so a redeploy without it keeps the value on the service; `VERIFIER_SA=none` removes it. |
 | `ADAPTER_TIMEOUT_SECONDS` | `30.0` | HTTP timeout for outbound ServiceNow API calls. |
 
 ---
@@ -68,23 +68,39 @@ The agent owns all incident grouping, atomic Open Knowledge File (OKF) storage w
 | `GCP_READ_RETRY_BASE_SECONDS` | `2.0` | Full-jitter exponential backoff base: before retry n the wait is uniform in [0, min(MAX, BASE * 2^(n-1))] seconds. |
 | `GCP_READ_RETRY_MAX_SECONDS` | `30.0` | Upper bound of one backoff wait. |
 | `LOW_TRAFFIC_RPM` | `5` | Latency reports: when the origin's Cloud Run `request_count` over the investigation window (alert start −15 min to +15 min or now) averages below this many requests/min (measured total ÷ window), the problem statement, root cause and an observation state the measured volume (e.g. for INC0010327, 32 requests in its window: "low traffic: 32 requests in 17.2 min (1.9 requests/min) on ata-inventory-api, so the latency may come from a few slow requests (such as a cold start) rather than a service-wide degradation") instead of calling it a service degradation. Applies to the origin's own dossier only, also when the alert is on a caller. Nothing is suppressed, and no statement is made without a measured total and window. Live 2026-10-27: INC0010327 at 1.9 requests/min, S2's origin about 35 requests/min (627 requests in about 18 min). Must be > 0. |
+| `TOOLS_URL` | *none (required when not local)* | URL of the deployed `<prefix>-tools` service. The ChangeSpecialist calls its `get_change_timeline` tool at `<TOOLS_URL>/mcp` with an ID token whose audience is this URL (see §1.3.1). Must be `https://<host>` with no path. A non-local agent without it fails at startup. `deploy.sh` sets it from `gcloud run services describe <prefix>-tools --format='value(status.url)'`, else `https://<prefix>-tools-<PROJECT_NUMBER>.<REGION>.run.app`. |
+| `TOOLS_TIMEOUT_SECONDS` | `60` | Per-attempt HTTP timeout of an ata-tools call (0 < value <= 300). The timeline lists every Cloud Run service's revisions and the Apigee deployments. |
+| `TOOLS_RETRY_ATTEMPTS` | `3` | Total attempts for an ata-tools call on a connection error, timeout or HTTP 429/5xx (1-5). Other 4xx (e.g. 403 when `roles/run.invoker` is missing) are not retried. |
+| `TOOLS_RETRY_BASE_SECONDS` | `1.0` | Backoff before retry n: `BASE * 2^(n-1)` seconds, capped at 10 s. |
 
 ---
 
 ### 1.3 FastMCP Tools Server (`ata-tools`)
 
-The FastMCP server exposes read-only tools to the ADK agent for topology, Apigee metrics, proxy bundles, and logs.
+The FastMCP server exposes read-only tools for topology, Apigee metrics, proxy bundles, logs and change history. At runtime the agent calls one of them, `get_change_timeline`, over MCP (§1.3.1); the agent image does not contain the `tools` package.
+
+`tools/scripts/deploy.sh` sets `APIGEE_ENV`, `ENFORCE_AUTH=true`, `VERIFY_OIDC=true`, `PROJECT_NUMBER` and `EXPECTED_AUDIENCE` (the agent's `TOOLS_URL`) ([DEPLOY.md §4.5](DEPLOY.md#45-environment-variables-set-by-the-deploy-scripts)). TODO(scripts-lane): confirm when the deploy wiring lands.
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
 | `PORT` | `8080` | HTTP server listening port. |
 | `PROJECT_ID` | *Set by `deploy.sh`* (`${PROJECT_ID}`) | Google Cloud project ID. |
-| `APIGEE_ORG` | *Set by `deploy.sh`* (`${APIGEE_ORG}`, default `${PROJECT_ID}`) | Apigee organization identifier. |
-| `REGION` | `us-west1` | Target GCP region. |
+| `APIGEE_ORG` | *Set by `deploy.sh`* (`${APIGEE_ORG}`, default `${PROJECT_ID}`) | Apigee organization whose deployments `get_change_timeline` reads. |
+| `APIGEE_ENV` | *none* | Apigee environment whose deployments `get_change_timeline` reads. Without it the Apigee deployment history is returned as a failed source (the ticket says so); it is never guessed. |
+| `NAME_PREFIX` | `ata` | Stack prefix. `get_change_timeline` reports only `<NAME_PREFIX>-*` Apigee proxies; the default caller SA and audience derive from it. |
+| `PROJECT_NUMBER` | *none* | Builds the accepted audience `https://<prefix>-tools-<PROJECT_NUMBER>.<REGION>.run.app`. |
+| `REGION` | *Set by `deploy.sh`* (`${REGION}`) | Target GCP region. |
 | `ENFORCE_AUTH` | `false` | When `true`, enforces OIDC token verification on tool endpoints. |
 | `VERIFY_OIDC` | `false` | Validates Google OIDC ID token signature and audience. |
-| `EXPECTED_AUDIENCE` | `None` | Cloud Run audience URL for incoming OIDC tokens. |
-| `ALLOWED_SERVICE_ACCOUNTS` | `ata-agent-sa@...` | Comma-separated list of caller service accounts allowed. |
+| `EXPECTED_AUDIENCE` | `None` | Comma-separated accepted ID-token audiences; set it to the URL the agent calls (`TOOLS_URL`). The deterministic URL from `PROJECT_NUMBER` is always accepted too. With `ENFORCE_AUTH` and `VERIFY_OIDC` on and no audience, startup fails; a token that cannot be verified is rejected (fail closed). |
+| `ALLOWED_SERVICE_ACCOUNTS` | `<prefix>-agent-sa@<PROJECT_ID>.iam.gserviceaccount.com` | Comma-separated caller service accounts allowed (others get 403). |
+
+#### 1.3.1 Change timeline call path (ChangeSpecialist -> ata-tools)
+
+- **Call:** `POST <TOOLS_URL>/mcp`, one JSON-RPC `tools/call` of `get_change_timeline(window_hours=2, project_id, region)`. ata-tools runs stateless with JSON responses, so there is no `initialize` handshake or session. The client is plain httpx (`agent/app/tools/tools_client.py`).
+- **Auth:** an ID token of the agent SA from the metadata server, audience = `TOOLS_URL`. Cloud Run checks `roles/run.invoker` on `<prefix>-tools` for `<prefix>-agent-sa`; with `ENFORCE_AUTH=true VERIFY_OIDC=true`, the ata-tools middleware also checks the audience and the caller SA.
+- **Result:** Cloud Run revisions (new revisions, traffic shifts, service updates) and the Apigee deployment history of the stack's proxies: every deployed revision with its deploy time, and the deployments started in the window. Each source that fails is an `error` entry.
+- **Failure semantics (no fallback):** if ata-tools is unreachable, times out, returns a non-2xx status, an MCP or tool error, or a malformed result, the agent logs an ERROR, and the change dossier states `change timeline unavailable: <reason>. Apigee proxy deployment history and Cloud Run revision history were not assessed; change attribution not assessed.` Change-Induced becomes `Not assessed (change detection incomplete: change timeline unavailable: <reason>; ...)`, never `No`. An `error` entry for one source is stated the same way for that source (for example `change timeline unavailable: Apigee deployment history source failed (APIGEE_ENV not set in ata-tools)`), and the other source is still used. The agent makes no Cloud Run-only query that could present partial history as complete.
 
 ---
 
@@ -111,7 +127,7 @@ Demo script settings (scripts/scenarios/common.sh):
 | :--- | :--- | :--- |
 | `ATA_DEMO_MAX_INSTANCES` | `1` | Max Cloud Run instances of the demo services (service and revision level). Keep equal to Terraform `demo_max_instance_count`. |
 | `ATA_INVENTORY_RESTOCK_BASELINE` | `item-101=1000,...,item-105=1000` | Stock that `reset-scenarios.sh` sets via `POST /admin/restock` before each scenario (`<id>=<stock>`, stock >= 1). |
-| `ATA_INVENTORY_PIN_FILE` | `scripts/scenarios/inventory-pin.env` | The inventory pin (revision, digest, previous pin). Change it with `scripts/repin-inventory.sh`. |
+| `ATA_INVENTORY_PIN_FILE` | `scripts/scenarios/inventory-pin.<prefix>.env` (TODO(scripts-lane): per-prefix name from the scenario lane) | The inventory pin (revision, digest, previous pin). Change it with `scripts/repin-inventory.sh`. |
 | `ATA_ARTIFACT_REGISTRY_HOST` | `<REGION>-docker.pkg.dev` | Artifact Registry host of the `<prefix>-docker` repository. |
 | `INVENTORY_SERVICE_URL` | *Cloud Run URL* | Internal Cloud Run URL of inventory service called by orders API. |
 

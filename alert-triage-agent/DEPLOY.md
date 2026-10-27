@@ -6,6 +6,8 @@ Every command is meant to be copied and pasted as it is, in bash 3.2 or later (t
 
 Markers of the form `TODO(<lane>)` mark steps whose final script or flag is still landing on another branch. Search for `TODO(` before following the guide.
 
+> TODO(scripts-lane): `scripts/deploy-stage1.sh` becomes the from-scratch orchestrator, with phases that run alone (`--only <phase>`, `--from <phase>`). Each step below will then run its phase through `deploy-stage1.sh`, followed by the manual verification, and this guide will show the one-shot run. Until the phase names land, the steps show the commands each phase runs.
+
 ---
 
 ## Contents
@@ -193,7 +195,7 @@ Rules:
 - **Never share a checkout's `.terraform/` between prefixes.** Do not copy `.terraform/` or `backend.hcl` from another clone. Always run `terraform init -reconfigure -backend-config=backend.hcl`, as every step here does.
 - **Use a separate shell with its own inputs file.** `TF_VAR_name_prefix` and `NAME_PREFIX` are read by every step.
 - Both stacks may use the same ServiceNow instance. Their tickets then share a queue and differ only in the group IDs and the `<prefix>-*` names in the text.
-- Do not commit or push `scripts/scenarios/inventory-pin.env` from a second stack's clone. It holds that stack's pin ([Step 7](#step-7-demo-applications-and-the-inventory-pin)).
+- Each stack has its own pin file, `scripts/scenarios/inventory-pin.<prefix>.env` ([Step 7](#step-7-demo-applications-and-the-inventory-pin)). Commit a stack's pin file only if that stack is meant to be tracked in the repository.
 
 ### 2.4 Step overview
 
@@ -549,7 +551,7 @@ cd "${ATA_DIR}"
 ./scripts/set-demo-instance-caps.sh --apply
 ```
 
-- `write-pin` writes the pin file.
+- `write-pin` writes the stack's pin file, `scripts/scenarios/inventory-pin.<prefix>.env`.
 - `switch` moves 100% of the traffic to the pinned revision, and verifies serving, `/health`, `/items` and the admin probes.
 - `set-demo-instance-caps.sh --apply` sets the service-level instance limit (default 1) on both demo services ([§4.2](#42-instance-caps)).
 
@@ -557,18 +559,18 @@ cd "${ATA_DIR}"
 
 ```bash
 ./scripts/repin-inventory.sh status
-cat scripts/scenarios/inventory-pin.env | grep '^PIN_'
+grep '^PIN_' "scripts/scenarios/inventory-pin.${NAME_PREFIX}.env"
 ```
 
 `status` exits 0 and reports traffic 100% on the pin, with no baseline gaps. The pin file names a `<prefix>-inventory-api-...` revision and `INVENTORY_DIGEST`.
 
 **If it fails:**
-- `--initial: a pin exists`: the pin file in this clone names a revision that exists in this project. You are probably in the wrong clone or project.
+- `--initial: a pin exists`: `inventory-pin.<prefix>.env` names a revision that exists in this project, so this stack is already pinned. Re-pin without `--initial` ([§4.3](#43-re-pinning-the-inventory-baseline-and-pruning-revisions)), or check `NAME_PREFIX` and `PROJECT_ID`.
 - `/items` fails in `prepare`: the schema or the GRANT is missing (Step 6), or the instance is not `RUNNABLE` yet.
 - The applications apply fails with `service account ... does not exist`: Step 3 did not complete for this prefix.
 
 > [!NOTE]
-> The pin file is per stack and per clone. In the clone of a second stack, keep the file local: do not commit or push it.
+> TODO(scripts-lane): the per-prefix pin file `inventory-pin.<prefix>.env` is the scenario lane's interface. Confirm the name when it lands.
 
 ---
 
@@ -583,11 +585,11 @@ cd "${ATA_DIR}/bridge" && ./scripts/deploy.sh
 cd "${ATA_DIR}"
 ```
 
-> TODO(tools-lane): `agent/scripts/deploy.sh` must set `TOOLS_URL` (the agent refuses to start without it), and `tools/scripts/deploy.sh` must set `APIGEE_ENV` (the tools service needs it for the change timeline). Confirm both are wired before running this step.
+The tools service must be reachable by the agent: the agent deploy sets `TOOLS_URL` to the tools URL (the agent does not start without it), and the tools deploy sets `APIGEE_ENV`, `ENFORCE_AUTH=true`, `VERIFY_OIDC=true`, `PROJECT_NUMBER` and `EXPECTED_AUDIENCE` (the agent's `TOOLS_URL`). TODO(scripts-lane): confirm the deploy scripts set these, as listed in [§4.5](#45-environment-variables-set-by-the-deploy-scripts).
 
 - The scripts take `PROJECT_ID`, `REGION`, `NAME_PREFIX`, `ENVIRONMENT`, `OWNER` and `PROJECT_NUMBER` from the inputs.
-- The tools script also takes `APIGEE_ORG`.
-- The bridge script also takes `SERVICENOW_INSTANCE_URL`, and `VERIFIER_SA` when it is exported.
+- The tools script also takes `APIGEE_ORG` and `APIGEE_ENV`.
+- The bridge script also takes `SERVICENOW_INSTANCE_URL`, and `VERIFIER_SA` when it is exported (`VERIFIER_SA=none` removes the variable from the service).
 - Each script prints `Successfully deployed <prefix>-<service>: https://...`.
 - On a first deploy, the bridge script also updates `BRIDGE_URL` to the service's real `status.url`.
 
@@ -700,15 +702,9 @@ There are eight `<prefix>-*` policies, all enabled, and each notifies the one ch
 
 **Purpose:** prove the whole path end to end. Check the demo services and Apigee, then the bridge webhook, the preflight, and finally two real scenarios that must each produce one incident group and one ServiceNow ticket.
 
-> TODO(scripts-lane): the verification and scenario scripts read the API key from `.ata-api-key` and use hardcoded `/ata/...` base paths and `ata-*` names. Until the scripts lane lands the prefix variables, run them only for `NAME_PREFIX=ata`. Confirm the final variable names (`APIGEE_HOST` and the key file) and remove this note.
+The verification and scenario scripts require `PROJECT_ID`, `REGION` and `NAME_PREFIX`, and read the Apigee values from `.${NAME_PREFIX}-apigee.env` and the key from `.${NAME_PREFIX}-api-key`, both written by Step 9. Run them from `${ATA_DIR}`.
 
-Load the Apigee values and the key into the environment that the scripts read:
-
-```bash
-cd "${ATA_DIR}"
-set -a; . "./.${NAME_PREFIX}-apigee.env"; set +a
-export ATA_API_KEY="$(cat "./.${NAME_PREFIX}-api-key")"
-```
+> TODO(scripts-lane): this is the scenario lane's interface (in progress): `common.sh` sources `.<prefix>-apigee.env`, reads `.<prefix>-api-key`, and uses `<prefix>` base paths and names. Until it lands, Step 11 works only for `NAME_PREFIX=ata`.
 
 **11.1 Demo services and Apigee**
 
@@ -768,7 +764,11 @@ There is no separate automated test-suite count to compare against. The deployme
 
 **If it fails:**
 - No ticket, and the group stays open: check the agent logs for timer task errors (`gcloud run services logs read "${NAME_PREFIX}-agent" --region="${REGION}" --project="${PROJECT_ID}" --limit=100`). A `PERMISSION_DENIED` on Cloud Tasks or on `actAs` points to Step 3. A 403 on the agent points to `triage-iam`.
-- A ticket that says `change timeline unavailable`: the agent could not call the tools service. Check `TOOLS_URL` on the agent and the `tools_invoker_agent` binding (Step 8).
+- A ticket that says `change timeline unavailable: <reason>` (with Change-Induced "Not assessed"): the change timeline from the tools service failed. The reason names the cause:
+  - `returned HTTP 403` from `<prefix>-tools`: the `tools_invoker_agent` binding is missing (`triage-iam`, Step 8), or `EXPECTED_AUDIENCE` on the tools service is not the agent's `TOOLS_URL`;
+  - `unreachable` or `timed out`: check `TOOLS_URL` on the agent and that `<prefix>-tools` is serving;
+  - `Apigee deployment history source failed (APIGEE_ENV not set in ata-tools)`: redeploy the tools service with `APIGEE_ENV`;
+  - `Apigee deployments list returned HTTP 403`: `<prefix>-agent-sa` lacks `roles/apigee.readOnlyAdmin` in the `APIGEE_ORG` project (the foundation grants it in `PROJECT_ID` only).
 - The bridge logs show ServiceNow 401: the secrets still hold `placeholder`, or the credentials are wrong. Run Step 4 again, then redeploy the bridge (`cd "${ATA_DIR}/bridge" && ./scripts/deploy.sh`) so that a new revision reads them.
 
 ---
@@ -821,14 +821,14 @@ The service-level limit covers every revision, including a pinned revision creat
 
 ### 4.3 Re-pinning the inventory baseline and pruning revisions
 
-The pin lives only in `scripts/scenarios/inventory-pin.env`: the revision, its image digest, and the previous pin (the rollback target). Do not edit the file by hand. Use `scripts/repin-inventory.sh`:
+Each stack's pin lives only in `scripts/scenarios/inventory-pin.<prefix>.env`: the revision, its image digest, and the previous pin (the rollback target). Do not edit the file by hand. Use `scripts/repin-inventory.sh`:
 
 ```bash
 ./scripts/repin-inventory.sh status                       # read-only: pin, traffic, baseline gaps, caps
 ./scripts/repin-inventory.sh prepare --image-tag v1.2.0   # build; deploy a candidate with NO traffic; verify; untag
 #   (or: prepare --image-digest sha256:<hex> for an image already in ${AR_REPO})
 ./scripts/repin-inventory.sh write-pin --revision <candidate> --digest sha256:<hex>
-git add scripts/scenarios/inventory-pin.env && git commit -m "chore(inventory): pin <candidate>"   # main stack only
+git add "scripts/scenarios/inventory-pin.${NAME_PREFIX}.env" && git commit -m "chore(inventory): pin <candidate>"   # tracked stacks only
 ./scripts/repin-inventory.sh switch                       # 100% to the pin; verify serving, /health, /items, admin probes
 ./scripts/reset-scenarios.sh                              # restock and full baseline check
 # Rollback: ./scripts/repin-inventory.sh rollback  (traffic and pin file back to the previous pin)
@@ -866,7 +866,7 @@ URLs are never hardcoded. An exported `AGENT_URL` or `BRIDGE_URL` wins. Otherwis
 | | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` (the GCS volume mount) |
 | | `BRIDGE_URL` | The bridge URL: the agent's ID-token audience for the bridge. |
 | | `AGENT_URL` | The agent's own URL (the timer task target). |
-| | `TOOLS_URL` | The tools service URL (MCP calls, ID-token audience). TODO(tools-lane): confirm the script sets it. |
+| | `TOOLS_URL` | The tools service's `status.url`, else `https://${NAME_PREFIX}-tools-${PROJECT_NUMBER}.${REGION}.run.app`. Bare `https://host`, no path. Required: the agent does not start without it. |
 | | `LOCATION` | `${REGION}` (the timer queue region) |
 | | `TIMER_QUEUE_NAME` | `${NAME_PREFIX}-timer-queue` |
 | | `SERVICE_ACCOUNT_EMAIL` | `${NAME_PREFIX}-agent-sa@${PROJECT_ID}.iam.gserviceaccount.com` (the OIDC identity of the timer tasks) |
@@ -878,17 +878,22 @@ URLs are never hardcoded. An exported `AGENT_URL` or `BRIDGE_URL` wins. Otherwis
 | | `AGENT_URL` | The agent URL (the `/triage` target of the dispatched tasks). |
 | | `BRIDGE_URL` | The bridge's own `status.url`. Required. On a first deploy, the script deploys with the deterministic URL, then sets `status.url` with `gcloud run services update` if it differs. |
 | | `SERVICENOW_INSTANCE_URL` | Environment, else `servicenow_instance_url` in `infra/terraform/foundation/terraform.tfvars`, else the value on the service. Required. |
-| | `VERIFIER_SA` | Only when exported. The list is passed with gcloud's `^\|^` delimiter, so commas in it are kept. |
+| | `VERIFIER_SA` | Only when exported; `VERIFIER_SA=none` removes it. The list is passed with gcloud's `^\|^` delimiter, so commas in it are kept. |
+| | `IS_LOCAL` | Always `false`. |
 | | `WEBHOOK_TOKEN`, `SERVICENOW_USERNAME`, `SERVICENOW_PASSWORD` | Secret Manager `${NAME_PREFIX}-webhook-token`, `${NAME_PREFIX}-servicenow-username`, `${NAME_PREFIX}-servicenow-password` (`:latest`). |
 | `<prefix>-tools` | `PROJECT_ID`, `NAME_PREFIX`, `REGION` | From the environment. Runs as `${NAME_PREFIX}-agent-sa`. |
 | | `APIGEE_ORG` | `${APIGEE_ORG}`, default `${PROJECT_ID}` |
-| | `APIGEE_ENV` | `${APIGEE_ENV}`. TODO(tools-lane): confirm the script sets it. |
+| | `APIGEE_ENV` | `${APIGEE_ENV}`. Required for the Apigee deployment history. |
+| | `ENFORCE_AUTH`, `VERIFY_OIDC` | `true`: the tools service also verifies the caller's ID token (Cloud Run IAM is the primary gate). |
+| | `PROJECT_NUMBER` | As for the bridge. Gives the accepted audience `https://${NAME_PREFIX}-tools-${PROJECT_NUMBER}.${REGION}.run.app`. |
+| | `EXPECTED_AUDIENCE` | The agent's `TOOLS_URL`. |
 
 The other deploy-script inputs:
 
 | Input | Effect |
 | :--- | :--- |
 | `ENVIRONMENT`, `OWNER` | Labels (defaults `demo`, `sre-prototypes`). |
+| `TOOLS_TIMEOUT_SECONDS`, `TOOLS_RETRY_ATTEMPTS`, `TOOLS_RETRY_BASE_SECONDS` | Optional agent tuning of the tools calls ([CONFIGURATION.md §1.2](CONFIGURATION.md#12-multi-agent-adk-runtime-ata-agent)). The defaults are fine. |
 | `PROJECT_ID` (or `GCP_PROJECT`), `REGION` (or `GCP_REGION`) | **Required**. There are no defaults: the scripts exit before any gcloud call without them. |
 | `PROJECT_NUMBER` | Looked up with `gcloud projects describe` if unset. The bridge deploy exits if the lookup fails. |
 | `BRIDGE_URL`, `AGENT_URL` | Override the URLs that the scripts look up. |
