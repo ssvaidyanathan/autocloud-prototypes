@@ -79,14 +79,14 @@ def timeline_source_errors(timeline: dict[str, Any]) -> dict[str, str]:
 def _apigee_summary_problem(apigee: Any) -> Optional[str]:
     """Why a get_change_timeline "apigee" block cannot back a statement, or None if it can."""
     if apigee is None:
-        return "ata-tools returned no Apigee deployment summary (no 'apigee' block)"
+        return "the tools service returned no Apigee deployment summary (no 'apigee' block)"
     if not isinstance(apigee, dict):
-        return f"ata-tools returned a malformed Apigee deployment summary ({type(apigee).__name__}, not an object)"
+        return f"the tools service returned a malformed Apigee deployment summary ({type(apigee).__name__}, not an object)"
     missing = [k for k in ("org", "environment") if not apigee.get(k)]
     if not isinstance(apigee.get("deployments"), list):
         missing.append("deployments")
     if missing:
-        return f"ata-tools Apigee deployment summary is incomplete (missing {', '.join(missing)})"
+        return f"the tools service Apigee deployment summary is incomplete (missing {', '.join(missing)})"
     return None
 
 

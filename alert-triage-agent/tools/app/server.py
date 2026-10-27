@@ -689,7 +689,7 @@ def create_app(
     # any non-empty Bearer string, and neither leaves the MCP tools open to anyone with run.invoker.
     if os.getenv("K_SERVICE") and not cfg.is_local and not (enforce_auth and verify_oidc):
         raise RuntimeError(
-            "ata-tools on Cloud Run requires ENFORCE_AUTH=true and VERIFY_OIDC=true "
+            "the tools service on Cloud Run requires ENFORCE_AUTH=true and VERIFY_OIDC=true "
             "(tools/scripts/deploy.sh sets both)"
         )
     if enforce_auth and verify_oidc and not expected_audience:
