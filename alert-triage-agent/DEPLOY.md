@@ -889,7 +889,7 @@ Every policy closes an open incident whose condition has received no data for `a
 
 Each script deploys the image given in `TOOLS_IMAGE` / `BRIDGE_IMAGE` / `AGENT_IMAGE`, which `deploy-stage1.sh` takes from the images file. The image must be in this stack's repository, or the deploy is refused. Without one, the script builds the image itself with the build SA. All three label the service with `app`, `stack=<prefix>`, `component`, `role`, `tier`, `env`, `managed-by=script` and `owner`.
 
-URLs are never hardcoded. An exported `AGENT_URL` or `BRIDGE_URL` wins. Otherwise the script reads the service's `status.url`, and for a service that is not deployed yet it uses the deterministic URL `https://<service>-<project number>.<REGION>.run.app` and says so. If the services cannot be listed, the deploy stops.
+URLs are never hardcoded. An exported `AGENT_URL` or `BRIDGE_URL` wins. Otherwise the script reads the service's `status.url`, and for a service that is not deployed yet it uses the deterministic URL `https://<service>-<project number>.<REGION>.run.app` and says so. If the services cannot be listed, the deploy stops. Every URL, exported or derived, must be this stack's service (`https://<prefix>-<service>-...`); a URL left in the shell from another stack's deploy stops the deploy. For a custom domain, export `ALLOW_CUSTOM_SERVICE_URLS=true` as well (the script says it accepted it).
 
 | Service | Variable | Value |
 | :--- | :--- | :--- |

@@ -93,6 +93,9 @@ if [ -z "${BRIDGE_URL:-}" ]; then
     BRIDGE_URL="$(service_url_or_deterministic "${SERVICE_NAME}")"
     BRIDGE_URL_DERIVED=true
 fi
+# Exported URLs from another stack's deploy in the same shell are refused (sec L9).
+assert_stack_url AGENT_URL agent || exit 1
+assert_stack_url BRIDGE_URL bridge || exit 1
 
 echo "==================================================================="
 echo "  Deploying ${SERVICE_NAME} to Cloud Run"

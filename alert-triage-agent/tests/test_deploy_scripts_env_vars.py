@@ -102,7 +102,8 @@ def deploy(tmp_path):
                if k not in ("PROJECT_ID", "REGION", "APIGEE_ORG", "PROJECT_NUMBER", "VERIFIER_SA", "AUTO_RESOLVE_ON_RECOVERY", "BRIDGE_URL", "AGENT_URL",
                             "SERVICENOW_INSTANCE_URL", "GCP_PROJECT", "GCP_REGION", "NAME_PREFIX", "APIGEE_ENV", "TOOLS_URL",
                             "AGENT_IMAGE", "BRIDGE_IMAGE", "TOOLS_IMAGE", "IMAGE_TAG", "ASSUME_YES", "MODEL_NAME", "GEMINI_LOCATION",
-                            "ALLOWED_SERVICE_ACCOUNTS", "ENVIRONMENT", "OWNER", "TOOLS_TIMEOUT_SECONDS")}
+                            "ALLOWED_SERVICE_ACCOUNTS", "ENVIRONMENT", "OWNER", "TOOLS_TIMEOUT_SECONDS",
+                            "ALLOW_CUSTOM_SERVICE_URLS")}
         env.update(
             PATH=f"{bin_dir}{os.pathsep}{env['PATH']}",
             STUB_LOG=str(log),
@@ -193,12 +194,45 @@ def test_agent_uses_deterministic_bridge_url_when_bridge_is_not_deployed(deploy)
 
 def test_exported_urls_win(deploy):
     res, calls = deploy("agent", BRIDGE_URL="https://bridge.example", AGENT_URL="https://agent.example",
-                        TOOLS_URL="https://tools.example")
+                        TOOLS_URL="https://tools.example", ALLOW_CUSTOM_SERVICE_URLS="true")
 
     assert res.returncode == 0, res.stdout + res.stderr
     env = _env(_deploy_call(calls))
     assert (env["BRIDGE_URL"], env["AGENT_URL"]) == ("https://bridge.example", "https://agent.example")
     assert not [c for c in calls if c[:3] == ["run", "services", "list"]]
+
+
+@pytest.mark.parametrize("component,var,url", [
+    # Left over in the shell from another stack's deploy (prefix "ata" vs this test's prefix).
+    ("agent", "BRIDGE_URL", "https://atat-bridge-abc123-uw.a.run.app"),
+    ("agent", "AGENT_URL", "https://atat-agent-123456789012.europe-west1.run.app"),
+    ("agent", "TOOLS_URL", "https://atat-tools-abc123-uw.a.run.app"),
+    ("bridge", "AGENT_URL", "https://atat-agent-abc123-uw.a.run.app"),
+    ("bridge", "BRIDGE_URL", "https://atat-bridge-abc123-uw.a.run.app"),
+    # The right prefix but the wrong service, and a custom domain without the override.
+    ("agent", "BRIDGE_URL", "https://ata-agent-abc123-uw.a.run.app"),
+    ("bridge", "AGENT_URL", "https://agent.custom.example"),
+])
+def test_exported_url_of_another_stack_or_service_stops_the_deploy(deploy, component, var, url):
+    """sec L9: exported URLs must be ${NAME_PREFIX}-<svc>; ALLOW_CUSTOM_SERVICE_URLS=true for custom domains."""
+    res, calls = deploy(component, **{var: url})
+    assert res.returncode != 0
+    assert f"{var}={url} is not the ata-" in res.stderr and "ALLOW_CUSTOM_SERVICE_URLS=true" in res.stderr
+    assert not [c for c in calls if c[:2] == ["run", "deploy"]]
+
+
+def test_own_stack_urls_pass_the_prefix_check(deploy):
+    res, calls = deploy("agent", BRIDGE_URL="https://ata-bridge-abc123-uw.a.run.app",
+                        AGENT_URL="https://ata-agent-123456789012.europe-west1.run.app",
+                        TOOLS_URL="https://ata-tools-abc123-uw.a.run.app")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "ALLOW_CUSTOM_SERVICE_URLS" not in res.stderr
+
+
+def test_custom_domain_needs_the_explicit_override_and_says_so(deploy):
+    res, calls = deploy("bridge", BRIDGE_URL="https://bridge.custom.example", ALLOW_CUSTOM_SERVICE_URLS="true")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "accepted because ALLOW_CUSTOM_SERVICE_URLS=true" in res.stderr
 
 
 @pytest.mark.parametrize("component", ["agent", "bridge"])
@@ -349,7 +383,7 @@ def test_bridge_verifier_sa_none_removes_it(deploy):
 
 
 def test_bridge_exported_bridge_url_is_never_replaced_after_the_deploy(deploy):
-    res, calls = deploy("bridge", BRIDGE_URL="https://bridge.custom.example")
+    res, calls = deploy("bridge", BRIDGE_URL="https://bridge.custom.example", ALLOW_CUSTOM_SERVICE_URLS="true")
 
     assert res.returncode == 0, res.stdout + res.stderr
     assert _env(_deploy_call(calls))["BRIDGE_URL"] == "https://bridge.custom.example"
