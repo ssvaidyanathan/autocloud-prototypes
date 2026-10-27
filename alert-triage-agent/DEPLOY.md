@@ -218,9 +218,9 @@ terraform apply tfplan
 
 ### Alert Policies Configured
 1. `ata-orders-5xx`: Cloud Run `ata-orders-api` 5xx rate > 5% over 60s.
-2. `ata-orders-latency`: Cloud Run `ata-orders-api` latency > 2000ms over 60s.
+2. `ata-orders-latency`: Cloud Run `ata-orders-api` p99 latency > 2000ms (60s windows, all revisions and response codes merged per service) sustained for the `latency_duration_secs` retest window (default 180s), so a single cold-start burst does not open an alert.
 3. `ata-inventory-5xx`: Cloud Run `ata-inventory-api` 5xx rate > 5% over 60s.
-4. `ata-inventory-latency`: Cloud Run `ata-inventory-api` latency > 2000ms over 60s.
+4. `ata-inventory-latency`: Cloud Run `ata-inventory-api` p99 latency > 2000ms (60s windows, all revisions and response codes merged per service) sustained for the `latency_duration_secs` retest window (default 180s), so a single cold-start burst does not open an alert.
 5. `ata-apigee-orders-5xx`: Apigee proxy `ata-orders-v1` HTTP 500 error count > 1.
 6. `ata-apigee-orders-429`: Apigee proxy `ata-orders-v1` HTTP 429 SpikeArrest rate count > 1.
 7. `ata-cloudsql-connections-critical`: Cloud SQL `ata-inventory-db` connection count > 20 backends (~80% of db-f1-micro max_connections 25).

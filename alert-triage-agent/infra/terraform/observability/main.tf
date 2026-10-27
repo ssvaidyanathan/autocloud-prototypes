@@ -65,7 +65,7 @@ resource "google_monitoring_alert_policy" "orders_latency" {
     display_name = "Cloud Run orders latency > 2s"
     condition_threshold {
       filter                  = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${var.name_prefix}-orders-api\" AND metric.type = \"run.googleapis.com/request_latencies\""
-      duration                = "60s"
+      duration                = "${var.latency_duration_secs}s"
       comparison              = "COMPARISON_GT"
       threshold_value         = 2000
       evaluation_missing_data = var.alert_evaluation_missing_data
@@ -142,7 +142,7 @@ resource "google_monitoring_alert_policy" "inventory_latency" {
     display_name = "Cloud Run inventory latency > 2s"
     condition_threshold {
       filter                  = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${var.name_prefix}-inventory-api\" AND metric.type = \"run.googleapis.com/request_latencies\""
-      duration                = "60s"
+      duration                = "${var.latency_duration_secs}s"
       comparison              = "COMPARISON_GT"
       threshold_value         = 2000
       evaluation_missing_data = var.alert_evaluation_missing_data
