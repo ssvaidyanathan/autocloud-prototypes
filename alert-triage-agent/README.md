@@ -85,7 +85,7 @@ The system integrates with ServiceNow via the Table and Attachment APIs:
 
 ## Prerequisites: deployer IAM roles
 
-The deployer is the principal that runs `scripts/deploy-stage1.sh`, the scenarios and `scripts/teardown-stack.sh`: a user, or a service account. `roles/owner` on the project covers everything. Without Owner, the deployer needs **all** of the roles below. Editor alone is not enough: it cannot set IAM policies on service accounts, Cloud Tasks queues, secrets or Artifact Registry repositories, and the foundation phase grants roles on all four. Without these roles, the foundation phase creates the resources but fails on their bindings with 403.
+The deployer is the principal that runs `scripts/deploy-stage1.sh`, the scenarios and `scripts/teardown-stack.sh`: a user, or a service account. `roles/owner` on the project covers everything. Without Owner, the deployer needs **all** of the roles below. Editor alone is not enough: it cannot set IAM policies on service accounts, Cloud Tasks queues, secrets or Artifact Registry repositories, and the foundation phase grants roles on all four. The Cloud Build step also needs nothing extra from you: the build SA's bucket access comes from the foundation. Without these roles, the foundation phase creates the resources but fails on their bindings with 403.
 
 On the project `PROJECT_ID`:
 
@@ -98,13 +98,13 @@ On the project `PROJECT_ID`:
 | `roles/cloudtasks.admin` | `cloudtasks.queues.getIamPolicy` / `setIamPolicy`: enqueuer bindings on the two queues (foundation) |
 | `roles/artifactregistry.admin` | `artifactregistry.repositories.setIamPolicy`: the build SA's writer binding (foundation) |
 | `roles/secretmanager.admin` | `secretmanager.secrets.setIamPolicy`: the bridge SA's accessor bindings (foundation) |
-| `roles/cloudsql.admin` | The Cloud SQL instance, IAM database user and postgres password (`database`, `schema`) |
+| `roles/cloudsql.admin` | The Cloud SQL instance, IAM database user and postgres password (`database`, `schema`). Editor already covers these phases (the `atat` proof ran them with Editor); grant it if you replace Editor with narrower roles. |
 
 On the Apigee organization's project `APIGEE_ORG` (often the same project):
 
 | Role | Needed for |
 | :--- | :--- |
-| `roles/apigee.admin` | TargetServers, proxies, product, developer and app (`apigee`, teardown) |
+| `roles/apigee.admin` | TargetServers, proxies, product, developer and app (`apigee`, teardown). Editor on the Apigee project also covers this (the `atat` proof deployed with Editor). It is needed when `APIGEE_ORG` is a project where the deployer is not Editor. |
 
 Also list the deployer in the foundation variable `deployer_members` (`infra/terraform/foundation/terraform.tfvars`), which grants it `roles/iam.serviceAccountUser` on the build and Apigee SAs ([DEPLOY.md Step 4](DEPLOY.md#step-4-foundation)).
 

@@ -593,7 +593,7 @@ It lists `<prefix>-inventory-api` and `<prefix>-orders-api` with URLs.
 
 It exits 0 and reports traffic 100% on the pin, with no baseline gaps.
 
-The pin file is `scripts/scenarios/inventory-pin.<prefix>.env`; the end-of-phase message names it. Check it with `grep '^PIN_' scripts/scenarios/inventory-pin.${NAME_PREFIX}.env` and commit it.
+The pin file is `scripts/scenarios/inventory-pin.<prefix>.env`; the end-of-phase message names it. Check it with `grep '^PIN_' scripts/scenarios/inventory-pin.${NAME_PREFIX}.env`. Commit it only if the stack is tracked in the repository ([§2.3](#23-second-stack-in-an-existing-project-and-apigee-organization)); a temporary stack's pin file stays local.
 
 The phase then caps the demo services at the service level (the default is 1 instance; see [§4.2](#42-instance-caps)) by running `./scripts/set-demo-instance-caps.sh --apply`. If only that step fails, the pin is in place: fix the cause, re-run that command alone, and resume with `--from triage`.
 
