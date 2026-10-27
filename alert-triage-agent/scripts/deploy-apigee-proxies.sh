@@ -18,7 +18,9 @@
 #   TargetServers ${NAME_PREFIX}-orders-target, ${NAME_PREFIX}-inventory-target (in APIGEE_ENV)
 #   Proxies ${NAME_PREFIX}-orders-v1 (/${NAME_PREFIX}/orders/v1), ${NAME_PREFIX}-inventory-v1
 #     (/${NAME_PREFIX}/inventory/v1): new revision imported and deployed with override=true,
-#     running as ${NAME_PREFIX}-apigee-sa@${PROJECT_ID}.iam.gserviceaccount.com
+#     running as ${NAME_PREFIX}-apigee-sa@${PROJECT_ID}.iam.gserviceaccount.com, ONLY when the
+#     rendered bundle differs from the revision deployed in APIGEE_ENV (see deployed_matches);
+#     an unchanged proxy is left alone, so a reset adds no revision and no deployment
 #   API product ${NAME_PREFIX}-product, developer ${NAME_PREFIX}-dev@example.com,
 #     app ${NAME_PREFIX}-demo-app
 # Writes:
@@ -26,7 +28,9 @@
 #   ${ATA_STACK_DIR}/.${NAME_PREFIX}-apigee.env   APIGEE_HOST=, APIGEE_ORG=, APIGEE_ENV= (sourceable)
 #
 # Every management API call is checked: any non-2xx fails with the response body. 409 on a
-# create means "exists" and is followed by an update. Undo with scripts/teardown-apigee.sh.
+# create means "exists" and is followed by an update. TargetServers, the product and the
+# developer are read first and not written when they already hold the wanted values.
+# Undo with scripts/teardown-apigee.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,7 +95,8 @@ echo "The following Apigee resources in organizations/${APIGEE_ORG} will be crea
 echo "  targetserver  ${APIGEE_ENV}/${TS_ORDERS} -> ${ORDERS_HOST}:443"
 echo "  targetserver  ${APIGEE_ENV}/${TS_INVENTORY} -> ${INVENTORY_HOST}:443"
 for proxy in ${PROXIES}; do
-    echo "  proxy         ${proxy} (new revision, deployed to ${APIGEE_ENV} with override=true, SA ${SA_EMAIL})"
+    echo "  proxy         ${proxy} (new revision, deployed to ${APIGEE_ENV} with override=true, SA ${SA_EMAIL};"
+    echo "                skipped when the deployed revision already matches the rendered bundle)"
 done
 echo "  apiproduct    ${PRODUCT}"
 echo "  developer     ${DEVELOPER}"
@@ -109,8 +114,19 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/apigee-deploy-${P}.XXXXXX")"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 # create_or_update DESC CREATE_URL UPDATE_URL JSON
+# A resource that already holds every field of JSON is left alone (no write, no new
+# lastModifiedAt). A failed read only costs that shortcut: the create/update path runs.
 create_or_update() {
     local desc="$1" create_url="$2" update_url="$3" json="$4"
+    apigee_api GET "${update_url}"
+    if apigee_ok && apigee_json_contains "${json}"; then
+        echo "    ${desc} unchanged; not updated."
+        return 0
+    fi
+    case "${API_CODE}" in
+        2[0-9][0-9]|404) ;;
+        *) echo "WARNING: reading ${desc} returned HTTP ${API_CODE}; creating or updating it." >&2 ;;
+    esac
     apigee_api POST "${create_url}" -H "Content-Type: application/json" -d "${json}"
     if [ "${API_CODE}" = "409" ]; then
         echo "    ${desc} exists; updating."
@@ -130,11 +146,75 @@ ensure_targetserver() {
         "{\"name\": \"${name}\", \"host\": \"${host}\", \"port\": 443, \"isEnabled\": true, \"sSLInfo\": {\"enabled\": true}}"
 }
 
+proxy_warn() {
+    echo "WARNING: ${1}: ${2}; importing and deploying the rendered bundle." >&2
+}
+
+# deployed_matches PROXY ZIP
+# 0 only when PROXY has exactly one deployment in APIGEE_ENV, it runs as SA_EMAIL, it is
+# READY, and its revision's bundle has the same content as ZIP (apigee_bundles_equal; Apigee
+# exposes no content hash for a revision, its metadata has only timestamps). Sets
+# DEPLOYED_REVISION. Every doubt returns 1, with a WARNING unless the bundles plainly differ.
+deployed_matches() {
+    local proxy="$1" zip="$2" count revision sa state diff rc=0 deployed_zip
+    DEPLOYED_REVISION=""
+    apigee_api GET "${ENV_URL}/apis/${proxy}/deployments"
+    if [ "${API_CODE}" = "404" ]; then
+        proxy_warn "${proxy}" "not deployed in ${APIGEE_ENV} (HTTP 404: no such proxy yet)"
+        return 1
+    elif ! apigee_ok; then
+        proxy_warn "${proxy}" "could not read its deployments in ${APIGEE_ENV} (HTTP ${API_CODE})"
+        return 1
+    fi
+    count="$(apigee_json 'len(d.get("deployments") or [])')" || count=""
+    case "${count}" in
+        0) proxy_warn "${proxy}" "not deployed in ${APIGEE_ENV}"; return 1 ;;
+        1) ;;
+        ''|*[!0-9]*) proxy_warn "${proxy}" "unreadable deployments response"; return 1 ;;
+        *) proxy_warn "${proxy}" "${count} deployments in ${APIGEE_ENV} (a rollout in progress?)"; return 1 ;;
+    esac
+    revision="$(apigee_json 'd["deployments"][0].get("revision")')" || revision=""
+    case "${revision}" in
+        ''|*[!0-9]*) proxy_warn "${proxy}" "deployment has no numeric revision"; return 1 ;;
+    esac
+    sa="$(apigee_json 'd["deployments"][0].get("serviceAccount")')" || sa=""
+    if [ "${sa}" != "projects/-/serviceAccounts/${SA_EMAIL}" ]; then
+        proxy_warn "${proxy}" "deployed revision ${revision} runs as '${sa:-<none>}', not ${SA_EMAIL}"
+        return 1
+    fi
+    apigee_api GET "${ENV_URL}/apis/${proxy}/revisions/${revision}/deployments"
+    state=""
+    if apigee_ok; then
+        state="$(apigee_json 'd.get("state")')" || state=""
+    fi
+    if [ "${state}" != "READY" ]; then
+        proxy_warn "${proxy}" "deployed revision ${revision} is not READY (HTTP ${API_CODE}, state '${state}')"
+        return 1
+    fi
+    deployed_zip="${WORK_DIR}/${proxy}-deployed-r${revision}.zip"
+    apigee_download "${BASE_URL}/apis/${proxy}/revisions/${revision}?format=bundle" "${deployed_zip}"
+    if ! apigee_ok; then
+        proxy_warn "${proxy}" "could not download revision ${revision} (HTTP ${API_CODE})"
+        return 1
+    fi
+    diff="$(apigee_bundles_equal "${deployed_zip}" "${zip}")" || rc=$?
+    case "${rc}" in
+        0) DEPLOYED_REVISION="${revision}"; return 0 ;;
+        1) echo "    ${proxy}: deployed revision ${revision} differs from the rendered bundle (${diff})."; return 1 ;;
+        *) proxy_warn "${proxy}" "could not compare revision ${revision} with the rendered bundle (${diff:-python3 failed})"; return 1 ;;
+    esac
+}
+
 deploy_proxy() {
     local proxy="$1" template="${1#"${P}"-}" zip revision state waited=0
     zip="${WORK_DIR}/${proxy}.zip"
     echo "--> Packaging ${proxy} from template demo/apigee/${template}"
     "${BUNDLE_DIR}/render-bundle.sh" "${template}" "${P}" "${WORK_DIR}/${proxy}" "${zip}" > /dev/null
+
+    if deployed_matches "${proxy}" "${zip}"; then
+        echo "    ${proxy}: deployed revision ${DEPLOYED_REVISION} matches the rendered bundle; not redeployed."
+        return 0
+    fi
 
     echo "--> Importing ${proxy}"
     apigee_api POST "${BASE_URL}/apis?name=${proxy}&action=import" -F "file=@${zip}"

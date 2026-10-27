@@ -12,7 +12,7 @@
 # 1. Reset fault injection states on demo apps (POST /admin/fault/reset)
 # 2. Bridge state (stateless note)
 # 3. Terminate background DB sleep connections and release locks
-# 4. Restore healthy Apigee proxy revisions (re-deploy base bundles)
+# 4. Restore healthy Apigee proxy revisions (re-deploy base bundles that differ from the deployed revision)
 # 5. Restore Cloud Run service configuration if S5 was deployed
 # 5b. Warm up the demo services, check health (direct and via Apigee) and the admin fault
 #    injection endpoints, and restock the demo items to INVENTORY_RESTOCK_BASELINE
@@ -1041,6 +1041,28 @@ print(json.dumps({"items": {k: int(v) for k, v in (e.split("=", 1) for e in sys.
     log_success "    Restocked and verified: ${INVENTORY_RESTOCK_BASELINE}"
 }
 
+# Step 4: deploy-apigee-proxies.sh imports and deploys a proxy only when its rendered bundle
+# differs from the deployed revision, so an unchanged proxy adds no deployment to the change
+# window. Its per-proxy verdicts (and any WARNING that forced a redeploy) are echoed here.
+restore_apigee_proxies() {
+    local log line
+    log="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-apigee-deploy.XXXXXX")"
+    if ! "${SCRIPT_DIR}/deploy-apigee-proxies.sh" > "${log}" 2>&1; then
+        log_error "FATAL: deploy-apigee-proxies.sh failed; the Apigee proxy baselines were NOT restored. Last output:" >&2
+        tail -n 20 "${log}" >&2
+        rm -f "${log}"
+        return 1
+    fi
+    while IFS= read -r line; do
+        case "${line}" in
+            WARNING:*) log_warn "    ${line}" >&2 ;;
+            *"not redeployed."*|*"differs from the rendered bundle"*|*"Imported revision"*|*"is READY"*) log_info "    ${line#"${line%%[! ]*}"}" ;;
+        esac
+    done < "${log}"
+    rm -f "${log}"
+    log_success "    Apigee proxy baselines restored."
+}
+
 # Sourced (tests): define the functions above without running the reset.
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     return 0
@@ -1115,15 +1137,7 @@ if [ "${MOCK_MODE}" = "false" ] && [ "${DRY_RUN}" = "false" ]; then
         log_error "FATAL: ${SCRIPT_DIR}/deploy-apigee-proxies.sh is missing or not executable; the Apigee proxy baselines were NOT restored." >&2
         exit 1
     fi
-    APIGEE_LOG="$(mktemp)"
-    if ! "${SCRIPT_DIR}/deploy-apigee-proxies.sh" > "${APIGEE_LOG}" 2>&1; then
-        log_error "FATAL: deploy-apigee-proxies.sh failed; the Apigee proxy baselines were NOT restored. Last output:" >&2
-        tail -n 20 "${APIGEE_LOG}" >&2
-        rm -f "${APIGEE_LOG}"
-        exit 1
-    fi
-    rm -f "${APIGEE_LOG}"
-    log_success "    Apigee proxy baselines restored."
+    restore_apigee_proxies || exit 1
 else
     log_info "    [MOCK/DRY-RUN] Apigee restore simulation completed (deploy-apigee-proxies.sh not run)."
 fi

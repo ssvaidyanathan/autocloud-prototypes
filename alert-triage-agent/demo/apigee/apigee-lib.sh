@@ -13,6 +13,12 @@
 #   apigee_ok                     -> 0 if API_CODE is 2xx
 #   apigee_fail_call DESC         -> prints status + body, dies
 #   apigee_json EXPR              -> evaluates a Python expression on `d` = json(API_BODY)
+#   apigee_download URL FILE      -> GET URL into FILE (binary-safe); sets API_CODE, API_LAST,
+#                                    and API_BODY (the error body, only when not 2xx)
+#   apigee_json_contains JSON     -> 0 if every field of JSON equals the one in API_BODY
+#                                    (lists compared order-insensitively)
+#   apigee_bundles_equal A B      -> 0 same proxy content, 1 different (reason on stdout),
+#                                    2 unreadable bundle (reason on stdout)
 #
 # Required globals: NAME_PREFIX, APIGEE_TOKEN, and for apigee_guard_url APIGEE_ORG.
 
@@ -111,6 +117,25 @@ apigee_api() {
     return 0
 }
 
+apigee_download() {
+    local url="$1" dest="$2"
+    apigee_guard_url "${url}"
+    rm -f "${dest}"
+    API_CODE="$(curl -sS -o "${dest}" -w '%{http_code}' -X GET \
+        --config <(printf 'header = "Authorization: Bearer %s"\n' "${APIGEE_TOKEN}") \
+        "${url}")" || API_CODE="000"
+    case "${API_CODE}" in
+        [0-9][0-9][0-9]) ;;
+        *) API_CODE="000" ;;
+    esac
+    API_BODY=""
+    if ! apigee_ok && [ -f "${dest}" ]; then
+        API_BODY="$(head -c 2000 "${dest}" | tr -d '\000')"
+    fi
+    API_LAST="GET ${url}"
+    return 0
+}
+
 apigee_ok() {
     case "${API_CODE}" in
         2[0-9][0-9]) return 0 ;;
@@ -159,4 +184,93 @@ else:
 # {"developer":[{"email":..}]}, or a bare JSON array of strings.
 apigee_list_names() {
     apigee_json '[ (x.get("name") or x.get("email") or "") if isinstance(x, dict) else x for x in (d if isinstance(d, list) else next((v for v in d.values() if isinstance(v, list)), [])) ]'
+}
+
+apigee_json_contains() {
+    printf '%s' "${API_BODY}" | python3 -c '
+import json, sys
+def canon(v):
+    return json.dumps(v, sort_keys=True)
+def contains(want, have):
+    if isinstance(want, dict):
+        return isinstance(have, dict) and all(k in have and contains(v, have[k]) for k, v in want.items())
+    if isinstance(want, list):
+        return isinstance(have, list) and sorted(map(canon, want)) == sorted(map(canon, have))
+    return want == have
+try:
+    have = json.load(sys.stdin)
+    want = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(3)
+sys.exit(0 if contains(want, have) else 1)
+' "$1"
+}
+
+# Proxy bundles are compared by content, not by zip bytes: every file is compared
+# byte-for-byte except the root descriptors apiproxy/*.xml, which Apigee regenerates on export
+# (revision attribute, CreatedAt/LastModifiedAt, BasePaths, no XML declaration, Policies
+# reordered). Those are compared on what an import takes from them: every element except the
+# generated metadata, with list elements (Policies, ProxyEndpoints, ...) order-insensitive.
+apigee_bundles_equal() {
+    python3 - "$1" "$2" <<'PY'
+import sys, zipfile
+import xml.etree.ElementTree as ET
+
+GENERATED = {"CreatedAt", "CreatedBy", "LastModifiedAt", "LastModifiedBy", "ManifestVersion",
+             "ConfigurationVersion", "BasePaths"}
+
+def files(path):
+    out = {}
+    with zipfile.ZipFile(path) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename
+            while name.startswith("./"):
+                name = name[2:]
+            out[name] = zf.read(info)
+    return out
+
+def is_descriptor(name):
+    parts = name.split("/")
+    return len(parts) == 2 and parts[0] == "apiproxy" and parts[1].endswith(".xml")
+
+def descriptor(data):
+    root = ET.fromstring(data)
+    fields = {}
+    for child in root:
+        if child.tag in GENERATED:
+            continue
+        items = sorted((c.tag, (c.text or "").strip()) for c in child)
+        value = items if items else (child.text or "").strip()
+        if value:
+            fields[child.tag] = value
+    return (root.tag, root.get("name"), sorted(fields.items()))
+
+try:
+    a, b = files(sys.argv[1]), files(sys.argv[2])
+except (OSError, zipfile.BadZipFile) as e:
+    print("unreadable bundle: %s" % e)
+    sys.exit(2)
+if not any(is_descriptor(n) for n in a) or not any(is_descriptor(n) for n in b):
+    print("a bundle has no apiproxy/<name>.xml")
+    sys.exit(2)
+if sorted(a) != sorted(b):
+    only = sorted(set(a) ^ set(b))
+    print("file lists differ: %s" % ", ".join(only))
+    sys.exit(1)
+for name in sorted(a):
+    if is_descriptor(name):
+        try:
+            same = descriptor(a[name]) == descriptor(b[name])
+        except ET.ParseError as e:
+            print("unparsable %s: %s" % (name, e))
+            sys.exit(2)
+    else:
+        same = a[name] == b[name]
+    if not same:
+        print("%s differs" % name)
+        sys.exit(1)
+sys.exit(0)
+PY
 }
