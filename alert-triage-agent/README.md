@@ -447,7 +447,12 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # Install component packages in editable mode with development dependencies
-pip install -e "./bridge[dev]" -e "./agent[dev]" -e "./tools[dev]" pytest ruff mypy
+# (the same set as CI, .github/workflows/alert-triage-agent-ci.yml; the packages have no [dev] extra)
+pip install -e ./bridge -e ./agent -e ./tools \
+  pytest==9.1.1 pytest-asyncio==1.4.1 shellcheck-py==0.11.0.1 \
+  sqlalchemy "cloud-sql-python-connector[pg8000]" pg8000 \
+  -r demo/ata-inventory-api/requirements.txt -r demo/ata-orders-api/requirements.txt \
+  ruff mypy
 ```
 
 ### Offline & Mock Development Mode
