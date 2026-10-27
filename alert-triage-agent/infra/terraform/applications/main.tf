@@ -21,6 +21,9 @@ resource "google_cloud_run_v2_service" "inventory_api" {
   location = var.region
   project  = var.project_id
   ingress  = "INGRESS_TRAFFIC_ALL"
+  # Provider 6.x defaults deletion_protection to true, which makes `terraform destroy`
+  # (scripts/teardown-stack.sh) fail. The stack is removed only through the teardown.
+  deletion_protection = false
 
   labels = {
     app        = "alert-triage-agent"
@@ -97,6 +100,9 @@ resource "google_cloud_run_v2_service" "orders_api" {
   location = var.region
   project  = var.project_id
   ingress  = "INGRESS_TRAFFIC_ALL"
+  # Provider 6.x defaults deletion_protection to true, which makes `terraform destroy`
+  # (scripts/teardown-stack.sh) fail. The stack is removed only through the teardown.
+  deletion_protection = false
 
   labels = {
     app        = "alert-triage-agent"

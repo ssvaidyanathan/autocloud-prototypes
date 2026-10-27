@@ -999,6 +999,19 @@ It asks you to type `NAME_PREFIX` (`--confirm-prefix <prefix>` instead makes it 
   (cd infra/terraform/database && terraform init -reconfigure -backend-config=backend.hcl && terraform state rm google_sql_user.inventory_iam_user)
   ```
 
+- The applications destroy fails with `cannot destroy service without setting deletion_protection=false`: the stack was applied before the applications root set `deletion_protection = false`, so its state still holds the provider 6.x default (`true`). Delete the two services, which also removes their invoker bindings, then drop the root's five resources from the state. Run T2 again:
+
+  ```bash
+  for s in inventory-api orders-api; do
+    gcloud run services delete "${NAME_PREFIX}-${s}" --project="${PROJECT_ID}" --region="${REGION}" --quiet
+  done
+  (cd infra/terraform/applications && terraform init -reconfigure -backend-config=backend.hcl && \
+    terraform state rm google_cloud_run_v2_service.inventory_api google_cloud_run_v2_service.orders_api \
+      google_cloud_run_v2_service_iam_member.inventory_invoker_orders \
+      google_cloud_run_v2_service_iam_member.inventory_invoker_apigee \
+      google_cloud_run_v2_service_iam_member.orders_invoker_apigee)
+  ```
+
 - The foundation destroy fails with `the bucket you tried to delete is not empty`: an object was written after step 5, for example by a late alert. Run T2 again.
 - The final check lists a resource: delete it by hand (the check names it), then run [§6](#6-verify-that-nothing-is-left).
 

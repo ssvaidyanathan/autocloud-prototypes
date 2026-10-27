@@ -188,6 +188,16 @@ def test_build_sa_can_get_the_build_bucket():
             assert "storage." not in proj, proj
 
 
+def test_cloud_run_services_can_be_destroyed():
+    """Provider 6.x defaults google_cloud_run_v2_service.deletion_protection to true; the atat
+    proof's teardown then failed at 'terraform destroy applications'. Every Cloud Run service
+    declared in Terraform must set deletion_protection = false."""
+    for root in ROOTS:
+        main_tf = (TF_DIR / root / "main.tf").read_text()
+        for name, body in re.findall(r'resource "google_cloud_run_v2_service" "([^"]+)" \{(.*?)\n\}', main_tf, re.S):
+            assert re.search(r"^\s*deletion_protection\s*=\s*false\s*$", body, re.M), f"{root}: {name}"
+
+
 def test_stack_label_everywhere_labels_are_set():
     foundation = (TF_DIR / "foundation" / "main.tf").read_text()
     assert re.search(r"common_labels = \{[^}]*stack\s+= var\.name_prefix", foundation, re.S)
