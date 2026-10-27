@@ -95,7 +95,7 @@ if [ -n "${AUTO_RESOLVE_ON_RECOVERY:-}" ]; then
 fi
 # Optional tuning, passed only when exported (else the service keeps its value or the app
 # default applies).
-for optional in MODEL_NAME GEMINI_LOCATION TOOLS_TIMEOUT_SECONDS TOOLS_RETRY_ATTEMPTS TOOLS_RETRY_BASE_SECONDS; do
+for optional in MODEL_NAME GEMINI_LOCATION GEMINI_TIMEOUT_SECONDS TOOLS_TIMEOUT_SECONDS TOOLS_RETRY_ATTEMPTS TOOLS_RETRY_BASE_SECONDS; do
     if [ -n "${!optional:-}" ]; then
         ENV_VARS="${ENV_VARS},${optional}=${!optional}"
     fi

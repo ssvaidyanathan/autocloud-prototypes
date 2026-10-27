@@ -53,6 +53,9 @@ class AgentConfig(BaseSettings):
     # Gemini gray-zone correlation (Vertex AI). Model tuning values, overridable per deploy.
     model_name: str = Field(default="gemini-3.8-flash", alias="MODEL_NAME")
     gemini_location: str = Field(default="global", alias="GEMINI_LOCATION")
+    # Bound of one gray-zone Gemini call; on timeout the deterministic fallback decides (WARNING).
+    # The call runs outside the global ingest lock (grouping/manager.py), so this bounds one alert.
+    gemini_timeout_seconds: float = Field(default=20.0, alias="GEMINI_TIMEOUT_SECONDS", gt=0, le=120)
 
     is_local: bool = Field(default=False, alias="IS_LOCAL")
 

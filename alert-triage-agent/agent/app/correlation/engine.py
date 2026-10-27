@@ -16,7 +16,8 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Literal, Optional
+import threading
+from typing import Any, Callable, Literal, Optional
 import yaml
 from pydantic import BaseModel, Field
 
@@ -35,6 +36,8 @@ logger = logging.getLogger(__name__)
 GRAY_ZONE_SOURCE_GEMINI = "gemini"
 GRAY_ZONE_SOURCE_FALLBACK = "deterministic_fallback"
 _MAX_REASON_CHARS = 200
+# Bound of one gray-zone Gemini call (config GEMINI_TIMEOUT_SECONDS; this is its documented default).
+DEFAULT_GEMINI_TIMEOUT_SECONDS = 20.0
 
 
 class GeminiGrayZoneDecision(BaseModel):
@@ -56,21 +59,54 @@ def _short_reason(text: str) -> str:
     return text if len(text) <= _MAX_REASON_CHARS else text[: _MAX_REASON_CHARS - 3] + "..."
 
 
-def _call_gemini(prompt: str, model_name: str, project_id: str, location: str) -> Optional[str]:
-    """One Vertex AI generate_content call (google-genai SDK); returns response.text."""
+class GeminiTimeout(TimeoutError):
+    """The gray-zone Gemini call did not answer within GEMINI_TIMEOUT_SECONDS."""
+
+
+def _call_gemini(
+    prompt: str,
+    model_name: str,
+    project_id: str,
+    location: str,
+    timeout_seconds: float = DEFAULT_GEMINI_TIMEOUT_SECONDS,
+) -> Optional[str]:
+    """One Vertex AI generate_content call (google-genai SDK); returns response.text.
+
+    Bounded twice: the SDK's HTTP timeout (HttpOptions.timeout, milliseconds), and a wall-clock
+    wait on a daemon worker thread, so a client that ignores its timeout (or hangs before the
+    request) still cannot hold the caller longer than timeout_seconds. GeminiTimeout then.
+    """
     from google import genai
     from google.genai import types
 
-    client = genai.Client(vertexai=True, project=project_id, location=location)
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=GeminiGrayZoneDecision,
-        ),
-    )
-    return getattr(response, "text", None) if response is not None else None
+    outcome: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            client = genai.Client(
+                vertexai=True, project=project_id, location=location,
+                http_options=types.HttpOptions(timeout=int(timeout_seconds * 1000)),
+            )
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=GeminiGrayZoneDecision,
+                ),
+            )
+            outcome["text"] = getattr(response, "text", None) if response is not None else None
+        except BaseException as exc:  # handed to the caller below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_run, name="gemini-gray-zone", daemon=True)
+    worker.start()
+    worker.join(timeout_seconds)
+    if worker.is_alive():
+        raise GeminiTimeout(f"no answer from {model_name} within {timeout_seconds:g} s (GEMINI_TIMEOUT_SECONDS)")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("text")
 
 
 @dataclass
@@ -210,10 +246,12 @@ def resolve_gray_zone_with_gemini(
     model_name: str,
     project_id: Optional[str],
     location: str,
+    timeout_seconds: float = DEFAULT_GEMINI_TIMEOUT_SECONDS,
 ) -> GrayZoneResolution:
     """Ask Gemini (model_name at location, Vertex AI) to resolve a gray-zone alert.
 
-    Any failure (SDK missing, permission denied, model not found, empty or invalid answer) is
+    Any failure (SDK missing, permission denied, model not found, timeout after timeout_seconds,
+    empty or invalid answer) is
     logged at WARNING and the deterministic heuristic decides, with source="deterministic_fallback"
     and the reason in fallback_reason. The result never claims Gemini decided when it did not.
     """
@@ -255,7 +293,8 @@ Respond with JSON adhering to:
         logger.warning("Gemini gray-zone resolution for alert %s not attempted: %s; using deterministic fallback", alert.incident_id, reason)
     else:
         try:
-            text = _call_gemini(prompt, model_name=model_name, project_id=project_id, location=location)
+            text = _call_gemini(prompt, model_name=model_name, project_id=project_id, location=location,
+                                timeout_seconds=timeout_seconds)
             if text and text.strip():
                 parsed = GeminiGrayZoneDecision(**json.loads(text))
                 return GrayZoneResolution(**parsed.model_dump(), source=GRAY_ZONE_SOURCE_GEMINI)
@@ -327,11 +366,27 @@ class CorrelationEngine:
         model_name: str,
         project_id: Optional[str],
         gemini_location: str,
+        gemini_timeout_seconds: float = DEFAULT_GEMINI_TIMEOUT_SECONDS,
     ):
         self.incident_store_path = Path(incident_store_path)
         self.model_name = model_name
         self.project_id = project_id
         self.gemini_location = gemini_location
+        self.gemini_timeout_seconds = gemini_timeout_seconds
+
+    def resolve_gray_zone(
+        self, alert: AlertEvent, candidate: CandidateGroup, breakdown: ScoreBreakdown
+    ) -> GrayZoneResolution:
+        """The Gemini gray-zone call with this engine's model, location and timeout."""
+        return resolve_gray_zone_with_gemini(
+            alert=alert,
+            candidate=candidate,
+            breakdown=breakdown,
+            model_name=self.model_name,
+            project_id=self.project_id,
+            location=self.gemini_location,
+            timeout_seconds=self.gemini_timeout_seconds,
+        )
 
     def list_candidate_groups(self) -> list[CandidateGroup]:
         """Discover candidate open incident groups in the store path."""
@@ -376,8 +431,14 @@ class CorrelationEngine:
         alert: AlertEvent,
         deployment_time: Optional[datetime] = None,
         candidate_groups: Optional[list[CandidateGroup]] = None,
+        gray_zone_resolver: Optional[
+            Callable[[AlertEvent, CandidateGroup, ScoreBreakdown], GrayZoneResolution]
+        ] = None,
     ) -> CorrelationDecision:
-        """Evaluate an alert against candidate open groups and make correlation decision."""
+        """Evaluate an alert against candidate open groups and make correlation decision.
+
+        gray_zone_resolver replaces the Gemini call for a gray-zone score (the grouping manager
+        uses it to make the call outside its ingest lock); default: resolve_gray_zone()."""
         if not is_ata_alert(alert):
             logger.warning(
                 "Defensively filtering non-ata alert %s (policy: %s, resource: %s) in correlation engine",
@@ -478,14 +539,7 @@ class CorrelationEngine:
         else:
             # Gray Zone: 35 <= best_score < 65
             logger.info("Alert %s falls in correlation gray zone with score %s; invoking Gemini", alert.incident_id, best_score)
-            res = resolve_gray_zone_with_gemini(
-                alert=alert,
-                candidate=best_candidate,
-                breakdown=best_breakdown,
-                model_name=self.model_name,
-                project_id=self.project_id,
-                location=self.gemini_location,
-            )
+            res = (gray_zone_resolver or self.resolve_gray_zone)(alert, best_candidate, best_breakdown)
             if res.source == GRAY_ZONE_SOURCE_GEMINI:
                 rationale = f"Gray-zone Gemini resolution: {res.rationale}"
             else:

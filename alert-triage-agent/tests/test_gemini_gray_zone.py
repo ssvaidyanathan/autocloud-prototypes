@@ -165,7 +165,11 @@ def test_gemini_success_is_reported_as_gemini(gemini, caplog):
 
     assert isinstance(res, GrayZoneResolution)
     assert (res.source, res.decision, res.fallback_reason) == ("gemini", "new_group", None)
-    assert fake.inits == [{"vertexai": True, "project": PROJECT, "location": LOCATION}]
+    assert len(fake.inits) == 1
+    init = dict(fake.inits[0])
+    http_options = init.pop("http_options")
+    assert init == {"vertexai": True, "project": PROJECT, "location": LOCATION}
+    assert http_options.timeout == 20000  # GEMINI_TIMEOUT_SECONDS default, in milliseconds
     call = fake.calls[0]
     assert call["model"] == MODEL and "gray zone" in call["contents"]
     from google.genai import types
@@ -288,3 +292,168 @@ def test_grouping_manager_stores_gray_zone_source_in_correlation(tmp_path, gemin
     assert result.correlation["gray_zone_source"] == "deterministic_fallback"
     assert "ClientError: 403" in result.correlation["gray_zone_fallback_reason"]
     assert result.doc.correlation["gray_zone_source"] == "deterministic_fallback"
+
+
+# --- crev R3: bounded call, never under the global ingest lock ----------------------------
+
+class _HungModels:
+    def __init__(self, release, lock_probe):
+        self.release, self.lock_probe = release, lock_probe
+
+    def generate_content(self, **kwargs):
+        if self.lock_probe is not None:
+            self.lock_probe.append(self.lock_probe_fn())
+        self.release.wait(10)  # a Vertex response that never comes (within the test)
+        return type("Resp", (), {"text": None})()
+
+
+def _install_hung_client(monkeypatch, lock_probe=None):
+    import threading
+    from google import genai
+
+    release = threading.Event()
+    inits: list = []
+
+    def factory(**kwargs):
+        inits.append(kwargs)
+        client = type("Client", (), {})()
+        client.models = _HungModels(release, lock_probe)
+        if lock_probe is not None:
+            from agent.app.grouping import manager as manager_mod
+
+            def free() -> bool:
+                # Runs on the Gemini worker thread: the ingest lock is free iff nobody holds it.
+                got = manager_mod._global_ingest_lock.acquire(blocking=False)
+                if got:
+                    manager_mod._global_ingest_lock.release()
+                return got
+            client.models.lock_probe_fn = free
+        return client
+
+    monkeypatch.setattr(genai, "Client", factory)
+    return release, inits
+
+
+def test_hung_gemini_times_out_within_the_bound_and_falls_back_loudly(monkeypatch, caplog):
+    import time as _time
+
+    release, inits = _install_hung_client(monkeypatch)
+    caplog.set_level(logging.WARNING)
+    alert, candidate, breakdown = _gray_zone_inputs()
+    started = _time.monotonic()
+    try:
+        res = resolve_gray_zone_with_gemini(alert, candidate, breakdown, model_name=MODEL, project_id=PROJECT,
+                                            location=LOCATION, timeout_seconds=0.3)
+    finally:
+        release.set()
+    elapsed = _time.monotonic() - started
+    assert elapsed < 2.0, f"not bounded: {elapsed:.2f}s"
+    assert res.source == "deterministic_fallback"
+    assert "GeminiTimeout" in res.fallback_reason and "0.3 s" in res.fallback_reason
+    assert inits[0]["http_options"].timeout == 300
+    assert any("GeminiTimeout" in w and "deterministic fallback" in w for w in _warnings(caplog))
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "121", "abc"])
+def test_gemini_timeout_setting_is_validated(bad):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentConfig(name_prefix="ata", is_local=True, GEMINI_TIMEOUT_SECONDS=bad)
+    assert AgentConfig(name_prefix="ata", is_local=True).gemini_timeout_seconds == 20.0
+    assert AgentConfig(name_prefix="ata", is_local=True, GEMINI_TIMEOUT_SECONDS="7.5").gemini_timeout_seconds == 7.5
+
+
+def _manager_with_one_group(tmp_path, **cfg_kw):
+    from agent.app.grouping.manager import GroupingManager
+    from agent.app.grouping.store import OKFStore
+
+    cfg = AgentConfig(
+        project_id=PROJECT, region="test-region1", name_prefix="ata", is_local=True,
+        incident_store_path=str(tmp_path / "store"), fallback_store_path=str(tmp_path / "fb"),
+        model_name=MODEL, gemini_location=LOCATION, **cfg_kw,
+    )
+    manager = GroupingManager(config=cfg, store=OKFStore(config=cfg), bridge_client=object())
+    first = AlertEvent(
+        incident_id="0.a1", policy_name="ata-orders-latency", resource_name="ata-orders-api",
+        started_at=NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), policy_user_labels={"signal": "latency", "component": "ata-orders-api"},
+    )
+    manager.ingest_alert(first, current_time=NOW.timestamp())
+    return manager
+
+
+def test_gray_zone_gemini_call_is_made_without_the_ingest_lock_and_is_bounded(tmp_path, monkeypatch):
+    import threading
+    import time as _time
+
+    from agent.app.grouping import manager as manager_mod
+    from agent.app.timers.scheduler import set_timer_scheduler_hook
+
+    set_timer_scheduler_hook(lambda **kw: "task")
+    probe: list = []
+    release, _ = _install_hung_client(monkeypatch, lock_probe=probe)
+    try:
+        manager = _manager_with_one_group(tmp_path, GEMINI_TIMEOUT_SECONDS="0.5")
+        alert, _, _ = _gray_zone_inputs()
+        # While the gray-zone call hangs, another thread can take the ingest lock.
+        other_got_lock: list = []
+
+        def other():
+            _time.sleep(0.2)
+            got = manager_mod._global_ingest_lock.acquire(timeout=0.2)
+            other_got_lock.append(got)
+            if got:
+                manager_mod._global_ingest_lock.release()
+
+        t = threading.Thread(target=other)
+        t.start()
+        started = _time.monotonic()
+        result = manager.ingest_alert(alert, current_time=(NOW + timedelta(minutes=3)).timestamp())
+        elapsed = _time.monotonic() - started
+        t.join()
+    finally:
+        release.set()
+        set_timer_scheduler_hook(None)
+
+    assert probe == [True], "the Gemini call ran while the global ingest lock was held"
+    assert other_got_lock == [True]
+    assert elapsed < 3.0
+    assert result.correlation["is_gray_zone"] is True
+    assert result.correlation["gray_zone_source"] == "deterministic_fallback"
+    assert "GeminiTimeout" in result.correlation["gray_zone_fallback_reason"]
+
+
+def test_groups_changing_during_the_call_bounds_the_retries(tmp_path, monkeypatch):
+    """If every locked pass sees a different gray-zone candidate/score, Gemini is asked at most
+    _GRAY_ZONE_ATTEMPTS times and the deterministic fallback decides, with the reason."""
+    import dataclasses
+
+    from agent.app.grouping import manager as manager_mod
+    from agent.app.timers.scheduler import set_timer_scheduler_hook
+
+    set_timer_scheduler_hook(lambda **kw: "task")
+    try:
+        manager = _manager_with_one_group(tmp_path)
+        engine = manager.correlation_engine
+        real_evaluate = engine.evaluate_alert
+        passes = {"n": 0}
+        asked: list = []
+
+        def shifting(alert, candidate_groups=None, gray_zone_resolver=None, **kw):
+            passes["n"] += 1
+
+            def resolver(a, cand, bd):
+                return gray_zone_resolver(a, cand, dataclasses.replace(bd, total_score=bd.total_score + passes["n"] / 100))
+            return real_evaluate(alert, candidate_groups=candidate_groups, gray_zone_resolver=resolver, **kw)
+
+        monkeypatch.setattr(engine, "evaluate_alert", shifting)
+        monkeypatch.setattr(engine, "resolve_gray_zone", lambda a, c, b: asked.append(b.total_score) or
+                            GrayZoneResolution(decision="attach", rationale="r", source="gemini"))
+        alert, _, _ = _gray_zone_inputs()
+        result = manager.ingest_alert(alert, current_time=(NOW + timedelta(minutes=3)).timestamp())
+    finally:
+        set_timer_scheduler_hook(None)
+
+    assert len(asked) == manager_mod._GRAY_ZONE_ATTEMPTS
+    assert result.correlation["gray_zone_source"] == "deterministic_fallback"
+    assert "incident groups changed while Gemini was consulted" in result.correlation["gray_zone_fallback_reason"]

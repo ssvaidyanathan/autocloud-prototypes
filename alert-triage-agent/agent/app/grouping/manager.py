@@ -17,7 +17,7 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from pydantic import BaseModel, Field
 
 from ..bridge_client import BridgeClient
@@ -28,9 +28,11 @@ from ..correlation.engine import (
     CandidateGroup,
     CorrelationDecision,
     CorrelationEngine,
+    GrayZoneResolution,
+    _deterministic_resolution,
     candidate_from_okf,
 )
-from ..correlation.scoring import THRESHOLD_AUTO_ATTACH, THRESHOLD_AUTO_NEW
+from ..correlation.scoring import THRESHOLD_AUTO_ATTACH, THRESHOLD_AUTO_NEW, ScoreBreakdown
 from ..timers.scheduler import TimerScheduleError, schedule_delayed_timer
 from .late_alerts import exclude_late_new_signal_groups, refresh_ticket_for_late_alerts
 from .models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument, format_okf_alert_entry
@@ -62,6 +64,17 @@ except ImportError:
 
 
 _global_ingest_lock = threading.RLock()
+# Locked passes that may stop for a gray-zone Gemini call made outside the lock (ingest_alert).
+_GRAY_ZONE_ATTEMPTS = 2
+
+
+class _GrayZonePending(Exception):
+    """A locked ingest pass reached a gray-zone decision with no Gemini answer yet."""
+
+    def __init__(self, candidate: "CandidateGroup", breakdown: "ScoreBreakdown") -> None:
+        super().__init__(candidate.group_id)
+        self.candidate = candidate
+        self.breakdown = breakdown
 
 # Statuses of groups a new alert can join (degraded, resolved, recovered and archived cannot).
 ACTIVE_GROUP_STATUSES = frozenset(
@@ -100,6 +113,7 @@ class GroupingManager:
             model_name=self.config.model_name,
             project_id=self.config.project_id,
             gemini_location=self.config.gemini_location,
+            gemini_timeout_seconds=self.config.gemini_timeout_seconds,
         )
 
     def _emit_decision_log(
@@ -178,13 +192,58 @@ class GroupingManager:
         bridge_group_id: Optional[str] = None,
         bridge_filename: Optional[str] = None,
     ) -> GroupingResult:
-        """Thread-safe ingestion enforcing serialization for same-second simultaneous arrival."""
+        """Thread-safe ingestion enforcing serialization for same-second simultaneous arrival.
+
+        The gray-zone Gemini call (a network call of up to GEMINI_TIMEOUT_SECONDS) is never made
+        while holding _global_ingest_lock (crev R3). A locked pass that reaches a gray-zone
+        decision stops there, before any write of this alert (the stuck-investigation sweep that
+        runs first is idempotent); Gemini is asked with the lock released; then a new locked pass
+        re-reads the groups and uses that answer if the same candidate and score come up again.
+        If the groups changed in between, it asks again, at most _GRAY_ZONE_ATTEMPTS times in
+        total, and then the deterministic fallback decides, with the reason stated.
+        """
+        resolved: dict[tuple[str, float], GrayZoneResolution] = {}
+        for _ in range(_GRAY_ZONE_ATTEMPTS):
+            pending: Optional[_GrayZonePending] = None
+
+            def _precomputed_only(a: AlertEvent, cand: CandidateGroup, bd: ScoreBreakdown) -> GrayZoneResolution:
+                key = (cand.group_id, bd.total_score)
+                if key in resolved:
+                    return resolved[key]
+                raise _GrayZonePending(cand, bd)
+
+            with _global_ingest_lock:
+                try:
+                    return self._ingest_alert_locked(
+                        alert=alert,
+                        current_time=current_time,
+                        bridge_group_id=bridge_group_id,
+                        bridge_filename=bridge_filename,
+                        gray_zone_resolver=_precomputed_only,
+                    )
+                except _GrayZonePending as exc:
+                    pending = exc
+            # Lock released: the bounded network call.
+            resolved[(pending.candidate.group_id, pending.breakdown.total_score)] = (
+                self.correlation_engine.resolve_gray_zone(alert, pending.candidate, pending.breakdown)
+            )
+
+        def _final(a: AlertEvent, cand: CandidateGroup, bd: ScoreBreakdown) -> GrayZoneResolution:
+            key = (cand.group_id, bd.total_score)
+            if key in resolved:
+                return resolved[key]
+            reason = (f"incident groups changed while Gemini was consulted ({_GRAY_ZONE_ATTEMPTS} attempts); "
+                      "not called again under the ingest lock")
+            logger.warning("Gray-zone alert %s: %s; using deterministic fallback", a.incident_id, reason)
+            return _deterministic_resolution(a, cand, bd, reason)
+
         with _global_ingest_lock:
             return self._ingest_alert_locked(
                 alert=alert,
                 current_time=current_time,
                 bridge_group_id=bridge_group_id,
                 bridge_filename=bridge_filename,
+                gray_zone_resolver=_final,
             )
 
     def _ingest_alert_locked(
@@ -193,6 +252,9 @@ class GroupingManager:
         current_time: Optional[float] = None,
         bridge_group_id: Optional[str] = None,
         bridge_filename: Optional[str] = None,
+        gray_zone_resolver: Optional[
+            Callable[[AlertEvent, CandidateGroup, ScoreBreakdown], GrayZoneResolution]
+        ] = None,
     ) -> GroupingResult:
         """Ingest incoming alert, enforcing idempotency, correlation, OKF mutations, and timers."""
         now = current_time if current_time is not None else time.time()
@@ -351,7 +413,9 @@ class GroupingManager:
                 alert, active_docs, self.config.late_new_signal_max_onset_gap_seconds
             )
             candidates = [candidate_from_okf(d) for d in eligible_docs]
-            decision = self.correlation_engine.evaluate_alert(alert, candidate_groups=candidates)
+            decision = self.correlation_engine.evaluate_alert(
+                alert, candidate_groups=candidates, gray_zone_resolver=gray_zone_resolver
+            )
             correlation_info = {
                 "decision": decision.decision,
                 "best_score": decision.best_score,
