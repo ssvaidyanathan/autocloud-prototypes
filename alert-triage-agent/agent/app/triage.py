@@ -279,16 +279,15 @@ def generate_investigation_report(
                 command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
                 verification="Confirm active connections drop below 80% capacity via Cloud Monitoring",
             ),
+            *SynthesizerAgent()._db_caller_actions(canonical_res),
             ActionItem(
-                title=f"Inspect application connection pool release logic and maximum connection pool size in {canonical_res}",
-                command=f"gcloud logging read 'resource.type=\"cloud_run_revision\" AND textPayload=~\"connection leak|pool exhausted\"' --limit=30",
-                verification="Confirm no connection leak in application logs",
-            ),
-            ActionItem(
-                title="Reconfigure database connection parameters",
-                command=f"gcloud sql instances patch {canonical_res} --database-flags=max_connections=200",
-                verification="Verify database restarts cleanly and accepts connections",
-                rollback="Revert max_connections flag if instance memory pressure increases.",
+                title=(
+                    f"Review the tier and database flags of {canonical_res} before any max_connections change "
+                    "(gcloud sql instances patch --database-flags replaces the whole flag set, so every "
+                    "existing flag must be repeated)"
+                ),
+                command=f'gcloud sql instances describe {canonical_res} --format="yaml(settings.tier,settings.databaseFlags)"',
+                verification="List the current flags and tier; any change must keep all existing flags",
             ),
         ]
     elif is_apigee:

@@ -677,3 +677,70 @@ def test_latency_and_5xx_policies_set_missing_data_behaviour_from_variable():
         r'variable "alert_evaluation_missing_data"[^}]*default\s*=\s*"EVALUATION_MISSING_DATA_INACTIVE"', variables
     )
     assert "validation {" in variables.split('variable "alert_evaluation_missing_data"')[1]
+
+
+# ---------------------------------------------------------------------------------------
+# S4 (INC0010325): Cloud SQL connection saturation without any observed 5xx
+# ---------------------------------------------------------------------------------------
+
+
+def _s4_dossiers(caller_5xx: str = "0.0%"):
+    sql = EvidenceDossier(
+        specialist_name="CloudSQLSpecialist", target_resource="ata-inventory-db", findings=[],
+        metrics={"active_connections": 24, "max_connections": 25}, evidence_items=[],
+        queries_executed={}, anomaly_detected=True, confidence=0.9,
+    )
+    # CloudRunSpecialist run against the DB alert: nothing measurable (live S4 showed N/A).
+    cr_db = EvidenceDossier(
+        specialist_name="CloudRunSpecialist", target_resource="ata-inventory-db", findings=[],
+        metrics={"error_rate_5xx": "N/A (not captured)", "request_count_rpm": "N/A (not captured)",
+                 "container_restarts": "N/A (not captured)"},
+        evidence_items=[], queries_executed={}, anomaly_detected=False, confidence=0.9,
+    )
+    cr_api = EvidenceDossier(
+        specialist_name="CloudRunSpecialist", target_resource="ata-inventory-api", findings=[],
+        metrics={"error_rate_5xx": caller_5xx, "request_count_rpm": 87,
+                 "container_restarts": "N/A (not captured)"},
+        evidence_items=[], queries_executed={}, anomaly_detected=False, confidence=0.9,
+    )
+    return [sql, cr_db, cr_api]
+
+
+S4_ALERT = AlertEvent(
+    incident_id="0.oeb69qnqwd4o", policy_name="ata-cloudsql-connections-critical",
+    resource_name="ata-inventory-db", started_at="2026-10-27T08:58:25Z",
+)
+S4_BLAST = ["ata-inventory-db", "ata-inventory-api", "ata-inventory-v1", "ata-orders-api", "ata-orders-v1"]
+
+
+def test_s4_problem_does_not_claim_unobserved_5xx_cascade():
+    text = SynthesizerAgent()._synthesize_problem(S4_ALERT, _s4_dossiers(), "ata-inventory-db", S4_BLAST)
+    assert "5xx failures" not in text and "cascading" not in text
+    assert text.startswith("Database connection pool saturation (connections at 24/25) on ata-inventory-db")
+    assert "no HTTP 5xx errors measured on dependent services" in text
+
+
+def test_s4_problem_states_cascade_only_with_measured_caller_5xx():
+    text = SynthesizerAgent()._synthesize_problem(S4_ALERT, _s4_dossiers("42.0%"), "ata-inventory-db", S4_BLAST)
+    assert "with HTTP 5xx errors on dependent ata-inventory-api (42.0%)" in text
+
+
+def test_s4_observations_skip_unmeasured_values_and_never_fill_in_numbers():
+    obs = SynthesizerAgent()._synthesize_observations(_s4_dossiers(), S4_ALERT)
+    assert "N/A (not captured) rpm" not in obs
+    assert "on ata-inventory-db; container restarts" not in obs
+    assert "HTTP 5xx error rate N/A" not in obs
+    assert "HTTP 5xx error rate 0.0% (87 rpm) on ata-inventory-api" in obs
+    assert "320 rpm" not in obs and "container restarts: 0" not in obs
+
+
+def test_s4_actions_never_patch_database_flags():
+    actions = SynthesizerAgent()._synthesize_recommendations(
+        _s4_dossiers(), "ata-inventory-db", S4_ALERT, region="us-west1", project_id="cloud-assist-fde-2"
+    )
+    commands = [a.command or "" for a in actions]
+    assert not any("instances patch" in c or "--database-flags" in c for c in commands)
+    assert 'gcloud sql instances describe ata-inventory-db --format="yaml(settings.tier,settings.databaseFlags)"' in commands
+    leak = next(a for a in actions if a.title.startswith("Inspect connection pool release logic"))
+    assert "in ata-inventory-api, which calls ata-inventory-db" in leak.title
+    assert 'resource.labels.service_name="ata-inventory-api"' in leak.command

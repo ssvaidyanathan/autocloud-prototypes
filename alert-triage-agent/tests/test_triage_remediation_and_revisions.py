@@ -70,7 +70,9 @@ def test_triage_remediation_cloud_sql_commands(agent_config):
 
     commands = [act.command for act in report.recommended_actions if act.command]
     assert any("SELECT pg_terminate_backend" in cmd for cmd in commands)
-    assert any("gcloud sql instances patch" in cmd for cmd in commands)
+    # No flag patch: --database-flags replaces every flag (S4 would have dropped IAM auth).
+    assert not any("gcloud sql instances patch" in cmd for cmd in commands)
+    assert any("gcloud sql instances describe ata-inventory-db" in cmd for cmd in commands)
 
 
 def test_triage_remediation_cloud_run_commands(agent_config):

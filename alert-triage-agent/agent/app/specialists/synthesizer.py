@@ -901,6 +901,8 @@ class SynthesizerAgent:
         err_5xx_rate: Optional[str] = None
         err_5xx_pct: Optional[float] = None
         lat_p95_ms: Optional[float] = None
+        # Highest measured 5xx rate on a service other than the origin: (service, rate).
+        caller_5xx: Optional[tuple[str, str, float]] = None
 
         for d in dossiers:
             if d.specialist_name == "CloudSQLSpecialist" and d.anomaly_detected:
@@ -922,6 +924,13 @@ class SynthesizerAgent:
                         err_5xx_pct = float(str(raw_err).replace("%", ""))
                     except ValueError:
                         pass
+                    if (
+                        d.target_resource != origin
+                        and err_5xx_pct is not None
+                        and err_5xx_pct >= 5.0
+                        and (caller_5xx is None or err_5xx_pct > caller_5xx[2])
+                    ):
+                        caller_5xx = (d.target_resource, raw_err, err_5xx_pct)
                 raw_lat = d.metrics.get("latency_p95_ms")
                 if raw_lat and raw_lat != "N/A (not captured)":
                     try:
@@ -968,9 +977,16 @@ class SynthesizerAgent:
 
         if is_sql and ("db" in origin or "sql" in origin):
             metric_str = f" ({', '.join(metric_details)})" if metric_details else ""
+            if caller_5xx:
+                # A cascade is stated only when a dependent service shows measured 5xx errors.
+                return (
+                    f"Database connection pool saturation{metric_str} on {origin} "
+                    f"with HTTP 5xx errors on dependent {caller_5xx[0]} ({caller_5xx[1]}) since {started_at}"
+                )
+            dependents = f"; dependent services per topology: {', '.join(upstream)}" if upstream else ""
             return (
-                f"Database connection pool saturation{metric_str} on {origin} "
-                f"causing cascading HTTP 5xx failures for {upstream_str} since {started_at}"
+                f"Database connection pool saturation{metric_str} on {origin} since {started_at}"
+                f" (no HTTP 5xx errors measured on dependent services){dependents}"
             )
         elif is_apigee:
             metric_str = f" ({', '.join(metric_details)})" if metric_details else ""
@@ -1241,6 +1257,31 @@ class SynthesizerAgent:
                 command=log_cmd,
                 verification="Identify the proxy revision and clients receiving HTTP 429 responses",
             ),
+        ]
+
+    def _db_caller_actions(self, origin: str) -> list[ActionItem]:
+        """Connection-release review on the Cloud Run services that call the database directly.
+
+        The callers come from TOPOLOGY.md; the pool and its release logic live in them, not in
+        the database. Without a known caller, no action is given.
+        """
+        loader = get_loader()
+        callers = [
+            e.from_node for e in loader.edges
+            if e.to_node == loader.canonicalize(origin) and self._is_cloud_run(e.from_node)
+        ]
+        if not callers:
+            logger.warning("No Cloud Run caller of %s in TOPOLOGY.md; no connection-release review suggested", origin)
+        return [
+            ActionItem(
+                title=f"Inspect connection pool release logic and pool size in {caller}, which calls {origin}",
+                command=(
+                    f"gcloud logging read 'resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"{caller}\" "
+                    f"AND textPayload=~\"connection leak|pool exhausted|get_db_connection\"' --limit=30"
+                ),
+                verification=f"Confirm {caller} releases database connections (no leak in its logs)",
+            )
+            for caller in callers
         ]
 
     def _gateway_timeout_fact(self, dossiers: list[EvidenceDossier], origin: str) -> Optional[str]:
@@ -1583,8 +1624,15 @@ class SynthesizerAgent:
                 err_rate = d.metrics.get("error_rate_5xx")
                 restarts = d.metrics.get("container_restarts")
                 rpm = d.metrics.get("request_count_rpm")
-                if err_rate and err_rate != "0.1%":
-                    obs_items.append(f"HTTP 5xx error rate reached {err_rate} ({rpm or 320} rpm) on {d.target_resource}; container restarts: {restarts or 0}")
+                if err_rate and err_rate != "0.1%" and not str(err_rate).startswith("N/A"):
+                    # Only measured values: no request rate or restart count is filled in.
+                    line = f"HTTP 5xx error rate {err_rate}"
+                    if isinstance(rpm, (int, float)):
+                        line += f" ({rpm} rpm)"
+                    line += f" on {d.target_resource}"
+                    if isinstance(restarts, (int, float)):
+                        line += f"; container restarts: {restarts}"
+                    obs_items.append(line)
                 has_db_auth = _dossier_has_db_auth_error(d)
                 if has_db_auth:
                     obs_items.append(f"Database authentication failure observed in application logs on {d.target_resource}")
@@ -1592,7 +1640,7 @@ class SynthesizerAgent:
                 if "proxy_response_code_429" in d.metrics and d.metrics["proxy_response_code_429"] != "N/A (not captured)":
                     obs_items.append(f"Apigee proxy {d.target_resource} recorded {d.metrics['proxy_response_code_429']} HTTP 429 rate limit responses")
                 elif "status_429_rate" in d.metrics:
-                    obs_items.append(f"Apigee proxy {d.target_resource} recorded {d.metrics['status_429_rate']} HTTP 429 response rate under traffic burst")
+                    obs_items.append(f"Apigee proxy {d.target_resource} recorded {d.metrics['status_429_rate']} HTTP 429 response rate")
                 elif "proxy_response_code_504" in d.metrics and d.metrics["proxy_response_code_504"] != "N/A (not captured)":
                     obs_items.append(f"Apigee proxy {d.target_resource} recorded {d.metrics['proxy_response_code_504']} HTTP 504 gateway timeout responses")
                 elif any(k.startswith("proxy_response_code_5") for k in d.metrics):
@@ -1752,16 +1800,15 @@ class SynthesizerAgent:
                     command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
                     verification="Confirm active connections drop below 80% capacity via Cloud Monitoring",
                 ),
+                *self._db_caller_actions(origin),
                 ActionItem(
-                    title=f"Inspect application connection pool release logic and maximum connection pool size in {origin}",
-                    command=f"gcloud logging read 'resource.type=\"cloud_run_revision\" AND textPayload=~\"connection leak|pool exhausted\"' --limit=30",
-                    verification="Confirm no connection leak in application logs",
-                ),
-                ActionItem(
-                    title="Reconfigure database connection parameters",
-                    command=f"gcloud sql instances patch {origin} --database-flags=max_connections=200",
-                    verification="Verify database restarts cleanly and accepts connections",
-                    rollback="Revert max_connections flag if instance memory pressure increases.",
+                    title=(
+                        f"Review the tier and database flags of {origin} before any max_connections change "
+                        "(gcloud sql instances patch --database-flags replaces the whole flag set, so every "
+                        "existing flag must be repeated)"
+                    ),
+                    command=f'gcloud sql instances describe {origin} --format="yaml(settings.tier,settings.databaseFlags)"',
+                    verification="List the current flags and tier; any change must keep all existing flags",
                 ),
             ]
 
