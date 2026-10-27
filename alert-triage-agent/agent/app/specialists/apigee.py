@@ -17,6 +17,9 @@ from .base import BaseSpecialist, EvidenceDossier
 
 logger = logging.getLogger(__name__)
 
+# Apigee fault raised when the target does not answer within the proxy's target timeout.
+GATEWAY_TIMEOUT_FAULT = "GatewayTimeout"
+
 try:
     from topology.topology_graph import get_loader
 except ImportError:
@@ -99,6 +102,14 @@ class ApigeeSpecialist(BaseSpecialist):
         latencies_ms: list[float] = []
         top_client_ip: Optional[str] = None
         fault_codes: set[str] = set()
+        # GatewayTimeout evidence: metric series (response_code/fault_code/fault_source labels)
+        # and access-log entries (fault_source field, proxy revision).
+        gt_metric_count = 0
+        gt_fault_code: Optional[str] = None
+        gt_fault_source: Optional[str] = None
+        gt_response_code: Optional[str] = None
+        gt_log_count = 0
+        log_revisions: Counter[str] = Counter()
 
         # 1. Query Cloud Monitoring: proxy/response_count
         try:
@@ -128,6 +139,11 @@ class ApigeeSpecialist(BaseSpecialist):
                 )
                 if code and pts_sum > 0:
                     status_counts[code] = status_counts.get(code, 0) + pts_sum
+                if fc and str(fc).endswith(GATEWAY_TIMEOUT_FAULT) and pts_sum > 0:
+                    gt_metric_count += pts_sum
+                    gt_fault_code = str(fc)
+                    gt_fault_source = ts.metric.labels.get("fault_source") or gt_fault_source
+                    gt_response_code = code or gt_response_code
         except Exception as exc:
             logger.warning("Cloud Monitoring proxy/response_count query error: %s", exc)
 
@@ -187,6 +203,11 @@ class ApigeeSpecialist(BaseSpecialist):
                 cip = payload.get("client_ip")
                 if cip:
                     client_counter[cip] += 1
+                if str(payload.get("fault_source") or "") == GATEWAY_TIMEOUT_FAULT:
+                    gt_log_count += 1
+                    rev = str(payload.get("revision") or "").strip()
+                    if rev:
+                        log_revisions[rev] += 1
                 tlat = payload.get("target_latency_ms")
                 if tlat and str(tlat).strip():
                     try:
@@ -230,6 +251,26 @@ class ApigeeSpecialist(BaseSpecialist):
             metrics["target_latency_p99"] = "N/A (not captured)"
 
         metrics["top_client_ip"] = top_client_ip if top_client_ip else "<CLIENT_IP>/32"
+
+        # Only observed facts: counts, fault code and source as reported, the proxy revision
+        # named by the access log. The proxy's timeout value is not part of this telemetry.
+        if gt_metric_count or gt_log_count:
+            metrics["gateway_timeout"] = {
+                "proxy": target_proxy,
+                "count": gt_metric_count or gt_log_count,
+                "count_source": (
+                    "apigee.googleapis.com/proxy/response_count" if gt_metric_count
+                    else "ata-apigee-access log entries"
+                ),
+                "response_code": gt_response_code,
+                "fault_code": gt_fault_code or GATEWAY_TIMEOUT_FAULT,
+                "fault_source": gt_fault_source,
+                "revision": log_revisions.most_common(1)[0][0] if log_revisions else None,
+            }
+            findings.append(
+                f"Apigee proxy `{target_proxy}` returned {metrics['gateway_timeout']['count']} "
+                f"{GATEWAY_TIMEOUT_FAULT} faults in the window [{window_start.isoformat()}, {window_end.isoformat()}]."
+            )
         metrics["response_codes"] = status_counts if status_counts else {}
 
         # Log WARNING for genuinely absent data per Quality Gates

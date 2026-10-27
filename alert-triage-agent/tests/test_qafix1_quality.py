@@ -329,3 +329,149 @@ async def test_s1_cloud_run_sample_logs_keep_500_and_drop_admin_lines():
     content = "\n".join(e.content for e in dossier.evidence_items)
     assert "ERROR HTTP 500 /items/reserve" in content
     assert "/admin/fault" not in content
+
+
+# ---------------------------------------------------------------------------------------
+# Bug 3: Apigee GatewayTimeout context in the S2 RCA (facts only, no timeout value)
+# ---------------------------------------------------------------------------------------
+
+from unittest.mock import MagicMock as _MagicMock, patch as _patch  # noqa: E402
+
+from agent.app.specialists.base import EvidenceDossier  # noqa: E402
+
+S2_GT_FAULT = "messaging.adaptors.http.flow.GatewayTimeout"
+
+
+def _ts(labels: dict, values: list[int]):
+    ts = _MagicMock()
+    ts.metric.labels = labels
+    pts = []
+    for v in values:
+        pt = _MagicMock()
+        pt.value.int64_value = v
+        pts.append(pt)
+    ts.points = pts
+    return ts
+
+
+async def _s2_apigee_dossier(series, log_payloads):
+    from agent.app.config import AgentConfig
+    from agent.app.specialists.apigee import ApigeeSpecialist
+
+    alert = AlertEvent(
+        incident_id="0.oeb4hxzrsiqu",
+        policy_name="ata-inventory-latency",
+        resource_name="ata-inventory-api",
+        started_at="2026-10-27T07:40:49Z",
+    )
+    entries = []
+    for p in log_payloads:
+        e = _MagicMock()
+        e.payload = p
+        entries.append(e)
+    config = AgentConfig(project_id="test-proj", region="test-region", is_local=True)
+    with _patch("google.cloud.monitoring_v3.MetricServiceClient") as mon_cls, \
+         _patch("google.cloud.logging.Client") as log_cls:
+        mon_cls.return_value.list_time_series.side_effect = (
+            lambda request: series if "response_count" in request.filter else []
+        )
+        log_cls.return_value.list_entries.return_value = entries
+        return await ApigeeSpecialist().investigate(alert, config)
+
+
+S2_SERIES = [
+    _ts({"response_code": "504", "method": "GET", "fault_code": S2_GT_FAULT,
+         "fault_source": "target", "apigee_fault": "false"}, [60, 70, 70]),
+    _ts({"response_code": "200", "method": "GET", "apigee_fault": "false"}, [5]),
+]
+S2_LOGS = [
+    {"proxy": "ata-inventory-v1", "revision": "132", "environment": "prod", "status_code": "",
+     "target_latency_ms": "", "fault_source": "GatewayTimeout", "client_ip": "34.61.176.32"}
+    for _ in range(3)
+]
+
+
+@pytest.mark.asyncio
+async def test_apigee_specialist_records_gateway_timeout_evidence():
+    dossier = await _s2_apigee_dossier(S2_SERIES, S2_LOGS)
+    assert dossier.target_resource == "ata-inventory-v1"
+    gt = dossier.metrics["gateway_timeout"]
+    assert gt == {
+        "proxy": "ata-inventory-v1",
+        "count": 200,
+        "count_source": "apigee.googleapis.com/proxy/response_count",
+        "response_code": "504",
+        "fault_code": S2_GT_FAULT,
+        "fault_source": "target",
+        "revision": "132",
+    }
+
+
+@pytest.mark.asyncio
+async def test_apigee_specialist_without_timeouts_records_nothing():
+    dossier = await _s2_apigee_dossier([S2_SERIES[1]], [])
+    assert "gateway_timeout" not in dossier.metrics
+
+
+def _s2_dossiers(gt: dict | None, p95=6546.0):
+    cr = EvidenceDossier(
+        specialist_name="CloudRunSpecialist", target_resource="ata-inventory-api",
+        findings=[], metrics={"latency_p95_ms": p95, "error_rate_5xx": "0.0%"},
+        evidence_items=[], queries_executed={}, anomaly_detected=True, confidence=0.9,
+    )
+    ap = EvidenceDossier(
+        specialist_name="ApigeeSpecialist", target_resource="ata-inventory-v1",
+        findings=[], metrics={"gateway_timeout": gt} if gt else {},
+        evidence_items=[], queries_executed={}, anomaly_detected=False, confidence=0.9,
+    )
+    return [cr, ap]
+
+
+S2_GT = {
+    "proxy": "ata-inventory-v1", "count": 200,
+    "count_source": "apigee.googleapis.com/proxy/response_count",
+    "response_code": "504", "fault_code": S2_GT_FAULT, "fault_source": "target", "revision": "132",
+}
+
+
+def test_s2_root_cause_states_gateway_timeout_fact_without_timeout_value():
+    alert = AlertEvent(
+        incident_id="0.oeb4hxzrsiqu", policy_name="ata-inventory-latency",
+        resource_name="ata-inventory-api", started_at="2026-10-27T07:40:49Z",
+    )
+    text, _ = SynthesizerAgent()._determine_root_cause(
+        _s2_dossiers(S2_GT), "ata-inventory-api", alert, blast_radius=S1_BLAST_RADIUS
+    )
+    assert (
+        "Apigee proxy `ata-inventory-v1` (revision 132) returned 200 HTTP 504 responses with fault "
+        f"`{S2_GT_FAULT}` (fault source: target). Requests on ata-inventory-v1 -> ata-inventory-api "
+        "did not complete within the proxy's target timeout; `ata-inventory-api` P95 latency was 6546ms."
+    ) in text
+    # The timeout value is not in the gathered data, so none is stated.
+    assert "5000" not in text and "5 s" not in text and "5s" not in text
+
+
+def test_no_gateway_timeout_fact_without_evidence():
+    alert = AlertEvent(
+        incident_id="0.oeb4hxzrsiqu", policy_name="ata-inventory-latency",
+        resource_name="ata-inventory-api", started_at="2026-10-27T07:40:49Z",
+    )
+    text, _ = SynthesizerAgent()._determine_root_cause(
+        _s2_dossiers(None), "ata-inventory-api", alert, blast_radius=S1_BLAST_RADIUS
+    )
+    assert "GatewayTimeout" not in text and "Apigee" not in text
+
+
+def test_gateway_timeout_fact_requires_topology_path_and_omits_missing_fields():
+    synth = SynthesizerAgent()
+    # A proxy that is not on a path to the origin: no claim.
+    other = dict(S2_GT, proxy="ata-orders-v1")
+    assert synth._gateway_timeout_fact(_s2_dossiers(other), "ata-inventory-v1") is None
+    # Log-only evidence (no metric labels, no revision, no latency): only what was observed.
+    log_only = {"proxy": "ata-inventory-v1", "count": 3, "count_source": "ata-apigee-access log entries",
+                "response_code": None, "fault_code": "GatewayTimeout", "fault_source": None, "revision": None}
+    fact = synth._gateway_timeout_fact(_s2_dossiers(log_only, p95="N/A (not captured)"), "ata-inventory-api")
+    assert fact == (
+        "Apigee proxy `ata-inventory-v1` returned 3 responses with fault `GatewayTimeout`. Requests on "
+        "ata-inventory-v1 -> ata-inventory-api did not complete within the proxy's target timeout."
+    )

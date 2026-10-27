@@ -357,6 +357,10 @@ class SynthesizerAgent:
         root_cause_analysis = self._build_root_cause_analysis(
             root_cause_text, confidence, dossiers, origin, alert,
         )
+        gateway_fact = self._gateway_timeout_fact(dossiers, origin)
+        if gateway_fact:
+            observations = " | ".join([*split_observations(observations), gateway_fact.replace("`", "")])
+            root_cause_analysis["supporting_evidence"].append(gateway_fact)
         if origin_notes:
             label = origin_notes["label"]
             observations = self._insert_origin_observation(observations, origin_notes["explanation"], label)
@@ -1119,6 +1123,45 @@ class SynthesizerAgent:
         )
         return total_conf, contributing_factors, rationale
 
+    def _gateway_timeout_fact(self, dossiers: list[EvidenceDossier], origin: str) -> Optional[str]:
+        """Sentence stating the Apigee GatewayTimeout evidence for ``origin``, or None.
+
+        Built only from gathered data: the 504/GatewayTimeout count, fault code and fault source
+        from Apigee telemetry, the proxy revision from its access log, the topology path from
+        the proxy to the origin, and the origin's P95 latency from the Cloud Run dossier. The
+        proxy's timeout value is not gathered, so no value is stated.
+        """
+        apigee = next((d for d in dossiers if d.specialist_name == "ApigeeSpecialist"), None)
+        gt = apigee.metrics.get("gateway_timeout") if apigee else None
+        if not isinstance(gt, dict) or not gt.get("count"):
+            return None
+        proxy = gt.get("proxy") or apigee.target_resource
+        path = next((p for p in get_loader().dependency_paths(origin) if proxy in p), None)
+        if path is None:
+            logger.info(
+                "Apigee GatewayTimeout evidence on %s not stated for origin %s: no topology path between them",
+                proxy,
+                origin,
+            )
+            return None
+        route = " -> ".join(path[path.index(proxy):])
+        rev = f" (revision {gt['revision']})" if gt.get("revision") else ""
+        what = f"HTTP {gt['response_code']} responses" if gt.get("response_code") else "responses"
+        src = f" (fault source: {gt['fault_source']})" if gt.get("fault_source") else ""
+        fact = (
+            f"Apigee proxy `{proxy}`{rev} returned {gt['count']} {what} with fault "
+            f"`{gt.get('fault_code')}`{src}. Requests on {route} did not complete within the "
+            f"proxy's target timeout"
+        )
+        cr = next(
+            (d for d in dossiers if d.specialist_name == "CloudRunSpecialist" and d.target_resource == origin),
+            None,
+        )
+        lat = cr.metrics.get("latency_p95_ms") if cr else None
+        if isinstance(lat, (int, float)):
+            fact += f"; `{origin}` P95 latency was {int(lat)}ms"
+        return fact + "."
+
     def _format_dominant_signal_facts(self, alert: AlertEvent, dossier: Optional[EvidenceDossier]) -> str:
         """Format facts matching the dominant observed signal (latency vs 5xx vs auth errors vs connections)."""
         if not dossier or not dossier.metrics:
@@ -1347,6 +1390,9 @@ class SynthesizerAgent:
             root_cause_text = (
                 f"Service degradation on `{origin}`{signal_facts} triggered threshold breach on policy `{alert.policy_name}`."
             )
+        gateway_fact = self._gateway_timeout_fact(dossiers, origin)
+        if gateway_fact:
+            root_cause_text = f"{root_cause_text} {gateway_fact}"
         return root_cause_text, confidence
 
     def _synthesize_observations(
