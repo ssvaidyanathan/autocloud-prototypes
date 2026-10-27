@@ -218,7 +218,7 @@ This topology specification is ingested at runtime via the agent's `get_topology
   - Webhook authentication for Cloud Monitoring via HTTP Basic Auth (`webhook_basicauth` channel).
   - Scope validation: verifies project scoping and filters out foreign or non-`ata` alert notifications.
   - Asynchronous task enqueue: enqueues normalized `AlertEvent` payloads directly to Cloud Tasks (`ata-triage-queue`) returning HTTP 202 `accepted`.
-  - ServiceNow instruction endpoints (`POST /instructions/ticket/*`): exposes authenticated routes (`create`, `work-note`, `update-report`, `resolve`) invoked by `ata-agent`.
+  - ServiceNow instruction endpoints (`POST /instructions/ticket/*`): exposes authenticated routes (`create`, `work-note`, `update-report`, `update-fields`, `resolve`) invoked by `ata-agent`.
   - **Thin-Bridge Guarantee**: Completely stateless with zero in-memory windowing, background polling loops, or alert suppression.
 
 ### 2. `ata-agent` (`agent/`)

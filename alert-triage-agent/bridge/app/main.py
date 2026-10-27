@@ -20,6 +20,7 @@ from .contracts.instructions import (
     TicketWorkNote,
     TicketAttachment,
     UpdateReportRequest,
+    UpdateTicketFieldsRequest,
     WorkNoteRequest,
 )
 from .core.dispatcher import TaskDispatcher
@@ -267,6 +268,40 @@ async def update_report_instruction(
         number=ref.number,
         url=ref.url,
         group_id=request.group_id,
+    )
+
+
+@app.post("/instructions/ticket/update-fields", response_model=ActionStatusResponse)
+async def update_ticket_fields_instruction(
+    request: UpdateTicketFieldsRequest,
+    caller: dict[str, Any] = Depends(verify_agent_caller),
+    adapter: ServiceNowAdapter = Depends(get_servicenow_adapter),
+) -> ActionStatusResponse:
+    """Update the incident short description (and urgency/impact when escalated) with a work note."""
+    logger.info(
+        "Instruction update fields requested for sys_id %s (group %s, priority %s) by caller %s",
+        request.sys_id,
+        request.group_id,
+        request.priority or "unchanged",
+        caller.get("email"),
+    )
+    try:
+        adapter.update_ticket_fields(
+            sys_id=request.sys_id,
+            short_description=request.short_description,
+            work_note=request.work_note,
+            priority=request.priority,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"ServiceNow update failed: {type(exc).__name__}",
+        ) from exc
+    return ActionStatusResponse(
+        status="updated",
+        sys_id=request.sys_id,
+        group_id=request.group_id,
+        message="Ticket fields updated",
     )
 
 

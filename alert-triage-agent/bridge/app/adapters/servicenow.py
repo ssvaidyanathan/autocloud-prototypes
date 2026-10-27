@@ -195,6 +195,49 @@ class ServiceNowAdapter:
         work_note = f"[code]<b>Incident Resolved:</b> {res_text}[/code]"
         self.append_work_note(sys_id, work_note, client=client)
 
+    def update_ticket_fields(
+        self,
+        sys_id: str,
+        short_description: str,
+        work_note: str,
+        priority: Optional[str] = None,
+        client: Optional[httpx.Client] = None,
+    ) -> None:
+        """PATCH the short description and a work note; set urgency/impact when ``priority`` is given.
+
+        Urgency/impact follow create_incident's mapping (P1 -> 1, otherwise 2). ``priority`` is
+        sent only to escalate; this method never derives or lowers a priority itself.
+        """
+        body: dict[str, Any] = {"short_description": short_description, "work_notes": work_note}
+        if priority:
+            level = "1" if str(priority).upper() == "P1" else "2"
+            body["urgency"] = level
+            body["impact"] = level
+        base_url = (self.config.servicenow_instance_url or "").rstrip("/")
+        if not base_url or not self.config.servicenow_username:
+            logger.info("Mock updating incident %s fields: %s", sys_id, sorted(body))
+            return
+
+        close_client = False
+        if client is None:
+            client = self._get_client()
+            close_client = True
+        try:
+            resp = client.patch(f"{base_url}/api/now/table/incident/{sys_id}", json=body)
+            resp.raise_for_status()
+            logger.info(
+                "Updated incident %s: short_description=%r%s",
+                sys_id,
+                short_description,
+                f", urgency/impact={body['urgency']} ({priority})" if priority else "",
+            )
+        except Exception as exc:
+            logger.error("Failed to update incident %s fields: %s", sys_id, type(exc).__name__)
+            raise
+        finally:
+            if close_client and self._http_client is None:
+                client.close()
+
     def resolve_incident(
         self,
         sys_id: str,

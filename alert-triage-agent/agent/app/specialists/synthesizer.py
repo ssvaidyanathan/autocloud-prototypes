@@ -31,7 +31,7 @@ from ..contracts.links import ConsoleLinkBuilder
 from ..grouping.models import OKFDocument, format_okf_alert_entry
 from ..grouping.store import OKFStore, get_canonical_blob_name, resolve_local_target_file
 from .base import EvidenceDossier
-from .cloud_run import CloudRunSpecialist, measured_breaches
+from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches
 from .apigee import ACCESS_LOG_NAME, SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_name
 from .cloud_sql import CloudSQLSpecialist
 from .change import ChangeSpecialist, is_genuine_change
@@ -238,6 +238,13 @@ def apply_group_alerts(report: InvestigationReport, group_alerts: list[Any]) -> 
     return report
 
 
+def _latency_disp(lat_ms: Optional[float], stat: Optional[str]) -> str:
+    """' (<statistic>: <n>ms)' when the statistic is recorded, ' (<n>ms)' otherwise, '' if unmeasured."""
+    if lat_ms is None:
+        return ""
+    return f" ({stat}: {int(lat_ms)}ms)" if stat else f" ({int(lat_ms)}ms)"
+
+
 def _as_number(value: Any) -> Optional[float]:
     """Float of a measured value, or None for missing / 'N/A (not captured)' / unparseable."""
     if value is None or isinstance(value, bool):
@@ -294,10 +301,15 @@ def correlation_observation(correlation: Optional[dict[str, Any]]) -> Optional[s
     score = _as_number(correlation.get("best_score"))
     low = _as_number(correlation.get("threshold_auto_new"))
     high = _as_number(correlation.get("threshold_auto_attach"))
+    excluded = _excluded_groups_text(correlation.get("excluded_groups"))
     if compared == 0:
+        if excluded:
+            return f"{CORRELATION_PREFIX} opened a new incident group; {excluded}"
         return f"{CORRELATION_PREFIX} opened a new incident group (no other open incident group to compare with)"
     if score is None or not compared:
         return None
+    if excluded:
+        return correlation_observation({**correlation, "excluded_groups": None}) + f"; {excluded}"
     groups = "group" if compared == 1 else "groups"
     text = f"{CORRELATION_PREFIX} opened a new incident group; best correlation score {score:g} pts against {compared} open {groups}"
     if correlation.get("is_gray_zone") and low is not None and high is not None:
@@ -305,6 +317,26 @@ def correlation_observation(correlation: Optional[dict[str, Any]]) -> Optional[s
     if low is not None and score < low:
         return text + f", below the {low:g} pts new-group threshold"
     return text
+
+
+def _excluded_groups_text(excluded: Any) -> Optional[str]:
+    """Text naming ticketed groups left out of correlation by the late new-signal rule, or None."""
+    if not isinstance(excluded, list) or not excluded:
+        return None
+    parts = []
+    for g in excluded:
+        if not isinstance(g, dict) or not g.get("group_id"):
+            continue
+        gap = _as_number(g.get("onset_gap_seconds"))
+        window = _as_number(g.get("window_seconds"))
+        detail = (
+            f" (ticketed; this alert's signal type is new to it and opened {gap:g}s after its first alert, "
+            f"beyond the {window:g}s window)"
+            if gap is not None and window is not None
+            else " (ticketed; new signal type beyond the late-alert window)"
+        )
+        parts.append(f"{g['group_id']}{detail}")
+    return f"not compared with {'; '.join(parts)}" if parts else None
 
 
 def apply_correlation_note(report: InvestigationReport, correlation: Optional[dict[str, Any]]) -> None:
@@ -1044,6 +1076,8 @@ class SynthesizerAgent:
         err_5xx_rate: Optional[str] = None
         err_5xx_pct: Optional[float] = None
         lat_p95_ms: Optional[float] = None
+        # Statistic label of the origin's latency (e.g. per-minute mean), when the dossier records it.
+        lat_stat: Optional[str] = None
         # Measured 5xx rate (text, percent) per topology dependent of the origin.
         dependent_5xx: dict[str, tuple[str, float]] = {}
         low_traffic: Optional[dict[str, Any]] = None
@@ -1082,6 +1116,8 @@ class SynthesizerAgent:
                 if raw_lat and raw_lat != "N/A (not captured)":
                     try:
                         lat_p95_ms = float(raw_lat)
+                        if d.metrics.get("latency_statistic"):
+                            lat_stat = latency_label(d.metrics)
                     except ValueError:
                         pass
             elif d.specialist_name == "ApigeeSpecialist" and d.anomaly_detected:
@@ -1111,7 +1147,7 @@ class SynthesizerAgent:
                     f"for {upstream_str} since {started_at}"
                 )
             elif "latency" in alert.policy_name.lower() or "timeout" in alert.policy_name.lower() or (lat_p95_ms is not None and lat_p95_ms >= 2000.0):
-                lat_disp = f" ({int(lat_p95_ms)}ms)" if lat_p95_ms is not None else ""
+                lat_disp = _latency_disp(lat_p95_ms, lat_stat)
                 if low_traffic:
                     return f"Elevated latency{lat_disp} on {origin} since {started_at} under {low_traffic_sentence(low_traffic)}"
                 return (
@@ -1153,7 +1189,7 @@ class SynthesizerAgent:
                 f"impacting {upstream_str} since {started_at}"
             )
         elif "latency" in alert.policy_name.lower() or "timeout" in alert.policy_name.lower() or (lat_p95_ms is not None and lat_p95_ms >= 2000.0):
-            lat_disp = f" ({int(lat_p95_ms)}ms)" if lat_p95_ms is not None else ""
+            lat_disp = _latency_disp(lat_p95_ms, lat_stat)
             if low_traffic:
                 return f"Elevated latency{lat_disp} on {origin} since {started_at} under {low_traffic_sentence(low_traffic)}"
             return (
@@ -1458,7 +1494,7 @@ class SynthesizerAgent:
         )
         lat = cr.metrics.get("latency_p95_ms") if cr else None
         if isinstance(lat, (int, float)):
-            fact += f"; `{origin}` peak observed latency was {int(lat)}ms"
+            fact += f"; `{origin}` {latency_label(cr.metrics)} was {int(lat)}ms"
         return fact + "."
 
     def _format_dominant_signal_facts(self, alert: AlertEvent, dossier: Optional[EvidenceDossier]) -> str:
@@ -1498,7 +1534,7 @@ class SynthesizerAgent:
         # If policy is latency or latency breach without 5xx policy:
         if is_latency_policy or (lat_val is not None and lat_val >= 2000.0 and not is_5xx_policy):
             if lat_val is not None:
-                return f" (peak observed latency: {int(lat_val)}ms)"
+                return f" ({latency_label(dossier.metrics)}: {int(lat_val)}ms)"
             return " (elevated request latency)"
 
         # If policy is 5xx or 5xx error breach:
@@ -1508,7 +1544,7 @@ class SynthesizerAgent:
             return " (elevated HTTP 5xx errors)"
 
         if lat_val is not None and lat_val >= 2000.0:
-            return f" (peak observed latency: {int(lat_val)}ms)"
+            return f" ({latency_label(dossier.metrics)}: {int(lat_val)}ms)"
         if err and err != "0.1%":
             return f" (HTTP 5xx error rate: {err})"
 
@@ -1597,7 +1633,11 @@ class SynthesizerAgent:
                 symptom_text = f"database authentication failures in application logs{err_str}"
             elif any(k in (alert.policy_name or "").lower() for k in ("latency", "timeout", "slow")):
                 lat = cr_spec.metrics.get("latency_p95_ms") if cr_spec else None
-                lat_str = f" (peak observed latency: {lat}ms)" if lat and lat != "N/A (not captured)" else ""
+                lat_str = (
+                    f" ({latency_label(cr_spec.metrics)}: {lat:g}ms)"
+                    if isinstance(lat, (int, float)) and not isinstance(lat, bool)
+                    else ""
+                )
                 symptom_text = f"elevated request latency{lat_str}"
             elif cr_spec and cr_spec.metrics.get("error_rate_5xx") and cr_spec.metrics["error_rate_5xx"] != "0.1%":
                 symptom_text = f"elevated HTTP 5xx error rate ({cr_spec.metrics['error_rate_5xx']})"

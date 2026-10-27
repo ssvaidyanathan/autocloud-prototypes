@@ -25,6 +25,20 @@ class UpdateReportRequest(BaseModel):
     report: InvestigationReport = Field(..., description="Updated diagnostic report")
 
 
+class UpdateTicketFieldsRequest(BaseModel):
+    """Payload to update a ticket's title (and raise its priority) when alerts join its group.
+
+    Sent when alerts attach to an already-ticketed group: the short description is rebuilt
+    from the group (alert count, problem) and ``priority`` is set only when a new alert is
+    more severe than the ticket (the agent never lowers it). ``work_note`` states the change.
+    """
+    sys_id: str = Field(..., description="ServiceNow incident sys_id")
+    group_id: str = Field(..., description="Canonical incident group identifier")
+    short_description: str = Field(..., description="New ticket short description")
+    priority: Optional[str] = Field(default=None, description="Escalated priority (P1..P4); None leaves urgency/impact unchanged")
+    work_note: str = Field(..., description="Work note naming the new alerts and the changes")
+
+
 class ResolveTicketRequest(BaseModel):
     """Payload to resolve an incident in ServiceNow."""
     sys_id: str = Field(..., description="ServiceNow incident sys_id")

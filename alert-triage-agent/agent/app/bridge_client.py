@@ -12,6 +12,7 @@ from .contracts.instructions import (
     ResolveTicketRequest,
     TicketResponse,
     UpdateReportRequest,
+    UpdateTicketFieldsRequest,
     WorkNoteRequest,
 )
 
@@ -227,6 +228,28 @@ class BridgeClient:
             backoff_factor=self.backoff_factor,
         )
         return TicketResponse.model_validate(data)
+
+    def update_ticket_fields(
+        self,
+        bridge_url: str,
+        request: UpdateTicketFieldsRequest,
+        config: Optional[AgentConfig] = None,
+        http_client: Optional[httpx.Client] = None,
+    ) -> ActionStatusResponse:
+        """Call POST /instructions/ticket/update-fields to update the ticket title / raise its priority."""
+        cfg = config or self.config
+        h_client = http_client or self.http_client
+        data = _execute_instruction_request(
+            method="POST",
+            bridge_url=bridge_url,
+            endpoint_path="/instructions/ticket/update-fields",
+            payload=request.model_dump(mode="json"),
+            config=cfg,
+            http_client=h_client,
+            max_retries=self.max_retries,
+            backoff_factor=self.backoff_factor,
+        )
+        return ActionStatusResponse.model_validate(data)
 
     def resolve_ticket(
         self,

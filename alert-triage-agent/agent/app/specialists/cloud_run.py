@@ -57,6 +57,20 @@ DB_AUTH_PATTERNS = [
 ERROR_RATE_5XX_BREACH_PCT = 5.0
 LATENCY_P95_BREACH_MS = 2000.0
 
+# Which statistic ``latency_p95_ms`` holds (the key name is historical; it is never a P95).
+# run.googleapis.com/request_latencies is a DISTRIBUTION metric in milliseconds, one point per
+# minute per series; its points carry a mean, so the metric value is the highest per-minute
+# mean. A logged request's httpRequest.latency is that single request's duration.
+LATENCY_STAT_MINUTE_MEAN = "peak per-minute mean latency"
+LATENCY_STAT_LOGGED_REQUEST = "slowest logged request latency"
+LATENCY_STAT_GENERIC = "peak observed latency"
+
+
+def latency_label(metrics: Optional[dict[str, Any]]) -> str:
+    """Label of the latency statistic recorded in a Cloud Run dossier's metrics."""
+    stat = (metrics or {}).get("latency_statistic")
+    return stat if isinstance(stat, str) and stat.strip() else LATENCY_STAT_GENERIC
+
 
 def _as_float(value: Any) -> Optional[float]:
     if isinstance(value, bool):
@@ -69,6 +83,13 @@ def _as_float(value: Any) -> Optional[float]:
         except ValueError:
             return None
     return None
+
+
+def _fmt_latency(value: Any) -> str:
+    """'<value>ms' for a measured latency in ms, else the value as recorded (e.g. 'N/A ...')."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:g}ms"
+    return str(value)
 
 
 def measured_breaches(metrics: dict[str, Any]) -> list[str]:
@@ -85,7 +106,7 @@ def measured_breaches(metrics: dict[str, Any]) -> list[str]:
         breaches.append(f"HTTP 5xx error rate {rate_raw}")
     latency = _as_float(metrics.get("latency_p95_ms"))
     if latency is not None and latency >= LATENCY_P95_BREACH_MS:
-        breaches.append(f"peak observed latency {latency:g}ms")
+        breaches.append(f"{latency_label(metrics)} {latency:g}ms")
     return breaches
 
 
@@ -219,6 +240,7 @@ class CloudRunSpecialist(BaseSpecialist):
         total_requests_val: Optional[int] = None
         restarts_val: Optional[int] = None
         latency_p95_ms_val: Optional[float] = None
+        latency_statistic: Optional[str] = None
         earliest_anomaly_time: Optional[datetime] = None
         service_describe_info: Optional[dict[str, Any]] = None
         error_logs_captured: list[dict[str, Any]] = []
@@ -292,10 +314,12 @@ class CloudRunSpecialist(BaseSpecialist):
                         pt_val = float(pt.value.int64_value)
 
                     if pt_val is not None:
-                        # Normalize to milliseconds if in seconds
-                        lat_ms = pt_val * 1000.0 if pt_val < 100.0 and pt_val > 1.0 else pt_val
+                        # request_latencies is documented in milliseconds: no unit guessing
+                        # (a 28 ms mean is 28 ms, not 28 s).
+                        lat_ms = float(pt_val)
                         if latency_p95_ms_val is None or lat_ms > latency_p95_ms_val:
                             latency_p95_ms_val = lat_ms
+                            latency_statistic = LATENCY_STAT_MINUTE_MEAN
                         if lat_ms >= 2000.0 and earliest_anomaly_time is None:
                             pt_time = _extract_point_time(pt)
                             if pt_time:
@@ -392,6 +416,7 @@ class CloudRunSpecialist(BaseSpecialist):
                 if entry_lat_ms is not None and entry_lat_ms >= 2000.0:
                     if latency_p95_ms_val is None or entry_lat_ms > latency_p95_ms_val:
                         latency_p95_ms_val = entry_lat_ms
+                        latency_statistic = LATENCY_STAT_LOGGED_REQUEST
                     if earliest_anomaly_time is None and hasattr(entry, "timestamp") and entry.timestamp:
                         earliest_anomaly_time = entry.timestamp
 
@@ -432,6 +457,8 @@ class CloudRunSpecialist(BaseSpecialist):
         metrics["container_restarts"] = restarts_val if restarts_val is not None else "N/A (not captured)"
         metrics["latency_p95_ms"] = latency_p95_ms_val if latency_p95_ms_val is not None else "N/A (not captured)"
         metrics["target_latency_p95_ms"] = latency_p95_ms_val if latency_p95_ms_val is not None else "N/A (not captured)"
+        if latency_p95_ms_val is not None and latency_statistic:
+            metrics["latency_statistic"] = latency_statistic
 
         # Log WARNING for genuinely absent data per Quality Gates
         if error_rate_5xx_val is None:
@@ -446,7 +473,7 @@ class CloudRunSpecialist(BaseSpecialist):
             )
         if latency_p95_ms_val is None:
             logger.warning(
-                "Latency P95 on %s is N/A: no latency distribution points found in window [%s, %s]",
+                "Request latency on %s is N/A: no latency distribution points or slow logged requests found in window [%s, %s]",
                 target_service, start_iso, end_iso,
             )
         if restarts_val is None:
@@ -493,7 +520,8 @@ class CloudRunSpecialist(BaseSpecialist):
         if anomaly_detected:
             if has_latency_breach:
                 findings.append(
-                    f"Elevated request latency detected on `{target_service}`: {latency_p95_ms_val}ms (threshold: 2000ms)."
+                    f"Elevated request latency detected on `{target_service}`: {latency_label(metrics)} "
+                    f"{latency_p95_ms_val:g}ms (threshold: 2000ms)."
                 )
             elif error_rate_5xx_val is not None:
                 findings.append(
@@ -532,7 +560,7 @@ class CloudRunSpecialist(BaseSpecialist):
             evidence_content = (
                 f"Target: {target_service}\n"
                 f"5xx Errors: {metrics['error_rate_5xx']}\n"
-                f"Peak observed latency: {metrics['latency_p95_ms']}\n"
+                f"{latency_label(metrics)[0].upper()}{latency_label(metrics)[1:]}: {_fmt_latency(metrics['latency_p95_ms'])}\n"
                 f"Request Rate: {metrics['request_count_rpm']}\n"
                 f"Container Restarts: {metrics['container_restarts']}\n"
                 f"Sample Logs (excluding /admin/*):\n"

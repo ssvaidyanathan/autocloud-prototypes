@@ -71,6 +71,15 @@ class AgentConfig(BaseSettings):
     # INC0010327 had 1.9 requests/min (32 in 17.2 min); S2's origin ata-inventory-api ~35
     # requests/min (627 in ~18 min).
     low_traffic_rpm: float = Field(default=5.0, alias="LOW_TRAFFIC_RPM", gt=0)
+    # Late alerts on ticketed groups: an alert of a signal type the group does not have yet
+    # (e.g. 5xx joining a latency group) whose onset is more than this many seconds after the
+    # group's first alert opens a new group instead of joining a ticketed group. Same-service
+    # latency/5xx score 35 (topology) + 30 (causal) = the 65-pt attach threshold, so the
+    # temporal score alone never separates them. Default: the 10-min temporal scoring horizon.
+    # Live S5 (one incident) had latency -> 5xx 413 s apart; keep the window above that.
+    late_new_signal_max_onset_gap_seconds: float = Field(
+        default=600.0, alias="LATE_NEW_SIGNAL_MAX_ONSET_GAP_SECONDS", ge=0
+    )
 
     @property
     def effective_incidents_bucket(self) -> str:

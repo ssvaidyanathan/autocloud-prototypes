@@ -27,6 +27,7 @@ from .duplicate_checker import (
     append_duplicate_alert_to_incident,
     check_for_duplicate,
 )
+from .grouping.late_alerts import TICKET_TITLE_MAX_LENGTH, refresh_ticket_for_late_alerts
 from .grouping.manager import GroupingManager
 from .grouping.models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument
 from .grouping.store import OKFStore, read_okf, update_okf_atomically
@@ -360,6 +361,7 @@ async def timer_wake(
             d.servicenow_sys_id = ticket_resp.sys_id
             d.servicenow_number = ticket_resp.number
             d.servicenow_url = ticket_resp.url
+            _record_ticket_title(d, report)
             d.origin = report.origin
             d.blast_radius = report.blast_radius
             d.updated_at = now_iso
@@ -382,7 +384,7 @@ async def timer_wake(
                 doc.group_id,
             )
             return TimerWakeResponse(status="executed", group_id=doc.group_id, reason="group_file_gone")
-        _note_alerts_missed_by_ticket(report, updated_doc, bridge_client, settings)
+        _note_alerts_missed_by_ticket(report, updated_doc, bridge_client, settings, store=store)
         if cooling_scheduled and cooling_dt is not None:
             try:
                 schedule_delayed_timer(
@@ -468,6 +470,7 @@ async def timer_wake(
             d.servicenow_sys_id = ticket_resp.sys_id
             d.servicenow_number = ticket_resp.number
             d.servicenow_url = ticket_resp.url
+            _record_ticket_title(d, report)
             d.origin = report.origin
             d.blast_radius = report.blast_radius
             d.updated_at = now_iso
@@ -490,7 +493,7 @@ async def timer_wake(
                 doc.group_id,
             )
             return TimerWakeResponse(status="executed", group_id=doc.group_id, reason="group_file_gone")
-        _note_alerts_missed_by_ticket(report, updated_doc, bridge_client, settings)
+        _note_alerts_missed_by_ticket(report, updated_doc, bridge_client, settings, store=store)
         if cooling_scheduled and cooling_dt is not None:
             try:
                 schedule_delayed_timer(
@@ -759,11 +762,20 @@ def _apply_current_group_alerts(report: InvestigationReport, store: OKFStore, do
     apply_correlation_note(report, current.correlation)
 
 
+def _record_ticket_title(d: OKFDocument, report: InvestigationReport) -> None:
+    """Store the title/priority the bridge built for the new ticket (late-alert updates start from it)."""
+    d.ticket_short_description = report.build_short_description(max_length=TICKET_TITLE_MAX_LENGTH)
+    d.ticket_priority = report.priority
+    d.ticket_title_problem = report.resolve_title_problem()
+    d.ticket_origin = report.origin
+
+
 def _note_alerts_missed_by_ticket(
     report: InvestigationReport,
     doc: OKFDocument,
     bridge_client: BridgeClient,
     settings: AgentConfig,
+    store: Optional[OKFStore] = None,
 ) -> None:
     """Append a late-alert work note for each group alert the created ticket does not list.
 
@@ -777,10 +789,12 @@ def _note_alerts_missed_by_ticket(
     reported = {
         a.get("incident_id") for a in (report.alerts or []) if isinstance(a, dict) and a.get("incident_id")
     }
+    missed: list[str] = []
     for entry in doc.alerts or []:
         inc_id = entry.get("incident_id") if isinstance(entry, dict) else None
         if not inc_id or inc_id in reported:
             continue
+        missed.append(inc_id)
         logger.warning(
             "Alert %s attached to group %s while ticket %s was being created; appending a late-alert work note",
             inc_id,
@@ -804,6 +818,9 @@ def _note_alerts_missed_by_ticket(
                 doc.group_id,
                 type(exc).__name__,
             )
+    if missed:
+        # The ticket title was built without these alerts: update count/priority (work-noted).
+        refresh_ticket_for_late_alerts(doc, missed, bridge_client, settings, store or OKFStore(config=settings))
 
 
 def _group_fallback_alert(doc: OKFDocument) -> AlertEvent:
