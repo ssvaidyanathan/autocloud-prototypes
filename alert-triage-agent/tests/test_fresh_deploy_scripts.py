@@ -104,6 +104,8 @@ elif args[:3] == ["artifacts", "packages", "list"]:
 STUB_TERRAFORM = r'''#!/bin/sh
 if [ "$1" = "version" ]; then echo "Terraform v1.9.8"; exit 0; fi
 python3 -c 'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["terraform", os.path.basename(os.getcwd())] + sys.argv[1:]) + "\n")' "$@"
+# show -json <plan>: STUB_TF_SHOW_JSON (prior_state and resource_changes), default an empty state.
+if [ "$1" = "show" ] && [ "$2" = "-json" ]; then printf '%s\n' "${STUB_TF_SHOW_JSON:-{\}}"; fi
 '''
 
 STUB_PSQL = r'''#!/bin/sh
@@ -827,6 +829,174 @@ def test_teardown_with_its_own_backend_does_run_terraform(stack):
     res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--skip-apigee")
     destroys = [c[1] for c in calls if c[:3] == ["terraform", c[1], "destroy"]]
     assert destroys[:2] == ["observability", "triage-iam"], (destroys, _out(res))
+
+
+APP_SERVICES = ["google_cloud_run_v2_service.inventory_api", "google_cloud_run_v2_service.orders_api"]
+INV_IMAGE = "us-central1-docker.pkg.dev/fresh-proj/atat-docker/atat-inventory-api@sha256:" + "a" * 64
+ORD_IMAGE = "us-central1-docker.pkg.dev/fresh-proj/atat-docker/atat-orders-api@sha256:" + "b" * 64
+
+
+def _service_values(name, protection, image, env=()):
+    return {"name": name, "deletion_protection": protection, "labels": {"env": "test", "owner": "team-x"},
+            "template": [{"scaling": [{"max_instance_count": 1}],
+                          "containers": [{"image": image, "env": [{"name": k, "value": v} for k, v in env]}]}]}
+
+
+def _show_json(prefix="atat", protection=True, changes=None, services=APP_SERVICES):
+    """`terraform show -json` of both teardown plans: the refreshed state of the two services
+    (prior_state) and the resource changes (default: only deletion_protection true -> false)."""
+    values = {
+        APP_SERVICES[0]: _service_values(f"{prefix}-inventory-api", protection, INV_IMAGE,
+                                         [("ATA_INVENTORY_MOCK_DB", "false")]),
+        APP_SERVICES[1]: _service_values(f"{prefix}-orders-api", protection, ORD_IMAGE),
+    }
+    resources = [{"address": a, "values": values[a]} for a in services]
+    if changes is None:
+        changes = []
+        for a in services:
+            before = dict(values[a])
+            after = dict(before, deletion_protection=False)
+            changes.append({"address": a, "change": {"actions": ["update"], "before": before, "after": after,
+                                                      "after_unknown": {"template": [{"containers": [{}]}]}}})
+    return json.dumps({"prior_state": {"values": {"root_module": {"resources": resources}}},
+                       "resource_changes": changes})
+
+
+def _app_calls(calls):
+    return [c for c in calls if c[:2] == ["terraform", "applications"]]
+
+
+def _targets(c):
+    return [c[i + 1] for i, a in enumerate(c) if a == "-target"]
+
+
+def _vars(c):
+    return [c[i + 1] for i, a in enumerate(c) if a == "-var"]
+
+
+def test_teardown_unprotects_both_services_before_the_applications_destroy(stack):
+    """D10: the applications root defaults deletion_protection to true. Before the destroy, a
+    targeted apply with deletion_protection=false on exactly the two services; its plan reuses
+    their refreshed images and labels, so it changes nothing else."""
+    _write_backends(stack, "fresh-proj-atat-tfstate", "atat")
+    res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--skip-apigee",
+                       STUB_TF_SHOW_JSON=_show_json())
+    assert res.returncode == 0, _out(res)
+    app = _app_calls(calls)
+    actions = [c[2] for c in app]
+    assert actions == ["init", "plan", "show", "plan", "show", "apply", "init", "destroy"], app
+    read_plan, plan, apply_, destroy = app[1], app[3], app[5], app[7]
+    for c in (read_plan, plan):
+        assert sorted(_targets(c)) == APP_SERVICES, c
+        assert _vars(c)[-1] == "deletion_protection=false", c
+        assert "project_id=fresh-proj" in _vars(c) and "name_prefix=atat" in _vars(c), c
+    assert "-auto-approve" not in read_plan + plan
+    # The applied plan reproduces the services' configuration: their images, not the placeholders.
+    v = _vars(plan)
+    assert f"inventory_image={INV_IMAGE}" in v and f"orders_image={ORD_IMAGE}" in v, v
+    assert v.index(f"inventory_image={INV_IMAGE}") > v.index("inventory_image=unused-on-destroy")
+    assert {"environment=test", "owner=team-x", "inventory_mock_db=false", "demo_max_instance_count=1"} <= set(v)
+    out_plan = [a for a in plan if a.startswith("-out=")][0].split("=", 1)[1]
+    assert apply_[3:] == ["-input=false", out_plan], apply_
+    assert not _targets(destroy) and "deletion_protection=false" not in _vars(destroy)
+    assert "only deletion_protection -> false" in res.stdout
+    # Ordering against the other roots: triage-iam destroyed first, database after.
+    tf = [(c[1], c[2]) for c in calls if c[0] == "terraform" and c[2] in ("apply", "destroy")]
+    assert tf.index(("applications", "apply")) == tf.index(("applications", "destroy")) - 1
+    assert tf.index(("triage-iam", "destroy")) < tf.index(("applications", "apply")) < tf.index(("database", "destroy"))
+
+
+def test_teardown_unprotects_only_the_services_still_protected(stack):
+    _write_backends(stack, "fresh-proj-atat-tfstate", "atat")
+    show = json.loads(_show_json(services=[APP_SERVICES[1]]))
+    res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--skip-apigee",
+                       STUB_TF_SHOW_JSON=json.dumps(show))
+    assert res.returncode == 0, _out(res)
+    plans = [c for c in _app_calls(calls) if c[2] == "plan"]
+    assert _targets(plans[1]) == [APP_SERVICES[1]]
+    assert "orders_image=" + ORD_IMAGE in _vars(plans[1])
+
+
+@pytest.mark.parametrize("protection", [False, None])
+def test_teardown_skips_the_apply_when_nothing_is_protected(stack, protection):
+    """State already false (or no service in state): no apply, straight to the destroy."""
+    _write_backends(stack, "fresh-proj-atat-tfstate", "atat")
+    show = _show_json(protection=False) if protection is False else "{}"
+    res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--skip-apigee",
+                       STUB_TF_SHOW_JSON=show)
+    assert res.returncode == 0, _out(res)
+    assert [c[2] for c in _app_calls(calls)] == ["init", "plan", "show", "init", "destroy"]
+    assert "nothing to change" in res.stdout
+
+
+@pytest.mark.parametrize("change,message", [
+    # The image would change: a stale state or a placeholder. The PATCH would redeploy it.
+    ({"template": [{"containers": [{"image": "unused-on-destroy"}]}]}, "changes deletion_protection, template"),
+    ({"labels": {"env": "demo"}}, "changes deletion_protection, labels"),
+])
+def test_teardown_stops_when_the_plan_changes_more_than_deletion_protection(stack, change, message):
+    _write_backends(stack, "fresh-proj-atat-tfstate", "atat")
+    show = json.loads(_show_json())
+    show["resource_changes"][0]["change"]["after"].update(change)
+    res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--skip-apigee",
+                       STUB_TF_SHOW_JSON=json.dumps(show))
+    assert res.returncode == 1
+    assert message in res.stderr and "nothing was applied" in res.stderr
+    assert [c[2] for c in _app_calls(calls)] == ["init", "plan", "show", "plan", "show"]
+    assert not [c for c in calls if c[0] == "terraform" and c[1] in ("applications", "database", "foundation")
+                and c[2] in ("apply", "destroy")]
+
+
+@pytest.mark.parametrize("changes", [
+    [{"address": "google_cloud_run_v2_service_iam_member.inventory_invoker_apigee",
+      "change": {"actions": ["delete"], "before": {}, "after": None}}],
+    [{"address": APP_SERVICES[0], "change": {"actions": ["delete", "create"], "before": {}, "after": {}}}],
+    [{"address": APP_SERVICES[0], "change": {"actions": ["update"], "before": {"deletion_protection": True},
+                                             "after": {"deletion_protection": True}}}],
+])
+def test_teardown_plan_check_refuses_other_resources_and_actions(stack, changes):
+    _write_backends(stack, "fresh-proj-atat-tfstate", "atat")
+    res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--skip-apigee",
+                       STUB_TF_SHOW_JSON=_show_json(changes=changes))
+    assert res.returncode == 1, _out(res)
+    assert not [c for c in _app_calls(calls) if c[2] in ("apply", "destroy")]
+
+
+def test_teardown_never_unprotects_another_prefixes_services(stack):
+    """A state whose services are ata-* (another stack) is refused before any apply or destroy."""
+    _write_backends(stack, "fresh-proj-atat-tfstate", "atat")
+    res, calls = stack("teardown-stack.sh", "--apply", "--confirm-prefix", "atat", "--skip-apigee",
+                       STUB_TF_SHOW_JSON=_show_json(prefix="ata"))
+    assert res.returncode == 1
+    assert "is named 'ata-inventory-api', not 'atat-inventory-api'" in res.stderr
+    assert [c[2] for c in _app_calls(calls)] == ["init", "plan", "show"]
+
+
+@pytest.mark.parametrize("bucket,prefix", [("fresh-proj-ata-tfstate", "ata"), ("fresh-proj-atat-tfstate", "ata"),
+                                           ("fresh-proj-ata-tfstate", "atat")])
+def test_teardown_unprotect_refuses_a_foreign_applications_backend(stack, bucket, prefix):
+    """The other roots belong to atat, only applications/backend.hcl to another stack: the
+    deletion_protection step dies at the backend guard, before any applications terraform call."""
+    _write_backends(stack, "fresh-proj-atat-tfstate", "atat")
+    (stack.work / "infra" / "terraform" / "applications" / "backend.hcl").write_text(
+        f'bucket = "{bucket}"\nprefix = "{prefix}/applications"\n')
+    for args in (["--apply", "--confirm-prefix", "atat", "--skip-apigee"], ["--skip-apigee"]):
+        res, calls = stack("teardown-stack.sh", *args, STUB_TF_SHOW_JSON=_show_json())
+        assert res.returncode == 1, _out(res)
+        assert "applications/backend.hcl" in res.stderr
+        assert not _app_calls(calls), calls
+
+
+def test_teardown_dry_run_prints_the_unprotect_step(stack):
+    _write_backends(stack, "fresh-proj-atat-tfstate", "atat")
+    res, calls = stack("teardown-stack.sh", "--skip-apigee", STUB_TF_SHOW_JSON=_show_json())
+    assert res.returncode == 0, _out(res)
+    assert not [c for c in calls if c[0] == "terraform"]
+    out = res.stdout
+    step = out.index("deletion_protection=false on " + " ".join(APP_SERVICES))
+    assert step < out.index("terraform destroy applications")
+    assert f"-target {APP_SERVICES[0]} -target {APP_SERVICES[1]}" in out
+    assert "[dry-run] terraform apply <plan>" in out
 
 
 def _teardown_functions(tmp_path):
