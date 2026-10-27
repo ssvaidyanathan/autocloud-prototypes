@@ -1,31 +1,32 @@
 variable "project_id" {
   type        = string
-  default     = "cloud-assist-fde-2"
-  description = "Google Cloud project ID"
+  description = "Google Cloud project ID. No default: it identifies the target."
 }
 
 variable "region" {
   type        = string
-  default     = "us-west1"
-  description = "Google Cloud region"
+  description = "Google Cloud region (e.g. us-central1). No default: it identifies the target."
 }
 
 variable "name_prefix" {
   type        = string
   default     = "ata"
-  description = "Resource name prefix for all alert triage agent components"
+  description = "Resource name prefix for all alert triage agent components: lowercase, starts with a letter, 2-10 characters of [a-z0-9]."
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9]{1,9}$", var.name_prefix))
+    error_message = "name_prefix must be 2-10 characters, lowercase letters and digits only, starting with a letter (regex ^[a-z][a-z0-9]{1,9}$)."
+  }
 }
 
 variable "inventory_image" {
   type        = string
-  default     = "us-west1-docker.pkg.dev/cloud-assist-fde-2/ata-docker/ata-inventory-api:latest"
-  description = "Container image for ata-inventory-api"
+  description = "Container image of the inventory API, built into the stack's repository (<region>-docker.pkg.dev/<project_id>/<name_prefix>-docker/<name_prefix>-inventory-api@sha256:...). Required: no image exists in a fresh project until the build script pushes it."
 }
 
 variable "orders_image" {
   type        = string
-  default     = "us-west1-docker.pkg.dev/cloud-assist-fde-2/ata-docker/ata-orders-api:latest"
-  description = "Container image for ata-orders-api"
+  description = "Container image of the orders API, built into the stack's repository (<region>-docker.pkg.dev/<project_id>/<name_prefix>-docker/<name_prefix>-orders-api@sha256:...). Required: no image exists in a fresh project until the build script pushes it."
 }
 
 variable "environment" {
