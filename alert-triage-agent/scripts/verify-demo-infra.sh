@@ -14,6 +14,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ALERT_TRIAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Stack-local files (.${NAME_PREFIX}-api-key, .${NAME_PREFIX}-apigee.env); same default as common.sh.
+ATA_STACK_DIR="${ATA_STACK_DIR:-${ALERT_TRIAGE_DIR}}"
 # shellcheck source=scripts/cloud-run-deploy-lib.sh
 source "${SCRIPT_DIR}/cloud-run-deploy-lib.sh"
 
@@ -30,14 +32,14 @@ if [ "${VERIFY_MOCK}" != "true" ]; then
     # Checked before common.sh, which still has defaults for some of these.
     require_vars PROJECT_ID REGION || exit 1
     require_name_prefix || exit 1
-    APIGEE_ENV_FILE="${ALERT_TRIAGE_DIR}/.${NAME_PREFIX}-apigee.env"
+    APIGEE_ENV_FILE="${ATA_STACK_DIR}/.${NAME_PREFIX}-apigee.env"
     if [ -z "${APIGEE_HOST:-}" ] && [ -f "${APIGEE_ENV_FILE}" ]; then
         APIGEE_HOST="$(grep -E '^APIGEE_HOST=' "${APIGEE_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
         echo "APIGEE_HOST not exported: using ${APIGEE_HOST} from ${APIGEE_ENV_FILE}"
     fi
     require_vars APIGEE_HOST || exit 1
     export APIGEE_HOST
-    KEY_FILE="${ALERT_TRIAGE_DIR}/.${NAME_PREFIX}-api-key"
+    KEY_FILE="${ATA_STACK_DIR}/.${NAME_PREFIX}-api-key"
     if [ -z "${ATA_API_KEY:-}" ] && [ -s "${KEY_FILE}" ]; then
         ATA_API_KEY="$(tr -d '[:space:]' < "${KEY_FILE}")"
         export ATA_API_KEY

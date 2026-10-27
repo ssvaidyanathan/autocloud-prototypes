@@ -137,6 +137,7 @@ Demo script settings (scripts/scenarios/common.sh):
 | `ATA_DEMO_MAX_INSTANCES` | `1` | Max Cloud Run instances of the demo services (service and revision level). Keep equal to Terraform `demo_max_instance_count`. |
 | `ATA_INVENTORY_RESTOCK_BASELINE` | `item-101=1000,...,item-105=1000` | Stock that `reset-scenarios.sh` sets via `POST /admin/restock` before each scenario (`<id>=<stock>`, stock >= 1). |
 | `ATA_INVENTORY_PIN_FILE` | `scripts/scenarios/inventory-pin.<prefix>.env` | The inventory pin (revision, digest, previous pin). Change it with `scripts/repin-inventory.sh`. |
+| `ATA_STACK_DIR` | `alert-triage-agent/` of the checkout | Directory of the stack-local, gitignored files `.<prefix>-api-key`, `.<prefix>-apigee.env` and `.deploy-state/`. Read and written by `common.sh` (every scenario, reset, preflight and repin), `deploy-apigee-proxies.sh`, `deploy-stage1.sh` and `verify-demo-infra.sh`. The committed inventory pin does not move with it (`ATA_INVENTORY_PIN_FILE`). |
 | `ATA_ARTIFACT_REGISTRY_HOST` | `<REGION>-docker.pkg.dev` | Artifact Registry host of the `<prefix>-docker` repository. |
 | `INVENTORY_SERVICE_URL` | *Cloud Run URL* | Internal Cloud Run URL of inventory service called by orders API. |
 
@@ -335,8 +336,8 @@ Client traffic reaching the demo microservices routes through the Apigee X envir
 | **API Product** | `<prefix>-product` | Bundles `<prefix>-orders-v1` and `<prefix>-inventory-v1`. |
 | **Developer Account** | `<prefix>-dev@example.com` | Registered Apigee developer identity. |
 | **Developer App** | `<prefix>-demo-app` | Registered application holding API credentials. |
-| **Credential Key File** | `.<prefix>-api-key` | Stores the consumer API key (mode 600, gitignored). |
-| **Apigee Env File** | `.<prefix>-apigee.env` | `APIGEE_HOST`, `APIGEE_ORG` and `APIGEE_ENV`, sourceable (gitignored). |
+| **Credential Key File** | `.<prefix>-api-key` (in `ATA_STACK_DIR`) | Stores the consumer API key (mode 600, gitignored). |
+| **Apigee Env File** | `.<prefix>-apigee.env` (in `ATA_STACK_DIR`) | `APIGEE_HOST`, `APIGEE_ORG` and `APIGEE_ENV`, sourceable (gitignored). |
 | **Authentication Header** | `x-api-key: <KEY>` | Header enforced on protected proxy endpoints. |
 | **Query Parameter Auth** | `?apikey=<KEY>` | Query parameter fallback for API key validation. |
 

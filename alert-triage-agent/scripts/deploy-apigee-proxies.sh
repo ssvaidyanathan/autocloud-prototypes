@@ -9,7 +9,8 @@
 #   APIGEE_HOST   envgroup hostname that serves APIGEE_ENV (written to the env file for the scenarios)
 # Optional:
 #   APIGEE_ORG    Apigee organization; defaults to PROJECT_ID (echoed when it does)
-#   ALERT_TRIAGE_DIR       where the key and env files go (default: this checkout's alert-triage-agent/)
+#   ATA_STACK_DIR          where the key and env files go (default: ALERT_TRIAGE_DIR, else this
+#                          checkout's alert-triage-agent/; ALERT_TRIAGE_DIR is the older name)
 #   DEPLOY_TIMEOUT_SECS    deployment READY timeout per proxy (default 300)
 #   DEPLOY_POLL_SECS       poll interval (default 5)
 #
@@ -21,8 +22,8 @@
 #   API product ${NAME_PREFIX}-product, developer ${NAME_PREFIX}-dev@example.com,
 #     app ${NAME_PREFIX}-demo-app
 # Writes:
-#   ${ALERT_TRIAGE_DIR}/.${NAME_PREFIX}-api-key      consumer key of ${NAME_PREFIX}-demo-app (mode 600)
-#   ${ALERT_TRIAGE_DIR}/.${NAME_PREFIX}-apigee.env   APIGEE_HOST=, APIGEE_ORG=, APIGEE_ENV= (sourceable)
+#   ${ATA_STACK_DIR}/.${NAME_PREFIX}-api-key      consumer key of ${NAME_PREFIX}-demo-app (mode 600)
+#   ${ATA_STACK_DIR}/.${NAME_PREFIX}-apigee.env   APIGEE_HOST=, APIGEE_ORG=, APIGEE_ENV= (sourceable)
 #
 # Every management API call is checked: any non-2xx fails with the response body. 409 on a
 # create means "exists" and is followed by an update. Undo with scripts/teardown-apigee.sh.
@@ -46,8 +47,8 @@ for v in PROJECT_ID REGION APIGEE_ORG APIGEE_ENV APIGEE_HOST; do
     # shellcheck disable=SC2154
     apigee_safe_token "${val}" || apigee_die "${v}='${val}' contains unexpected characters."
 done
-ALERT_TRIAGE_DIR="${ALERT_TRIAGE_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
-[ -d "${ALERT_TRIAGE_DIR}" ] || apigee_die "ALERT_TRIAGE_DIR ${ALERT_TRIAGE_DIR} is not a directory."
+ATA_STACK_DIR="${ATA_STACK_DIR:-${ALERT_TRIAGE_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}}"
+[ -d "${ATA_STACK_DIR}" ] || apigee_die "ATA_STACK_DIR ${ATA_STACK_DIR} is not a directory."
 DEPLOY_TIMEOUT_SECS="${DEPLOY_TIMEOUT_SECS:-300}"
 DEPLOY_POLL_SECS="${DEPLOY_POLL_SECS:-5}"
 
@@ -59,8 +60,8 @@ PRODUCT="${P}-product"
 DEVELOPER="${P}-dev@example.com"
 APP="${P}-demo-app"
 SA_EMAIL="${P}-apigee-sa@${PROJECT_ID}.iam.gserviceaccount.com"
-KEY_FILE="${ALERT_TRIAGE_DIR}/.${P}-api-key"
-ENV_FILE="${ALERT_TRIAGE_DIR}/.${P}-apigee.env"
+KEY_FILE="${ATA_STACK_DIR}/.${P}-api-key"
+ENV_FILE="${ATA_STACK_DIR}/.${P}-apigee.env"
 BASE_URL="https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG}"
 ENV_URL="${BASE_URL}/environments/${APIGEE_ENV}"
 
