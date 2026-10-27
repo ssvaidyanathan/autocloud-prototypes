@@ -114,3 +114,28 @@ def test_non_local_config_on_cloud_run_is_unaffected(monkeypatch, cls_index):
     monkeypatch.setenv("K_SERVICE", "atat-svc")
     cfg = cls(NAME_PREFIX="atat", PROJECT_ID="proj-x", REGION="us-central1", IS_LOCAL=False)
     assert cfg.is_local is False
+
+
+# ---------------------------------------------------------------------------
+# test review M2: the tools middleware fails closed without an audience
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("audience", [None, [], ""])
+def test_tools_middleware_without_audience_rejects_a_token_the_verifier_would_accept(monkeypatch, audience):
+    """Without this branch verify_oauth2_token(audience=None) accepts a Google token minted for any
+    audience. The fake verifier accepts everything, so only the fail-closed branch can say 401."""
+    from google.oauth2 import id_token
+
+    calls: list = []
+    monkeypatch.setattr(id_token, "verify_oauth2_token", lambda token, request, audience=None, **kw:
+                        calls.append(audience) or {"email": "atat-agent-sa@proj-x.iam.gserviceaccount.com", "aud": "x"})
+    app = Starlette(
+        routes=[Route("/mcp", lambda request: PlainTextResponse("ok"), methods=["POST"])],
+        middleware=[Middleware(tools_server.AuthMiddleware, enforce_auth=True, verify_oidc=True,
+                               expected_audience=audience,
+                               allowed_service_accounts=["atat-agent-sa@proj-x.iam.gserviceaccount.com"])],
+    )
+    resp = TestClient(app).post("/mcp", headers={"Authorization": "Bearer any-google-token"})
+    assert resp.status_code == 401
+    assert "OIDC verification is not configured" in resp.text
+    assert calls == [], "the token must not even be verified without an audience"
