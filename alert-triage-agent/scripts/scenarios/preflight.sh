@@ -56,7 +56,7 @@ if [ -n "${ID_TOKEN_ORD}" ] && [ "${ID_TOKEN_ORD}" != "mock-id-token" ]; then
 fi
 
 APIGEE_TOKEN="$(resolve_apigee_token)"
-API_KEY="$(resolve_api_key)"
+API_KEY="$(resolve_api_key)" || exit 1
 KEY_HEADER=()
 if [ -n "${API_KEY}" ]; then
     KEY_HEADER=(-H "x-api-key: ${API_KEY}")
@@ -79,7 +79,7 @@ else
     log_success "      Serving pinned revision ${PINNED_INVENTORY_REVISION} (${PINNED_INVENTORY_DIGEST})"
     log_info "    Probing ata-inventory-api (${INV_URL})..."
     INV_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-        "${AUTH_HEADER_INV[@]}" "${INV_URL}/health" || echo "000")
+        ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/health" || echo "000")
     if [ "${INV_HEALTH}" = "200" ]; then
         log_success "      /health -> HTTP 200 OK"
     else
@@ -88,7 +88,7 @@ else
 
 
     INV_LEAK=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-        "${AUTH_HEADER_INV[@]}" "${INV_URL}/admin/leak-connections" || echo "000")
+        ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/admin/leak-connections" || echo "000")
     if [ "${INV_LEAK}" = "200" ]; then
         log_success "      /admin/leak-connections -> HTTP 200 OK (Endpoint Present)"
     else
@@ -96,7 +96,7 @@ else
     fi
 
     INV_INJECT=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-        "${AUTH_HEADER_INV[@]}" "${INV_URL}/admin/fault/inject" || echo "000")
+        ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/admin/fault/inject" || echo "000")
     if [ "${INV_INJECT}" = "200" ]; then
         log_success "      /admin/fault/inject -> HTTP 200 OK (Endpoint Present)"
     else
@@ -104,7 +104,7 @@ else
     fi
 
     INV_RESET=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-        "${AUTH_HEADER_INV[@]}" -X POST "${INV_URL}/admin/fault/reset" || echo "000")
+        ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} -X POST "${INV_URL}/admin/fault/reset" || echo "000")
     if [ "${INV_RESET}" = "200" ]; then
         log_success "      /admin/fault/reset -> HTTP 200 OK"
     else
@@ -114,7 +114,7 @@ else
     # 1b. Orders API health & admin endpoints
     log_info "    Probing ata-orders-api (${ORD_URL})..."
     ORD_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-        "${AUTH_HEADER_ORD[@]}" "${ORD_URL}/health" || echo "000")
+        ${AUTH_HEADER_ORD[@]+"${AUTH_HEADER_ORD[@]}"} "${ORD_URL}/health" || echo "000")
     if [ "${ORD_HEALTH}" = "200" ]; then
         log_success "      /health -> HTTP 200 OK"
     else
@@ -122,7 +122,7 @@ else
     fi
 
     ORD_RESET=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-        "${AUTH_HEADER_ORD[@]}" -X POST "${ORD_URL}/admin/reset" || echo "000")
+        ${AUTH_HEADER_ORD[@]+"${AUTH_HEADER_ORD[@]}"} -X POST "${ORD_URL}/admin/reset" || echo "000")
     if [ "${ORD_RESET}" = "200" ]; then
         log_success "      /admin/reset -> HTTP 200 OK"
     else
@@ -234,7 +234,7 @@ else
 
     POLICIES_JSON=$(gcloud monitoring policies list --project="${PROJECT_ID}" --format=json 2>/dev/null || echo "[]")
 
-    for p in "${REQUIRED_POLICIES[@]}"; do
+    for p in ${REQUIRED_POLICIES[@]+"${REQUIRED_POLICIES[@]}"}; do
         FOUND=$(echo "${POLICIES_JSON}" | python3 -c "
 import sys, json
 try:
@@ -280,7 +280,7 @@ else
     fi
 
     # 4b. Read-only probe via microservice endpoint (inventory catalog query)
-    ITEMS_RESP=$(curl -s "${AUTH_HEADER_INV[@]}" "${INV_URL}/items" || echo "[]")
+    ITEMS_RESP=$(curl -s ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/items" || echo "[]")
     ITEM_COUNT=$(echo "${ITEMS_RESP}" | python3 -c "
 import sys, json
 try:

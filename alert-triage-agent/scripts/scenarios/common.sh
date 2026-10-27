@@ -173,6 +173,10 @@ restore_inventory_pinned_baseline() {
     verify_inventory_serving_pinned
 }
 
+# Case conversion via tr: macOS ships bash 3.2, which has no ${x,,} or ${x^^}.
+to_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+to_upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
+
 # Duration Parser (supports Xm, Xs, or raw seconds)
 parse_duration() {
     local val="$1"
@@ -185,27 +189,29 @@ parse_duration() {
     fi
 }
 
-# Resolve API Key
+# Print the Apigee consumer API key on stdout, or fail loudly. Never prints an empty key.
+# Lookup order: $ATA_API_KEY, ./.ata-api-key, alert-triage-agent/.ata-api-key, repo root
+# .ata-api-key. The first key file that exists is used; an empty one is an error, not
+# a reason to try the next location. Mock/dry-run use a placeholder when none is found.
 resolve_api_key() {
     if [ -n "${ATA_API_KEY:-}" ]; then
         echo "${ATA_API_KEY}"
         return 0
     fi
 
-    local key_file="${SCRIPT_DIR}/../../.ata-api-key"
-    local repo_key_file="${SCRIPT_DIR}/../../../.ata-api-key"
-    local pwd_key_file="${PWD}/.ata-api-key"
-
-    if [ -f "${pwd_key_file}" ]; then
-        cat "${pwd_key_file}"
-        return 0
-    elif [ -f "${key_file}" ]; then
-        cat "${key_file}"
-        return 0
-    elif [ -f "${repo_key_file}" ]; then
-        cat "${repo_key_file}"
-        return 0
-    fi
+    local key_file key
+    for key_file in "${PWD}/.ata-api-key" "${SCRIPT_DIR}/../../.ata-api-key" "${SCRIPT_DIR}/../../../.ata-api-key"; do
+        if [ -f "${key_file}" ]; then
+            key="$(tr -d '[:space:]' < "${key_file}")"
+            if [ -n "${key}" ]; then
+                echo "${key}"
+                return 0
+            fi
+            log_error "Apigee consumer API key file ${key_file} is empty." >&2
+            api_key_help >&2
+            return 1
+        fi
+    done
 
     if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
         echo "mock-apigee-api-key"
@@ -213,12 +219,23 @@ resolve_api_key() {
     fi
 
     log_error "Apigee consumer API key not found." >&2
-    log_error "Please set the ATA_API_KEY environment variable or write the key to .ata-api-key." >&2
-    log_error "To retrieve your consumer key using your own gcloud credentials, run:" >&2
-    log_error "  curl -s -H \"Authorization: Bearer \$(gcloud auth print-access-token)\" \\" >&2
-    log_error "    \"https://apigee.googleapis.com/v1/organizations/${PROJECT_ID}/developers/ata-dev@example.com/apps/ata-demo-app\" \\" >&2
-    log_error "    | python3 -c \"import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])\" > .ata-api-key" >&2
+    api_key_help >&2
     return 1
+}
+
+# Explain where resolve_api_key looks for the key and how to fetch it (see DEMO.md step 4).
+api_key_help() {
+    log_error "The key is looked up, in order, from:"
+    log_error "  1. the ATA_API_KEY environment variable"
+    log_error "  2. ${PWD}/.ata-api-key (current directory)"
+    log_error "  3. ${SCRIPT_DIR}/../../.ata-api-key (alert-triage-agent/)"
+    log_error "  4. ${SCRIPT_DIR}/../../../.ata-api-key (repository root)"
+    log_error "To retrieve your consumer key using your own gcloud credentials (DEMO.md step 4), run:"
+    log_error "  curl -s -H \"Authorization: Bearer \$(gcloud auth print-access-token)\" \\"
+    log_error "    \"https://apigee.googleapis.com/v1/organizations/${PROJECT_ID}/developers/ata-dev@example.com/apps/ata-demo-app\" \\"
+    log_error "    | python3 -c \"import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])\" > .ata-api-key"
+    log_error "  chmod 600 .ata-api-key"
+    log_error "Or: export ATA_API_KEY=\"<consumer key>\""
 }
 
 # Resolve Cloud Run Service URLs
@@ -259,8 +276,9 @@ resolve_id_token() {
     fi
 
     if [ -z "${token}" ]; then
-        log_warn "Could not resolve identity token via 'gcloud auth print-identity-token'."
-        log_warn "Ensure you are authenticated ('gcloud auth login') and have 'roles/run.invoker' on Cloud Run demo services."
+        # stderr: stdout is the token, and callers send it as a Bearer header.
+        log_warn "Could not resolve identity token via 'gcloud auth print-identity-token'." >&2
+        log_warn "Ensure you are authenticated ('gcloud auth login') and have 'roles/run.invoker' on Cloud Run demo services." >&2
     fi
 
     echo "${token}"

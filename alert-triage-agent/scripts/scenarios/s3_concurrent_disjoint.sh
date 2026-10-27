@@ -57,6 +57,9 @@ done
 HOLD_SECS="$(parse_duration "${HOLD_DURATION}")"
 SCENARIO_START_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
+# Resolve the Apigee key before any fault is injected: traffic needs it.
+API_KEY="$(resolve_api_key)" || exit 1
+
 log_info "=== Starting Scenario S3: Concurrent Disjoint Incidents ==="
 log_info "Start Time: ${SCENARIO_START_TIME} | Hold Duration: ${HOLD_SECS}s (${HOLD_DURATION})"
 
@@ -73,7 +76,7 @@ if [ "${DRY_RUN}" = "true" ]; then
     log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/fault/inject -d '{\"type\": \"500\", \"rate\": 0.85}'"
 else
     HTTP_CODE=$(curl -s -o /tmp/ata-s3-inject-resp.txt -w "%{http_code}" -X POST \
-        "${AUTH_HEADER[@]}" \
+        ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} \
         -H "Content-Type: application/json" \
         -d '{"type": "500", "rate": 0.85}' \
         "${INV_URL}/admin/fault/inject" || echo "000")
@@ -84,7 +87,6 @@ fi
 # 2. Trigger Orders proxy SpikeArrest 429 fault concurrently
 log_info "--> Deploying strict 1pm SpikeArrest on ata-orders-v1 Apigee proxy..."
 TOKEN="$(resolve_apigee_token)"
-API_KEY="$(resolve_api_key)"
 BASE_URL="https://apigee.googleapis.com/v1/organizations/${PROJECT_ID}"
 SA_EMAIL="ata-apigee-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 
@@ -180,7 +182,7 @@ else
 
         # Inventory traffic (500)
         STATUS_INV=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-            "${KEY_HEADER[@]}" \
+            ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
             "https://${APIGEE_HOST}/ata/inventory/v1/items" || echo "000")
         TOTAL_INV=$((TOTAL_INV + 1))
         if [ "${STATUS_INV}" = "500" ]; then
@@ -190,7 +192,7 @@ else
         # Orders burst traffic (breaching SpikeArrest 1pm -> 429)
         for b in 1 2 3; do
             STATUS_ORD=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 \
-                "${KEY_HEADER[@]}" \
+                ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
                 "https://${APIGEE_HOST}/ata/orders/v1/orders/test" || echo "000")
             TOTAL_ORD=$((TOTAL_ORD + 1))
             if [ "${STATUS_ORD}" = "429" ]; then

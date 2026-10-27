@@ -89,17 +89,25 @@ else
     SCENARIOS_TO_RUN=("s1" "s2" "s3" "s4" "s5")
 fi
 
-declare -A SCENARIO_NAMES=(
-    ["s1"]="Backend 5xx Error Spike (Cloud Run ata-inventory-api)"
-    ["s2"]="Backend Latency Degradation (>5s timeout)"
-    ["s3"]="Concurrent Disjoint Incidents (ata-orders-v1 & ata-inventory-api)"
-    ["s4"]="Database Connection Pool Exhaustion (Cloud SQL max_conn)"
-    ["s5"]="Bad Deploy / Config Failure (Cloud Run ata-inventory-api)"
-)
+# Bash 3.2 (macOS /bin/bash) has no associative arrays or ${x,,}/${x^^}: names come
+# from a case statement, case conversion from to_lower/to_upper (common.sh), and
+# results are indexed arrays parallel to SCENARIOS_TO_RUN.
 
-# Results tracking
-declare -A SCENARIO_STATUS=()
-declare -A SCENARIO_DURATION=()
+# Print the description of scenario $1 (lowercase id), or $2 if unknown.
+scenario_name() {
+    case "$1" in
+        s1) echo "Backend 5xx Error Spike (Cloud Run ata-inventory-api)" ;;
+        s2) echo "Backend Latency Degradation (>5s timeout)" ;;
+        s3) echo "Concurrent Disjoint Incidents (ata-orders-v1 & ata-inventory-api)" ;;
+        s4) echo "Database Connection Pool Exhaustion (Cloud SQL max_conn)" ;;
+        s5) echo "Bad Deploy / Config Failure (Cloud Run ata-inventory-api)" ;;
+        *) echo "$2" ;;
+    esac
+}
+
+# Results tracking, indexed like SCENARIOS_TO_RUN
+SCENARIO_STATUS=()
+SCENARIO_DURATION=()
 
 # Initial Environment Cleanup
 log_info "Performing pre-run baseline reset..."
@@ -114,21 +122,24 @@ if [ "${SKIP_PREFLIGHT:-false}" != "true" ]; then
     }
 fi
 
-for sc in "${SCENARIOS_TO_RUN[@]}"; do
-    sc_clean="${sc,,}"
-    sc_name="${SCENARIO_NAMES[${sc_clean}]:-Unknown Scenario}"
+idx=-1
+for sc in ${SCENARIOS_TO_RUN[@]+"${SCENARIOS_TO_RUN[@]}"}; do
+    idx=$((idx + 1))
+    sc_clean="$(to_lower "${sc}")"
+    sc_upper="$(to_upper "${sc}")"
+    sc_name="$(scenario_name "${sc_clean}" "Unknown Scenario")"
     script_path="${SCRIPT_DIR}/scenarios/${sc_clean}_*.sh"
     resolved_script=$(ls ${script_path} 2>/dev/null | head -n 1 || echo "")
 
     if [ -z "${resolved_script}" ] || [ ! -f "${resolved_script}" ]; then
         log_error "Scenario script for ${sc} not found: ${script_path}"
-        SCENARIO_STATUS["${sc}"]="NOT_FOUND"
+        SCENARIO_STATUS[idx]="NOT_FOUND"
         continue
     fi
 
     echo ""
     log_info "---------------------------------------------------------------"
-    log_info "Executing Scenario: ${sc^^} - ${sc_name}"
+    log_info "Executing Scenario: ${sc_upper} - ${sc_name}"
     log_info "Script: ${resolved_script}"
     log_info "---------------------------------------------------------------"
 
@@ -139,22 +150,22 @@ for sc in "${SCENARIOS_TO_RUN[@]}"; do
     set -e
     END_T=$(date +%s)
     DUR=$((END_T - START_T))
-    SCENARIO_DURATION["${sc}"]="${DUR}s"
+    SCENARIO_DURATION[idx]="${DUR}s"
 
     if [ ${EXIT_CODE} -eq 0 ]; then
-        log_success "Scenario ${sc^^} completed successfully (${DUR}s)."
-        SCENARIO_STATUS["${sc}"]="PASSED"
+        log_success "Scenario ${sc_upper} completed successfully (${DUR}s)."
+        SCENARIO_STATUS[idx]="PASSED"
     else
-        log_error "Scenario ${sc^^} failed with exit code ${EXIT_CODE} (${DUR}s)."
-        SCENARIO_STATUS["${sc}"]="FAILED"
+        log_error "Scenario ${sc_upper} failed with exit code ${EXIT_CODE} (${DUR}s)."
+        SCENARIO_STATUS[idx]="FAILED"
     fi
 
     # Reset environment between scenarios
     log_info "Resetting environment faults before next scenario..."
     if ! "${SCRIPT_DIR}/reset-scenarios.sh" >> "${LOG_FILE}" 2>&1; then
         # Do not run further scenarios (or leave S5's bad revision serving) silently.
-        log_error "FATAL: reset after ${sc^^} failed; environment is NOT on the baseline. See ${LOG_FILE}. Halting."
-        SCENARIO_STATUS["${sc}"]="RESET_FAILED"
+        log_error "FATAL: reset after ${sc_upper} failed; environment is NOT on the baseline. See ${LOG_FILE}. Halting."
+        SCENARIO_STATUS[idx]="RESET_FAILED"
         break
     fi
 done
@@ -168,12 +179,14 @@ printf "%-8s %-45s %-12s %-10s\n" "ID" "Scenario Description" "Status" "Duration
 echo "-------------------------------------------------------------------"
 
 TOTAL_FAILED=0
-for sc in "${SCENARIOS_TO_RUN[@]}"; do
-    sc_clean="${sc,,}"
-    desc="${SCENARIO_NAMES[${sc_clean}]:-Unknown}"
-    status="${SCENARIO_STATUS[${sc}]:-UNKNOWN}"
-    dur="${SCENARIO_DURATION[${sc}]:-0s}"
-    printf "%-8s %-45s %-12s %-10s\n" "${sc^^}" "${desc:0:43}" "${status}" "${dur}"
+idx=-1
+for sc in ${SCENARIOS_TO_RUN[@]+"${SCENARIOS_TO_RUN[@]}"}; do
+    idx=$((idx + 1))
+    sc_clean="$(to_lower "${sc}")"
+    desc="$(scenario_name "${sc_clean}" "Unknown")"
+    status="${SCENARIO_STATUS[idx]:-UNKNOWN}"
+    dur="${SCENARIO_DURATION[idx]:-0s}"
+    printf "%-8s %-45s %-12s %-10s\n" "$(to_upper "${sc}")" "${desc:0:43}" "${status}" "${dur}"
     if [ "${status}" != "PASSED" ]; then
         TOTAL_FAILED=$((TOTAL_FAILED + 1))
     fi

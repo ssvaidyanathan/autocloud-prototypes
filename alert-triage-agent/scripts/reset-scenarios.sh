@@ -376,12 +376,12 @@ fi
 log_info "--> 1. Resetting demo applications via /admin/fault/reset..."
 if [ "${DRY_RUN}" = "false" ]; then
     # Inventory API reset
-    curl -s -X POST "${AUTH_HEADER_INV[@]}" "${INV_URL}/admin/fault/reset" > /dev/null 2>&1 || \
-    curl -s -X POST "${AUTH_HEADER_INV[@]}" "${INV_URL}/admin/reset" > /dev/null 2>&1 || true
+    curl -s -X POST ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/admin/fault/reset" > /dev/null 2>&1 || \
+    curl -s -X POST ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/admin/reset" > /dev/null 2>&1 || true
 
     # Orders API reset
-    curl -s -X POST "${AUTH_HEADER_ORD[@]}" "${ORD_URL}/admin/fault/reset" > /dev/null 2>&1 || \
-    curl -s -X POST "${AUTH_HEADER_ORD[@]}" "${ORD_URL}/admin/reset" > /dev/null 2>&1 || true
+    curl -s -X POST ${AUTH_HEADER_ORD[@]+"${AUTH_HEADER_ORD[@]}"} "${ORD_URL}/admin/fault/reset" > /dev/null 2>&1 || \
+    curl -s -X POST ${AUTH_HEADER_ORD[@]+"${AUTH_HEADER_ORD[@]}"} "${ORD_URL}/admin/reset" > /dev/null 2>&1 || true
 
     log_success "    Demo application fault states cleared."
 fi
@@ -460,7 +460,7 @@ if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
     ACTIVE_COUNT=$(echo "${BRIDGE_RESET_RESP:-}" | python3 -c "import sys, json; raw=sys.stdin.read().strip(); data=json.loads(raw) if raw.startswith('{') else {}; print(data.get('active_groups', 0))" 2>/dev/null || echo "0")
     if [ "${ACTIVE_COUNT}" != "0" ]; then
         log_warn "    Active groups remaining on bridge: ${ACTIVE_COUNT}. Forcing reset..."
-        curl -s -X POST "${AUTH_HEADER_BRIDGE[@]}" "${BRIDGE_URL}/reset" > /dev/null 2>&1 || true
+        curl -s -X POST ${AUTH_HEADER_BRIDGE[@]+"${AUTH_HEADER_BRIDGE[@]}"} "${BRIDGE_URL}/reset" > /dev/null 2>&1 || true
     else
         log_success "    Bridge active groups verified: 0 active groups."
     fi
@@ -471,8 +471,8 @@ log_info "--> 9. Verifying admin fault injection endpoints exist on deployed inv
 if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
     # The GET probes below are only harmless on the pinned code; never send them elsewhere.
     verify_inventory_serving_pinned || exit 1
-    STATUS_LEAK=$(curl -s -o /dev/null -w "%{http_code}" "${AUTH_HEADER_INV[@]}" "${INV_URL}/admin/leak-connections" || echo "000")
-    STATUS_INJECT=$(curl -s -o /dev/null -w "%{http_code}" "${AUTH_HEADER_INV[@]}" "${INV_URL}/admin/fault/inject" || echo "000")
+    STATUS_LEAK=$(curl -s -o /dev/null -w "%{http_code}" ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/admin/leak-connections" || echo "000")
+    STATUS_INJECT=$(curl -s -o /dev/null -w "%{http_code}" ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/admin/fault/inject" || echo "000")
 
     MISSING=0
 

@@ -43,12 +43,12 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --scenario)
-            FILTER_SCENARIO="${2,,}"
+            FILTER_SCENARIO="$(to_lower "$2")"
             shift 2
             ;;
         --scenario=*)
             FILTER_SCENARIO="${1#*=}"
-            FILTER_SCENARIO="${FILTER_SCENARIO,,}"
+            FILTER_SCENARIO="$(to_lower "${FILTER_SCENARIO}")"
             shift
             ;;
         --bucket)
@@ -92,7 +92,7 @@ if [ -n "${SINCE_TIME}" ]; then
     echo "  Filter Since: ${SINCE_TIME}"
 fi
 if [ -n "${FILTER_SCENARIO}" ]; then
-    echo "  Target Scenario: ${FILTER_SCENARIO^^}"
+    echo "  Target Scenario: $(to_upper "${FILTER_SCENARIO}")"
 fi
 echo "==================================================================="
 

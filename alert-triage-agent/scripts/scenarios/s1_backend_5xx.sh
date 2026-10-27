@@ -54,6 +54,9 @@ done
 HOLD_SECS="$(parse_duration "${HOLD_DURATION}")"
 SCENARIO_START_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
+# Resolve the Apigee key before any fault is injected: traffic needs it.
+API_KEY="$(resolve_api_key)" || exit 1
+
 log_info "=== Starting Scenario S1: Backend 5xx Error Spike ==="
 log_info "Start Time: ${SCENARIO_START_TIME} | Hold Duration: ${HOLD_SECS}s (${HOLD_DURATION})"
 
@@ -64,7 +67,6 @@ fi
 # 1. Resolve Targets
 INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
 ID_TOKEN="$(resolve_id_token "${INV_URL}")"
-API_KEY="$(resolve_api_key)"
 
 AUTH_HEADER=()
 if [ -n "${ID_TOKEN}" ] && [ "${ID_TOKEN}" != "mock-id-token" ]; then
@@ -80,7 +82,7 @@ if [ "${DRY_RUN}" = "true" ]; then
     log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/fault/inject -d '{\"type\": \"500\", \"rate\": 0.85}'"
 else
     HTTP_CODE=$(curl -s -o /tmp/ata-s1-inject-resp.txt -w "%{http_code}" -X POST \
-        "${AUTH_HEADER[@]}" \
+        ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} \
         -H "Content-Type: application/json" \
         -d '{"type": "500", "rate": 0.85}' \
         "${INV_URL}/admin/fault/inject" || echo "000")
@@ -123,10 +125,10 @@ else
         fi
 
         STATUS_INV=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-            "${KEY_HEADER[@]}" \
+            ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
             "https://${APIGEE_HOST}/ata/inventory/v1/items" || echo "000")
         STATUS_ORD=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-            "${KEY_HEADER[@]}" \
+            ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
             -H "Content-Type: application/json" -X POST \
             "https://${APIGEE_HOST}/ata/orders/v1/orders" \
             -d '{"item_id":"item-101","quantity":1}' || echo "000")

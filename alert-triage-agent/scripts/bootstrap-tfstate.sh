@@ -131,7 +131,7 @@ gcloud storage buckets update "${BUCKET_URI}" --project="${PROJECT_ID}" \
 
 # Generate backend.hcl for foundation stack
 STACKS=("foundation")
-for stack in "${STACKS[@]}"; do
+for stack in ${STACKS[@]+"${STACKS[@]}"}; do
     stack_dir="${REPO_ROOT}/infra/terraform/${stack}"
     if [ -d "${stack_dir}" ]; then
         cat <<EOF > "${stack_dir}/backend.hcl"

@@ -39,7 +39,7 @@ for svc in "Inventory API:${INVENTORY_URL}" "Agent:${AGENT_URL}" "Bridge:${BRIDG
     name="${svc%%:*}"
     url="${svc#*:}"
     echo -n "Checking ${name} (${url}/health)... "
-    resp="$(curl -s -w "\n%{http_code}" "${AUTH_HEADER[@]}" "${url}/health")"
+    resp="$(curl -s -w "\n%{http_code}" ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} "${url}/health")"
     body="$(echo "${resp}" | head -n 1)"
     code="$(echo "${resp}" | tail -n 1)"
     if [ "${code}" -eq 200 ]; then
@@ -86,7 +86,7 @@ EOF
 )
 
 WEBHOOK_RESP="$(curl -s -w "\n%{http_code}" -X POST \
-    "${AUTH_HEADER[@]}" \
+    ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} \
     -H "Content-Type: application/json" \
     "${BRIDGE_URL}/webhook/monitoring?token=${WEBHOOK_TOKEN}" \
     -d "${TEST_ALERT_PAYLOAD}")"
@@ -121,7 +121,7 @@ EOF
 )
 
 AGENT_RESP="$(curl -s -w "\n%{http_code}" -X POST \
-    "${AUTH_HEADER[@]}" \
+    ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} \
     -H "Content-Type: application/json" \
     "${AGENT_URL}/triage" \
     -d "${ALERT_EVENT_PAYLOAD}")"

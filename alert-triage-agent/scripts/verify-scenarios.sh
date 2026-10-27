@@ -30,7 +30,7 @@ else
     PYTEST_CMD=(pytest)
 fi
 
-"${PYTEST_CMD[@]}" "${SCRIPT_DIR}/../tests/test_scenarios_e2e.py" -v
+${PYTEST_CMD[@]+"${PYTEST_CMD[@]}"} "${SCRIPT_DIR}/../tests/test_scenarios_e2e.py" -v
 log_success "    Automated test assertions passed."
 
 # 2. Verify Fault Control Telemetry Exclusion Guardrail

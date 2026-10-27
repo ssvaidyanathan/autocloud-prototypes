@@ -56,7 +56,7 @@ if [ "${MOCK_MODE:-false}" = "true" ] || [ "${DRY_RUN:-false}" = "true" ]; then
     exit 0
 fi
 
-API_KEY="$(resolve_api_key)"
+API_KEY="$(resolve_api_key)" || exit 1
 INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
 ORD_URL="$(resolve_service_url "${NAME_PREFIX}-orders-api" "https://ata-orders-api-4klvlqnmpa-uw.a.run.app")"
 
@@ -77,8 +77,8 @@ echo "=== Verifying ATA Demo Infrastructure & Endpoints ==="
 
 # 1. Direct Cloud Run Endpoints (Internal / IAM only)
 echo "--> Verifying Cloud Run direct endpoints..."
-INV_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "${AUTH_HEADER_INV[@]}" "${INV_URL}/health" || echo "000")
-ORDERS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "${AUTH_HEADER_ORD[@]}" "${ORD_URL}/health" || echo "000")
+INV_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/health" || echo "000")
+ORDERS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 ${AUTH_HEADER_ORD[@]+"${AUTH_HEADER_ORD[@]}"} "${ORD_URL}/health" || echo "000")
 echo "    ata-inventory-api /health: ${INV_STATUS} (expected 200)"
 if [ "${INV_STATUS}" != "200" ]; then
     record_failure "ata-inventory-api /health returned ${INV_STATUS} (expected 200)"
