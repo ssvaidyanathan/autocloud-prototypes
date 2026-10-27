@@ -41,6 +41,11 @@ resource "google_cloud_run_v2_service" "inventory_api" {
   template {
     service_account = data.google_service_account.inventory_sa.email
 
+    # One instance holds the fault state and leaked connections; see var.demo_max_instance_count.
+    scaling {
+      max_instance_count = var.demo_max_instance_count
+    }
+
     containers {
       image = var.inventory_image
 
@@ -115,6 +120,10 @@ resource "google_cloud_run_v2_service" "orders_api" {
 
   template {
     service_account = data.google_service_account.orders_sa.email
+
+    scaling {
+      max_instance_count = var.demo_max_instance_count
+    }
 
     containers {
       image = var.orders_image
