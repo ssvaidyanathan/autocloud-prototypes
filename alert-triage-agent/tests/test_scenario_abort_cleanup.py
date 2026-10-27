@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_s5_bad_deploy import BAD_USER, GOOD_USER, PINNED_REVISION, Env, baseline_state
+from tests.test_s5_bad_deploy import BAD_USER, GOOD_USER, PINNED_REVISION, STACK_ENV, Env, baseline_state
 
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
@@ -80,6 +80,7 @@ def env(tmp_path):
     (tmp_path / "deployments.json").write_text(json.dumps({"deployments": [
         {"environment": "prod", "apiProxy": "ata-orders-v1", "revision": "168"}]}))
     e = {k: v for k, v in os.environ.items() if k not in ("ATA_API_KEY", "MOCK_MODE", "DRY_RUN")}
+    e.update(STACK_ENV)
     e.update(PATH=f"{bin_dir}{os.pathsep}{e['PATH']}", ATA_TEST_CALLS=str(tmp_path / "calls"),
              ATA_IMPORT_BODY=str(tmp_path / "import.json"), ATA_DEPLOYMENTS_BODY=str(tmp_path / "deployments.json"),
              ATA_API_KEY="test-key", MOCK_MODE="false", DRY_RUN="false", RUN_PREFLIGHT="false")
@@ -192,7 +193,9 @@ def test_s3_missing_bundle_stops_before_any_fault(tmp_path, env):
 def test_s3_dry_run_abort_makes_no_network_call(tmp_path, env):
     res = _run(tmp_path, env, "s3_concurrent_disjoint.sh", "--dry-run", "--hold", "1s", ATA_FAIL_EPOCH_AFTER="0")
     assert res.returncode == 3
-    assert "[DRY-RUN] curl -s -X POST https://ata-inventory-api-4klvlqnmpa-uw.a.run.app/admin/fault/reset" in res.stderr
+    # Dry-run resolves no URL: a logged placeholder, never another stack's fixed URL.
+    assert "Using the placeholder URL https://ata-inventory-api.mock.invalid" in res.stderr
+    assert "[DRY-RUN] curl -s -X POST https://ata-inventory-api.mock.invalid/admin/fault/reset" in res.stderr
     assert _calls(tmp_path) == []
 
 
@@ -387,6 +390,7 @@ def test_s5_ctrl_c_during_the_hold_finishes_and_keeps_the_bad_deploy(tmp_path, a
     for var in ("PINNED_INVENTORY_DIGEST", "PINNED_INVENTORY_REVISION", "PINNED_INVENTORY_IMAGE",
                 "PROJECT_ID", "GCP_PROJECT", "REGION", "GCP_REGION", "NAME_PREFIX"):
         e.pop(var, None)
+    e.update(STACK_ENV)
     e.update(PATH=f"{s5.dir}{os.pathsep}{e['PATH']}", MOCK_MODE="false", DRY_RUN="false", ATA_API_KEY="test-key")
     argv = [TEST_BASH, str(SCRIPTS_DIR / "scenarios" / "s5_bad_deploy.sh"), "--hold", "5m"]
     # `date +%s` call 0 names the revision, 1 is START_EPOCH, 2 is the first loop iteration.

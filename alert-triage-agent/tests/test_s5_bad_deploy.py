@@ -30,6 +30,10 @@ BASELINE_ENV = {
     "ATA_INVENTORY_MOCK_DB": "false",
 }
 LEGACY_ALIASES = ("DB_USER", "MOCK_DB")
+# The stack these fakes model. common.sh has no defaults: PROJECT_ID, REGION and NAME_PREFIX
+# are required, and the Apigee org/env/host come from the env file or the environment.
+STACK_ENV = {"PROJECT_ID": "cloud-assist-fde-2", "REGION": "us-west1", "NAME_PREFIX": "ata",
+             "APIGEE_HOST": "apigee.example", "APIGEE_ORG": "cloud-assist-fde-2", "APIGEE_ENV": "prod"}
 
 # Stateful fake gcloud: state.json holds traffic, template and revision counter;
 # calls.log records one JSON argv per invocation. "fail" lists verbs to fail.
@@ -153,6 +157,7 @@ class Env:
         for var in ("PINNED_INVENTORY_DIGEST", "PINNED_INVENTORY_REVISION", "PINNED_INVENTORY_IMAGE",
                     "PROJECT_ID", "GCP_PROJECT", "REGION", "GCP_REGION", "NAME_PREFIX"):
             env.pop(var, None)
+        env.update(STACK_ENV)
         env.update(PATH=f"{self.dir}{os.pathsep}{env['PATH']}", MOCK_MODE="false", DRY_RUN="false",
                    ATA_API_KEY="test-key")
         return subprocess.run(argv, cwd=str(self.tmp_path), capture_output=True, text=True,

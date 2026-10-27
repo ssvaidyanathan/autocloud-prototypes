@@ -106,17 +106,18 @@ resolve_api_key
 
 
 def test_common_api_key_success_when_present(tmp_path):
-    """Verify resolve_api_key returns the key from .ata-api-key when present."""
-    isolated_dir = tmp_path / "pkg" / "scripts" / "scenarios"
-    isolated_dir.mkdir(parents=True, exist_ok=True)
-    key_file = tmp_path / ".ata-api-key"
+    """Verify resolve_api_key returns the key from <alert-triage-agent>/.<prefix>-api-key."""
+    # A copy of scripts/, so the key file is not written into the checkout.
+    import shutil
+    pkg = tmp_path / "pkg" / "alert-triage-agent"
+    shutil.copytree(SCENARIOS_DIR.parent, pkg / "scripts")
+    key_file = pkg / ".ata-api-key"
     key_file.write_text("test-consumer-key-12345\n")
 
     test_sh = tmp_path / "test_key.sh"
     test_sh.write_text(f"""#!/usr/bin/env bash
 set -e
-SCRIPT_DIR="{isolated_dir}"
-source "{SCENARIOS_DIR}/common.sh"
+source "{pkg}/scripts/scenarios/common.sh"
 resolve_api_key
 """)
     test_sh.chmod(0o755)

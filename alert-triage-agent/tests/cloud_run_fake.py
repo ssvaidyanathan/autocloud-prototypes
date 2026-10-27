@@ -231,7 +231,19 @@ if data is not None and method == "GET":
     method = "POST"
 base = url.split("/", 3)
 base_url, path = "/".join(base[:3]), "/" + (base[3] if len(base) > 3 else "")
-code, body = state["http"].get(base_url, {}).get(f"{method} {path}", [404, '{"detail":"Not Found"}'])
+# state["http_rev"] ({"<revision>": {"<METHOD> <path>": [code, body]}}): answers follow the
+# revision that serves the service URL (100%) or carries the tag of a tag URL, so a test sees
+# what the code of the serving revision would answer. Without an entry: state["http"].
+answers = state["http"].get(base_url, {})
+for svc in state["services"].values():
+    for entry in svc["traffic"]:
+        rev = entry.get("revisionName")
+        if entry.get("tag") and entry.get("url") == base_url and rev in state.get("http_rev", {}):
+            answers = state["http_rev"][rev]
+        elif not entry.get("tag") and svc["url"] == base_url and entry.get("percent") == 100 \
+                and rev in state.get("http_rev", {}):
+            answers = state["http_rev"][rev]
+code, body = answers.get(f"{method} {path}", [404, '{"detail":"Not Found"}'])
 if isinstance(body, (dict, list)):
     body = json.dumps(body)
 if data is not None:
@@ -256,6 +268,16 @@ def healthy_http(base):
         "GET /admin/fault/inject": [200, PROBE_OK],
         "GET /admin/restock": [200, PROBE_OK],
     }
+
+
+def without(answers, *keys):
+    """A copy of HTTP answers without the given "<METHOD> <path>" entries (404 then)."""
+    return {k: v for k, v in answers.items() if k not in keys}
+
+
+def for_prefix(state, prefix):
+    """The same state for another NAME_PREFIX (every 'ata-' name becomes '<prefix>-')."""
+    return json.loads(json.dumps(state).replace("ata-", f"{prefix}-"))
 
 
 def live_like_state():
@@ -324,15 +346,16 @@ class FakeCloud:
             exe = self.dir / name
             exe.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "{self.dir}/{name}.py" "$@"\n')
             exe.chmod(0o755)
-        self.pin_file = tmp_path / "inventory-pin.env"
+        self.pin_file = tmp_path / "inventory-pin.ata.env"
         write_pin(self.pin_file, OLD_PIN, OLD_DIGEST)
 
     def run(self, argv, **extra_env):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("PINNED_INVENTORY_", "ATA_", "GCP_")) and k not in (
                    "PROJECT_ID", "REGION", "NAME_PREFIX", "MOCK_MODE", "DRY_RUN")}
+        # The stack identity is required (common.sh has no defaults): this fake's stack.
         env.update(PATH=f"{self.dir}{os.pathsep}{env['PATH']}", ATA_INVENTORY_PIN_FILE=str(self.pin_file),
-                   TMPDIR=str(self.tmp_path))
+                   TMPDIR=str(self.tmp_path), PROJECT_ID=PROJECT, REGION="us-west1", NAME_PREFIX="ata")
         env.update(extra_env)
         return subprocess.run([TEST_BASH, *map(str, argv)], cwd=str(self.tmp_path), capture_output=True,
                               text=True, env=env, check=False, timeout=60)

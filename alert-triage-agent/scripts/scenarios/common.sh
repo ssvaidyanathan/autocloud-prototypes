@@ -301,6 +301,8 @@ elif ! read_inventory_pin_file "${INVENTORY_PIN_FILE}"; then
 else
     INVENTORY_PIN_PRESENT=true
 fi
+# Read by the scripts that source this file (repin-inventory.sh, the inventory deploy.sh).
+export INVENTORY_PIN_PRESENT
 
 # Deterministic pinned demo image and revision (empty without a pin, see above).
 export PINNED_INVENTORY_DIGEST="${PINNED_INVENTORY_DIGEST:-${PIN_INVENTORY_DIGEST}}"
@@ -708,6 +710,14 @@ require_service_url() {
         return 1
     fi
     echo "${url}"
+}
+
+# resolve_service_url <service> [<ignored>]: compatibility name for scripts outside this
+# lane that still call it (verify-demo-infra.sh until ata-fresh-scripts lands). It is
+# require_service_url: the second argument, once a fixed fallback URL, is ignored. No
+# fallback. Remove once no caller is left.
+resolve_service_url() {
+    require_service_url "$1"
 }
 
 # Resolve Bearer Token for Cloud Run IAM Invocation

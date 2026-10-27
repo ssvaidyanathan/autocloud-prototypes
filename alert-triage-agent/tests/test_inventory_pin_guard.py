@@ -91,9 +91,9 @@ def test_guards_skip_gcloud_in_mock_mode(tmp_path, guard):
     assert res.returncode == 0, res.stdout + res.stderr
 
 
-# --- The pin lives in ONE file: scripts/scenarios/inventory-pin.env --------------------
+# --- The pin lives in ONE file per stack: scripts/scenarios/inventory-pin.<prefix>.env ----
 
-PIN_FILE = SCENARIOS_DIR / "inventory-pin.env"
+PIN_FILE = SCENARIOS_DIR / "inventory-pin.ata.env"
 REPO = SCENARIOS_DIR.parent.parent
 
 
@@ -157,7 +157,77 @@ def test_missing_pin_file_fails_loudly(tmp_path):
     script.write_text(f'#!/usr/bin/env bash\nsource "{SCENARIOS_DIR}/common.sh"\necho REACHED\n')
     env = dict(os.environ, ATA_INVENTORY_PIN_FILE=str(tmp_path / "nope.env"))
     res = subprocess.run([os.environ.get("ATA_TEST_BASH", "bash"), str(script)], capture_output=True, text=True, env=env)
-    assert res.returncode != 0 and "missing or unreadable" in res.stderr and "REACHED" not in res.stdout
+    assert res.returncode != 0 and "REACHED" not in res.stdout
+    assert f"{tmp_path}/nope.env does not exist" in res.stderr
+    assert "run scripts/repin-inventory.sh prepare --initial" in res.stderr
+
+
+def _source_default_pin(tmp_path, prefix, guard="echo REACHED", **env_extra):
+    """Source common.sh with NAME_PREFIX=<prefix> and the default (per-prefix) pin path."""
+    script = tmp_path / "src.sh"
+    script.write_text(f'#!/usr/bin/env bash\nsource "{SCENARIOS_DIR}/common.sh"\n{guard}\n')
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
+    env.update(NAME_PREFIX=prefix, **env_extra)
+    return subprocess.run([os.environ.get("ATA_TEST_BASH", "bash"), str(script)], capture_output=True,
+                          text=True, env=env, check=False, cwd=str(tmp_path))
+
+
+def test_pin_file_is_per_prefix():
+    """The ata pin is stack data of stack 'ata' only; no prefix-neutral pin file remains."""
+    assert PIN_FILE.is_file()
+    assert not (SCENARIOS_DIR / "inventory-pin.env").exists()
+    for f in SCENARIOS_DIR.glob("inventory-pin.*.env"):
+        prefix = f.name[len("inventory-pin."):-len(".env")]
+        assert f"PIN_INVENTORY_REVISION={prefix}-inventory-api-" in f.read_text(), f
+
+
+def test_default_pin_path_follows_the_prefix(tmp_path):
+    res = _source_default_pin(tmp_path, "ata", guard='echo "${INVENTORY_PIN_FILE} ${PINNED_INVENTORY_REVISION}"')
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == f"{PIN_FILE} {PINNED_REVISION}"
+
+
+def test_new_prefix_without_pin_file_says_to_run_prepare_initial(tmp_path):
+    """atat has no pin file: scenarios/preflight fail; the ata pin is never used for it."""
+    res = _source_default_pin(tmp_path, "atat")
+    assert res.returncode != 0 and "REACHED" not in res.stdout
+    assert "no inventory pin for stack 'atat'" in res.stderr
+    assert str(SCENARIOS_DIR / "inventory-pin.atat.env") in res.stderr
+    assert "scripts/repin-inventory.sh prepare --initial" in res.stderr
+
+
+@pytest.mark.parametrize("script", ["s1_backend_5xx.sh", "preflight.sh"])
+def test_scenarios_and_preflight_fail_without_a_pin_for_the_prefix(tmp_path, script):
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
+    env.update(NAME_PREFIX="atat", MOCK_MODE="true")
+    res = subprocess.run([os.environ.get("ATA_TEST_BASH", "bash"), str(SCENARIOS_DIR / script)],
+                         capture_output=True, text=True, env=env, check=False, cwd=str(tmp_path))
+    assert res.returncode != 0
+    assert "run scripts/repin-inventory.sh prepare --initial" in res.stderr
+
+
+def test_pin_optional_scripts_load_without_a_pin(tmp_path):
+    """repin --initial / inventory deploy.sh / caps / check-result set INVENTORY_PIN_OPTIONAL."""
+    res = _source_default_pin(tmp_path, "atat", guard='echo "PRESENT=${INVENTORY_PIN_PRESENT} PIN=${PINNED_INVENTORY_REVISION}."')
+    assert res.returncode != 0
+    script = tmp_path / "opt.sh"
+    script.write_text(f'#!/usr/bin/env bash\nINVENTORY_PIN_OPTIONAL=true\nsource "{SCENARIOS_DIR}/common.sh"\n'
+                      'echo "PRESENT=${INVENTORY_PIN_PRESENT} PIN=${PINNED_INVENTORY_REVISION}."\n')
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("PINNED_INVENTORY_", "ATA_"))}
+    env.update(NAME_PREFIX="atat")
+    res = subprocess.run([os.environ.get("ATA_TEST_BASH", "bash"), str(script)], capture_output=True,
+                         text=True, env=env, check=False, cwd=str(tmp_path))
+    assert (res.returncode, res.stdout) == (0, "PRESENT=false PIN=.\n"), res.stderr
+
+
+def test_optional_pin_still_rejects_an_invalid_file(tmp_path):
+    pin = tmp_path / "pin.env"
+    pin.write_text("garbage\n")
+    script = tmp_path / "opt.sh"
+    script.write_text(f'#!/usr/bin/env bash\nINVENTORY_PIN_OPTIONAL=true\nsource "{SCENARIOS_DIR}/common.sh"\necho REACHED\n')
+    env = dict(os.environ, ATA_INVENTORY_PIN_FILE=str(pin))
+    res = subprocess.run([os.environ.get("ATA_TEST_BASH", "bash"), str(script)], capture_output=True, text=True, env=env)
+    assert res.returncode != 0 and "unexpected line 'garbage'" in res.stderr and "REACHED" not in res.stdout
 
 
 @pytest.mark.parametrize("value", ["0", "", "x", "-1", "01", "1.5"])

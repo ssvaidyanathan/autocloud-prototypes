@@ -2,7 +2,7 @@
 
 The live pin (ata-inventory-api-00073-9vb) predates the one-instance cap (its maxScale is
 100; revision scaling is immutable) and carries the DB_USER/MOCK_DB aliases. A new pin
-must be deployed with NO traffic, verified, written to inventory-pin.env (the one place
+must be deployed with NO traffic, verified, written to inventory-pin.<prefix>.env (the one place
 the pin lives), and only then receive 100% of traffic. Rollback swaps back.
 
 Runs under ATA_TEST_BASH (bash 3.2 for macOS parity) with a stateful fake gcloud/curl.
@@ -14,7 +14,7 @@ import pytest
 
 from tests.cloud_run_fake import (
     BASELINE_ENV, IMAGE_BASE, INV, INV_URL, NEW_DIGEST, OLD_DIGEST, OLD_PIN, REPO_ROOT,
-    FakeCloud, fresh_project_state, live_like_state, write_pin,
+    FakeCloud, for_prefix, fresh_project_state, healthy_http, live_like_state, without, write_pin,
 )
 
 REPIN = REPO_ROOT / "scripts" / "repin-inventory.sh"
@@ -267,6 +267,80 @@ def test_rollback_restores_the_previous_pin_and_swaps_the_file(cloud):
     assert "differs from the current baseline" in res.stderr
 
 
+def _switched_with_http_by_revision(cloud, old_answers):
+    """prepare -> write-pin -> switch; afterwards HTTP answers follow the serving revision:
+    the new pin has current code, OLD_PIN answers old_answers."""
+    cand = prepared(cloud)
+    assert cloud.run([REPIN, "write-pin", "--revision", cand, "--digest", NEW_DIGEST]).returncode == 0
+    assert cloud.run([REPIN, "switch"]).returncode == 0
+    state = cloud.state
+    state["http_rev"] = {cand: healthy_http(INV_URL), OLD_PIN: old_answers}
+    cloud.set_state(state)
+    return cand
+
+
+def test_rollback_to_a_pin_without_restock_swaps_the_pin_and_says_no_restock(cloud):
+    """Review C1: the legacy pin (00073-9vb) predates /admin/restock (404). Rollback must
+    succeed with a warning, the pin file must name the serving revision, and the next step
+    is reset --no-restock (a plain reset would fail at the restock step)."""
+    cand = _switched_with_http_by_revision(cloud, without(healthy_http(INV_URL), "GET /admin/restock"))
+
+    res = cloud.run([REPIN, "rollback"])
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert cloud.serving() == [(OLD_PIN, 100)]
+    text = cloud.pin_file.read_text()
+    assert f"PIN_INVENTORY_REVISION={OLD_PIN}\n" in text
+    assert f"PIN_INVENTORY_PREVIOUS_REVISION={cand}\n" in text
+    assert "predates /admin/restock" in res.stderr
+    assert "./scripts/reset-scenarios.sh --no-restock" in res.stdout
+    # The probe was really sent to the old code (the fake answered 404 for it).
+    assert any(c[-1] == f"{INV_URL}/admin/restock" for c in cloud.curl_calls())
+
+
+def test_rollback_with_restock_present_keeps_the_plain_reset(cloud):
+    _switched_with_http_by_revision(cloud, healthy_http(INV_URL))
+    res = cloud.run([REPIN, "rollback"])
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "--no-restock" not in res.stdout and "predates /admin/restock" not in res.stderr
+    assert "./scripts/reset-scenarios.sh\n" in res.stdout
+
+
+def test_rollback_http_failure_after_routing_still_swaps_the_pin(cloud):
+    """Traffic moved: the pin file must follow it even when the old revision fails checks,
+    or the next reset routes traffic back to the pin being rolled back from."""
+    cand = _switched_with_http_by_revision(cloud, without(healthy_http(INV_URL), "GET /items"))
+
+    res = cloud.run([REPIN, "rollback"])
+
+    assert res.returncode != 0
+    assert cloud.serving() == [(OLD_PIN, 100)]
+    text = cloud.pin_file.read_text()
+    assert f"PIN_INVENTORY_REVISION={OLD_PIN}\n" in text
+    assert f"PIN_INVENTORY_PREVIOUS_REVISION={cand}\n" in text
+    assert "serves 100% and the pin file names it" in res.stderr
+    assert "GET /items" in res.stderr or "/items -> HTTP 404" in res.stderr
+
+
+def test_switch_still_requires_the_restock_probe(cloud):
+    """Only rollback relaxes the restock probe: new code must have /admin/restock."""
+    cand = prepared(cloud)
+    assert cloud.run([REPIN, "write-pin", "--revision", cand, "--digest", NEW_DIGEST]).returncode == 0
+    state = cloud.state
+    state["http_rev"] = {cand: without(healthy_http(INV_URL), "GET /admin/restock")}
+    cloud.set_state(state)
+    res = cloud.run([REPIN, "switch"])
+    assert res.returncode != 0
+    assert "GET https://inv.example/admin/restock -> HTTP 404" in res.stderr
+
+
+def test_write_pin_says_to_switch_immediately(cloud):
+    cand = prepared(cloud)
+    res = cloud.run([REPIN, "write-pin", "--revision", cand, "--digest", NEW_DIGEST])
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Run switch immediately; no reset/scenario in between" in res.stdout
+
+
 def test_rollback_without_a_previous_pin_changes_nothing(cloud):
     res = cloud.run([REPIN, "rollback"])
     assert res.returncode != 0
@@ -372,3 +446,57 @@ def test_initial_refuses_when_it_cannot_tell_whether_a_pin_exists(tmp_path):
     assert res.returncode != 0
     assert "cannot tell whether" in res.stderr and "PERMISSION_DENIED" in res.stderr
     assert cloud.calls(["run", "services", "update"]) == []
+
+
+# --- a new stack: no pin file for the prefix ------------------------------------------
+
+
+def _new_stack(tmp_path, prefix="atat"):
+    """A fresh project state for <prefix>, and a pin path for <prefix> that does not exist."""
+    cloud = FakeCloud(tmp_path, for_prefix(fresh_project_state(), prefix))
+    cloud.pin_file.unlink()
+    cloud.pin_file = tmp_path / f"inventory-pin.{prefix}.env"
+    return cloud
+
+
+def _run_stack(cloud, argv, prefix="atat"):
+    return cloud.run(argv, NAME_PREFIX=prefix, ATA_INVENTORY_PIN_FILE=str(cloud.pin_file))
+
+
+def test_new_stack_initial_pin_creates_the_pin_file_end_to_end(tmp_path):
+    cloud = _new_stack(tmp_path)
+
+    res = _run_stack(cloud, [REPIN, "prepare", "--initial", "--image-digest", NEW_DIGEST])
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "No pin file for stack 'atat'" in res.stdout
+    update = cloud.calls(["run", "services", "update"])[0]
+    assert update[3] == "atat-inventory-api"
+    suffix = next(a.split("=", 1)[1] for a in update if a.startswith("--revision-suffix="))
+    cand = f"atat-inventory-api-{suffix}"
+    assert not cloud.pin_file.exists()  # prepare never writes the pin
+    assert f"git add {cloud.pin_file}" in res.stdout
+
+    res = _run_stack(cloud, [REPIN, "write-pin", "--revision", cand, "--digest", NEW_DIGEST, "--initial"])
+    assert res.returncode == 0, res.stdout + res.stderr
+    text = cloud.pin_file.read_text()
+    assert f"PIN_INVENTORY_REVISION={cand}\n" in text and "PIN_INVENTORY_PREVIOUS_REVISION=\n" in text
+    assert 'Stack "atat" (NAME_PREFIX=atat): atat-inventory-api baseline pin.' in text
+
+    res = _run_stack(cloud, [REPIN, "switch"])
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert cloud.serving("atat-inventory-api") == [(cand, 100)]
+    # Nothing ever named the ata stack.
+    for call in cloud.calls() + cloud.curl_calls():
+        assert not any("ata-" in a.replace("atat-", "") for a in call), call
+
+
+@pytest.mark.parametrize("command", [["status"], ["switch"], ["rollback"],
+                                     ["prepare", "--image-digest", NEW_DIGEST],
+                                     ["write-pin", "--revision", "atat-inventory-api-00001-abc", "--digest", NEW_DIGEST]])
+def test_new_stack_without_pin_file_points_to_prepare_initial(tmp_path, command):
+    cloud = _new_stack(tmp_path)
+    res = _run_stack(cloud, [REPIN, *command])
+    assert res.returncode != 0
+    assert "no inventory pin for stack 'atat'" in res.stderr and "prepare --initial" in res.stderr
+    assert cloud.calls(["run", "services", "update"]) == [] and cloud.calls(["run", "services", "update-traffic"]) == []
+    assert not cloud.pin_file.exists()

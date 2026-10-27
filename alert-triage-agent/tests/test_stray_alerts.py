@@ -121,6 +121,7 @@ printf '%s %s' "${code:-200}" "${secs:-0.012}"
 FAKE_GCLOUD = r"""#!/bin/sh
 case "$*" in
   "auth print-identity-token"*) echo "token" ;;
+  "run services describe "*"value(status.url)"*) echo "https://$4-test.a.run.app" ;;
   *) exit 1 ;;
 esac
 """
@@ -298,8 +299,8 @@ def test_every_demo_request_runs_before_the_alert_wait():
     main = _main_flow()
     wait = main.index("\nwait_for_open_alerts\n")
     before, after = main[:wait], main[wait:]
-    for call in ("reset_app_faults", "warm_up_service \"${NAME_PREFIX}-inventory-api\"",
-                 "warm_up_service \"${NAME_PREFIX}-orders-api\"", "check_apigee_health",
+    for call in ("reset_app_faults", "warm_up_service \"${SVC_INVENTORY}\"",
+                 "warm_up_service \"${SVC_ORDERS}\"", "check_apigee_health",
                  "verify_admin_endpoints \"${INV_URL}\""):
         assert call in before, call
     for forbidden in ("curl", "demo_request", "admin_request", "warm_up_service", "check_apigee_health",
@@ -352,8 +353,9 @@ def test_help_documents_alert_window_options():
 # verify-demo-infra.sh: reports requests that can raise an alert
 # =======================================================================================
 
-INV_DIRECT = "ata-inventory-api-4klvlqnmpa-uw.a.run.app/health"
-ORD_DIRECT = "ata-orders-api-4klvlqnmpa-uw.a.run.app/health"
+# The stub gcloud answers `run services describe <svc>` with https://<svc>-test.a.run.app.
+INV_DIRECT = "ata-inventory-api-test.a.run.app/health"
+ORD_DIRECT = "ata-orders-api-test.a.run.app/health"
 VERIFY_OK = ("/ata/orders/v1/orders/test 401\n/ata/inventory/v1/admin/reset 403\n"
              "/ata/orders/v1/admin/reset 403\n")
 
