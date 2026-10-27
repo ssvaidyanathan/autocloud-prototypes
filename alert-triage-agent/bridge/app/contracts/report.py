@@ -605,7 +605,8 @@ class InvestigationReport(BaseModel):
 
         issue_type = self.infer_issue_type()
 
-        change_ind = self.change_induced or self.raw_metadata.get("change_induced") or "No"
+        # Unset means nobody assessed it: "No" would be an unverified claim (old payloads included).
+        change_ind = self.change_induced or self.raw_metadata.get("change_induced") or "Not assessed"
 
         all_ts: list[str] = []
         if self.timeline:

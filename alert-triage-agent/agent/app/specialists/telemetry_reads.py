@@ -20,6 +20,9 @@ T = TypeVar("T")
 
 # Dossier metrics key: list of {"source", "target", "reason", "affects_change_detection"}.
 UNAVAILABLE_KEY = "unavailable_telemetry"
+# Dossier metrics key: change sources that were actually read (list of names). Without one,
+# "no change found" is not a finding: the report says change attribution was not assessed.
+CHANGE_SOURCES_KEY = "change_sources_checked"
 QUOTA_HTTP_CODE = 429
 QUOTA_GRPC_STATUS = "RESOURCE_EXHAUSTED"
 
@@ -121,6 +124,23 @@ def record_unavailable(
     metrics.setdefault(UNAVAILABLE_KEY, []).append(gap)
     logger.warning("Telemetry unavailable: %s for %s (%s)", source, target, reason)
     return gap
+
+
+def record_change_source(metrics: dict[str, Any], source: str) -> None:
+    """Record in the dossier metrics that change source ``source`` was read successfully."""
+    sources = metrics.setdefault(CHANGE_SOURCES_KEY, [])
+    if source not in sources:
+        sources.append(source)
+
+
+def change_sources_checked(dossiers: list[Any]) -> list[str]:
+    """Names of the change sources read by ``dossiers``, de-duplicated, in dossier order."""
+    sources: list[str] = []
+    for d in dossiers:
+        for source in (getattr(d, "metrics", None) or {}).get(CHANGE_SOURCES_KEY, []) or []:
+            if source not in sources:
+                sources.append(source)
+    return sources
 
 
 def unavailable_telemetry(dossiers: list[Any]) -> list[dict[str, Any]]:

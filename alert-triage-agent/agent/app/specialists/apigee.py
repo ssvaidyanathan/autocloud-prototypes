@@ -15,7 +15,14 @@ from ..config import AgentConfig
 from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
 from .base import BaseSpecialist, EvidenceDossier
-from .telemetry_reads import UNAVAILABLE_KEY, failure_reason, gap_text, read_log_entries, record_unavailable
+from .telemetry_reads import (
+    UNAVAILABLE_KEY,
+    failure_reason,
+    gap_text,
+    read_log_entries,
+    record_change_source,
+    record_unavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +389,9 @@ class ApigeeSpecialist(BaseSpecialist):
                         pass
             if client_counter:
                 top_client_ip = client_counter.most_common(1)[0][0]
+            if not access_log_truncated:
+                # The whole window was read, so proxy revision switches were evaluated.
+                record_change_source(metrics, f"Apigee access log {ACCESS_LOG_NAME} (proxy revisions of {target_proxy})")
         except Exception as exc:
             logger.warning("Cloud Logging ata-apigee-access query error: %s", exc)
             access_log_unavailable = True

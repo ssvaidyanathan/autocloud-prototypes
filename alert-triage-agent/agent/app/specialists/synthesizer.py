@@ -36,7 +36,13 @@ from .apigee import ACCESS_LOG_NAME, SPIKE_ARREST_FAULT, ApigeeSpecialist, acces
 from .cloud_sql import CloudSQLSpecialist
 from .change import ChangeSpecialist, is_genuine_change
 from .origin_selection import OriginSelection, alert_event_from_entry, onset_allows_explanation, select_origin
-from .telemetry_reads import change_detection_incomplete_text, gap_text, unavailable_telemetry
+from .telemetry_reads import (
+    CHANGE_SOURCES_KEY,
+    change_detection_incomplete_text,
+    change_sources_checked,
+    gap_text,
+    unavailable_telemetry,
+)
 
 try:
     from topology.topology_graph import (
@@ -575,9 +581,8 @@ class SynthesizerAgent:
         # change source missing and no change implicated, "Change-Induced: No" is unverified.
         gaps = unavailable_telemetry(dossiers)
         change_gap = change_detection_incomplete_text(gaps)
-        change_induced: Optional[str] = None
-        if change_gap and not (verdict is not None and verdict.get("implicated")):
-            change_induced = f"Not assessed ({change_gap})"
+        change_induced = self._change_induced(verdict, dossiers, origin, change_gap)
+        if change_gap and change_induced.startswith("Not assessed"):
             all_evidence.setdefault("change", []).append(
                 EvidenceItem(headline="Change detection incomplete", content=f"{change_gap[0].upper()}{change_gap[1:]}.")
             )
@@ -837,6 +842,15 @@ class SynthesizerAgent:
             return False
         return bool(comp) and str(comp.type).strip().lower() == "cloud run"
 
+    @staticmethod
+    def _is_apigee_proxy(service: str) -> bool:
+        try:
+            comp = get_loader().components.get(get_loader().canonicalize(service) or service)
+        except Exception as exc:
+            logger.warning("Topology component lookup failed for %s: %s", service, type(exc).__name__)
+            return False
+        return bool(comp) and "apigee" in str(comp.type).lower()
+
     def _db_telemetry_anomalous(self, alert: AlertEvent, dossiers: dict[str, EvidenceDossier]) -> bool:
         """Cloud SQL telemetry shows saturation/locks (and the caller has no DB auth error)."""
         sql_dossier = dossiers.get("CloudSQLSpecialist")
@@ -960,7 +974,8 @@ class SynthesizerAgent:
             reason = f"{node} shows no errors or latency of its own; recent revision {revision} not implicated"
             implicated = False
         else:
-            reason = f"{node} degraded ({'; '.join(own)}) with no degraded upstream dependency; recent revision {revision} implicated"
+            evidence = f"{node} degraded ({'; '.join(own)}) with no degraded upstream dependency"
+            reason = f"{evidence}; recent revision {revision} implicated"
             implicated = True
         logger.info(
             "Change assessment: service=%s revision=%s implicated=%s own_evidence=%s explained_by=%s",
@@ -970,7 +985,10 @@ class SynthesizerAgent:
             own,
             explaining,
         )
-        return {"service": service, "revision": revision, "implicated": implicated, "reason": reason}
+        verdict = {"service": service, "revision": revision, "implicated": implicated, "reason": reason}
+        if implicated:
+            verdict["evidence"] = evidence
+        return verdict
 
     def _service_onset(
         self,
@@ -1400,6 +1418,88 @@ class SynthesizerAgent:
             f"and change proximity (+{score_change:.2f})."
         )
         return total_conf, contributing_factors, rationale
+
+    def _change_induced(
+        self,
+        verdict: Optional[dict[str, Any]],
+        dossiers: list[EvidenceDossier],
+        origin: str,
+        change_gap: Optional[str],
+    ) -> str:
+        """The Change-Induced value of the report, with its evidence.
+
+        "Yes (...)" when a change is implicated: a Cloud Run revision (the change verdict) or an
+        Apigee proxy revision that brought the SpikeArrest faults. "Not assessed (...)" when a
+        change source could not be read, none was queried, or the origin proxy's revisions were
+        not evaluated. "No (...)" only when change detection ran and found no implicated change.
+        """
+        if verdict is not None and verdict.get("implicated"):
+            chg = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist"), None)
+            metrics = chg.metrics if chg is not None else {}
+            when = ""
+            if metrics.get("deploy_timestamp"):
+                when = f" deployed {metrics['deploy_timestamp']}"
+            mins = metrics.get("minutes_since_deploy")
+            if isinstance(mins, int) and mins >= 0:
+                when += f" ({mins}m before the alert)"
+            evidence = verdict.get("evidence") or verdict["reason"]
+            value = f"Yes (revision {verdict['revision']} on {verdict['service']}{when}; {evidence})"
+            logger.info("Change-Induced: %s", value)
+            return value
+
+        proxy = self._proxy_change_evidence(dossiers, origin)
+        if proxy is not None:
+            new, prev = proxy["new_revision"], proxy["previous_revision"]
+            value = (
+                f"Yes (Apigee proxy {proxy['proxy']} revision {new} first served {proxy['new_first_served_at']}, "
+                f"replacing revision {prev}; access log: revision {new} served {proxy['new_requests']} requests "
+                f"with {proxy['new_spike_arrest_faults']} SpikeArrest faults, revision {prev} served "
+                f"{proxy['previous_requests']} requests with none)"
+            )
+            logger.info("Change-Induced: %s", value)
+            return value
+
+        if change_gap:
+            value = f"Not assessed ({change_gap})"
+            logger.info("Change-Induced: %s", value)
+            return value
+
+        chg = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist"), None)
+        not_assessed = None
+        if chg is None or not chg.metrics.get(CHANGE_SOURCES_KEY):
+            not_assessed = "no deployment or configuration change source was queried"
+        else:
+            # An Apigee origin's changes are proxy revisions, read only from its access log.
+            apigee = None
+            if self._is_apigee_proxy(origin):
+                apigee = next(
+                    (d for d in dossiers if d.specialist_name == "ApigeeSpecialist" and d.target_resource == origin),
+                    None,
+                )
+            switch = apigee.metrics.get("proxy_revision_change") if apigee is not None else None
+            if apigee is not None and not apigee.metrics.get(CHANGE_SOURCES_KEY):
+                cap = " (access log read cap hit)" if apigee.metrics.get("access_log_cap_hit") else ""
+                not_assessed = f"Apigee proxy {origin} revisions not evaluated{cap}"
+            elif isinstance(switch, dict):
+                not_assessed = (
+                    f"Apigee proxy {origin} switched from revision {switch.get('previous_revision')} to "
+                    f"{switch.get('new_revision')} in the window; it is attributed only when the new revision brought SpikeArrest faults"
+                )
+        if not_assessed:
+            value = f"Not assessed ({not_assessed}; change attribution not assessed)"
+            logger.info("Change-Induced: %s", value)
+            return value
+
+        checked = ", ".join(change_sources_checked(dossiers))
+        if verdict is not None:
+            value = f"No ({verdict['reason']}; checked: {checked})"
+        else:
+            value = (
+                f"No (no deployment or configuration change on {chg.target_resource} or its upstream "
+                f"dependencies in the 2 h before the alert; checked: {checked})"
+            )
+        logger.info("Change-Induced: %s", value)
+        return value
 
     @staticmethod
     def _proxy_change_evidence(dossiers: list[EvidenceDossier], origin: str) -> Optional[dict[str, Any]]:

@@ -13,7 +13,15 @@ from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
 from ..request_count import REQUEST_COUNT_METRIC, request_count_filter, request_count_series
 from .base import BaseSpecialist, EvidenceDossier
-from .telemetry_reads import UNAVAILABLE_KEY, failure_reason, gap_text, read_log_entries, record_unavailable
+from .telemetry_reads import (
+    CHANGE_SOURCES_KEY,
+    UNAVAILABLE_KEY,
+    failure_reason,
+    gap_text,
+    read_log_entries,
+    record_change_source,
+    record_unavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +241,7 @@ class ChangeSpecialist(BaseSpecialist):
             apigee_queried = not any(
                 c.get("source") == "apigee" and c.get("error") for c in tl.get("changes", [])
             )
+            record_change_source(metrics, "ata-tools change timeline")
             for chg in tl.get("changes", []):
                 svc = chg.get("service_name") or chg.get("api_name")
                 rev = chg.get("revision_name") or str(chg.get("revision", ""))
@@ -309,6 +318,7 @@ class ChangeSpecialist(BaseSpecialist):
                         affects_change_detection=True,
                     )
                 if resp.status_code == 200:
+                    record_change_source(metrics, "Cloud Run Admin API revision history")
                     services = resp.json().get("services", [])
                     for svc in services:
                         svc_full_name = svc.get("name", "")
@@ -469,6 +479,7 @@ class ChangeSpecialist(BaseSpecialist):
                     config=config,
                     what="Cloud Logging Cloud Run audit-log read",
                 )
+                record_change_source(metrics, "Cloud Run audit log")
                 for ae in audit_entries:
                     pld = ae.payload if isinstance(ae.payload, dict) else {}
                     method = str(pld.get("methodName", ""))
@@ -567,6 +578,15 @@ class ChangeSpecialist(BaseSpecialist):
             content = f"Change detection incomplete: {gaps}; change attribution not assessed."
             findings.append(content)
             evidence_items.append(EvidenceItem(headline="Deployment History Analysis (incomplete)", content=content))
+        elif not metrics.get(CHANGE_SOURCES_KEY):
+            # Nothing was read (local run without ata-tools): no finding either way.
+            content = (
+                "Change history not queried: no change source was available (ata-tools change timeline "
+                "absent; Cloud Run Admin API and audit log are not queried in local mode; Apigee proxy "
+                "deployment history not queried); change attribution not assessed."
+            )
+            findings.append(content)
+            evidence_items.append(EvidenceItem(headline="Deployment History Analysis (not queried)", content=content))
         else:
             if apigee_queried:
                 findings.append("No configuration or revision deployments detected in the 2-hour window prior to alert onset.")

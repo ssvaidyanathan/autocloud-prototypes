@@ -76,6 +76,8 @@ Recommended Actions:
 Full diagnostic report attached as HTML (ata-diagnostic-report-grp_20261023_inv_001.html).
 ```
 
+`Change-Induced` is one of: `Yes (<the implicated change and its evidence>)`; `No (<why, and the change sources checked>)`, only when change detection read at least one change source and found no implicated change in the window; `Not assessed (<why>)` when a change source could not be read, none was queried, or an Apigee origin's proxy revisions were not evaluated. A report that does not set it prints `Not assessed`, never `No`.
+
 ---
 
 ## 4. Rich Operational Criteria for 4-Bullet Summaries
