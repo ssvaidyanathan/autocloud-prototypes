@@ -76,8 +76,25 @@ fi
 log_info "Target Inventory Service: ${INV_URL}"
 log_info "Apigee Ingress Host: ${APIGEE_HOST}"
 
+# From the fault injection on, an exit with an error resets the fault instead of leaving
+# ata-inventory-api faulty with no traffic. A successful run keeps it until reset-scenarios.sh.
+FAULT_INJECTED=false
+reset_fault_on_error() {
+    local rc=$?
+    if [ "${rc}" -eq 0 ] || [ "${FAULT_INJECTED}" != "true" ]; then
+        return 0
+    fi
+    log_error "S2 aborted (exit ${rc}) after injecting the latency fault on ${NAME_PREFIX}-inventory-api; resetting it via POST ${INV_URL}/admin/fault/reset." >&2
+    if ! reset_inventory_fault_after_abort "the latency fault"; then
+        log_error "Run ./scripts/reset-scenarios.sh now." >&2
+    fi
+    exit "${rc}"
+}
+trap reset_fault_on_error EXIT
+
 # 2. Inject Fault: POST /admin/fault/inject with latency delay_ms: 6500
 log_info "--> Injecting latency fault (delay: 6500ms) on ata-inventory-api..."
+FAULT_INJECTED=true
 if [ "${DRY_RUN}" = "true" ]; then
     log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/fault/inject -d '{\"type\": \"latency\", \"delay_ms\": 6500}'"
 else

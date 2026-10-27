@@ -63,29 +63,8 @@ API_KEY="$(resolve_api_key)" || exit 1
 log_info "=== Starting Scenario S3: Concurrent Disjoint Incidents ==="
 log_info "Start Time: ${SCENARIO_START_TIME} | Hold Duration: ${HOLD_SECS}s (${HOLD_DURATION})"
 
-# 1. Trigger S1 fault directly on inventory API
-INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
-ID_TOKEN="$(resolve_id_token "${INV_URL}")"
-AUTH_HEADER=()
-if [ -n "${ID_TOKEN}" ] && [ "${ID_TOKEN}" != "mock-id-token" ]; then
-    AUTH_HEADER=(-H "Authorization: Bearer ${ID_TOKEN}")
-fi
-
-log_info "--> Injecting 500 error fault (rate: 0.85) on ata-inventory-api..."
-if [ "${DRY_RUN}" = "true" ]; then
-    log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/fault/inject -d '{\"type\": \"500\", \"rate\": 0.85}'"
-else
-    HTTP_CODE=$(curl -s -o /tmp/ata-s3-inject-resp.txt -w "%{http_code}" -X POST \
-        ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} \
-        -H "Content-Type: application/json" \
-        -d '{"type": "500", "rate": 0.85}' \
-        "${INV_URL}/admin/fault/inject" || echo "000")
-    check_cloud_run_auth "${HTTP_CODE}" "${INV_URL}/admin/fault/inject" || true
-    rm -f /tmp/ata-s3-inject-resp.txt
-fi
-
-# 2. Trigger Orders proxy SpikeArrest 429 fault concurrently
-log_info "--> Deploying strict 1pm SpikeArrest on ata-orders-v1 Apigee proxy..."
+# The strict SpikeArrest bundle and the Apigee token are prepared before any fault is
+# injected: a missing bundle or a failed zip then stops the run with nothing to undo.
 TOKEN="$(resolve_apigee_token)"
 BASE_URL="https://apigee.googleapis.com/v1/organizations/${PROJECT_ID}"
 SA_EMAIL="ata-apigee-sa@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -94,10 +73,12 @@ BUNDLE_SRC="${SCRIPT_DIR}/../../demo/apigee/ata-orders-v1"
 TMP_DIR="/tmp/ata-orders-s3-$$"
 ZIP_FILE="/tmp/ata-orders-v1-s3.zip"
 
-mkdir -p "${TMP_DIR}"
-if [ -d "${BUNDLE_SRC}" ]; then
-    cp -r "${BUNDLE_SRC}"/* "${TMP_DIR}/"
+if [ ! -d "${BUNDLE_SRC}/apiproxy/policies" ]; then
+    log_error "FATAL: Apigee bundle ${BUNDLE_SRC} (apiproxy/policies) not found; S3 not started, no fault injected." >&2
+    exit 1
 fi
+mkdir -p "${TMP_DIR}"
+cp -r "${BUNDLE_SRC}"/* "${TMP_DIR}/"
 
 cat <<'EOF' > "${TMP_DIR}/apiproxy/policies/SA-SpikeArrest.xml"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -119,20 +100,144 @@ if os.path.exists(bundle_dir):
                 zf.write(full_path, rel_path)
 " "${TMP_DIR}" "${ZIP_FILE}" 2>/dev/null || true
 
+APIGEE_LIVE=true
 if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ] || [ -z "${TOKEN}" ] || [ "${TOKEN}" = "mock-apigee-token" ]; then
+    APIGEE_LIVE=false
+fi
+if [ "${APIGEE_LIVE}" = "true" ] && [ ! -s "${ZIP_FILE}" ]; then
+    log_error "FATAL: could not build the Apigee bundle zip ${ZIP_FILE} from ${TMP_DIR}; S3 not started, no fault injected." >&2
+    rm -rf "${TMP_DIR}"
+    exit 1
+fi
+
+# 1. Trigger S1 fault directly on inventory API
+INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
+ID_TOKEN="$(resolve_id_token "${INV_URL}")"
+AUTH_HEADER=()
+if [ -n "${ID_TOKEN}" ] && [ "${ID_TOKEN}" != "mock-id-token" ]; then
+    AUTH_HEADER=(-H "Authorization: Bearer ${ID_TOKEN}")
+fi
+
+# From the fault injection on, an exit with an error undoes what S3 changed instead of
+# leaving it with no traffic: it resets the inventory 500 fault and, if the strict
+# SpikeArrest revision was deployed, redeploys the proxy revision that served before.
+# A successful run keeps both: the scenario needs them until reset-scenarios.sh.
+FAULT_INJECTED=false
+PROXY_DEPLOYED=false
+PREV_PROXY_REVISION=""
+REVISION=""
+restore_orders_proxy_after_abort() {
+    local code
+    if [ -z "${PREV_PROXY_REVISION}" ]; then
+        log_error "FATAL: the ata-orders-v1 revision deployed before S3 is unknown; the proxy was NOT restored." >&2
+        return 1
+    fi
+    if [ "${PREV_PROXY_REVISION}" = "${REVISION}" ]; then
+        return 0
+    fi
+    code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 60 -X POST \
+        -H "Authorization: Bearer ${TOKEN}" \
+        "${BASE_URL}/environments/${ENV_NAME}/apis/ata-orders-v1/revisions/${PREV_PROXY_REVISION}/deployments?override=true&serviceAccount=projects/-/serviceAccounts/${SA_EMAIL}" \
+        2>/dev/null) || code="000"
+    case "${code}" in
+        2??)
+            log_warn "Redeployed ata-orders-v1 revision ${PREV_PROXY_REVISION} (HTTP ${code})." >&2
+            return 0
+            ;;
+    esac
+    log_error "FATAL: redeploying ata-orders-v1 revision ${PREV_PROXY_REVISION} returned HTTP ${code:-<none>}." >&2
+    return 1
+}
+undo_s3_on_error() {
+    local rc=$? left=""
+    if [ "${rc}" -eq 0 ] || [ "${FAULT_INJECTED}" != "true" ]; then
+        return 0
+    fi
+    log_error "S3 aborted (exit ${rc}) after injecting faults; undoing them." >&2
+    if ! reset_inventory_fault_after_abort "the 500 error fault"; then
+        left="the 500 error fault on ${NAME_PREFIX}-inventory-api"
+    fi
+    if [ "${PROXY_DEPLOYED}" = "true" ] && ! restore_orders_proxy_after_abort; then
+        left="${left:+${left}; }ata-orders-v1 deployed with the strict 1pm SpikeArrest revision ${REVISION:-<unknown>}"
+    fi
+    rm -rf "${TMP_DIR}" "${ZIP_FILE}"
+    if [ -n "${left}" ]; then
+        log_error "STILL LEFT after the S3 abort: ${left}. Run ./scripts/reset-scenarios.sh now." >&2
+    else
+        log_warn "S3 abort cleanup complete: nothing left injected." >&2
+    fi
+    exit "${rc}"
+}
+trap undo_s3_on_error EXIT
+
+log_info "--> Injecting 500 error fault (rate: 0.85) on ata-inventory-api..."
+FAULT_INJECTED=true
+if [ "${DRY_RUN}" = "true" ]; then
+    log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/fault/inject -d '{\"type\": \"500\", \"rate\": 0.85}'"
+else
+    HTTP_CODE=$(curl -s -o /tmp/ata-s3-inject-resp.txt -w "%{http_code}" -X POST \
+        ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} \
+        -H "Content-Type: application/json" \
+        -d '{"type": "500", "rate": 0.85}' \
+        "${INV_URL}/admin/fault/inject" || echo "000")
+    check_cloud_run_auth "${HTTP_CODE}" "${INV_URL}/admin/fault/inject" || true
+    rm -f /tmp/ata-s3-inject-resp.txt
+fi
+
+# 2. Trigger Orders proxy SpikeArrest 429 fault concurrently
+log_info "--> Deploying strict 1pm SpikeArrest on ata-orders-v1 Apigee proxy..."
+
+if [ "${APIGEE_LIVE}" != "true" ]; then
     log_info "    [MOCK/DRY-RUN] Simulating import and deployment of strict SpikeArrest revision..."
 else
+    # The revision serving now, so an abort after the deploy can put it back.
+    DEPLOYMENTS_RESP=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
+        "${BASE_URL}/environments/${ENV_NAME}/apis/ata-orders-v1/deployments" 2>/dev/null) || DEPLOYMENTS_RESP=""
+    PREV_PROXY_REVISION=$(printf '%s' "${DEPLOYMENTS_RESP}" | python3 -c '
+import json, sys
+try:
+    deps = json.load(sys.stdin).get("deployments") or []
+    print(max((str(d["revision"]) for d in deps if d.get("revision")), key=int))
+except Exception:
+    sys.exit(1)
+' 2>/dev/null) || PREV_PROXY_REVISION=""
+    if [ -n "${PREV_PROXY_REVISION}" ]; then
+        log_info "    ata-orders-v1 revision ${PREV_PROXY_REVISION} is deployed in ${ENV_NAME} before S3."
+    else
+        log_warn "    Could not read the deployed ata-orders-v1 revision; an abort after the deploy cannot restore it (reset-scenarios.sh does)." >&2
+    fi
+
     log_info "    Importing strict SpikeArrest revision to Apigee..."
-    IMPORT_RESP=$(curl -s -X POST \
+    if ! IMPORT_RESP=$(curl -s -X POST \
         -H "Authorization: Bearer ${TOKEN}" \
         -H "Content-Type: multipart/form-data" \
         -F "file=@${ZIP_FILE}" \
-        "${BASE_URL}/apis?name=ata-orders-v1&action=import" || echo '{"revision":"98"}')
+        "${BASE_URL}/apis?name=ata-orders-v1&action=import"); then
+        log_error "FATAL: the Apigee import request for ata-orders-v1 failed (curl error); strict SpikeArrest not deployed." >&2
+        exit 1
+    fi
 
-    REVISION=$(echo "${IMPORT_RESP}" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('revision', '98'))")
+    if ! REVISION=$(printf '%s' "${IMPORT_RESP}" | python3 -c '
+import json, sys
+try:
+    rev = json.load(sys.stdin).get("revision")
+except Exception as exc:
+    print("not JSON (%s)" % exc, file=sys.stderr)
+    sys.exit(1)
+if not rev:
+    print("JSON without a revision", file=sys.stderr)
+    sys.exit(1)
+print(rev)
+' 2>/tmp/ata-s3-import-err.txt); then
+        log_error "FATAL: the Apigee import response for ata-orders-v1 is $(cat /tmp/ata-s3-import-err.txt 2>/dev/null); strict SpikeArrest not deployed. Response: ${IMPORT_RESP:0:300}" >&2
+        rm -f /tmp/ata-s3-import-err.txt
+        exit 1
+    fi
+    rm -f /tmp/ata-s3-import-err.txt
     log_info "    Imported revision: ${REVISION}"
 
     log_info "    Deploying revision ${REVISION} to environment ${ENV_NAME}..."
+    PROXY_DEPLOYED=true
     curl -s -X POST \
         -H "Authorization: Bearer ${TOKEN}" \
         "${BASE_URL}/environments/${ENV_NAME}/apis/ata-orders-v1/revisions/${REVISION}/deployments?override=true&serviceAccount=projects/-/serviceAccounts/${SA_EMAIL}" > /dev/null 2>&1 || true

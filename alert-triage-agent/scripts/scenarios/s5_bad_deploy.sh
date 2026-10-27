@@ -84,6 +84,25 @@ log_info "Start Time: ${SCENARIO_START_TIME} | Hold Duration: ${HOLD_SECS}s (${H
 # traffic to it. Inventory traffic is pinned to PINNED_INVENTORY_REVISION by name,
 # and Cloud Run keeps a named-revision split for new revisions, so the revision
 # created by `services update` gets 0% until traffic is moved to it explicitly.
+# From the faulty `services update` on, an exit with an error reverts to the pinned baseline
+# (revert_s5) instead of leaving the invalid DB user in place with no traffic. A successful
+# run keeps the faulty revision serving: the scenario needs it until --revert / reset.
+FAULT_INJECTED=false
+revert_s5_on_error() {
+    local rc=$?
+    if [ "${rc}" -eq 0 ] || [ "${FAULT_INJECTED}" != "true" ]; then
+        return 0
+    fi
+    log_error "S5 aborted (exit ${rc}) after deploying the faulty revision ${BAD_REVISION:-}; reverting to the pinned baseline." >&2
+    if revert_s5 >&2; then
+        log_warn "S5 abort cleanup complete: ${NAME_PREFIX}-inventory-api is back on ${PINNED_INVENTORY_REVISION}." >&2
+    else
+        log_error "STILL LEFT after the S5 abort: ${NAME_PREFIX}-inventory-api is NOT on the pinned baseline (the faulty revision or the invalid DB user may still be live). Run '$0 --revert' or ./scripts/reset-scenarios.sh now." >&2
+    fi
+    exit "${rc}"
+}
+trap revert_s5_on_error EXIT
+
 log_info "--> Updating ata-inventory-api with invalid DB credentials on pinned image..."
 if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
     log_info "[MOCK/DRY-RUN] Simulating Cloud Run deployment with DB_USER=invalid_user on ${PINNED_INVENTORY_IMAGE}..."
@@ -103,11 +122,12 @@ else
         log_error "The service template may already carry the invalid DB user; run '$0 --revert' to restore the baseline." >&2
         exit 1
     fi
+    FAULT_INJECTED=true
     if ! gcloud run revisions describe "${BAD_REVISION}" \
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --format="value(metadata.name)" >/dev/null; then
-        log_error "FATAL: no new ${NAME_PREFIX}-inventory-api revision ${BAD_REVISION} after the update; S5 not injected. Run '$0 --revert'." >&2
+        log_error "FATAL: no new ${NAME_PREFIX}-inventory-api revision ${BAD_REVISION} after the update; S5 not injected." >&2
         exit 1
     fi
     log_info "    Faulty revision created: ${BAD_REVISION}. Routing 100% traffic to it..."
@@ -117,11 +137,10 @@ else
         --to-revisions="${BAD_REVISION}=100" \
         --quiet; then
         log_error "FATAL: could not route traffic to ${BAD_REVISION}; S5 not injected." >&2
-        log_error "Run '$0 --revert' to restore the pinned traffic and the service template." >&2
         exit 1
     fi
     if ! verify_inventory_serving_revision "${BAD_REVISION}"; then
-        log_error "FATAL: ${BAD_REVISION} is not serving 100% of traffic; S5 not injected. Run '$0 --revert'." >&2
+        log_error "FATAL: ${BAD_REVISION} is not serving 100% of traffic; S5 not injected." >&2
         exit 1
     fi
     log_success "    ${BAD_REVISION} is serving 100% of ${NAME_PREFIX}-inventory-api traffic."

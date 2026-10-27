@@ -374,6 +374,29 @@ check_cloud_run_auth() {
     return 0
 }
 
+# After a scenario aborted with an inventory app fault injected, reset the fault as
+# reset-scenarios.sh does: POST ${INV_URL}/admin/fault/reset, with AUTH_HEADER when set.
+# Usage: reset_inventory_fault_after_abort <fault description>. Uses INV_URL and AUTH_HEADER.
+# Returns 0 when the fault was reset (dry-run injected nothing: the call is only printed), and
+# 1 after saying the fault is STILL INJECTED when the reset failed. All output is on stderr.
+reset_inventory_fault_after_abort() {
+    local fault="$1" code
+    if [ "${DRY_RUN}" = "true" ]; then
+        log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/fault/reset" >&2
+        return 0
+    fi
+    code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 30 -X POST \
+        ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} "${INV_URL}/admin/fault/reset" 2>/dev/null) || code="000"
+    case "${code}" in
+        2??)
+            log_warn "Reset ${fault} (POST ${INV_URL}/admin/fault/reset -> HTTP ${code})." >&2
+            return 0
+            ;;
+    esac
+    log_error "FATAL: POST ${INV_URL}/admin/fault/reset returned HTTP ${code:-<none>}; ${fault} is STILL INJECTED on ${NAME_PREFIX}-inventory-api." >&2
+    return 1
+}
+
 # Resolve Apigee Management Token
 resolve_apigee_token() {
     if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
