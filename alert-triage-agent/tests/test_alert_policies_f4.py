@@ -45,14 +45,15 @@ def test_terraform_observability_contains_all_policies():
     assert "${var.name_prefix}-inventory-latency" in main_tf
     assert "${var.name_prefix}-inventory-api" in main_tf
     assert "run.googleapis.com/request_latencies" in main_tf
-    assert "ALIGN_PERCENTILE_99" in main_tf
+    # p99 per service: latency distributions merged across series (variables.tf defaults).
+    assert "cross_series_reducer = var.latency_cross_series_reducer" in main_tf
 
     # 3. Cloud SQL connections threshold uses variable
     assert "threshold_value = var.cloudsql_connections_threshold" in main_tf
 
     # 4. User labels on alert policies
     assert "user_labels = {" in main_tf
-    assert "app = \"alert-triage-agent\"" in main_tf
+    assert re.search(r'app\s+=\s+"alert-triage-agent"', main_tf)
 
     # 5. Outputs include inventory_latency
     assert "google_monitoring_alert_policy.inventory_latency.display_name" in outputs_tf

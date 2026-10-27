@@ -26,10 +26,11 @@ resource "google_monitoring_alert_policy" "orders_5xx" {
   conditions {
     display_name = "Cloud Run orders 5xx error rate"
     condition_threshold {
-      filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${var.name_prefix}-orders-api\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"5xx\""
-      duration        = "60s"
-      comparison      = "COMPARISON_GT"
-      threshold_value = 0.05
+      filter                  = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${var.name_prefix}-orders-api\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"5xx\""
+      duration                = "60s"
+      comparison              = "COMPARISON_GT"
+      threshold_value         = 0.05
+      evaluation_missing_data = var.alert_evaluation_missing_data
       aggregations {
         alignment_period     = "60s"
         per_series_aligner   = "ALIGN_RATE"
@@ -39,7 +40,7 @@ resource "google_monitoring_alert_policy" "orders_5xx" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
     component = "${var.name_prefix}-orders-api"
     tier      = "service"
     signal    = "5xx"
@@ -63,19 +64,22 @@ resource "google_monitoring_alert_policy" "orders_latency" {
   conditions {
     display_name = "Cloud Run orders latency > 2s"
     condition_threshold {
-      filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${var.name_prefix}-orders-api\" AND metric.type = \"run.googleapis.com/request_latencies\""
-      duration        = "60s"
-      comparison      = "COMPARISON_GT"
-      threshold_value = 2000
+      filter                  = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${var.name_prefix}-orders-api\" AND metric.type = \"run.googleapis.com/request_latencies\""
+      duration                = "60s"
+      comparison              = "COMPARISON_GT"
+      threshold_value         = 2000
+      evaluation_missing_data = var.alert_evaluation_missing_data
       aggregations {
-        alignment_period   = "60s"
-        per_series_aligner = "ALIGN_PERCENTILE_99"
+        alignment_period     = "60s"
+        per_series_aligner   = var.latency_per_series_aligner
+        cross_series_reducer = var.latency_cross_series_reducer
+        group_by_fields      = var.latency_group_by
       }
     }
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
     component = "${var.name_prefix}-orders-api"
     tier      = "service"
     signal    = "latency"
@@ -99,10 +103,11 @@ resource "google_monitoring_alert_policy" "inventory_5xx" {
   conditions {
     display_name = "Cloud Run inventory 5xx error rate"
     condition_threshold {
-      filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${var.name_prefix}-inventory-api\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"5xx\""
-      duration        = "60s"
-      comparison      = "COMPARISON_GT"
-      threshold_value = 0.05
+      filter                  = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${var.name_prefix}-inventory-api\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"5xx\""
+      duration                = "60s"
+      comparison              = "COMPARISON_GT"
+      threshold_value         = 0.05
+      evaluation_missing_data = var.alert_evaluation_missing_data
       aggregations {
         alignment_period     = "60s"
         per_series_aligner   = "ALIGN_RATE"
@@ -112,7 +117,7 @@ resource "google_monitoring_alert_policy" "inventory_5xx" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
     component = "${var.name_prefix}-inventory-api"
     tier      = "service"
     signal    = "5xx"
@@ -136,19 +141,22 @@ resource "google_monitoring_alert_policy" "inventory_latency" {
   conditions {
     display_name = "Cloud Run inventory latency > 2s"
     condition_threshold {
-      filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${var.name_prefix}-inventory-api\" AND metric.type = \"run.googleapis.com/request_latencies\""
-      duration        = "60s"
-      comparison      = "COMPARISON_GT"
-      threshold_value = 2000
+      filter                  = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${var.name_prefix}-inventory-api\" AND metric.type = \"run.googleapis.com/request_latencies\""
+      duration                = "60s"
+      comparison              = "COMPARISON_GT"
+      threshold_value         = 2000
+      evaluation_missing_data = var.alert_evaluation_missing_data
       aggregations {
-        alignment_period   = "60s"
-        per_series_aligner = "ALIGN_PERCENTILE_99"
+        alignment_period     = "60s"
+        per_series_aligner   = var.latency_per_series_aligner
+        cross_series_reducer = var.latency_cross_series_reducer
+        group_by_fields      = var.latency_group_by
       }
     }
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
     component = "${var.name_prefix}-inventory-api"
     tier      = "service"
     signal    = "latency"
@@ -172,10 +180,11 @@ resource "google_monitoring_alert_policy" "apigee_orders_5xx" {
   conditions {
     display_name = "Apigee orders proxy 5xx spike"
     condition_threshold {
-      filter          = "resource.type = \"apigee.googleapis.com/Proxy\" AND resource.labels.proxy_name = \"${var.name_prefix}-orders-v1\" AND metric.type = \"apigee.googleapis.com/proxy/response_count\" AND (metric.labels.response_code = \"500\" OR metric.labels.response_code = \"502\" OR metric.labels.response_code = \"504\")"
-      duration        = "60s"
-      comparison      = "COMPARISON_GT"
-      threshold_value = 1
+      filter                  = "resource.type = \"apigee.googleapis.com/Proxy\" AND resource.labels.proxy_name = \"${var.name_prefix}-orders-v1\" AND metric.type = \"apigee.googleapis.com/proxy/response_count\" AND (metric.labels.response_code = \"500\" OR metric.labels.response_code = \"502\" OR metric.labels.response_code = \"504\")"
+      duration                = "60s"
+      comparison              = "COMPARISON_GT"
+      threshold_value         = 1
+      evaluation_missing_data = var.alert_evaluation_missing_data
       aggregations {
         alignment_period     = "60s"
         per_series_aligner   = "ALIGN_RATE"
@@ -185,7 +194,7 @@ resource "google_monitoring_alert_policy" "apigee_orders_5xx" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
     component = "${var.name_prefix}-orders-v1"
     tier      = "edge"
     signal    = "5xx"
@@ -222,7 +231,7 @@ resource "google_monitoring_alert_policy" "apigee_orders_429" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
     component = "${var.name_prefix}-orders-v1"
     tier      = "edge"
     signal    = "rate-limit"
@@ -258,7 +267,7 @@ resource "google_monitoring_alert_policy" "cloudsql_connections" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
     component = "${var.name_prefix}-inventory-db"
     tier      = "data"
     signal    = "connections"
@@ -294,7 +303,7 @@ resource "google_monitoring_alert_policy" "cloudsql_cpu" {
   }
 
   user_labels = {
-    app = "alert-triage-agent"
+    app       = "alert-triage-agent"
     component = "${var.name_prefix}-inventory-db"
     tier      = "data"
     signal    = "cpu"

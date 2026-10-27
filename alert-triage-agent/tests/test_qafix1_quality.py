@@ -629,3 +629,51 @@ def test_change_specialist_no_deploy_finding_names_what_was_queried():
     joined = " ".join(dossier.findings)
     assert "No configuration or revision deployments detected" not in joined
     assert "Apigee proxy deployment history not queried" in joined
+
+
+# ---------------------------------------------------------------------------------------
+# Bug 5: latency policies reduce across series; latency/5xx close promptly on missing data
+# ---------------------------------------------------------------------------------------
+
+import re as _re  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_OBS = _Path(__file__).resolve().parents[1] / "infra/terraform/observability"
+
+
+def _policy_block(main_tf: str, name: str) -> str:
+    start = main_tf.index(f'resource "google_monitoring_alert_policy" "{name}"')
+    nxt = main_tf.find('resource "google_monitoring_alert_policy"', start + 1)
+    return main_tf[start: nxt if nxt != -1 else len(main_tf)]
+
+
+def test_latency_policies_reduce_series_to_one_per_service():
+    main_tf = (_OBS / "main.tf").read_text()
+    for name in ("orders_latency", "inventory_latency"):
+        block = _policy_block(main_tf, name)
+        assert "per_series_aligner   = var.latency_per_series_aligner" in block
+        assert "cross_series_reducer = var.latency_cross_series_reducer" in block
+        assert "group_by_fields      = var.latency_group_by" in block
+        assert "ALIGN_PERCENTILE_99" not in block
+    variables = (_OBS / "variables.tf").read_text()
+    assert _re.search(r'variable "latency_per_series_aligner"[^}]*default\s*=\s*"ALIGN_DELTA"', variables)
+    assert _re.search(r'variable "latency_cross_series_reducer"[^}]*default\s*=\s*"REDUCE_PERCENTILE_99"', variables)
+    assert _re.search(
+        r'variable "latency_group_by"[^}]*default\s*=\s*\["resource\.label\.service_name"\]', variables
+    )
+
+
+def test_latency_and_5xx_policies_set_missing_data_behaviour_from_variable():
+    main_tf = (_OBS / "main.tf").read_text()
+    for name in ("orders_latency", "inventory_latency", "orders_5xx", "inventory_5xx", "apigee_orders_5xx"):
+        block = _policy_block(main_tf, name)
+        assert "evaluation_missing_data = var.alert_evaluation_missing_data" in block, name
+        # The API requires duration >= 60s for evaluation_missing_data.
+        m = _re.search(r'duration\s*=\s*"(\d+)s"', block)
+        assert m and int(m.group(1)) >= 60, name
+    assert len(_re.findall(r"^\s*evaluation_missing_data\s*=", main_tf, _re.M)) == 5
+    variables = (_OBS / "variables.tf").read_text()
+    assert _re.search(
+        r'variable "alert_evaluation_missing_data"[^}]*default\s*=\s*"EVALUATION_MISSING_DATA_INACTIVE"', variables
+    )
+    assert "validation {" in variables.split('variable "alert_evaluation_missing_data"')[1]
