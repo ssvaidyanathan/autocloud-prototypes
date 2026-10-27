@@ -2,11 +2,11 @@
 # ==============================================================================
 # Scenario S5: Bad Deploy / Config Failure
 #
-# Target: Cloud Run (ata-inventory-api)
+# Target: Cloud Run (<prefix>-inventory-api)
 # Mechanism: Deploy new Cloud Run revision configured with invalid DB user/auth
 # Alerts: Cloud Run 500 error alert on startup/health, zero Cloud SQL CPU/connection alerts
 # Output: 1 Group, 1 Ticket
-#   - Origin: ata-inventory-api explicitly named revision (e.g. ata-inventory-api-00062-6pj)
+#   - Origin: <prefix>-inventory-api explicitly named revision (e.g. <prefix>-inventory-api-00062-6pj)
 #   - Blast Radius: Inventory & dependent APIs
 #   - Root Cause: Change-induced database authentication failure
 # ==============================================================================
@@ -23,7 +23,7 @@ HOLD_DURATION="${ATA_HOLD_DURATION:-7m}"
 revert_s5() {
     log_info "--> Reverting S5: Restoring exact pinned revision ${PINNED_INVENTORY_REVISION}..."
     restore_inventory_pinned_baseline || {
-        log_error "FATAL: S5 revert failed; ${NAME_PREFIX}-inventory-api is NOT on the pinned baseline." >&2
+        log_error "FATAL: S5 revert failed; ${SVC_INVENTORY} is NOT on the pinned baseline." >&2
         return 1
     }
     log_success "    Restored exact pinned revision ${PINNED_INVENTORY_REVISION}."
@@ -76,6 +76,7 @@ SCENARIO_START_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
 # Resolve the Apigee key before any fault is injected: traffic needs it.
 API_KEY="$(resolve_api_key)" || exit 1
+require_apigee_host || exit 1
 
 log_info "=== Starting Scenario S5: Bad Deploy / Config Failure ==="
 log_info "Start Time: ${SCENARIO_START_TIME} | Hold Duration: ${HOLD_SECS}s (${HOLD_DURATION})"
@@ -95,30 +96,30 @@ revert_s5_on_error() {
     fi
     log_error "S5 aborted (exit ${rc}) after deploying the faulty revision ${BAD_REVISION:-}; reverting to the pinned baseline." >&2
     if revert_s5 >&2; then
-        log_warn "S5 abort cleanup complete: ${NAME_PREFIX}-inventory-api is back on ${PINNED_INVENTORY_REVISION}." >&2
+        log_warn "S5 abort cleanup complete: ${SVC_INVENTORY} is back on ${PINNED_INVENTORY_REVISION}." >&2
     else
-        log_error "STILL LEFT after the S5 abort: ${NAME_PREFIX}-inventory-api is NOT on the pinned baseline (the faulty revision or the invalid DB user may still be live). Run '$0 --revert' or ./scripts/reset-scenarios.sh now." >&2
+        log_error "STILL LEFT after the S5 abort: ${SVC_INVENTORY} is NOT on the pinned baseline (the faulty revision or the invalid DB user may still be live). Run '$0 --revert' or ./scripts/reset-scenarios.sh now." >&2
     fi
     exit "${rc}"
 }
 trap revert_s5_on_error EXIT
 
-log_info "--> Updating ${NAME_PREFIX}-inventory-api with invalid DB credentials on pinned image..."
+log_info "--> Updating ${SVC_INVENTORY} with invalid DB credentials on pinned image..."
 if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
     log_info "[MOCK/DRY-RUN] Simulating Cloud Run deployment with ATA_INVENTORY_DB_USER=invalid-iam-user on ${PINNED_INVENTORY_IMAGE}..."
 else
     # Name the revision ourselves: reading latestCreatedRevisionName races with any
     # concurrent `services update`, which would make S5 route to someone else's revision.
     S5_REVISION_SUFFIX="s5-$(date +%s)"
-    BAD_REVISION="${NAME_PREFIX}-inventory-api-${S5_REVISION_SUFFIX}"
-    if ! gcloud run services update "${NAME_PREFIX}-inventory-api" \
+    BAD_REVISION="${SVC_INVENTORY}-${S5_REVISION_SUFFIX}"
+    if ! gcloud run services update "${SVC_INVENTORY}" \
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --image="${PINNED_INVENTORY_IMAGE}" \
         --update-env-vars="ATA_INVENTORY_DB_USER=invalid-iam-user@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false" \
         --revision-suffix="${S5_REVISION_SUFFIX}" \
         --quiet; then
-        log_error "FATAL: Cloud Run update of ${NAME_PREFIX}-inventory-api failed; S5 not injected." >&2
+        log_error "FATAL: Cloud Run update of ${SVC_INVENTORY} failed; S5 not injected." >&2
         log_error "The service template may already carry the invalid DB user; run '$0 --revert' to restore the baseline." >&2
         exit 1
     fi
@@ -127,11 +128,11 @@ else
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --format="value(metadata.name)" >/dev/null; then
-        log_error "FATAL: no new ${NAME_PREFIX}-inventory-api revision ${BAD_REVISION} after the update; S5 not injected." >&2
+        log_error "FATAL: no new ${SVC_INVENTORY} revision ${BAD_REVISION} after the update; S5 not injected." >&2
         exit 1
     fi
     log_info "    Faulty revision created: ${BAD_REVISION}. Routing 100% traffic to it..."
-    if ! gcloud run services update-traffic "${NAME_PREFIX}-inventory-api" \
+    if ! gcloud run services update-traffic "${SVC_INVENTORY}" \
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --to-revisions="${BAD_REVISION}=100" \
@@ -143,12 +144,12 @@ else
         log_error "FATAL: ${BAD_REVISION} is not serving 100% of traffic; S5 not injected." >&2
         exit 1
     fi
-    log_success "    ${BAD_REVISION} is serving 100% of ${NAME_PREFIX}-inventory-api traffic."
+    log_success "    ${BAD_REVISION} is serving 100% of ${SVC_INVENTORY} traffic."
 fi
 
 # 2. Check Service Health
 log_info "--> Checking service status to observe startup/DB connection failure..."
-INV_URL="$(require_service_url "${NAME_PREFIX}-inventory-api")"
+INV_URL="$(require_service_url "${SVC_INVENTORY}")" || exit 1
 ID_TOKEN="$(resolve_id_token "${INV_URL}")"
 
 AUTH_HEADER=()
@@ -165,7 +166,7 @@ fi
 
 # 3. Generate Sustained Traffic via Apigee
 log_info "--> Initiating sustained traffic loop (hold duration: ${HOLD_SECS}s / ${HOLD_DURATION})..."
-log_info "    Driving traffic through Apigee (/ata/inventory/v1/items and /ata/orders/v1/orders)..."
+log_info "    Driving traffic through Apigee (${BASEPATH_INVENTORY}/items and ${BASEPATH_ORDERS}/orders)..."
 
 KEY_HEADER=()
 if [ -n "${API_KEY}" ]; then
@@ -205,12 +206,12 @@ else
 
         STATUS_INV=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
             ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
-            "https://${APIGEE_HOST}/ata/inventory/v1/items") || { rc=$?; traffic_interrupted "${rc}" && break; STATUS_INV="000"; }
+            "https://${APIGEE_HOST}${BASEPATH_INVENTORY}/items") || { rc=$?; traffic_interrupted "${rc}" && break; STATUS_INV="000"; }
         traffic_interrupted && break
         STATUS_ORD=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
             ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
             -H "Content-Type: application/json" -X POST \
-            "https://${APIGEE_HOST}/ata/orders/v1/orders" \
+            "https://${APIGEE_HOST}${BASEPATH_ORDERS}/orders" \
             -d '{"item_id":"item-101","quantity":1}') || { rc=$?; traffic_interrupted "${rc}" && break; STATUS_ORD="000"; }
         traffic_interrupted && break
 
@@ -239,7 +240,7 @@ log_success "=== Scenario S5 Injected Successfully ==="
 log_info "Expected Triage & Correlation Outcome:"
 log_info "  - Total Groups: 1 Incident Group"
 log_info "  - Total Tickets: 1 ServiceNow Incident Ticket"
-log_info "  - Origin Attribution: ${NAME_PREFIX}-inventory-api; the bad revision is named in the problem and root cause"
+log_info "  - Origin Attribution: ${SVC_INVENTORY}; the bad revision is named in the problem and root cause"
 log_info "  - Rollback: to the revision that served before the deploy (Cloud Monitoring request_count by revision), with that evidence"
 log_info "  - Blast Radius: Inventory & dependent APIs"
 log_info "  - Root Cause: Change-induced database authentication failure."
@@ -254,9 +255,9 @@ cat <<EOF
 
 2. Check Incident in ServiceNow:
    - Expected Ticket Count: 1
-   - Expected Origin: ${NAME_PREFIX}-inventory-api (explicitly named bad revision)
+   - Expected Origin: ${SVC_INVENTORY} (explicitly named bad revision)
    - Expected Root Cause: Change-induced database authentication failure
-   - Blast Radius: Inventory & dependent APIs (ata-inventory-v1, ${NAME_PREFIX}-orders-api, ata-orders-v1)
+   - Blast Radius: Inventory & dependent APIs (${PROXY_INVENTORY}, ${SVC_ORDERS}, ${PROXY_ORDERS})
    - Verify HTML diagnostic report is attached to ServiceNow ticket
 
 3. Reset Environment Before Running Next Scenario:

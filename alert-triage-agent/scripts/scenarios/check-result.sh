@@ -12,7 +12,7 @@
 # Options:
 #   --since <ISO-8601-time>   Filter incidents created or updated on or after <time>
 #   --scenario <s1..s5>       Highlight expected results for a specific scenario
-#   --bucket <bucket-name>    Override GCS incidents bucket (default: ${PROJECT_ID}-ata-incidents)
+#   --bucket <bucket-name>    Override GCS incidents bucket (default: ${PROJECT_ID}-${NAME_PREFIX}-incidents)
 #   --dry-run                 Simulate output using mock incident data
 #   --mock                    Alias for --dry-run
 #   -h, --help                Display this help message
@@ -25,6 +25,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Reads the incidents bucket only: it does not need the inventory pin.
+INVENTORY_PIN_OPTIONAL=true
 # shellcheck source=scripts/scenarios/common.sh
 source "${SCRIPT_DIR}/common.sh"
 
@@ -97,7 +99,7 @@ fi
 echo "==================================================================="
 
 # Python helper to parse OKF markdown files and compare against DEMO.md expectations
-python3 - "${BUCKET_NAME}" "${SINCE_TIME}" "${FILTER_SCENARIO}" "${DRY_RUN}" "${MOCK_MODE}" << 'PYEOF'
+python3 - "${BUCKET_NAME}" "${SINCE_TIME}" "${FILTER_SCENARIO}" "${DRY_RUN}" "${MOCK_MODE}" "${NAME_PREFIX}" << 'PYEOF'
 import sys
 import os
 import re
@@ -109,52 +111,56 @@ bucket_name = sys.argv[1]
 since_str = sys.argv[2] if len(sys.argv) > 2 else ""
 target_scenario = sys.argv[3].lower() if len(sys.argv) > 3 else ""
 is_dry_run = sys.argv[4].lower() == "true" or (len(sys.argv) > 5 and sys.argv[5].lower() == "true")
+# Every expected name is derived from the stack's NAME_PREFIX (common.sh validated it).
+P = sys.argv[6]
+INV_API, ORD_API, INV_DB = f"{P}-inventory-api", f"{P}-orders-api", f"{P}-inventory-db"
+INV_PROXY, ORD_PROXY = f"{P}-inventory-v1", f"{P}-orders-v1"
 
 DEMO_EXPECTATIONS = {
     "s1": {
         "title": "S1: Backend 5xx Error Spike",
         "expected_groups": 1,
         "expected_tickets": 1,
-        "expected_origin": "ata-inventory-api",
-        "expected_alerts": ["ata-inventory-5xx", "ata-orders-5xx"],
-        "blast_radius": ["ata-inventory-api", "ata-inventory-v1", "ata-orders-api", "ata-orders-v1"],
-        "root_cause": "HTTP 5xx errors on ata-inventory-api (injected 85% fault)",
+        "expected_origin": INV_API,
+        "expected_alerts": [f"{P}-inventory-5xx", f"{P}-orders-5xx"],
+        "blast_radius": [INV_API, INV_PROXY, ORD_API, ORD_PROXY],
+        "root_cause": f"HTTP 5xx errors on {INV_API} (injected 85% fault)",
     },
     "s2": {
         "title": "S2: Backend Latency Degradation",
         "expected_groups": 1,
         "expected_tickets": 1,
-        "expected_origin": "ata-inventory-api",
-        "expected_alerts": ["ata-inventory-latency", "ata-orders-latency"],
-        "blast_radius": ["ata-inventory-api", "ata-inventory-v1", "ata-orders-api", "ata-orders-v1"],
-        "root_cause": "Latency on ata-inventory-api; Apigee ata-inventory-v1 returns HTTP 504 GatewayTimeout",
+        "expected_origin": INV_API,
+        "expected_alerts": [f"{P}-inventory-latency", f"{P}-orders-latency"],
+        "blast_radius": [INV_API, INV_PROXY, ORD_API, ORD_PROXY],
+        "root_cause": f"Latency on {INV_API}; Apigee {INV_PROXY} returns HTTP 504 GatewayTimeout",
     },
     "s3": {
         "title": "S3: Concurrent Disjoint Incidents",
         "expected_groups": 2,
         "expected_tickets": 2,
-        "expected_origins": ["ata-inventory-api", "ata-orders-v1"],
-        "expected_alerts": ["ata-inventory-5xx", "ata-apigee-orders-429"],
+        "expected_origins": [INV_API, ORD_PROXY],
+        "expected_alerts": [f"{P}-inventory-5xx", f"{P}-apigee-orders-429"],
         "notes": "Correlation engine opens a second group; its 'Correlation:' observation states the best score and the 35 pts new-group threshold",
     },
     "s4": {
         "title": "S4: Database Connection Pool Exhaustion",
         "expected_groups": 1,
         "expected_tickets": 1,
-        "expected_origin": "ata-inventory-db",
-        "expected_alerts": ["ata-cloudsql-connections-critical"],
-        "blast_radius": ["ata-inventory-db", "ata-inventory-api", "ata-inventory-v1", "ata-orders-api", "ata-orders-v1"],
-        "root_cause": "Connection pool saturation on ata-inventory-db (alert stays open until reset-scenarios.sh)",
+        "expected_origin": INV_DB,
+        "expected_alerts": [f"{P}-cloudsql-connections-critical"],
+        "blast_radius": [INV_DB, INV_API, INV_PROXY, ORD_API, ORD_PROXY],
+        "root_cause": f"Connection pool saturation on {INV_DB} (alert stays open until reset-scenarios.sh)",
     },
     "s5": {
         "title": "S5: Bad Deploy / Config Failure",
         "expected_groups": 1,
         "expected_tickets": 1,
-        "expected_origin_pattern": r"ata-inventory-api(-[a-z0-9\-]+)?",
-        # ata-inventory-latency opened in QA (2026-10-27) only from the new revision's cold start
+        "expected_origin_pattern": re.escape(INV_API) + r"(-[a-z0-9\-]+)?",
+        # <prefix>-inventory-latency opened in QA (2026-10-27) only from the new revision's cold start
         # (2 windows); the 240s retest window (latency_duration_secs) no longer fires on that.
-        "expected_alerts": ["ata-inventory-5xx", "ata-orders-5xx"],
-        "blast_radius": ["ata-inventory-api", "ata-inventory-v1", "ata-orders-api", "ata-orders-v1"],
+        "expected_alerts": [f"{P}-inventory-5xx", f"{P}-orders-5xx"],
+        "blast_radius": [INV_API, INV_PROXY, ORD_API, ORD_PROXY],
         "root_cause": "Change-induced database authentication failure; rollback to the revision that served before (traffic history)",
     },
 }
@@ -194,29 +200,29 @@ def extract_frontmatter(content):
 def get_incident_files_mock():
     return [
         {
-            "uri": f"gs://{bucket_name}/knowledge/incident-manager/incident-ata-inventory-5xx-20261026t220500z.md",
-            "group_id": "grp_20261026t220500z_ata-inventory-api",
+            "uri": f"gs://{bucket_name}/knowledge/incident-manager/incident-{P}-inventory-5xx-20261026t220500z.md",
+            "group_id": f"grp_20261026t220500z_{INV_API}",
             "timestamp": "2026-10-26T22:05:00Z",
-            "origin": "ata-inventory-api" if target_scenario != "s4" else "ata-inventory-db",
+            "origin": INV_API if target_scenario != "s4" else INV_DB,
             "servicenow_number": "INC0010482",
-            "servicenow_url": "https://dev377204.service-now.com/nav_to.do?uri=incident.do?sys_id=mock-sys-id",
+            "servicenow_url": "https://mock-instance.service-now.invalid/nav_to.do?uri=incident.do?sys_id=mock-sys-id",
             "status": "ticketed",
             "alert_count": 2,
             "alerts": [
                 {
-                    "policy_name": "ata-inventory-5xx" if target_scenario != "s4" else "ata-cloudsql-connections-critical",
-                    "resource_name": "ata-inventory-api" if target_scenario != "s4" else "ata-inventory-db",
+                    "policy_name": f"{P}-inventory-5xx" if target_scenario != "s4" else f"{P}-cloudsql-connections-critical",
+                    "resource_name": INV_API if target_scenario != "s4" else INV_DB,
                     "signal": "5xx" if target_scenario != "s4" else "connections",
-                    "labels": {"app": "alert-triage-agent", "component": "ata-inventory-api", "severity": "p1", "signal": "5xx", "tier": "service"}
+                    "labels": {"app": "alert-triage-agent", "component": INV_API, "severity": "p1", "signal": "5xx", "tier": "service"}
                 },
                 {
-                    "policy_name": "ata-inventory-latency",
-                    "resource_name": "ata-inventory-api",
+                    "policy_name": f"{P}-inventory-latency",
+                    "resource_name": INV_API,
                     "signal": "latency",
-                    "labels": {"app": "alert-triage-agent", "component": "ata-inventory-api", "severity": "p2", "signal": "latency", "tier": "service"}
+                    "labels": {"app": "alert-triage-agent", "component": INV_API, "severity": "p2", "signal": "latency", "tier": "service"}
                 }
             ],
-            "blast_radius": ["ata-inventory-api", "ata-inventory-v1", "ata-orders-api", "ata-orders-v1"]
+            "blast_radius": [INV_API, INV_PROXY, ORD_API, ORD_PROXY]
         }
     ]
 

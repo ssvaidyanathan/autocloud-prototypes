@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_s5_bad_deploy import BAD_USER, PINNED_REVISION, Env, baseline_state
+from tests.test_s5_bad_deploy import BAD_USER, PINNED_REVISION, STACK_ENV, Env, baseline_state
 from tests.test_scenario_abort_cleanup import CURL as STUB_CURL
 from tests.test_scenario_abort_cleanup import GCLOUD, REDEPLOY_168
 
@@ -142,6 +142,7 @@ def scenario_env(tmp_path, apigee_host):
     (tmp_path / "deployments.json").write_text(json.dumps({"deployments": [
         {"environment": "prod", "apiProxy": "ata-orders-v1", "revision": "168"}]}))
     e = {k: v for k, v in os.environ.items() if k not in ("ATA_API_KEY", "MOCK_MODE", "DRY_RUN")}
+    e.update(STACK_ENV)
     e.update(PATH=f"{bin_dir}{os.pathsep}{e['PATH']}", ATA_TEST_CALLS=str(tmp_path / "calls"),
              ATA_IMPORT_BODY=str(tmp_path / "import.json"),
              ATA_DEPLOYMENTS_BODY=str(tmp_path / "deployments.json"),
@@ -251,6 +252,7 @@ def test_s5_ctrl_c_on_a_terminal_finishes_and_keeps_the_bad_deploy(tmp_path, api
     for var in ("PINNED_INVENTORY_DIGEST", "PINNED_INVENTORY_REVISION", "PINNED_INVENTORY_IMAGE",
                 "PROJECT_ID", "GCP_PROJECT", "REGION", "GCP_REGION", "NAME_PREFIX"):
         e.pop(var, None)
+    e.update(STACK_ENV)
     e.update(PATH=f"{s5.dir}{os.pathsep}{e['PATH']}", MOCK_MODE="false", DRY_RUN="false",
              ATA_API_KEY="test-key", APIGEE_HOST=host, ATA_TEST_CALLS=str(tmp_path / "calls"))
     rc, output = run_on_pty_and_press_ctrl_c(

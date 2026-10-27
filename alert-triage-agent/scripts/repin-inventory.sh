@@ -2,23 +2,29 @@
 # ==============================================================================
 # Re-pin <prefix>-inventory-api: move the demo baseline to a new revision, safely.
 #
-# The pin (revision + image digest) lives in scripts/scenarios/inventory-pin.env. Every
-# scenario, reset and preflight restores and checks traffic against it. Re-pinning is:
+# The pin (revision + image digest) of stack NAME_PREFIX lives in
+# scripts/scenarios/inventory-pin.${NAME_PREFIX}.env (one file per stack). Every scenario,
+# reset and preflight restores and checks traffic against it. Re-pinning is:
 #
 #   1. prepare    Build the image (or take --image-digest), deploy it as a NEW revision with
 #                 NO traffic and a temporary tag, verify it (config + HTTP through the tag
 #                 URL), remove the tag. Traffic stays 100% on the current pin.
-#   2. write-pin  Check the candidate again (read-only) and rewrite inventory-pin.env; the
+#   2. write-pin  Check the candidate again (read-only) and rewrite the pin file; the
 #                 current pin becomes PIN_INVENTORY_PREVIOUS_* (the rollback target).
-#                 Commit the file.
+#                 Commit the file and run switch right away (no reset or scenario in
+#                 between: they would route traffic to the new pin without switch's checks).
 #   3. switch     Move 100% of traffic to the pinned revision, then verify serving, health,
 #                 the database path and the admin probes.
 #   rollback      Traffic back to PIN_INVENTORY_PREVIOUS_REVISION and the pin file swapped
-#                 back. Commit the file.
+#                 back as soon as traffic has moved (the file always names what serves).
+#                 A previous pin without /admin/restock is a warning: reset with --no-restock.
+#                 Commit the file.
 #
-# First pin on a fresh project (no pinned revision exists there yet): `prepare --initial`
-# and `write-pin --initial` (no previous pin is kept), then `switch`. --initial fails loudly
-# if the pinned revision in the pin file exists in this project.
+# First pin of a new stack (no pin file for the prefix yet, or a pin file whose revision does
+# not exist in this project): `prepare --initial` and `write-pin --initial` (creates the pin
+# file; no previous pin is kept), then `switch`. --initial fails loudly if the pin file's
+# revision exists in this project. Without a pin file every other command fails and says to
+# run `prepare --initial`.
 #   status        Read-only report: pin, traffic, pinned revision vs baseline, instance caps.
 #
 # Baseline of a pinned revision: image digest of the pin, ATA_INVENTORY_* env only (no
@@ -32,11 +38,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEMO_DIR="$(cd "${SCRIPT_DIR}/../demo/ata-inventory-api" && pwd)"  # prefix-ok: repo directory name
+# A new stack has no pin file yet: prepare/write-pin --initial create it, every other command
+# requires it (require_pin).
+INVENTORY_PIN_OPTIONAL=true
 # shellcheck source=scripts/scenarios/common.sh
 source "${SCRIPT_DIR}/scenarios/common.sh"
 
-SERVICE="${NAME_PREFIX}-inventory-api"
+SERVICE="${SVC_INVENTORY}"
 BASELINE_PY="${SCRIPT_DIR}/scenarios/inventory_baseline.py"
 # Temporary traffic tag of the candidate (removed before prepare exits).
 CANDIDATE_TAG="${ATA_REPIN_TAG:-repin-candidate}"
@@ -71,6 +79,13 @@ EOF
 die() {
     log_error "FATAL: $*" >&2
     exit 1
+}
+
+# Fail loudly unless this stack has a pin file (every command except --initial needs it).
+require_pin() {
+    if [ "${INVENTORY_PIN_PRESENT}" != "true" ]; then
+        die "no inventory pin for stack '${NAME_PREFIX}': ${INVENTORY_PIN_FILE} does not exist. First pin of a new stack: $0 prepare --initial --image-tag <tag> (or --image-digest sha256:<hex>), then write-pin --initial and switch."
+    fi
 }
 
 # The pin file is the source of truth here: refuse one-run env overrides of the pin.
@@ -111,12 +126,16 @@ http_get() {
     rm -f "${body_file}"
 }
 
-# verify_http <base> <audience>: health, the database path (GET /items lists EXPECTED_ITEM:
-# proves the Cloud SQL IAM login with ATA_INVENTORY_DB_USER), and the GET admin probes,
-# which must answer {"status": "ok"} (harmless-probe code, and /admin/restock is present).
-# Sends no POST. Returns the number of failed checks.
+# verify_http <base> <audience> [required|optional]: health, the database path (GET /items
+# lists EXPECTED_ITEM: proves the Cloud SQL IAM login with ATA_INVENTORY_DB_USER), and the GET
+# admin probes, which must answer {"status": "ok"} (harmless-probe code). The /admin/restock
+# probe is required (default; prepare and switch: the new code must have it) or optional
+# (rollback: a previous pin may predate /admin/restock): then a 404 on it is a reported
+# warning, RESTOCK_PROBE_ABSENT=true, not a failure. Sends no POST. Returns the number of
+# failed checks.
+RESTOCK_PROBE_ABSENT=false
 verify_http() {
-    local base="$1" aud="$2" failed=0 path
+    local base="$1" aud="$2" restock="${3:-required}" failed=0 path
     http_get "${base}" /health "${aud}"
     if [ "${HTTP_STATUS}" = "200" ]; then
         log_success "    GET /health -> 200"
@@ -131,10 +150,14 @@ verify_http() {
         log_error "    GET ${base}/items -> HTTP ${HTTP_STATUS} without ${EXPECTED_ITEM}: ${HTTP_BODY}" >&2
         failed=$((failed + 1))
     fi
+    RESTOCK_PROBE_ABSENT=false
     for path in /admin/leak-connections /admin/fault/inject /admin/restock; do
         http_get "${base}" "${path}" "${aud}"
         if [ "${HTTP_STATUS}" = "200" ] && printf '%s' "${HTTP_BODY}" | grep -q '"status": *"ok"'; then
             log_success "    GET ${path} -> 200 probe"
+        elif [ "${path}" = "/admin/restock" ] && [ "${restock}" = "optional" ] && [ "${HTTP_STATUS}" = "404" ]; then
+            RESTOCK_PROBE_ABSENT=true
+            log_warn "    GET ${path} -> 404: this revision predates /admin/restock. Reset with ./scripts/reset-scenarios.sh --no-restock until a re-pin to current code." >&2
         else
             log_error "    GET ${base}${path} -> HTTP ${HTTP_STATUS} (want a 200 probe): ${HTTP_BODY}" >&2
             failed=$((failed + 1))
@@ -147,6 +170,10 @@ verify_http() {
 # Any describe error other than "not found" is fatal: it cannot prove there is no pin.
 require_no_existing_pin() {
     local err_file rc=0
+    if [ "${INVENTORY_PIN_PRESENT}" != "true" ]; then
+        log_info "    No pin file for stack '${NAME_PREFIX}' (${INVENTORY_PIN_FILE}): first pin."
+        return 0
+    fi
     err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-repin.XXXXXX")"
     gcloud run revisions describe "${PIN_INVENTORY_REVISION}" --project="${PROJECT_ID}" --region="${REGION}" \
         --format="value(metadata.name)" >/dev/null 2>"${err_file}" || rc=$?
@@ -154,7 +181,7 @@ require_no_existing_pin() {
         rm -f "${err_file}"
         die "--initial: a pin exists: ${PIN_INVENTORY_REVISION} (from ${INVENTORY_PIN_FILE}) is a revision in ${PROJECT_ID}/${REGION}. Re-pin without --initial."
     fi
-    if ! grep -qi "not found\|could not be found\|NOT_FOUND" "${err_file}"; then
+    if ! grep -qiE "not found|could not be found|NOT_FOUND" "${err_file}"; then
         cat "${err_file}" >&2
         rm -f "${err_file}"
         die "--initial: cannot tell whether ${PIN_INVENTORY_REVISION} exists (gcloud error above); nothing changed."
@@ -172,10 +199,39 @@ expect_no_traffic() {
     esac
 }
 
+# Comment header of a new stack's pin file (write-pin --initial without a file).
+new_pin_file_header() {
+    cat <<EOF
+# Stack "${NAME_PREFIX}" (NAME_PREFIX=${NAME_PREFIX}): ${SVC_INVENTORY} baseline pin. Stack data: one file per
+# prefix, inventory-pin.<prefix>.env; the ONE place this stack's pinned revision and image
+# digest live. Read by scripts/scenarios/common.sh (every scenario, reset and preflight) and
+# by the inventory deploy.sh. KEY=VALUE lines only; anything else is an error.
+#
+# Do not edit by hand. Re-pin with scripts/repin-inventory.sh (DEPLOY.md, "Re-pinning
+# the inventory baseline"): \`prepare\` deploys and verifies a candidate revision with no traffic,
+# \`write-pin\` rewrites this file (commit it), \`switch\` moves 100% of traffic to it.
+#
+# PIN_INVENTORY_PREVIOUS_*: the pin before this one, the rollback target. prune-revisions.sh
+# never deletes it. Empty when there is no previous pin.
+EOF
+}
+
+# Path of the pin file as shown in the NEXT steps (relative to the repo when inside it).
+pin_file_display() {
+    case "${INVENTORY_PIN_FILE}" in
+        "${ALERT_TRIAGE_DIR}/"*) printf '%s' "${INVENTORY_PIN_FILE#"${ALERT_TRIAGE_DIR}/"}" ;;
+        *) printf '%s' "${INVENTORY_PIN_FILE}" ;;
+    esac
+}
+
 # Rewrite the pin file atomically (temp file in the same directory, then mv).
 write_pin_file() {
     local rev="$1" digest="$2" prev_rev="$3" prev_digest="$4" tmp header
-    header="$(sed -n '/^#/p' "${INVENTORY_PIN_FILE}")"
+    if [ -f "${INVENTORY_PIN_FILE}" ]; then
+        header="$(sed -n '/^#/p' "${INVENTORY_PIN_FILE}")"
+    else
+        header="$(new_pin_file_header)"
+    fi
     tmp="$(mktemp "$(dirname "${INVENTORY_PIN_FILE}")/.inventory-pin.XXXXXX")"
     {
         printf '%s\n' "${header}"
@@ -191,12 +247,14 @@ write_pin_file() {
     fi
     mv "${tmp}" "${INVENTORY_PIN_FILE}"
     read_inventory_pin_file "${INVENTORY_PIN_FILE}"
+    INVENTORY_PIN_PRESENT=true
 }
 
 # --- status --------------------------------------------------------------------------
 
 cmd_status() {
     local off=0 svc_json svc
+    require_pin
     log_info "Pin file ${INVENTORY_PIN_FILE}:"
     log_info "    pinned   ${PIN_INVENTORY_REVISION} (${PIN_INVENTORY_DIGEST})"
     log_info "    previous ${PIN_INVENTORY_PREVIOUS_REVISION:-<none>} ${PIN_INVENTORY_PREVIOUS_DIGEST:+(${PIN_INVENTORY_PREVIOUS_DIGEST})}"
@@ -292,6 +350,7 @@ cmd_prepare() {
         require_no_existing_pin
         svc_json="$(service_json)" || die "cannot describe ${SERVICE}: deploy it first (applications Terraform or demo/ata-inventory-api/scripts/deploy.sh)."  # prefix-ok: repo directory name
     else
+        require_pin
         log_info "=== Re-pin prepare: ${SERVICE} (current pin ${PIN_INVENTORY_REVISION}) ==="
         log_info "--> 1. Checking traffic is 100% on the current pin (the baseline stays serving)..."
         svc_json="$(service_json)" || die "cannot describe ${SERVICE}."
@@ -303,11 +362,8 @@ cmd_prepare() {
     fi
 
     if [ -n "${image_tag}" ]; then
-        log_info "--> 2. Building ${PINNED_INVENTORY_IMAGE_BASE}:${image_tag} from ${DEMO_DIR} (Cloud Build)..."
-        digest="$(gcloud builds submit "${DEMO_DIR}" --project="${PROJECT_ID}" \
-            --tag="${PINNED_INVENTORY_IMAGE_BASE}:${image_tag}" \
-            --format="value(results.images[0].digest)")" || die "Cloud Build failed; nothing was deployed."
-        is_valid_image_digest "${digest}" || die "Cloud Build returned no image digest ('${digest}'); nothing was deployed."
+        log_info "--> 2. Building ${PINNED_INVENTORY_IMAGE_BASE}:${image_tag} from ${INVENTORY_DEMO_DIR} (Cloud Build)..."
+        digest="$(build_inventory_image "${image_tag}")" || die "the build failed (above); nothing was deployed."
         log_success "    Built ${PINNED_INVENTORY_IMAGE_BASE}@${digest}"
     else
         log_info "--> 2. Using existing image ${PINNED_INVENTORY_IMAGE_BASE}@${digest} (no build)."
@@ -367,7 +423,7 @@ cmd_prepare() {
 
 NEXT (see DEPLOY.md, "Re-pinning the inventory baseline"):
   $0 write-pin --revision ${candidate} --digest ${digest}${next_flag}
-  git add scripts/scenarios/inventory-pin.env && git commit -m "chore(inventory): pin ${candidate}"
+  git add $(pin_file_display) && git commit -m "chore(inventory): pin ${candidate}"
   $0 switch
 EOF
 }
@@ -389,11 +445,13 @@ cmd_write_pin() {
     is_valid_inventory_revision "${rev}" || die "--revision '${rev}' is not a ${SERVICE} revision name."
     is_valid_image_digest "${digest}" || die "--digest '${digest}' is not sha256:<64 hex>."
     require_no_pin_override
-    if [ "${rev}" = "${PIN_INVENTORY_REVISION}" ]; then
-        die "${rev} is already the pin."
-    fi
     if [ "${initial}" = "true" ]; then
         require_no_existing_pin
+    else
+        require_pin
+    fi
+    if [ "${rev}" = "${PIN_INVENTORY_REVISION}" ]; then
+        die "${rev} is already the pin."
     fi
     log_info "--> Verifying ${rev} (read-only)..."
     inventory_revision_matches_baseline "${rev}" "${digest}" \
@@ -408,16 +466,20 @@ cmd_write_pin() {
     cat <<EOF
 
 NEXT: commit the pin, then switch traffic:
-  git add scripts/scenarios/inventory-pin.env && git commit -m "chore(inventory): pin ${rev}"
+  git add $(pin_file_display) && git commit -m "chore(inventory): pin ${rev}"
   $0 switch
+Run switch immediately; no reset/scenario in between: from now on a reset, an S5 revert or
+a scenario restore routes traffic to ${rev} without switch's HTTP checks.
 EOF
 }
 
 # --- switch / rollback ---------------------------------------------------------------
 
-# route_and_verify <revision>: 100% traffic to <revision>, then serving + HTTP checks.
-route_and_verify() {
-    local rev="$1" svc_json url
+# route_to <revision>: 100% traffic to <revision> and verify it serves 100%; dies if not.
+# Sets SERVICE_URL.
+SERVICE_URL=""
+route_to() {
+    local rev="$1" svc_json
     svc_json="$(service_json)" || die "cannot describe ${SERVICE}."
     log_info "    Serving before: $(python3 "${BASELINE_PY}" serving <<<"${svc_json}" | tr '\n' ' ')"
     if expect_serving "${rev}" <<<"${svc_json}" 2>/dev/null; then
@@ -429,11 +491,17 @@ route_and_verify() {
     PINNED_INVENTORY_REVISION="${rev}"
     verify_inventory_serving_revision "${rev}" || die "${rev} is not serving 100% after the switch."
     log_success "    ${rev} serves 100% of ${SERVICE}."
-    url="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"]["url"])' <<<"${svc_json}")"
-    verify_http "${url}" "${url}"
+    SERVICE_URL="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"]["url"])' <<<"${svc_json}")"
+}
+
+# route_and_verify <revision>: route_to, then the HTTP checks (restock probe required).
+route_and_verify() {
+    route_to "$1"
+    verify_http "${SERVICE_URL}" "${SERVICE_URL}" required
 }
 
 cmd_switch() {
+    require_pin
     require_no_pin_override
     log_info "=== Re-pin switch: 100% of ${SERVICE} to ${PIN_INVENTORY_REVISION} ==="
     verify_pinned_inventory_revision || die "the pinned revision does not run the pinned digest."
@@ -452,8 +520,10 @@ cmd_switch() {
 }
 
 cmd_rollback() {
+    require_pin
     local back_rev="${PIN_INVENTORY_PREVIOUS_REVISION}" back_digest="${PIN_INVENTORY_PREVIOUS_DIGEST}"
-    local failed_rev="${PIN_INVENTORY_REVISION}" failed_digest="${PIN_INVENTORY_DIGEST}" actual
+    local failed_rev="${PIN_INVENTORY_REVISION}" failed_digest="${PIN_INVENTORY_DIGEST}" actual http_failed=0
+    local reset_cmd="./scripts/reset-scenarios.sh"
     require_no_pin_override
     [ -n "${back_rev}" ] || die "no PIN_INVENTORY_PREVIOUS_REVISION in ${INVENTORY_PIN_FILE}; nothing to roll back to."
     log_info "=== Re-pin rollback: 100% of ${SERVICE} back to ${back_rev} ==="
@@ -466,16 +536,31 @@ cmd_rollback() {
         log_warn "Rolling back to ${back_rev}, which differs from the current baseline (above)." >&2
     fi
     PINNED_INVENTORY_REVISION="${back_rev}"
-    if ! route_and_verify "${back_rev}"; then
-        die "${back_rev} serves traffic but failed the HTTP checks (above); the pin file is unchanged."
-    fi
+    route_to "${back_rev}"
+    # Traffic has moved: the pin file must name the serving revision before anything else is
+    # reported, or the next reset / S5 revert would route traffic back to ${failed_rev}.
     write_pin_file "${back_rev}" "${back_digest}" "${failed_rev}" "${failed_digest}"
+    log_success "    Pin file swapped back: ${back_rev} (previous: ${failed_rev})."
+    verify_http "${SERVICE_URL}" "${SERVICE_URL}" optional || http_failed=$?
+    if [ "${RESTOCK_PROBE_ABSENT}" = "true" ]; then
+        reset_cmd="./scripts/reset-scenarios.sh --no-restock"
+    fi
+    if [ "${http_failed}" -gt 0 ]; then
+        log_error "FATAL: ${back_rev} serves 100% and the pin file names it, but ${http_failed} HTTP check(s) failed (above)." >&2
+        cat >&2 <<EOF
+
+The rollback is in effect (traffic and pin file agree). Commit the pin file, then investigate:
+  git add $(pin_file_display) && git commit -m "chore(inventory): roll back pin to ${back_rev}"
+  ${reset_cmd}
+EOF
+        exit 1
+    fi
     log_success "=== Rolled back: ${back_rev} serves 100%; pin file swapped back (previous: ${failed_rev}) ==="
     cat <<EOF
 
 NEXT: commit the pin file, then reset:
-  git add scripts/scenarios/inventory-pin.env && git commit -m "chore(inventory): roll back pin to ${back_rev}"
-  ./scripts/reset-scenarios.sh
+  git add $(pin_file_display) && git commit -m "chore(inventory): roll back pin to ${back_rev}"
+  ${reset_cmd}
 EOF
 }
 

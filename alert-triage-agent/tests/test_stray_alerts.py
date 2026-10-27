@@ -124,6 +124,7 @@ case "$*" in
   # verify-demo-infra.sh looks the demo services up by exact name (no fallback URL).
   "run services list"*"metadata.name=ata-inventory-api"*) printf 'ata-inventory-api\thttps://ata-inventory-api-test123-uc.a.run.app\n' ;;
   "run services list"*"metadata.name=ata-orders-api"*) printf 'ata-orders-api\thttps://ata-orders-api-test123-uc.a.run.app\n' ;;
+  "run services describe "*"value(status.url)"*) echo "https://$4-test.a.run.app" ;;
   *) exit 1 ;;
 esac
 """
@@ -301,8 +302,8 @@ def test_every_demo_request_runs_before_the_alert_wait():
     main = _main_flow()
     wait = main.index("\nwait_for_open_alerts\n")
     before, after = main[:wait], main[wait:]
-    for call in ("reset_app_faults", "warm_up_service \"${NAME_PREFIX}-inventory-api\"",
-                 "warm_up_service \"${NAME_PREFIX}-orders-api\"", "check_apigee_health",
+    for call in ("reset_app_faults", "warm_up_service \"${SVC_INVENTORY}\"",
+                 "warm_up_service \"${SVC_ORDERS}\"", "check_apigee_health",
                  "verify_admin_endpoints \"${INV_URL}\""):
         assert call in before, call
     for forbidden in ("curl", "demo_request", "admin_request", "warm_up_service", "check_apigee_health",

@@ -24,6 +24,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The caps do not depend on the inventory pin (a fresh stack can cap before its first pin).
+INVENTORY_PIN_OPTIONAL=true
 # shellcheck source=scripts/scenarios/common.sh
 source "${SCRIPT_DIR}/scenarios/common.sh"
 

@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Common Helper Functions & Environment Setup for Demo Scenarios (S1-S8)
+#
+# Required, no defaults (a default would point at someone else's stack):
+#   PROJECT_ID (or GCP_PROJECT), REGION (or GCP_REGION), NAME_PREFIX ([a-z][a-z0-9]{1,9}).
+# Every resource name below is derived from NAME_PREFIX once, here; scripts use the
+# derived variables, never literal names.
+# Apigee (scripts that call Apigee): APIGEE_HOST, APIGEE_ORG, APIGEE_ENV, read from
+#   <alert-triage-agent>/.${NAME_PREFIX}-apigee.env (written by deploy-apigee-proxies.sh)
+#   or exported. See load_apigee_env / require_apigee_host / require_apigee_mgmt.
 # ==============================================================================
 
 set -euo pipefail
-
-# Project & Regional Defaults
-export PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-cloud-assist-fde-2}}"
-export REGION="${REGION:-${GCP_REGION:-us-west1}}"
-export NAME_PREFIX="${NAME_PREFIX:-ata}"
-export ENV_NAME="${ENV_NAME:-prod}"
-export APIGEE_HOST="${APIGEE_HOST:-8.233.247.52.nip.io}"
-export DRY_RUN="${DRY_RUN:-false}"
-export MOCK_MODE="${MOCK_MODE:-false}"
-
-# Incident bucket
-export INCIDENTS_BUCKET="${INCIDENTS_BUCKET:-${PROJECT_ID}-${NAME_PREFIX}-incidents}"
 
 # Logging helpers. printf, not echo -e: portable to any POSIX sh/BSD echo, and a message's
 # own backslashes and % signs are printed as they are.
@@ -35,13 +31,189 @@ log_error() {
     printf '\033[1;31m[ERROR]\033[0m %s\n' "$*"
 }
 
-# --- ata-inventory-api baseline pin ----------------------------------------------------
-# The pinned revision and image digest live in ONE file, inventory-pin.env (next to this
-# script; ATA_INVENTORY_PIN_FILE overrides the path). Re-pinning is one documented step:
-# scripts/repin-inventory.sh (DEPLOY.md, "Re-pinning the inventory baseline"). The env vars
-# PINNED_INVENTORY_DIGEST / PINNED_INVENTORY_REVISION still override the file for one run.
+# --- Stack identity (required) --------------------------------------------------------
+# True if $1 is a valid NAME_PREFIX: [a-z][a-z0-9]{1,9} (same rule as Terraform's
+# name_prefix validation). Explicit character lists: [a-z] in a glob depends on the locale.
+is_valid_name_prefix() {
+    case "$1" in
+        ""|*[!abcdefghijklmnopqrstuvwxyz0123456789]*) return 1 ;;
+        [abcdefghijklmnopqrstuvwxyz]*) ;;
+        *) return 1 ;;
+    esac
+    [ "${#1}" -ge 2 ] && [ "${#1}" -le 10 ]
+}
+
+PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-}}"
+REGION="${REGION:-${GCP_REGION:-}}"
+NAME_PREFIX="${NAME_PREFIX:-}"
+_missing=""
+[ -n "${PROJECT_ID}" ] || _missing="${_missing} PROJECT_ID"
+[ -n "${REGION}" ] || _missing="${_missing} REGION"
+[ -n "${NAME_PREFIX}" ] || _missing="${_missing} NAME_PREFIX"
+if [ -n "${_missing}" ]; then
+    log_error "FATAL: required environment not set:${_missing}. There are no defaults: export PROJECT_ID (or GCP_PROJECT), REGION (or GCP_REGION) and NAME_PREFIX for the stack you mean, e.g. export PROJECT_ID=<project> REGION=<region> NAME_PREFIX=<prefix>." >&2
+    exit 1
+fi
+unset _missing
+if ! is_valid_name_prefix "${NAME_PREFIX}"; then
+    log_error "FATAL: NAME_PREFIX '${NAME_PREFIX}' is invalid: it must match [a-z][a-z0-9]{1,9}." >&2
+    exit 1
+fi
+case "${PROJECT_ID}" in
+    *[!abcdefghijklmnopqrstuvwxyz0123456789.:-]*)
+        log_error "FATAL: PROJECT_ID '${PROJECT_ID}' is not a GCP project id." >&2
+        exit 1
+        ;;
+esac
+case "${REGION}" in
+    *[!abcdefghijklmnopqrstuvwxyz0123456789-]*)
+        log_error "FATAL: REGION '${REGION}' is not a GCP region name." >&2
+        exit 1
+        ;;
+esac
+export PROJECT_ID REGION NAME_PREFIX
+export DRY_RUN="${DRY_RUN:-false}"
+export MOCK_MODE="${MOCK_MODE:-false}"
+
 COMMON_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export INVENTORY_PIN_FILE="${ATA_INVENTORY_PIN_FILE:-${COMMON_SH_DIR}/inventory-pin.env}"
+# The alert-triage-agent directory (stack-local files .${NAME_PREFIX}-api-key and
+# .${NAME_PREFIX}-apigee.env live here).
+ALERT_TRIAGE_DIR="$(cd "${COMMON_SH_DIR}/../.." && pwd)"
+
+# --- Derived names (the only place they are spelled out) ------------------------------
+# Cloud Run services
+export SVC_INVENTORY="${NAME_PREFIX}-inventory-api"
+export SVC_ORDERS="${NAME_PREFIX}-orders-api"
+export SVC_AGENT="${NAME_PREFIX}-agent"
+export SVC_BRIDGE="${NAME_PREFIX}-bridge"
+export SVC_TOOLS="${NAME_PREFIX}-tools"
+# Cloud SQL
+export DB_INSTANCE="${NAME_PREFIX}-inventory-db"
+export DB_NAME_INVENTORY="inventory"
+export DB_CONNECTION_NAME="${PROJECT_ID}:${REGION}:${DB_INSTANCE}"
+# Service accounts
+export INVENTORY_SA_EMAIL="${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+# Cloud SQL IAM database user of the inventory SA (the SA email without .gserviceaccount.com).
+export INVENTORY_DB_IAM_USER="${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam"
+export APIGEE_SA_EMAIL="${NAME_PREFIX}-apigee-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+# Artifact Registry repo ${NAME_PREFIX}-docker is created in the stack's region (foundation).
+export ARTIFACT_REGISTRY_HOST="${ATA_ARTIFACT_REGISTRY_HOST:-${REGION}-docker.pkg.dev}"
+export ARTIFACT_REPO="${ARTIFACT_REGISTRY_HOST}/${PROJECT_ID}/${NAME_PREFIX}-docker"
+# Cloud Build (the stack's build SA and bucket; foundation Terraform)
+export BUILD_SA_EMAIL="${NAME_PREFIX}-build-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+export BUILD_BUCKET="gs://${PROJECT_ID}-${NAME_PREFIX}-build"
+# Apigee (deploy-apigee-proxies.sh creates them; these names must match it)
+export PROXY_ORDERS="${NAME_PREFIX}-orders-v1"
+export PROXY_INVENTORY="${NAME_PREFIX}-inventory-v1"
+export BASEPATH_ORDERS="/${NAME_PREFIX}/orders/v1"
+export BASEPATH_INVENTORY="/${NAME_PREFIX}/inventory/v1"
+export TARGET_ORDERS="${NAME_PREFIX}-orders-target"
+export TARGET_INVENTORY="${NAME_PREFIX}-inventory-target"
+export APIGEE_PRODUCT="${NAME_PREFIX}-product"
+export APIGEE_APP="${NAME_PREFIX}-demo-app"
+export APIGEE_DEVELOPER="${NAME_PREFIX}-dev@example.com"
+export APIGEE_ACCESS_LOG="${NAME_PREFIX}-apigee-access"
+# Alert policy display names (infra/terraform/observability/main.tf)
+export POLICY_INVENTORY_5XX="${NAME_PREFIX}-inventory-5xx"
+export POLICY_INVENTORY_LATENCY="${NAME_PREFIX}-inventory-latency"
+export POLICY_ORDERS_5XX="${NAME_PREFIX}-orders-5xx"
+export POLICY_ORDERS_LATENCY="${NAME_PREFIX}-orders-latency"
+export POLICY_APIGEE_ORDERS_5XX="${NAME_PREFIX}-apigee-orders-5xx"
+export POLICY_APIGEE_ORDERS_429="${NAME_PREFIX}-apigee-orders-429"
+export POLICY_CLOUDSQL_CONNECTIONS="${NAME_PREFIX}-cloudsql-connections-critical"
+export POLICY_CLOUDSQL_CPU="${NAME_PREFIX}-cloudsql-cpu-high"
+# Stack-local files
+export API_KEY_FILE="${ALERT_TRIAGE_DIR}/.${NAME_PREFIX}-api-key"
+export APIGEE_ENV_FILE="${ALERT_TRIAGE_DIR}/.${NAME_PREFIX}-apigee.env"
+
+# Incident bucket
+export INCIDENTS_BUCKET="${INCIDENTS_BUCKET:-${PROJECT_ID}-${NAME_PREFIX}-incidents}"
+
+# --- Apigee host, org and environment ------------------------------------------------
+# Sources: APIGEE_ENV_FILE (KEY=VALUE lines APIGEE_HOST=, APIGEE_ORG=, APIGEE_ENV=, written
+# by deploy-apigee-proxies.sh) and/or the exported variables. Parsed, not sourced. A value
+# exported AND in the file must agree: a mismatch is an error, never a silent choice.
+# There are no defaults: a missing value fails in the scripts that need it.
+load_apigee_env() {
+    local file="${APIGEE_ENV_FILE}" line key value n=0 cur
+    [ -f "${file}" ] || return 0
+    while IFS= read -r line || [ -n "${line}" ]; do
+        n=$((n + 1))
+        case "${line}" in
+            ""|"#"*) continue ;;
+        esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "${key}" in
+            APIGEE_HOST|APIGEE_ORG|APIGEE_ENV) ;;
+            *)
+                log_error "${file}:${n}: unexpected line '${line}' (only APIGEE_HOST=, APIGEE_ORG=, APIGEE_ENV=)." >&2
+                return 1
+                ;;
+        esac
+        case "${value}" in
+            *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.:_@-]*)
+                log_error "${file}:${n}: ${key} value '${value}' has unexpected characters." >&2
+                return 1
+                ;;
+        esac
+        eval "cur=\"\${${key}:-}\""
+        if [ -n "${cur}" ] && [ "${cur}" != "${value}" ]; then
+            log_error "${key} is exported as '${cur}' but ${file} says '${value}'. Unset ${key} or fix the file (deploy-apigee-proxies.sh writes it)." >&2
+            return 1
+        fi
+        printf -v "${key}" '%s' "${value}"
+    done < "${file}"
+}
+APIGEE_HOST="${APIGEE_HOST:-}"
+APIGEE_ORG="${APIGEE_ORG:-}"
+APIGEE_ENV="${APIGEE_ENV:-}"
+if ! load_apigee_env; then
+    log_error "FATAL: cannot load ${APIGEE_ENV_FILE}." >&2
+    exit 1
+fi
+export APIGEE_HOST APIGEE_ORG APIGEE_ENV
+
+# require_apigee_host: APIGEE_HOST (the envgroup hostname that serves the proxies) must be
+# set for live runs. Mock/dry-run send no request: an unset host becomes the logged
+# placeholder apigee.mock.invalid.
+require_apigee_host() {
+    if [ -n "${APIGEE_HOST}" ]; then
+        return 0
+    fi
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        APIGEE_HOST="apigee.mock.invalid"
+        export APIGEE_HOST
+        log_warn "[MOCK/DRY-RUN] APIGEE_HOST is not set; using the placeholder ${APIGEE_HOST} (no request is sent)." >&2
+        return 0
+    fi
+    log_error "APIGEE_HOST is not set and ${APIGEE_ENV_FILE} does not exist. Run scripts/deploy-apigee-proxies.sh for this stack (it writes the file), or export APIGEE_HOST=<envgroup hostname>." >&2
+    return 1
+}
+
+# require_apigee_mgmt: APIGEE_ORG and APIGEE_ENV (Apigee management API) must be set for
+# live runs. Mock/dry-run never call the management API.
+require_apigee_mgmt() {
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        return 0
+    fi
+    local missing=""
+    [ -n "${APIGEE_ORG}" ] || missing="${missing} APIGEE_ORG"
+    [ -n "${APIGEE_ENV}" ] || missing="${missing} APIGEE_ENV"
+    if [ -n "${missing}" ]; then
+        log_error "Not set:${missing} (Apigee organization / environment). They come from ${APIGEE_ENV_FILE} (written by scripts/deploy-apigee-proxies.sh) or the environment; there are no defaults." >&2
+        return 1
+    fi
+}
+
+# --- ${SVC_INVENTORY} baseline pin -----------------------------------------
+# The pinned revision and image digest of each stack live in ONE file per prefix,
+# inventory-pin.${NAME_PREFIX}.env next to this script (stack data, committed;
+# ATA_INVENTORY_PIN_FILE overrides the path). Re-pinning is one documented step:
+# scripts/repin-inventory.sh (DEPLOY.md, "Re-pinning the inventory baseline"); a new stack
+# gets its file from `repin-inventory.sh write-pin --initial`. The env vars
+# PINNED_INVENTORY_DIGEST / PINNED_INVENTORY_REVISION still override the file for one run.
+export INVENTORY_PIN_FILE="${ATA_INVENTORY_PIN_FILE:-${COMMON_SH_DIR}/inventory-pin.${NAME_PREFIX}.env}"
 
 # True if $1 is sha256:<64 lowercase hex>.
 is_valid_image_digest() {
@@ -52,10 +224,10 @@ is_valid_image_digest() {
     esac
 }
 
-# True if $1 is a revision name of ${NAME_PREFIX}-inventory-api (lowercase, digits, '-').
+# True if $1 is a revision name of ${SVC_INVENTORY} (lowercase, digits, '-').
 is_valid_inventory_revision() {
     case "$1" in
-        "${NAME_PREFIX}-inventory-api-"?*) ;;
+        "${SVC_INVENTORY}-"?*) ;;
         *) return 1 ;;
     esac
     case "$1" in
@@ -94,7 +266,7 @@ read_inventory_pin_file() {
         esac
     done < "${file}"
     if ! is_valid_inventory_revision "${PIN_INVENTORY_REVISION}"; then
-        log_error "${file}: PIN_INVENTORY_REVISION '${PIN_INVENTORY_REVISION}' is not a ${NAME_PREFIX}-inventory-api revision name." >&2
+        log_error "${file}: PIN_INVENTORY_REVISION '${PIN_INVENTORY_REVISION}' is not a ${SVC_INVENTORY} revision name." >&2
         return 1
     fi
     if ! is_valid_image_digest "${PIN_INVENTORY_DIGEST}"; then
@@ -110,29 +282,100 @@ read_inventory_pin_file() {
     fi
 }
 
-if ! read_inventory_pin_file "${INVENTORY_PIN_FILE}"; then
-    log_error "FATAL: cannot load the ${NAME_PREFIX}-inventory-api pin; fix ${INVENTORY_PIN_FILE} (see DEPLOY.md, 'Re-pinning the inventory baseline')." >&2
+# Load the pin. Scripts that work without one (repin-inventory.sh --initial, the inventory
+# deploy.sh on a fresh stack) set INVENTORY_PIN_OPTIONAL=true before sourcing; then a
+# MISSING file leaves the pin empty (INVENTORY_PIN_PRESENT=false). An invalid file is
+# always fatal.
+INVENTORY_PIN_PRESENT=false
+PIN_INVENTORY_REVISION="" PIN_INVENTORY_DIGEST=""
+PIN_INVENTORY_PREVIOUS_REVISION="" PIN_INVENTORY_PREVIOUS_DIGEST=""
+if [ ! -e "${INVENTORY_PIN_FILE}" ] && [ "${INVENTORY_PIN_OPTIONAL:-false}" = "true" ]; then
+    :
+elif [ ! -e "${INVENTORY_PIN_FILE}" ]; then
+    log_error "FATAL: no inventory pin for stack '${NAME_PREFIX}': ${INVENTORY_PIN_FILE} does not exist." >&2
+    log_error "A new stack needs its first pin: run scripts/repin-inventory.sh prepare --initial (then write-pin --initial and switch; DEPLOY.md, 'Re-pinning the inventory baseline')." >&2
     exit 1
+elif ! read_inventory_pin_file "${INVENTORY_PIN_FILE}"; then
+    log_error "FATAL: cannot load the ${SVC_INVENTORY} pin; fix ${INVENTORY_PIN_FILE} (see DEPLOY.md, 'Re-pinning the inventory baseline')." >&2
+    exit 1
+else
+    INVENTORY_PIN_PRESENT=true
 fi
+# Read by the scripts that source this file (repin-inventory.sh, the inventory deploy.sh).
+export INVENTORY_PIN_PRESENT
 
-# Deterministic pinned demo image and revision.
+# Deterministic pinned demo image and revision (empty without a pin, see above).
 export PINNED_INVENTORY_DIGEST="${PINNED_INVENTORY_DIGEST:-${PIN_INVENTORY_DIGEST}}"
-# Artifact Registry repo ${NAME_PREFIX}-docker is created in the stack's region (foundation).
-export ARTIFACT_REGISTRY_HOST="${ATA_ARTIFACT_REGISTRY_HOST:-${REGION}-docker.pkg.dev}"
-export PINNED_INVENTORY_IMAGE_BASE="${ARTIFACT_REGISTRY_HOST}/${PROJECT_ID}/${NAME_PREFIX}-docker/${NAME_PREFIX}-inventory-api"
-export PINNED_INVENTORY_IMAGE="${PINNED_INVENTORY_IMAGE:-${PINNED_INVENTORY_IMAGE_BASE}@${PINNED_INVENTORY_DIGEST}}"
+export PINNED_INVENTORY_IMAGE_BASE="${ARTIFACT_REPO}/${SVC_INVENTORY}"
+if [ -n "${PINNED_INVENTORY_DIGEST}" ]; then
+    export PINNED_INVENTORY_IMAGE="${PINNED_INVENTORY_IMAGE:-${PINNED_INVENTORY_IMAGE_BASE}@${PINNED_INVENTORY_DIGEST}}"
+else
+    export PINNED_INVENTORY_IMAGE="${PINNED_INVENTORY_IMAGE:-}"
+fi
 # PINNED_INVENTORY_REVISION must be a revision whose image is PINNED_INVENTORY_DIGEST
 # and whose config is the healthy baseline (correct DB user, no DEPLOY_TAG).
 # Older revisions run code where GET on /admin/* performs the fault action.
 export PINNED_INVENTORY_REVISION="${PINNED_INVENTORY_REVISION:-${PIN_INVENTORY_REVISION}}"
 # The rollback target (prune-revisions.sh keeps it); empty if none.
 export PREVIOUS_PINNED_INVENTORY_REVISION="${PIN_INVENTORY_PREVIOUS_REVISION}"
-if ! is_valid_image_digest "${PINNED_INVENTORY_DIGEST}"; then
+if [ -n "${PINNED_INVENTORY_DIGEST}" ] && ! is_valid_image_digest "${PINNED_INVENTORY_DIGEST}"; then
     log_error "FATAL: PINNED_INVENTORY_DIGEST '${PINNED_INVENTORY_DIGEST}' is not sha256:<64 hex>." >&2
     exit 1
 fi
 
-# Max Cloud Run instances of the demo workloads (ata-inventory-api, ata-orders-api), at
+# --- Inventory image build (Cloud Build as the stack's build SA) ----------------------
+# Same flags as the stack's other image builds (scripts/build-image.sh): build SA
+# BUILD_SA_EMAIL, sources and logs in BUILD_BUCKET.
+INVENTORY_DEMO_DIR="${ALERT_TRIAGE_DIR}/demo/ata-inventory-api"
+
+# build_inventory_image <tag>: build INVENTORY_DEMO_DIR into
+# ${PINNED_INVENTORY_IMAGE_BASE}:<tag>. Prints the pushed sha256 digest on stdout (progress on
+# stderr); returns non-zero, saying why, on any failure.
+build_inventory_image() {
+    local tag="$1" ref digest
+    case "${tag}" in
+        ""|*[!A-Za-z0-9._-]*|[.-]*) log_error "Image tag '${tag}' is not a valid Docker tag." >&2; return 1 ;;
+    esac
+    ref="${PINNED_INVENTORY_IMAGE_BASE}:${tag}"
+    log_info "Building ${ref} from ${INVENTORY_DEMO_DIR} with Cloud Build (service account ${BUILD_SA_EMAIL}, bucket ${BUILD_BUCKET})..." >&2
+    if ! digest="$(gcloud builds submit "${INVENTORY_DEMO_DIR}" --project="${PROJECT_ID}" --tag="${ref}" \
+        --service-account="projects/${PROJECT_ID}/serviceAccounts/${BUILD_SA_EMAIL}" \
+        --gcs-source-staging-dir="${BUILD_BUCKET}/source" \
+        --gcs-log-dir="${BUILD_BUCKET}/logs" \
+        --format="value(results.images[0].digest)")"; then
+        log_error "Cloud Build failed for ${ref} (see the build log above)." >&2
+        return 1
+    fi
+    if ! is_valid_image_digest "${digest}"; then
+        log_error "Cloud Build returned no image digest for ${ref} ('${digest}')." >&2
+        return 1
+    fi
+    log_success "Pushed ${PINNED_INVENTORY_IMAGE_BASE}@${digest}" >&2
+    echo "${digest}"
+}
+
+# inventory_image_exists <digest>: 0 if ${PINNED_INVENTORY_IMAGE_BASE}@<digest> is in the
+# stack's Artifact Registry, 1 if it is not there (NOT_FOUND), 2 (gcloud's error on stderr)
+# if that cannot be told.
+inventory_image_exists() {
+    local digest="$1" err_file rc=0
+    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-ar.XXXXXX")"
+    gcloud artifacts docker images describe "${PINNED_INVENTORY_IMAGE_BASE}@${digest}" \
+        --project="${PROJECT_ID}" --format="value(image_summary.digest)" >/dev/null 2>"${err_file}" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        rm -f "${err_file}"
+        return 0
+    fi
+    if grep -qiE "NOT_FOUND|not found" "${err_file}"; then
+        rm -f "${err_file}"
+        return 1
+    fi
+    cat "${err_file}" >&2
+    rm -f "${err_file}"
+    return 2
+}
+
+# Max Cloud Run instances of the demo workloads (SVC_INVENTORY, SVC_ORDERS), at
 # service level and per revision. 1: fault state and leaked DB connections live in one
 # instance's memory, and /admin/fault/reset clears only the instance it reaches. Keep it
 # equal to Terraform's demo_max_instance_count (infra/terraform/applications). Min
@@ -151,6 +394,10 @@ verify_pinned_inventory_revision() {
         return 0
     fi
     local actual
+    if [ -z "${PINNED_INVENTORY_REVISION}" ] || [ -z "${PINNED_INVENTORY_DIGEST}" ]; then
+        log_error "No inventory pin for stack '${NAME_PREFIX}' (${INVENTORY_PIN_FILE}); run scripts/repin-inventory.sh prepare --initial." >&2
+        return 1
+    fi
     actual="$(gcloud run revisions describe "${PINNED_INVENTORY_REVISION}" \
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
@@ -163,15 +410,15 @@ verify_pinned_inventory_revision() {
     fi
 }
 
-# Print ata-inventory-api's live traffic as "revision,percent" (empty if describe fails).
+# Print ${SVC_INVENTORY}'s live traffic as "revision,percent" (empty if describe fails).
 inventory_traffic() {
-    gcloud run services describe "${NAME_PREFIX}-inventory-api" \
+    gcloud run services describe "${SVC_INVENTORY}" \
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --format="csv[no-heading](status.traffic.revisionName,status.traffic.percent)" 2>/dev/null || true
 }
 
-# Fail loudly unless ata-inventory-api serves 100% from the given revision.
+# Fail loudly unless ${SVC_INVENTORY} serves 100% from the given revision.
 verify_inventory_serving_revision() {
     local revision="$1"
     if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
@@ -180,12 +427,12 @@ verify_inventory_serving_revision() {
     local traffic
     traffic="$(inventory_traffic)"
     if [ "${traffic}" != "${revision},100" ]; then
-        log_error "${NAME_PREFIX}-inventory-api traffic is '${traffic:-<unknown>}', expected ${revision}=100." >&2
+        log_error "${SVC_INVENTORY} traffic is '${traffic:-<unknown>}', expected ${revision}=100." >&2
         return 1
     fi
 }
 
-# Fail loudly unless ata-inventory-api serves 100% from PINNED_INVENTORY_REVISION.
+# Fail loudly unless ${SVC_INVENTORY} serves 100% from PINNED_INVENTORY_REVISION.
 verify_inventory_serving_pinned() {
     if ! verify_inventory_serving_revision "${PINNED_INVENTORY_REVISION}"; then
         log_error "If S5 was run, restore the baseline with: scripts/scenarios/s5_bad_deploy.sh --revert (or scripts/reset-scenarios.sh)." >&2
@@ -241,8 +488,8 @@ validate_restock_baseline() {
 }
 
 # Baseline env of the inventory revision template (S5 overwrites the DB user). Only the
-# ATA_INVENTORY_* names: the app reads nothing else (demo/ata-inventory-api/app/config.py).
-INVENTORY_BASELINE_ENV_VARS="ATA_INVENTORY_INSTANCE_CONNECTION_NAME=${PROJECT_ID}:${REGION}:${NAME_PREFIX}-inventory-db,ATA_INVENTORY_DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,ATA_INVENTORY_DB_NAME=inventory,ATA_INVENTORY_DB_IAM_AUTH=true,ATA_INVENTORY_MOCK_DB=false"
+# ATA_INVENTORY_* names: the app reads nothing else (demo/<inventory app>/app/config.py).
+INVENTORY_BASELINE_ENV_VARS="ATA_INVENTORY_INSTANCE_CONNECTION_NAME=${DB_CONNECTION_NAME},ATA_INVENTORY_DB_USER=${INVENTORY_DB_IAM_USER},ATA_INVENTORY_DB_NAME=${DB_NAME_INVENTORY},ATA_INVENTORY_DB_IAM_AUTH=true,ATA_INVENTORY_MOCK_DB=false"
 # Legacy aliases the app no longer reads; the baseline template and pinned revision must not
 # carry them (a stale DB_USER would look like configuration that matters).
 INVENTORY_LEGACY_ENV_NAMES="DB_USER,MOCK_DB"
@@ -252,11 +499,11 @@ INVENTORY_LEGACY_ENV_NAMES="DB_USER,MOCK_DB"
 # DEMO_MAX_INSTANCES and minScale 0; 1 if it differs, 2 (with an error) if it cannot be read.
 inventory_template_matches_baseline() {
     local svc_json
-    if ! svc_json="$(gcloud run services describe "${NAME_PREFIX}-inventory-api" \
+    if ! svc_json="$(gcloud run services describe "${SVC_INVENTORY}" \
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --format=json)"; then
-        log_error "Could not read the ${NAME_PREFIX}-inventory-api service template." >&2
+        log_error "Could not read the ${SVC_INVENTORY} service template." >&2
         return 2
     fi
     python3 "${COMMON_SH_DIR}/inventory_baseline.py" template \
@@ -299,13 +546,13 @@ service_max_matches_baseline() {
     python3 "${COMMON_SH_DIR}/inventory_baseline.py" service-max --max="${DEMO_MAX_INSTANCES}" <<<"${svc_json}"
 }
 
-# Restore ata-inventory-api to the pinned baseline: 100% traffic on
+# Restore ${SVC_INVENTORY} to the pinned baseline: 100% traffic on
 # PINNED_INVENTORY_REVISION and a baseline service template. Each write is skipped
 # when the live state already matches, because every `services update` creates a
 # new revision (which gets 0% while traffic is pinned by name). Fails loudly.
 restore_inventory_pinned_baseline() {
     if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
-        log_info "[MOCK/DRY-RUN] Restored ${NAME_PREFIX}-inventory-api to pinned revision ${PINNED_INVENTORY_REVISION}."
+        log_info "[MOCK/DRY-RUN] Restored ${SVC_INVENTORY} to pinned revision ${PINNED_INVENTORY_REVISION}."
         return 0
     fi
     verify_pinned_inventory_revision || return 1
@@ -313,12 +560,12 @@ restore_inventory_pinned_baseline() {
     # 1. Traffic back to the pinned revision.
     if [ "$(inventory_traffic)" = "${PINNED_INVENTORY_REVISION},100" ]; then
         log_info "    Traffic already 100% on ${PINNED_INVENTORY_REVISION}; not changing it."
-    elif ! gcloud run services update-traffic "${NAME_PREFIX}-inventory-api" \
+    elif ! gcloud run services update-traffic "${SVC_INVENTORY}" \
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --to-revisions="${PINNED_INVENTORY_REVISION}=100" \
         --quiet; then
-        log_error "Failed to route ${NAME_PREFIX}-inventory-api traffic to ${PINNED_INVENTORY_REVISION}." >&2
+        log_error "Failed to route ${SVC_INVENTORY} traffic to ${PINNED_INVENTORY_REVISION}." >&2
         return 1
     fi
 
@@ -333,7 +580,7 @@ restore_inventory_pinned_baseline() {
             log_info "    Service template already on the baseline image, env and instance limits; skipping services update."
             ;;
         1)
-            if ! gcloud run services update "${NAME_PREFIX}-inventory-api" \
+            if ! gcloud run services update "${SVC_INVENTORY}" \
                 --project="${PROJECT_ID}" \
                 --region="${REGION}" \
                 --image="${PINNED_INVENTORY_IMAGE}" \
@@ -342,7 +589,7 @@ restore_inventory_pinned_baseline() {
                 --max-instances="${DEMO_MAX_INSTANCES}" \
                 --min-instances=0 \
                 --quiet; then
-                log_error "Failed to restore the ${NAME_PREFIX}-inventory-api service template." >&2
+                log_error "Failed to restore the ${SVC_INVENTORY} service template." >&2
                 return 1
             fi
             ;;
@@ -365,7 +612,7 @@ to_upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 # stderr and returns gcloud's exit status. stdout is gcloud's stdout.
 gcs_run() {
     local err_file rc=0
-    err_file="$(mktemp "${TMPDIR:-/tmp}/ata-gcs.XXXXXX")"
+    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-gcs.XXXXXX")"
     gcloud storage "$@" 2>"${err_file}" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         if grep -q "matched no objects" "${err_file}"; then
@@ -398,9 +645,10 @@ parse_duration() {
 }
 
 # Print the Apigee consumer API key on stdout, or fail loudly. In live mode it never
-# prints an empty key. Lookup order: $ATA_API_KEY, ./.ata-api-key,
-# alert-triage-agent/.ata-api-key, repo root .ata-api-key. The first key file that exists
-# is used; an empty one is an error, not a reason to try the next location.
+# prints an empty key. Sources, in order: $ATA_API_KEY, then API_KEY_FILE
+# (<alert-triage-agent>/.${NAME_PREFIX}-api-key, written by deploy-apigee-proxies.sh).
+# An empty key file is an error. There is no other location: a key file of another
+# stack or checkout is never picked up.
 # Mock/dry-run never call Apigee, so they need no key: it prints nothing and succeeds
 # without looking anywhere (callers send no x-api-key header for an empty key).
 resolve_api_key() {
@@ -413,66 +661,47 @@ resolve_api_key() {
         return 0
     fi
 
-    local key_file key
-    for key_file in "${PWD}/.ata-api-key" "${SCRIPT_DIR}/../../.ata-api-key" "${SCRIPT_DIR}/../../../.ata-api-key"; do
-        if [ -f "${key_file}" ]; then
-            key="$(tr -d '[:space:]' < "${key_file}")"
-            if [ -n "${key}" ]; then
-                echo "${key}"
-                return 0
-            fi
-            log_error "Apigee consumer API key file ${key_file} is empty." >&2
-            api_key_help >&2
-            return 1
+    local key
+    if [ -f "${API_KEY_FILE}" ]; then
+        key="$(tr -d '[:space:]' < "${API_KEY_FILE}")"
+        if [ -n "${key}" ]; then
+            echo "${key}"
+            return 0
         fi
-    done
+        log_error "Apigee consumer API key file ${API_KEY_FILE} is empty." >&2
+        api_key_help >&2
+        return 1
+    fi
 
-    log_error "Apigee consumer API key not found." >&2
+    log_error "Apigee consumer API key not found for stack '${NAME_PREFIX}'." >&2
     api_key_help >&2
     return 1
 }
 
-# Explain where resolve_api_key looks for the key and how to fetch it (see DEMO.md step 4).
+# Explain where resolve_api_key looks for the key and how to get it (see DEMO.md step 4).
 api_key_help() {
     log_error "The key is looked up, in order, from:"
     log_error "  1. the ATA_API_KEY environment variable"
-    log_error "  2. ${PWD}/.ata-api-key (current directory)"
-    log_error "  3. ${SCRIPT_DIR}/../../.ata-api-key (alert-triage-agent/)"
-    log_error "  4. ${SCRIPT_DIR}/../../../.ata-api-key (repository root)"
-    log_error "To retrieve your consumer key using your own gcloud credentials (DEMO.md step 4), run:"
+    log_error "  2. ${API_KEY_FILE}"
+    log_error "scripts/deploy-apigee-proxies.sh writes that file. To fetch the consumer key of ${APIGEE_APP} with your own gcloud credentials (DEMO.md step 4), run:"
     log_error "  curl -s -H \"Authorization: Bearer \$(gcloud auth print-access-token)\" \\"
-    log_error "    \"https://apigee.googleapis.com/v1/organizations/${PROJECT_ID}/developers/ata-dev@example.com/apps/ata-demo-app\" \\"
-    log_error "    | python3 -c \"import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])\" > .ata-api-key"
-    log_error "  chmod 600 .ata-api-key"
+    log_error "    \"https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG:-<APIGEE_ORG>}/developers/${APIGEE_DEVELOPER}/apps/${APIGEE_APP}\" \\"
+    log_error "    | python3 -c \"import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])\" > ${API_KEY_FILE}.tmp \\"
+    log_error "    && test -s ${API_KEY_FILE}.tmp && mv ${API_KEY_FILE}.tmp ${API_KEY_FILE}"
+    log_error "  chmod 600 ${API_KEY_FILE}"
     log_error "Or: export ATA_API_KEY=\"<consumer key>\""
-}
-
-# Resolve Cloud Run Service URLs
-resolve_service_url() {
-    local service_name="$1"
-    local default_url="$2"
-
-    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
-        echo "${default_url}"
-        return 0
-    fi
-
-    local discovered_url=""
-    discovered_url="$(gcloud run services describe "${service_name}" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)" 2>/dev/null || true)"
-    if [ -n "${discovered_url}" ]; then
-        echo "${discovered_url}"
-    else
-        echo "${default_url}"
-    fi
 }
 
 # require_service_url <service>: the live URL of a Cloud Run service, with no fallback: a
 # live run fails loudly (return 1) when it cannot be read (a fixed fallback URL would point
-# at another project's service). Mock/dry-run print https://<service>.mock.invalid.
+# at another stack's service). Mock/dry-run print https://<service>.mock.invalid and say so
+# on stderr.
 require_service_url() {
     local service_name="$1" url=""
     if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
-        echo "https://${service_name}.mock.invalid"
+        url="https://${service_name}.mock.invalid"
+        log_warn "[MOCK/DRY-RUN] Using the placeholder URL ${url} for Cloud Run service ${service_name} (no request is sent to it)." >&2
+        echo "${url}"
         return 0
     fi
     url="$(gcloud run services describe "${service_name}" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)" 2>/dev/null || true)"
@@ -481,6 +710,14 @@ require_service_url() {
         return 1
     fi
     echo "${url}"
+}
+
+# resolve_service_url <service> [<ignored>]: compatibility name for scripts outside this
+# lane that still call it (verify-demo-infra.sh until ata-fresh-scripts lands). It is
+# require_service_url: the second argument, once a fixed fallback URL, is ignored. No
+# fallback. Remove once no caller is left.
+resolve_service_url() {
+    require_service_url "$1"
 }
 
 # Resolve Bearer Token for Cloud Run IAM Invocation
@@ -523,7 +760,7 @@ select_order_item() {
         key_header=(-H "x-api-key: ${api_key}")
     fi
     body="$(curl -k -s --connect-timeout 5 --max-time 10 ${key_header[@]+"${key_header[@]}"} \
-        "https://${APIGEE_HOST}/ata/inventory/v1/items" 2>/dev/null)" || body=""
+        "https://${APIGEE_HOST}${BASEPATH_INVENTORY}/items" 2>/dev/null)" || body=""
     if ! picked="$(printf '%s' "${body}" | python3 -c '
 import json, sys
 try:
@@ -542,7 +779,7 @@ if not stocked:
 best = max(stocked, key=stock)
 print(best["id"], stock(best))
 ' 2>/dev/null)"; then
-        log_error "Could not find an in-stock item via GET https://${APIGEE_HOST}/ata/inventory/v1/items; every POST /orders would return HTTP 400 and never exercise the inventory path." >&2
+        log_error "Could not find an in-stock item via GET https://${APIGEE_HOST}${BASEPATH_INVENTORY}/items; every POST /orders would return HTTP 400 and never exercise the inventory path." >&2
         return 1
     fi
     item="${picked%% *}"
@@ -604,7 +841,7 @@ reset_inventory_fault_after_abort() {
             return 0
             ;;
     esac
-    log_error "FATAL: POST ${INV_URL}/admin/fault/reset returned HTTP ${code:-<none>}; ${fault} is STILL INJECTED on ${NAME_PREFIX}-inventory-api." >&2
+    log_error "FATAL: POST ${INV_URL}/admin/fault/reset returned HTTP ${code:-<none>}; ${fault} is STILL INJECTED on ${SVC_INVENTORY}." >&2
     return 1
 }
 

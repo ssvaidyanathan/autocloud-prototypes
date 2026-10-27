@@ -6,13 +6,17 @@
 #
 # Lists, oldest first, the revisions that would be deleted: 0% traffic, no traffic tag, not
 # the latest created/ready revision, and NOT protected. Protected, never deleted:
-#   - the pinned inventory revision (scripts/scenarios/inventory-pin.env, and a
+#   - the pinned inventory revision (scripts/scenarios/inventory-pin.${NAME_PREFIX}.env, and a
 #     PINNED_INVENTORY_REVISION override),
 #   - the previous pin (PIN_INVENTORY_PREVIOUS_REVISION: the rollback target),
 #   - every revision given with --keep.
-# Default: dry run (read-only). --apply deletes, and only when ata-inventory-api serves
+# Default: dry run (read-only). --apply deletes, and only when <prefix>-inventory-api serves
 # 100% from the pinned revision (no scenario in progress). Before deleting, the protected
-# set is read again; if it changed, nothing is deleted. Each delete re-checks the guard.
+# set is read again; if it changed, nothing is deleted. Each delete is checked against that
+# per-service plan (read once before the deletes start), not against live state: a full run
+# can take minutes, and a revision that starts serving meanwhile is refused by Cloud Run
+# itself (it never deletes a serving revision); reset, S5 revert and rollback only ever
+# route traffic to protected revisions.
 # Fails loudly; a failed delete is reported and makes the exit status non-zero.
 # bash 3.2 and BSD userland compatible.
 # ==============================================================================

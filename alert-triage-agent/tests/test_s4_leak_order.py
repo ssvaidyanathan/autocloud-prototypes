@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_s5_bad_deploy import STACK_ENV
 from tests.test_scenario_abort_cleanup import assert_finished_gracefully, install_ctrl_c_stubs, run_with_ctrl_c
 
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
@@ -42,12 +43,20 @@ DATE = f"""#!/bin/sh
 if [ "$1" = "+%s" ] && [ "${{ATA_FAIL_EPOCH:-0}}" = "1" ]; then echo "date: stub failure" >&2; exit 3; fi
 exec {REAL_DATE} "$@"
 """
-# The S4 Cloud SQL holding-connection helper is never run for real.
+# The S4 Cloud SQL holding-connection helper was removed: any attempt to run it is recorded.
 PYTHON = f"""#!/bin/sh
 case "$*" in
-  *sql.connector*) echo "python3 cloud-sql helper (stub)"; exit 0 ;;
+  *sql.connector*) echo "python3 sql.connector" >> "$ATA_TEST_CALLS"; exit 0 ;;
 esac
 exec {REAL_PYTHON} "$@"
+"""
+# gcloud: the service URL (S4 requires it: no fallback URL) and an ID token.
+GCLOUD = """#!/bin/sh
+echo "gcloud $*" >> "$ATA_TEST_CALLS"
+case "$*" in
+  *"value(status.url)"*) echo "https://inv.example" ;;
+  "auth print-identity-token"*) echo "id-token" ;;
+esac
 """
 
 
@@ -56,7 +65,7 @@ def env(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "bash").symlink_to(TEST_BASH)
-    for name, body in [("curl", CURL), ("date", DATE), ("python3", PYTHON), ("gcloud", "#!/bin/sh\n"),
+    for name, body in [("curl", CURL), ("date", DATE), ("python3", PYTHON), ("gcloud", GCLOUD),
                        ("pkill", '#!/bin/sh\necho "pkill $*" >> "$ATA_TEST_CALLS"\nexit 1\n')]:
         stub = bin_dir / name
         stub.write_text(body)
@@ -64,6 +73,7 @@ def env(tmp_path):
     items = tmp_path / "items.json"
     items.write_text(ITEMS_OK)
     e = {k: v for k, v in os.environ.items() if k not in ("ATA_API_KEY", "MOCK_MODE", "DRY_RUN")}
+    e.update(STACK_ENV)
     e.update(PATH=f"{bin_dir}{os.pathsep}{e['PATH']}", ATA_TEST_CALLS=str(tmp_path / "calls"),
              ATA_ITEMS_BODY=str(items), ATA_API_KEY="test-key", MOCK_MODE="false", DRY_RUN="false",
              RUN_PREFLIGHT="false")
@@ -118,7 +128,7 @@ def test_error_after_the_leak_releases_it_loudly(tmp_path, env):
     assert "S4 aborted (exit 3) after leaking DB connections" in res.stderr
     assert "Leaked connections released on the instance the reset reached" in res.stderr
     assert "./scripts/reset-scenarios.sh, which verifies the release" in res.stderr
-    assert any(c.startswith("pkill -f pg_sleep") for c in calls)
+    assert not any(c.startswith(("pkill", "python3 sql.connector")) for c in calls)  # no local helper
     assert "unbound variable" not in res.stderr
 
 

@@ -28,11 +28,13 @@ STUB = '#!/bin/sh\necho "$0 $*" >> "$ATA_TEST_CALLS"\n{body}\n'
 
 @pytest.fixture
 def stub_bin(tmp_path):
-    """PATH dir with `bash` -> TEST_BASH and logging gcloud/curl stubs (gcloud prints nothing)."""
+    """PATH dir with `bash` -> TEST_BASH and logging gcloud/curl stubs (gcloud prints only a
+    service URL: no ID token; the scripts have no fallback URL)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "bash").symlink_to(TEST_BASH)
-    for name, body in [("gcloud", ""), ("curl", 'echo 200')]:
+    gcloud = 'case "$*" in *"value(status.url)"*) echo "https://inv.example" ;; esac'
+    for name, body in [("gcloud", gcloud), ("curl", 'echo 200')]:
         stub = bin_dir / name
         stub.write_text(STUB.format(body=body))
         stub.chmod(0o755)
@@ -49,7 +51,8 @@ def isolated_scripts(tmp_path):
 def script_env(stub_bin, tmp_path, **extra):
     env = {k: v for k, v in os.environ.items() if k not in ("ATA_API_KEY", "MOCK_MODE", "DRY_RUN")}
     env.update(PATH=f"{stub_bin}{os.pathsep}{env['PATH']}", ATA_TEST_CALLS=str(tmp_path / "calls"),
-               MOCK_MODE="false", DRY_RUN="false", RUN_PREFLIGHT="false")
+               MOCK_MODE="false", DRY_RUN="false", RUN_PREFLIGHT="false",
+               APIGEE_HOST="apigee.example", APIGEE_ORG="test-org", APIGEE_ENV="test-env")
     env.update(extra)
     return env
 
@@ -111,9 +114,9 @@ def test_scenario_fails_loudly_without_api_key(sc, tmp_path, stub_bin):
     res = run([scripts / "scenarios" / sc, "--hold", "1s"], tmp_path, script_env(stub_bin, tmp_path))
 
     assert res.returncode != 0, res.stdout + res.stderr
-    for text in ["Apigee consumer API key not found", "ATA_API_KEY",
-                 f"{tmp_path}/.ata-api-key (current directory)", "(alert-triage-agent/)", "(repository root)",
-                 "developers/ata-dev@example.com/apps/ata-demo-app", "DEMO.md"]:
+    for text in ["Apigee consumer API key not found for stack 'ata'", "ATA_API_KEY",
+                 f"{tmp_path}/pkg/alert-triage-agent/.ata-api-key", "deploy-apigee-proxies.sh",
+                 "organizations/test-org/developers/ata-dev@example.com/apps/ata-demo-app", "DEMO.md"]:
         assert text in res.stderr, text
     assert "unbound variable" not in res.stderr
     assert calls(tmp_path) == [], "no gcloud/curl call (no fault injected) before the key check"
@@ -121,25 +124,44 @@ def test_scenario_fails_loudly_without_api_key(sc, tmp_path, stub_bin):
 
 @pytest.mark.parametrize("sc", SCENARIOS)
 def test_scenario_fails_loudly_on_empty_key_file(sc, tmp_path, stub_bin):
-    """An empty .ata-api-key (e.g. a failed DEMO.md fetch) is an error, not an empty key."""
+    """An empty .<prefix>-api-key (e.g. a failed DEMO.md fetch) is an error, not an empty key."""
     scripts = isolated_scripts(tmp_path)
-    (tmp_path / ".ata-api-key").write_text("\n")
+    (tmp_path / "pkg" / "alert-triage-agent" / ".ata-api-key").write_text("\n")
     res = run([scripts / "scenarios" / sc, "--hold", "1s"], tmp_path, script_env(stub_bin, tmp_path))
 
     assert res.returncode != 0, res.stdout + res.stderr
-    assert f"{tmp_path}/.ata-api-key is empty" in res.stderr
+    assert f"{tmp_path}/pkg/alert-triage-agent/.ata-api-key is empty" in res.stderr
     assert "developers/ata-dev@example.com/apps/ata-demo-app" in res.stderr
     assert calls(tmp_path) == []
 
 
-def test_first_existing_key_file_wins_and_is_trimmed(tmp_path, stub_bin):
+def test_stack_key_file_is_used_and_trimmed(tmp_path, stub_bin):
     scripts = isolated_scripts(tmp_path)
     (tmp_path / "pkg" / "alert-triage-agent" / ".ata-api-key").write_text("  pkg-key \n")
+    (tmp_path / ".ata-api-key").write_text("cwd-key\n")  # not a key location (stack isolation)
     probe = tmp_path / "probe.sh"
     probe.write_text(f'set -euo pipefail\nSCRIPT_DIR="{scripts}/scenarios"\n'
                      f'source "{scripts}/scenarios/common.sh"\nresolve_api_key\n')
     res = run([probe], tmp_path, script_env(stub_bin, tmp_path))
     assert (res.returncode, res.stdout) == (0, "pkg-key\n"), res.stderr
+
+
+@pytest.mark.parametrize("prefix", ["atat", "data"])
+def test_key_of_another_stack_or_directory_is_never_used(prefix, tmp_path, stub_bin):
+    """Only <alert-triage-agent>/.${NAME_PREFIX}-api-key: never .ata-api-key, never the cwd."""
+    scripts = isolated_scripts(tmp_path)
+    (tmp_path / "pkg" / "alert-triage-agent" / ".ata-api-key").write_text("ata-key\n")
+    (tmp_path / f".{prefix}-api-key").write_text("cwd-key\n")
+    probe = tmp_path / "probe.sh"
+    probe.write_text(f'set -euo pipefail\nSCRIPT_DIR="{scripts}/scenarios"\n'
+                     f'source "{scripts}/scenarios/common.sh"\nresolve_api_key\n')
+    pin = tmp_path / f"inventory-pin.{prefix}.env"
+    pin.write_text(f"PIN_INVENTORY_REVISION={prefix}-inventory-api-00001-abc\n"
+                   f"PIN_INVENTORY_DIGEST=sha256:{'ab' * 32}\n")
+    res = run([probe], tmp_path, script_env(stub_bin, tmp_path, NAME_PREFIX=prefix,
+                                            ATA_INVENTORY_PIN_FILE=str(pin)))
+    assert res.returncode != 0 and res.stdout == "", res.stdout + res.stderr
+    assert f"{tmp_path}/pkg/alert-triage-agent/.{prefix}-api-key" in res.stderr
 
 
 @pytest.mark.parametrize("mode", ["--mock", "--dry-run"])
@@ -157,7 +179,7 @@ def test_scenario_mock_and_dry_run_skip_the_key_check(sc, mode, tmp_path, stub_b
     """Mock/dry-run never call Apigee: no key, or an empty key file, is not an error there."""
     scripts = isolated_scripts(tmp_path)
     shutil.copytree(SCRIPTS_DIR.parent / "demo" / "apigee", scripts.parent / "demo" / "apigee")  # S3 reads it
-    (tmp_path / ".ata-api-key").write_text("\n")
+    (tmp_path / "pkg" / "alert-triage-agent" / ".ata-api-key").write_text("\n")
     res = run([scripts / "scenarios" / sc, mode, "--hold", "0s"], tmp_path, script_env(stub_bin, tmp_path))
 
     assert res.returncode == 0, res.stdout + res.stderr
@@ -169,7 +191,7 @@ def test_scenario_mock_and_dry_run_skip_the_key_check(sc, mode, tmp_path, stub_b
 def test_resolve_api_key_prints_nothing_in_mock_and_dry_run(mode, tmp_path, stub_bin):
     """No placeholder key: mock/dry-run resolve to an empty key without reading any key source."""
     scripts = isolated_scripts(tmp_path)
-    (tmp_path / ".ata-api-key").write_text("\n")
+    (tmp_path / "pkg" / "alert-triage-agent" / ".ata-api-key").write_text("\n")
     probe = tmp_path / "probe.sh"
     probe.write_text(f'set -euo pipefail\nSCRIPT_DIR="{scripts}/scenarios"\n'
                      f'source "{scripts}/scenarios/common.sh"\nresolve_api_key\necho RESOLVED\n')

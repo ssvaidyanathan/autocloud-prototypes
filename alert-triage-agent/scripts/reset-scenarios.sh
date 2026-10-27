@@ -80,7 +80,7 @@ DB_RELEASE_TIMEOUT_SECS="$(parse_duration "${ATA_RESET_DB_RELEASE_TIMEOUT:-1200}
 MAX_ALERT_AGE_SECS="$(parse_duration "${ATA_RESET_MAX_ALERT_AGE:-${MAX_ALERT_AGE:-3600}}")"
 # Consecutive failed Cloud Monitoring queries tolerated before the reset fails.
 MAX_QUERY_ATTEMPTS="${ATA_RESET_MAX_QUERY_ATTEMPTS:-3}"
-# A demo request at least this slow (ms) can raise an ata-*-latency alert: keep it equal to
+# A demo request at least this slow (ms) can raise a <prefix>-*-latency alert: keep it equal to
 # threshold_value of the latency policies (infra/terraform/observability/main.tf, 2000).
 SLOW_REQUEST_MS="${ATA_RESET_SLOW_REQUEST_MS:-2000}"
 # Time from a request to the alert it can open. Live 2026-10-27, with the 60s retest
@@ -298,7 +298,7 @@ get_serving_revisions() {
     fi
 
     if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
-        for svc in "${NAME_PREFIX}-inventory-api" "${NAME_PREFIX}-orders-api"; do
+        for svc in "${SVC_INVENTORY}" "${SVC_ORDERS}"; do
             local svc_json svc_revs
             if ! svc_json="$(gcloud run services describe "${svc}" \
                 --project="${PROJECT_ID}" \
@@ -336,9 +336,9 @@ DB_BACKENDS_PY="${SCRIPT_DIR}/scenarios/db_backends.py"
 # most DB_MAX_BACKENDS. Fails loudly, naming what remains, after DB_RELEASE_TIMEOUT_SECS.
 verify_db_backends_released() {
     local since="$1" deadline now token json rc parsed value at epoch last="" err_file failures=0
-    local db="${NAME_PREFIX}-inventory-db"
+    local db="${DB_INSTANCE}"
     deadline=$(( $(date +%s) + DB_RELEASE_TIMEOUT_SECS ))
-    err_file="$(mktemp "${TMPDIR:-/tmp}/ata-db-backends.XXXXXX")"
+    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-db-backends.XXXXXX")"
     while true; do
         rc=0
         if ! token="$(resolve_monitoring_token 2>"${err_file}")" || [ -z "${token}" ]; then
@@ -383,7 +383,7 @@ print("" if d.get("value") is None else "%s %s %s" % (d["value"], d["epoch"], d[
         fi
         if [ "${now}" -ge "${deadline}" ]; then
             log_error "FATAL: ${db} still has leaked connections ${DB_RELEASE_TIMEOUT_SECS}s after the fault reset: num_backends on database inventory is ${last:-not reported} (released means <= ${DB_MAX_BACKENDS} in a sample taken after the reset)." >&2
-            log_error "STILL LEFT: S4's leaked connections, held by an ${NAME_PREFIX}-inventory-api instance that POST /admin/fault/reset did not reach; ata-cloudsql-connections-critical stays open until they are released." >&2
+            log_error "STILL LEFT: S4's leaked connections, held by an ${SVC_INVENTORY} instance that POST /admin/fault/reset did not reach; ${POLICY_CLOUDSQL_CONNECTIONS} stays open until they are released." >&2
             log_error "Rerun ./scripts/reset-scenarios.sh once Cloud Run has scaled that instance in, or raise ATA_RESET_DB_RELEASE_TIMEOUT. With max_instance_count = 1 (Terraform demo_max_instance_count) the reset always reaches it." >&2
             rm -f "${err_file}"
             return 1
@@ -393,7 +393,7 @@ print("" if d.get("value") is None else "%s %s %s" % (d["value"], d["epoch"], d[
     done
 }
 
-# Print {"active": [...], "ignored": [...]} for OPEN ata-* alerts. Exits non-zero, with
+# Print {"active": [...], "ignored": [...]} for OPEN alerts of this stack (<prefix>-* policies). Exits non-zero, with
 # the cause on stderr, when the Alerts API cannot be queried.
 query_open_ata_alerts() {
     local proj="$1"
@@ -546,7 +546,7 @@ wait_for_open_alerts() {
     local serving_revs
     serving_revs="$(get_serving_revisions)"
 
-    log_info "    Polling Cloud Monitoring API (read-only) for OPEN alerts on ata-* policies (label app=alert-triage-agent)..."
+    log_info "    Polling Cloud Monitoring API (read-only) for OPEN alerts on ${NAME_PREFIX}-* policies (stack ${NAME_PREFIX})..."
     log_info "    Max timeout: ${WAIT_TIMEOUT_SECS}s | Quiet period: ${QUIET_PERIOD_SECS}s | Polling interval: ${POLL_INTERVAL_SECS}s | Max alert age: ${MAX_ALERT_AGE_SECS}s | Token source: ${ATA_MONITORING_TOKEN_SOURCE}"
     if [ "${ALERT_WINDOW_UNTIL}" -gt "${start_time}" ]; then
         log_info "    Alert window: watching for alerts from slow demo requests for another $((ALERT_WINDOW_UNTIL - start_time))s (max timeout counted from its end: $((deadline - start_time))s from now)."
@@ -913,7 +913,8 @@ reset_app_faults() {
     esac
 }
 
-# Step 3: local pg_sleep helpers (started by s4_db_connection_pool.sh on this machine).
+# Step 3: local pg_sleep helpers. s4_db_connection_pool.sh no longer starts any (its local
+# Cloud SQL helper was removed); this only clears ones left by an older checkout's S4.
 terminate_local_pg_sleep() {
     local rc=0
     pkill -f "pg_sleep" 2>/dev/null || rc=$?
@@ -944,10 +945,14 @@ warm_up_service() {
 # Step 5b: unauthenticated health checks through Apigee (reach the backends too). A
 # non-200 is logged as a warning, as before.
 check_apigee_health() {
-    local name status
+    local name status base
     for name in inventory orders; do
-        demo_request "GET https://${APIGEE_HOST}/ata/${name}/v1/health" -k --connect-timeout 5 --max-time 10 \
-            "https://${APIGEE_HOST}/ata/${name}/v1/health"
+        case "${name}" in
+            inventory) base="${BASEPATH_INVENTORY}" ;;
+            *) base="${BASEPATH_ORDERS}" ;;
+        esac
+        demo_request "GET https://${APIGEE_HOST}${base}/health" -k --connect-timeout 5 --max-time 10 \
+            "https://${APIGEE_HOST}${base}/health"
         status="${LAST_HTTP_STATUS}"
         log_info "    Apigee ${name} health: HTTP ${status} in ${LAST_HTTP_MS:-?} ms"
         if [ "${status}" != "200" ]; then
@@ -999,7 +1004,7 @@ print(json.dumps({"items": {k: int(v) for k, v in (e.split("=", 1) for e in sys.
         2??) ;;
         404)
             log_error "FATAL: POST ${base}/admin/restock -> HTTP 404: the serving inventory revision has no restock endpoint (code older than the restock change)." >&2
-            log_error "Re-pin ${NAME_PREFIX}-inventory-api to current code first: scripts/repin-inventory.sh (DEPLOY.md, 'Re-pinning the inventory baseline'), or, deliberately on old code, reset with --no-restock. Demo stock was NOT restocked." >&2
+            log_error "Re-pin ${SVC_INVENTORY} to current code first: scripts/repin-inventory.sh (DEPLOY.md, 'Re-pinning the inventory baseline'), or, deliberately on old code, reset with --no-restock. Demo stock was NOT restocked." >&2
             rm -f "${body_file}"
             return 1
             ;;
@@ -1043,6 +1048,13 @@ fi
 
 validate_alert_window_settings || exit 1
 validate_restock_baseline || exit 1
+# Apigee inputs before any step: step 4 runs deploy-apigee-proxies.sh (it needs APIGEE_HOST
+# and APIGEE_ENV; common.sh exports them from .${NAME_PREFIX}-apigee.env), step 5b probes
+# ${BASEPATH_INVENTORY}/health and ${BASEPATH_ORDERS}/health on APIGEE_HOST.
+if [ "${RESTOCK_ONLY}" != "true" ]; then
+    require_apigee_host || exit 1
+    require_apigee_mgmt || exit 1
+fi
 if [ "${RESTOCK_ONLY}" = "true" ] && [ "${NO_RESTOCK}" = "true" ]; then
     log_error "--restock-only and --no-restock contradict each other." >&2
     exit 2
@@ -1057,10 +1069,10 @@ if [ "${RESTOCK_ONLY}" = "true" ]; then
     # Admin calls only on the pinned code (as in step 5b).
     verify_pinned_inventory_revision || exit 1
     verify_inventory_serving_pinned || exit 1
-    INV_URL="$(require_service_url "${NAME_PREFIX}-inventory-api")"
+    INV_URL="$(require_service_url "${SVC_INVENTORY}")" || exit 1
     restock_inventory "${INV_URL}" || exit 1
     if [ "${ALERT_WINDOW_UNTIL}" -gt "$(date +%s)" ]; then
-        log_warn "A restock request was slow or failed (above): an ${NAME_PREFIX}-inventory latency/5xx alert can open within ${ALERT_LAG_SECS}s. Run ./scripts/reset-scenarios.sh before the next scenario." >&2
+        log_warn "A restock request was slow or failed (above): a ${NAME_PREFIX}-inventory latency/5xx alert can open within ${ALERT_LAG_SECS}s. Run ./scripts/reset-scenarios.sh before the next scenario." >&2
     fi
     log_success "=== Demo inventory restocked ==="
     exit 0
@@ -1074,14 +1086,14 @@ fi
 # Refuse to restore traffic to a pinned revision that does not run the pinned image.
 verify_pinned_inventory_revision || exit 1
 
-INV_URL="$(require_service_url "${NAME_PREFIX}-inventory-api")"
-ORD_URL="$(require_service_url "${NAME_PREFIX}-orders-api")"
+INV_URL="$(require_service_url "${SVC_INVENTORY}")" || exit 1
+ORD_URL="$(require_service_url "${SVC_ORDERS}")" || exit 1
 
 # 1. Reset Faults on Cloud Run Demo Apps
 log_info "--> 1. Resetting demo applications via /admin/fault/reset..."
 if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
-    reset_app_faults "${NAME_PREFIX}-inventory-api" "${INV_URL}" || exit 1
-    reset_app_faults "${NAME_PREFIX}-orders-api" "${ORD_URL}" || exit 1
+    reset_app_faults "${SVC_INVENTORY}" "${INV_URL}" || exit 1
+    reset_app_faults "${SVC_ORDERS}" "${ORD_URL}" || exit 1
     FAULT_RESET_EPOCH="$(date +%s)"
     log_success "    Demo application fault states cleared."
 else
@@ -1098,7 +1110,11 @@ terminate_local_pg_sleep
 
 # 4. Restore Healthy Apigee Proxy Revisions
 log_info "--> 4. Restoring healthy Apigee proxy revisions..."
-if [ -f "${SCRIPT_DIR}/deploy-apigee-proxies.sh" ] && [ "${MOCK_MODE}" = "false" ] && [ "${DRY_RUN}" = "false" ]; then
+if [ "${MOCK_MODE}" = "false" ] && [ "${DRY_RUN}" = "false" ]; then
+    if [ ! -x "${SCRIPT_DIR}/deploy-apigee-proxies.sh" ]; then
+        log_error "FATAL: ${SCRIPT_DIR}/deploy-apigee-proxies.sh is missing or not executable; the Apigee proxy baselines were NOT restored." >&2
+        exit 1
+    fi
     APIGEE_LOG="$(mktemp)"
     if ! "${SCRIPT_DIR}/deploy-apigee-proxies.sh" > "${APIGEE_LOG}" 2>&1; then
         log_error "FATAL: deploy-apigee-proxies.sh failed; the Apigee proxy baselines were NOT restored. Last output:" >&2
@@ -1109,14 +1125,14 @@ if [ -f "${SCRIPT_DIR}/deploy-apigee-proxies.sh" ] && [ "${MOCK_MODE}" = "false"
     rm -f "${APIGEE_LOG}"
     log_success "    Apigee proxy baselines restored."
 else
-    log_info "    Apigee restore simulation completed."
+    log_info "    [MOCK/DRY-RUN] Apigee restore simulation completed (deploy-apigee-proxies.sh not run)."
 fi
 
 # 5. Restore Cloud Run Configuration if altered by S5
 # Writes only what differs from the pinned baseline (see restore_inventory_pinned_baseline).
-log_info "--> 5. Restoring Cloud Run configuration for ata-inventory-api to pinned revision ${PINNED_INVENTORY_REVISION}..."
+log_info "--> 5. Restoring Cloud Run configuration for ${SVC_INVENTORY} to pinned revision ${PINNED_INVENTORY_REVISION}..."
 if ! restore_inventory_pinned_baseline; then
-    log_error "FATAL: could not restore ata-inventory-api to the pinned baseline." >&2
+    log_error "FATAL: could not restore ${SVC_INVENTORY} to the pinned baseline." >&2
     exit 1
 fi
 log_success "    Cloud Run configuration restored to pinned baseline."
@@ -1126,8 +1142,8 @@ log_success "    Cloud Run configuration restored to pinned baseline."
 # revision after an S5 revert); a slow one arms the alert window that step 6 waits out.
 log_info "--> 5b. Warming up the demo services and checking health and admin endpoints before the alert wait..."
 if [ "${DRY_RUN}" = "false" ] && [ "${MOCK_MODE}" = "false" ]; then
-    warm_up_service "${NAME_PREFIX}-inventory-api" "${INV_URL}" || exit 1
-    warm_up_service "${NAME_PREFIX}-orders-api" "${ORD_URL}" || exit 1
+    warm_up_service "${SVC_INVENTORY}" "${INV_URL}" || exit 1
+    warm_up_service "${SVC_ORDERS}" "${ORD_URL}" || exit 1
     check_apigee_health
     # The admin GET probes are only harmless on the pinned code; never send them elsewhere.
     verify_inventory_serving_pinned || exit 1
