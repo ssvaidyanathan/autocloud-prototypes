@@ -85,7 +85,9 @@ async def verify_agent_caller(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Bridge misconfigured: {', '.join(missing)} not set",
         )
-    expected_audiences = {str(request.base_url).rstrip("/")}
+    # BRIDGE_URL and the deterministic URL only: the Host-derived request.base_url is
+    # client-influenced and redundant now that both are required (sec L5).
+    expected_audiences: set[str] = set()
     if settings.bridge_url:
         expected_audiences.add(settings.bridge_url)
     if settings.project_number:
