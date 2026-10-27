@@ -1,5 +1,9 @@
 # Alert Triage Agent: Configuration & Environment Reference
 
+Resource names are shown with their prefix as `<prefix>` or `${NAME_PREFIX}`; with the default prefix they read `ata-*`. Where a table names `ata-bridge`, `ata-agent` or `ata-tools`, read `<prefix>-bridge`, `<prefix>-agent`, `<prefix>-tools`.
+
+**Defaults.** The "Default Value" column gives what a deployed service runs with. Where it says *Set by `deploy.sh`*, the deploy script always passes the value, and the code's own fallback (which may still name the original demo project) never applies. TODO(rt-lane): replace these entries with the code defaults once the config defaults no longer name a project or region.
+
 This document provides a comprehensive reference for all environment variables, Secret Manager secrets, IAM permissions, Cloud Tasks queue configurations, agent-owned grouping and timer parameters, and Apigee credentials used across the **Alert Triage Agent (ATA)** system.
 
 ---
@@ -12,18 +16,18 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
-| `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
+| `PROJECT_ID` | *Set by `deploy.sh`* (`${PROJECT_ID}`) | Google Cloud project ID. |
 | `PROJECT_NUMBER` | *None (required unless `IS_LOCAL=true`)* | Numeric GCP project number. The bridge accepts `https://<NAME_PREFIX>-bridge-<PROJECT_NUMBER>.<REGION>.run.app` as an ID-token audience on `/instructions/*`. Without it a non-local bridge fails at startup, and auth returns HTTP 500. `bridge/scripts/deploy.sh` sets it from `gcloud projects describe` unless it is already in the environment. |
 | `BRIDGE_URL` | *None (required unless `IS_LOCAL=true`)* | The bridge's own Cloud Run URL, i.e. the service's `status.url` (e.g. `https://<NAME_PREFIX>-bridge-<hash>-<region code>.a.run.app`), as an https URL without a path. `ata-agent` mints its ID tokens for the bridge URL it calls (the agent's `BRIDGE_URL`), so the bridge accepts this value as an ID-token audience on `/instructions/*`, next to the `PROJECT_NUMBER` URL and the request's base URL. Without it a non-local bridge fails at startup, and auth returns HTTP 500. `bridge/scripts/deploy.sh` sets it from the service's `status.url`; on a first deploy it starts with the deterministic URL and sets `status.url` right after the deploy. |
-| `NAME_PREFIX` | `ata` | Resource namespace prefix. |
-| `REGION` | `us-west1` | GCP region for Cloud Tasks and Cloud Run. |
+| `NAME_PREFIX` | `ata` | Resource namespace prefix. Set by `deploy.sh`. |
+| `REGION` | *Set by `deploy.sh`* (`${REGION}`) | GCP region for Cloud Tasks and Cloud Run. |
 | `ENVIRONMENT` | `prod` | Runtime environment name read by the service. The deploy scripts do not set it, so the default applies. Not the `env` resource label (see [§7.1](#71-label-scheme--value-requirements)). |
-| `AGENT_URL` | `http://localhost:8080` | URL of the `ata-agent` Cloud Run service. |
-| `TASKS_QUEUE` | `ata-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |
-| `TASKS_LOCATION` | `us-west1` | GCP region where the Cloud Tasks queue is hosted. |
-| `TASKS_INVOKER_SA` | `ata-bridge-sa@...` | Service account used by Cloud Tasks to generate OIDC tokens. |
+| `AGENT_URL` | `http://localhost:8080` | URL of the `<prefix>-agent` Cloud Run service. Set by `deploy.sh`. |
+| `TASKS_QUEUE` | `${NAME_PREFIX}-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |
+| `TASKS_LOCATION` | `${REGION}` | GCP region where the Cloud Tasks queue is hosted. |
+| `TASKS_INVOKER_SA` | `${NAME_PREFIX}-bridge-sa@${PROJECT_ID}.iam.gserviceaccount.com` | Service account in the OIDC token of the triage tasks. |
 | `WEBHOOK_TOKEN` | *Loaded from Secret Manager* | Webhook authentication password for Cloud Monitoring HTTP Basic Auth notification channel (`webhook_basicauth`). |
-| `SERVICENOW_INSTANCE_URL` | Configured via `servicenow_instance_url` or env | Target ServiceNow instance base URL (e.g. `https://<instance>.service-now.com`). Documented as CONFIG, not a secret. |
+| `SERVICENOW_INSTANCE_URL` | *Set by `deploy.sh`* (required) | Target ServiceNow instance base URL (e.g. `https://<instance>.service-now.com`). Configuration, not a secret. `bridge/scripts/deploy.sh` takes it from the environment, else from `servicenow_instance_url` in a local `infra/terraform/foundation/terraform.tfvars` if one exists, else from the running service. |
 | `SERVICENOW_USERNAME` | *Loaded from Secret Manager* | API integration user for ServiceNow Table API. |
 | `SERVICENOW_PASSWORD` | *Loaded from Secret Manager* | Password for ServiceNow integration user. |
 | `SERVICENOW_CALLER` | `ATA Integration` | Caller ID / name populated on incident records. |
@@ -40,17 +44,18 @@ The agent owns all incident grouping, atomic Open Knowledge File (OKF) storage w
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
-| `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
-| `NAME_PREFIX` | `ata` | Resource namespace prefix. |
-| `REGION` | `us-west1` | GCP deployment region. |
-| `INCIDENTS_BUCKET` | `cloud-assist-fde-2-ata-incidents` | Primary GCS incident storage bucket. |
+| `PROJECT_ID` | *Set by `deploy.sh`* (`${PROJECT_ID}`) | Google Cloud project ID. |
+| `NAME_PREFIX` | `ata` | Resource namespace prefix. Set by `deploy.sh`. |
+| `REGION` | *Set by `deploy.sh`* (`${REGION}`) | GCP deployment region. |
+| `INCIDENTS_BUCKET` | `${PROJECT_ID}-${NAME_PREFIX}-incidents` | Primary GCS incident storage bucket. Set by `deploy.sh`. |
 | `INCIDENT_STORE_PATH` | `/knowledge/incident-manager` | Local or mounted filesystem path for incident files. |
 | `FALLBACK_STORE_PATH` | `/tmp/knowledge/incident-manager` | Fallback path when primary mount is read-only or absent. |
 | `BRIDGE_URL` | `http://localhost:8080` | URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`), and the audience of the agent's ID tokens. `agent/scripts/deploy.sh` sets it to the bridge's `status.url`, or to the bridge's deterministic URL `https://<NAME_PREFIX>-bridge-<project number>.<REGION>.run.app` when the bridge is not deployed yet. |
-| `MODEL_NAME` | `gemini-3.8-flash` | Gemini model used for investigation synthesis and gray-zone correlation. |
-| `TIMER_QUEUE_NAME` | `ata-timer-queue` | Dedicated Cloud Tasks queue for delayed timer wakes. `agent/scripts/deploy.sh` sets `${NAME_PREFIX}-timer-queue` (the foundation Terraform queue). |
-| `LOCATION` | `us-west1` | GCP region where the timer queue is hosted. `agent/scripts/deploy.sh` sets `${REGION}`. |
-| `SERVICE_ACCOUNT_EMAIL`| `ata-agent-sa@cloud-assist-fde-2.iam.gserviceaccount.com` | Service account in the OIDC token of the agent's delayed timer tasks. `agent/scripts/deploy.sh` sets `${NAME_PREFIX}-agent-sa@${PROJECT_ID}.iam.gserviceaccount.com`. |
+| `MODEL_NAME` | `gemini-3.8-flash` | Gemini model used for gray-zone correlation scoring (Vertex AI; needs `roles/aiplatform.user` on `<prefix>-agent-sa`, granted by the foundation root). |
+| `GEMINI_LOCATION` | `global` | Vertex AI location of the Gemini calls. TODO(rt-lane): confirm the name, the default and the failure behaviour when the rt lane lands. |
+| `TIMER_QUEUE_NAME` | *Set by `deploy.sh`* | Dedicated Cloud Tasks queue for delayed timer wakes. `agent/scripts/deploy.sh` sets `${NAME_PREFIX}-timer-queue` (the foundation Terraform queue). |
+| `LOCATION` | *Set by `deploy.sh`* | GCP region where the timer queue is hosted. `agent/scripts/deploy.sh` sets `${REGION}`. |
+| `SERVICE_ACCOUNT_EMAIL`| *Set by `deploy.sh`* | Service account in the OIDC token of the agent's delayed timer tasks. `agent/scripts/deploy.sh` sets `${NAME_PREFIX}-agent-sa@${PROJECT_ID}.iam.gserviceaccount.com`. |
 | `IS_LOCAL` | `false` | Enables local offline mock mode. |
 | `ORIGIN_ONSET_TOLERANCE_SECONDS` | `300` | Origin selection: an upstream service explains a downstream service only when its onset is at most this many seconds after the downstream onset. A downstream service that degraded earlier than that is not attributed to the upstream service, and a recent deploy on it stays implicated. |
 | `AUTO_RESOLVE_ON_RECOVERY` | `false` | Sets what happens when every alert in a ticketed group has closed and the 180s cool-down passes with no recurrence. `false`: the ticket is not resolved. The agent posts one work note saying the alerts closed (with the measured traffic around the close) and that a human must verify the remediation, the ServiceNow state stays In Progress, and the group moves to the terminal `recovered` state. `true`: the agent calls `POST /instructions/ticket/resolve` and the group becomes `resolved`. `agent/scripts/deploy.sh` passes it only when it is exported (`true` or `false`, anything else stops the deploy), so a redeploy without it keeps the value on the service. See §5.1. |
@@ -73,8 +78,8 @@ The FastMCP server exposes read-only tools to the ADK agent for topology, Apigee
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
 | `PORT` | `8080` | HTTP server listening port. |
-| `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
-| `APIGEE_ORG` | `cloud-assist-fde-2` | Apigee organization identifier. |
+| `PROJECT_ID` | *Set by `deploy.sh`* (`${PROJECT_ID}`) | Google Cloud project ID. |
+| `APIGEE_ORG` | *Set by `deploy.sh`* (`${APIGEE_ORG}`, default `${PROJECT_ID}`) | Apigee organization identifier. |
 | `REGION` | `us-west1` | Target GCP region. |
 | `ENFORCE_AUTH` | `false` | When `true`, enforces OIDC token verification on tool endpoints. |
 | `VERIFY_OIDC` | `false` | Validates Google OIDC ID token signature and audience. |
@@ -90,20 +95,31 @@ Configuration for demo workloads (`ata-inventory-api` and `ata-orders-api`).
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
 | `PORT` | `8080` | HTTP listening port. |
-| `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
-| `REGION` | `us-west1` | GCP deployment region. |
-| `DB_USER` | `ata-inventory-sa@...` | IAM database user for Cloud SQL IAM authentication. |
-| `DB_NAME` | `inventory` | PostgreSQL database name. |
-| `INSTANCE_CONNECTION_NAME` | `cloud-assist-fde-2:us-west1:ata-inventory-db` | Cloud SQL instance connection name. |
-| `DB_IAM_AUTH` | `true` | Enables IAM database authentication via pg8000 connector. |
-| `MOCK_DB` | `false` | Fallback to in-memory catalog when database is unreachable. |
+| `PROJECT_ID` | *Set by Terraform* | Google Cloud project ID. |
+| `REGION` | *Set by Terraform* | GCP deployment region. |
+| `ATA_INVENTORY_DB_USER` | *none (required unless mock)* | IAM database user for Cloud SQL IAM authentication (`<prefix>-inventory-sa@<project>.iam`). |
+| `ATA_INVENTORY_DB_NAME` | `inventory` | PostgreSQL database name. |
+| `ATA_INVENTORY_INSTANCE_CONNECTION_NAME` | *none (required unless mock)* | Cloud SQL instance connection name (`<project>:<region>:<prefix>-inventory-db`). |
+| `ATA_INVENTORY_DB_IAM_AUTH` | `true` | Enables IAM database authentication via pg8000 connector. |
+| `ATA_INVENTORY_MOCK_DB` | `false` | Serve the in-memory catalog instead of Cloud SQL (`true`/`false`; other values fail at start). |
+
+The inventory API reads only `ATA_INVENTORY_*` names; the legacy `DB_USER` / `MOCK_DB` aliases are not read.
+
+Demo script settings (scripts/scenarios/common.sh):
+
+| Variable | Default Value | Description |
+| :--- | :--- | :--- |
+| `ATA_DEMO_MAX_INSTANCES` | `1` | Max Cloud Run instances of the demo services (service and revision level). Keep equal to Terraform `demo_max_instance_count`. |
+| `ATA_INVENTORY_RESTOCK_BASELINE` | `item-101=1000,...,item-105=1000` | Stock that `reset-scenarios.sh` sets via `POST /admin/restock` before each scenario (`<id>=<stock>`, stock >= 1). |
+| `ATA_INVENTORY_PIN_FILE` | `scripts/scenarios/inventory-pin.env` | The inventory pin (revision, digest, previous pin). Change it with `scripts/repin-inventory.sh`. |
+| `ATA_ARTIFACT_REGISTRY_HOST` | `<REGION>-docker.pkg.dev` | Artifact Registry host of the `<prefix>-docker` repository. |
 | `INVENTORY_SERVICE_URL` | *Cloud Run URL* | Internal Cloud Run URL of inventory service called by orders API. |
 
 ---
 
 ## 2. Secret Manager Secrets Reference
 
-Sensitive credentials are stored in Google Secret Manager under the prefix `ata-`:
+Sensitive credentials are stored in Google Secret Manager under the stack's prefix (`ata-` by default). All three are created by the foundation Terraform root; the ServiceNow ones with a `placeholder` version that `scripts/set-secrets.sh` replaces before the bridge is deployed ([DEPLOY.md Step 4](DEPLOY.md#step-4-servicenow-secrets)). Each is readable only by the stack's own bridge SA (secret-level `roles/secretmanager.secretAccessor`):
 
 | Secret Name | Purpose | Authorized Accessors | Management Script |
 | :--- | :--- | :--- | :--- |
@@ -112,7 +128,7 @@ Sensitive credentials are stored in Google Secret Manager under the prefix `ata-
 | `ata-servicenow-password` | Integration account password for ServiceNow. | `ata-bridge-sa` | `scripts/set-secrets.sh` |
 
 > [!NOTE]
-> **ServiceNow Instance URL is CONFIG, not a secret.** It is managed as the Terraform variable `servicenow_instance_url` in `terraform.tfvars` and passed as the environment variable `SERVICENOW_INSTANCE_URL` to `ata-bridge`. It is not stored in Secret Manager.
+> **ServiceNow Instance URL is CONFIG, not a secret.** It is passed to `<prefix>-bridge` as the environment variable `SERVICENOW_INSTANCE_URL` by `bridge/scripts/deploy.sh` (§1.1). It is not stored in Secret Manager.
 
 *Security Guardrail:* Secrets are resolved dynamically at runtime by `ata-bridge`. When running in local development mode (`IS_LOCAL=true`), mock values are used to prevent external credential leakage.
 
@@ -120,46 +136,39 @@ Sensitive credentials are stored in Google Secret Manager under the prefix `ata-
 
 ## 3. IAM Roles & Least Privilege Matrix
 
-The system assigns least-privilege IAM roles to 6 dedicated service accounts:
+Each stack has **six** service accounts, all created by the foundation Terraform root. There is no tools SA: `<prefix>-tools` runs as `<prefix>-agent-sa`. Every grant is either scoped to the stack's own resources (a queue, a secret, a bucket, a repository, a Cloud Run service), or is a read-only, inference-only or log-writing project role. Two stacks in one project therefore cannot enqueue into, read, write or act as each other's resources.
 
-```
-+--------------------+---------------------------------------+-----------------------------------------------+
-| Service Account    | Assigned IAM Roles                    | Security Boundary                             |
-+--------------------+---------------------------------------+-----------------------------------------------+
-| ata-orders-sa      | roles/run.invoker (on inventory API)  | Cannot access Cloud SQL directly.             |
-|                    | roles/logging.logWriter               |                                               |
-+--------------------+---------------------------------------+-----------------------------------------------+
-| ata-inventory-sa   | roles/cloudsql.client                 | IAM database user in Cloud SQL; no DDL or     |
-|                    | roles/cloudsql.instanceUser           | admin permissions.                            |
-|                    | roles/logging.logWriter               |                                               |
-+--------------------+---------------------------------------+-----------------------------------------------+
-| ata-apigee-sa      | roles/run.invoker (on orders API)     | Attached to Apigee environment prod; cannot   |
-|                    | roles/logging.logWriter               | access database or bridge.                    |
-+--------------------+---------------------------------------+-----------------------------------------------+
-| ata-bridge-sa      | roles/cloudtasks.enqueuer             | Sole component with write access to external  |
-|                    | roles/run.invoker (on agent service)  | ticketing systems.                            |
-|                    | roles/secretmanager.secretAccessor    |                                               |
-+--------------------+---------------------------------------+-----------------------------------------------+
-| ata-agent-sa       | roles/storage.objectUser (incidents)  | STRICTLY READ-ONLY ON PRODUCTION INFRA:       |
-|                    | roles/logging.viewer                  | Zero write privileges on GCP production       |
-|                    | roles/monitoring.viewer               | resources. Write access strictly confined to  |
-|                    | roles/run.viewer                      | the GCS incident store.                       |
-|                    | roles/cloudsql.viewer                 |                                               |
-|                    | roles/run.invoker (on ata-tools)      |                                               |
-+--------------------+---------------------------------------+-----------------------------------------------+
-| ata-tools-sa       | roles/monitoring.viewer               | STRICTLY READ-ONLY:                           |
-|                    | roles/logging.viewer                  | Read-only access to Apigee bundles, metrics,  |
-|                    | roles/apigee.readOnlyAdmin            | and topology graphs.                          |
-+--------------------+---------------------------------------+-----------------------------------------------+
-```
+| Service account | Roles | Where granted | Boundary |
+| :--- | :--- | :--- | :--- |
+| `<prefix>-bridge-sa` | `roles/cloudtasks.enqueuer` on `<prefix>-triage-queue` | foundation | The only component with ServiceNow credentials. |
+| | `roles/secretmanager.secretAccessor` on `<prefix>-webhook-token`, `<prefix>-servicenow-username`, `<prefix>-servicenow-password` | foundation | |
+| | `roles/storage.objectUser` on `gs://<project>-<prefix>-incidents` | foundation | |
+| | `roles/iam.serviceAccountUser` on itself (the OIDC identity of its triage tasks) | foundation | |
+| | `roles/run.invoker` on `<prefix>-agent` | triage-iam | |
+| `<prefix>-agent-sa` (also runs `<prefix>-tools`) | `roles/logging.viewer`, `roles/monitoring.viewer`, `roles/run.viewer`, `roles/cloudsql.viewer` (project) | foundation | Read-only on the monitored infrastructure. |
+| | `roles/apigee.readOnlyAdmin` (project): Apigee deployments for the change timeline | foundation | |
+| | `roles/aiplatform.user` (project): Gemini gray-zone scoring | foundation | |
+| | `roles/storage.objectUser` on `gs://<project>-<prefix>-incidents` | foundation | Its only data writes. |
+| | `roles/cloudtasks.enqueuer` on `<prefix>-timer-queue` | foundation | |
+| | `roles/iam.serviceAccountUser` on itself (the OIDC identity of its timer tasks) | foundation | |
+| | `roles/run.invoker` on `<prefix>-agent` (timer wakes), `<prefix>-bridge` (instructions) and `<prefix>-tools` (MCP) | triage-iam | |
+| `<prefix>-inventory-sa` | `roles/cloudsql.client`, `roles/cloudsql.instanceUser`, `roles/logging.logWriter` (project) | foundation | Cloud SQL IAM database user `<prefix>-inventory-sa@<project>.iam` with `SELECT, UPDATE` on `inventory_items` only (`demo/db/schema.sql`). |
+| `<prefix>-orders-sa` | `roles/logging.logWriter` (project) | foundation | Cannot reach Cloud SQL. |
+| | `roles/run.invoker` on `<prefix>-inventory-api` | applications | |
+| `<prefix>-apigee-sa` | `roles/logging.logWriter` (project): the `ML-CloudLogging` access log | foundation | Identity of the Apigee proxies. |
+| | `roles/run.invoker` on `<prefix>-orders-api` and `<prefix>-inventory-api` | applications | |
+| `<prefix>-build-sa` | `roles/storage.objectAdmin` on `gs://<project>-<prefix>-build`, `roles/artifactregistry.writer` on `<prefix>-docker`, `roles/logging.logWriter` (project) | foundation | Cloud Build identity. TODO(scripts-lane): the build commands do not pass it yet (they use the project's default Cloud Build SA). |
+
+The bridge's public invoker (`allUsers`, for the Cloud Monitoring webhook) is set by `bridge/scripts/deploy.sh` (`--allow-unauthenticated`), not by Terraform. Principals in the foundation variable `deployer_members` get `roles/iam.serviceAccountUser` on `<prefix>-apigee-sa` and `<prefix>-build-sa`, so that they can deploy without being project Owner.
 
 ### 3.1. Read-Only Ticket Verification Endpoint (`GET /instructions/ticket/view/{group_id or sys_id}`)
 
 To verify ServiceNow ticket lifecycle state without distributing or exposing ServiceNow credentials:
 - **Endpoint:** `GET /instructions/ticket/view/{group_id or sys_id}`
 - **Authentication:** Google-signed OIDC ID token (`Bearer <id_token>`) from an allowlisted caller identity:
-  - `ata-agent-sa@{project_id}.iam.gserviceaccount.com` and `ata-bridge-sa@{project_id}.iam.gserviceaccount.com`
-  - The comma-separated emails in the `VERIFIER_SA` environment variable on `ata-bridge` (§1.1). No operator account is built in.
+  - `<prefix>-agent-sa@<project>.iam.gserviceaccount.com` and `<prefix>-bridge-sa@<project>.iam.gserviceaccount.com`
+  - The comma-separated emails in the `VERIFIER_SA` environment variable on `<prefix>-bridge` (§1.1). No operator account is built in.
+- **Audience:** the token's audience must be the bridge URL (its `status.url` or `https://<prefix>-bridge-<PROJECT_NUMBER>.<REGION>.run.app`). A user token from `gcloud auth print-identity-token` carries gcloud's own audience and is rejected; mint one for a `VERIFIER_SA` service account with `--impersonate-service-account=<sa> --audiences=<bridge URL> --include-email` ([DEPLOY.md §4.6](DEPLOY.md#46-read-only-ticket-verification-endpoint)).
 - **Response Fields:** Ticket metadata only:
   - `number`: ServiceNow incident number (e.g. `INC0010482`)
   - `state`: Current lifecycle state (`1` New, `2` In Progress, `6` Resolved, `7` Closed)
@@ -238,7 +247,7 @@ The `max_backoff >= min_backoff` check runs only when both values are well forme
 - **Explicit triage retry window:** A failed `/triage` dispatch is retried until `triage_queue_max_retry_duration` has passed since its first attempt. With fast failures, the backoff runs 1s, 2s, 4s … 256s and then holds at 300s. The window is measured per task, so an alert is lost only if its first delivery attempt was more than one window before the agent recovered. Alerts that arrive later in a long outage are still delivered.
 - **Dropped alerts are silent:** When the window ends, Cloud Tasks deletes the task. Cloud Tasks has no dead-letter queue, and the foundation module does not enable queue logging (`stackdriver_logging_config`), so nothing records the drop.
 - **Explicit timer retry window:** A failed `/timer/wake` dispatch is retried until `timer_queue_max_retry_duration` has passed since its first attempt. With fast failures, the backoff runs 1s, 2s, 4s … 32s and then holds at 60s. Retrying a wake is safe: a wake that arrives before its deadline, or for a group that is already ticketed, resolved, or recovered, returns `ignored` without side effects. A late wake still tickets the group, and the bridge returns the existing ticket if one was already created for the group. When the window ends, a still-failing wake is deleted silently, as on the triage queue.
-- **Applying changes:** Queue settings change only when you apply the foundation module. Editing `main.tf` or the variables does not affect the live queues until then. To change only one queue, use a targeted apply as described in [DEPLOY.md, Applying Queue-Only Changes](DEPLOY.md#applying-queue-only-changes).
+- **Applying changes:** Queue settings change only when you apply the foundation module. Editing `main.tf` or the variables does not affect the live queues until then. To change only one queue, use a targeted apply as described in [DEPLOY.md, Applying Queue-Only Changes](DEPLOY.md#41-applying-queue-only-changes).
 - **Dedicated `ata-timer-queue`:** Prevents delayed timers from being head-of-line blocked behind high-volume alert webhook bursts.
 - **OIDC Dispatch Authentication:** Cloud Tasks generates Google-signed ID tokens for both raw alert dispatch (`/triage`) and timer wakeups (`/timer/wake`), validated via `verify_agent_caller`.
 
@@ -291,15 +300,18 @@ $$\text{Total Score} = \text{Topology (35)} + \text{Causal (30)} + \text{Tempora
 
 ## 6. Apigee Product & Developer App Credentials
 
-Client traffic reaching the demo microservices routes through Apigee X environment `prod`:
+Client traffic reaching the demo microservices routes through the Apigee X environment `APIGEE_ENV` of organization `APIGEE_ORG`. `scripts/deploy-apigee-proxies.sh` creates every name below from `NAME_PREFIX` ([DEPLOY.md Step 9](DEPLOY.md#step-9-apigee-proxies)), and `scripts/teardown-apigee.sh` removes them:
 
 | Property | Value | Description |
 | :--- | :--- | :--- |
-| **Ingress Hostname** | `8.233.247.52.nip.io` | External DNS envgroup hostname. |
-| **API Product** | `ata-product` | Bundles `ata-orders-v1` and `ata-inventory-v1`. |
-| **Developer Account** | `ata-dev@example.com` | Registered Apigee developer identity. |
-| **Developer App** | `ata-demo-app` | Registered application holding API credentials. |
-| **Credential Key File** | `.ata-api-key` | Stores consumer API key (gitignored). |
+| **Ingress Hostname** | `APIGEE_HOST` | Environment group hostname that serves `APIGEE_ENV` (for example `<IP>.nip.io`). |
+| **Proxies and base paths** | `<prefix>-orders-v1` (`/<prefix>/orders/v1`), `<prefix>-inventory-v1` (`/<prefix>/inventory/v1`) | Run as `<prefix>-apigee-sa`. |
+| **TargetServers** | `<prefix>-orders-target`, `<prefix>-inventory-target` | Point at the stack's own Cloud Run services. |
+| **API Product** | `<prefix>-product` | Bundles `<prefix>-orders-v1` and `<prefix>-inventory-v1`. |
+| **Developer Account** | `<prefix>-dev@example.com` | Registered Apigee developer identity. |
+| **Developer App** | `<prefix>-demo-app` | Registered application holding API credentials. |
+| **Credential Key File** | `.<prefix>-api-key` | Stores the consumer API key (mode 600, gitignored). |
+| **Apigee Env File** | `.<prefix>-apigee.env` | `APIGEE_HOST`, `APIGEE_ORG` and `APIGEE_ENV`, sourceable (gitignored). |
 | **Authentication Header** | `x-api-key: <KEY>` | Header enforced on protected proxy endpoints. |
 | **Query Parameter Auth** | `?apikey=<KEY>` | Query parameter fallback for API key validation. |
 
@@ -343,7 +355,7 @@ All 8 Cloud Monitoring alert policies defined in `infra/terraform/observability/
 1. **Labeled Resources:**
    - **Cloud Run Services:** `ata-orders-api`, `ata-inventory-api`, `ata-agent`, `ata-bridge`, `ata-tools` via Terraform `labels` or `gcloud run deploy --labels`.
    - **Cloud SQL Instances:** `ata-inventory-db` via Terraform `user_labels`.
-   - **Cloud Storage Buckets:** State bucket `gs://cloud-assist-fde-2-ata-tfstate/` and incidents bucket `gs://cloud-assist-fde-2-ata-incidents/`.
+   - **Cloud Storage Buckets:** State bucket `gs://<project>-<prefix>-tfstate/`, incidents bucket `gs://<project>-<prefix>-incidents/` and build bucket `gs://<project>-<prefix>-build/`.
    - **Artifact Registry & Secrets:** `docker_repo` and Secret Manager secrets (`ata-webhook-token`, placeholder secrets).
 2. **Unsupported Resource Types:**
    - **Apigee X Proxies:** Apigee API proxies do not support GCP resource labels. Instead, metadata is recorded in the `<Description>` tag of the proxy XML definition (`apiproxy/<proxy-name>.xml`), formatted as `[app=alert-triage-agent component=... tier=edge role=demo-workload env=demo managed-by=script owner=sre-prototypes]`.
