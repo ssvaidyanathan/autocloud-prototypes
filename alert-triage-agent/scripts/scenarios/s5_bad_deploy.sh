@@ -22,29 +22,15 @@ HOLD_DURATION="${ATA_HOLD_DURATION:-7m}"
 # Revert Helper Function: Restores the exact pinned revision and baseline config
 revert_s5() {
     log_info "--> Reverting S5: Restoring exact pinned revision ${PINNED_INVENTORY_REVISION}..."
-    if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
-        log_info "[MOCK/DRY-RUN] Reverted S5 to pinned revision."
-        return 0
-    fi
-    verify_pinned_inventory_revision || return 1
-    # 1. Direct traffic back to the exact pinned revision
-    gcloud run services update-traffic "${NAME_PREFIX}-inventory-api" \
-        --project="${PROJECT_ID}" \
-        --region="${REGION}" \
-        --to-revisions="${PINNED_INVENTORY_REVISION}=100" \
-        --quiet || log_warn "Traffic migration to pinned revision skipped or restricted."
-    # 2. Restore service baseline credentials on top of pinned image
-    gcloud run services update "${NAME_PREFIX}-inventory-api" \
-        --project="${PROJECT_ID}" \
-        --region="${REGION}" \
-        --image="${PINNED_INVENTORY_IMAGE}" \
-        --update-env-vars="ATA_INVENTORY_DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false,MOCK_DB=false" \
-        --quiet || log_warn "Cloud Run config restore skipped or restricted."
+    restore_inventory_pinned_baseline || {
+        log_error "FATAL: S5 revert failed; ${NAME_PREFIX}-inventory-api is NOT on the pinned baseline." >&2
+        return 1
+    }
     log_success "    Restored exact pinned revision ${PINNED_INVENTORY_REVISION}."
 }
 
 if [ "${1:-}" = "--revert" ]; then
-    revert_s5
+    revert_s5 || exit 1
     exit 0
 fi
 
@@ -67,7 +53,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --revert)
-            revert_s5
+            revert_s5 || exit 1
             exit 0
             ;;
         --help|-h)
@@ -91,17 +77,54 @@ SCENARIO_START_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 log_info "=== Starting Scenario S5: Bad Deploy / Config Failure ==="
 log_info "Start Time: ${SCENARIO_START_TIME} | Hold Duration: ${HOLD_SECS}s (${HOLD_DURATION})"
 
-# 1. Update Cloud Run Service Environment Variables strictly on top of pinned image
+# 1. Deploy the faulty revision (invalid DB user on the pinned image) and route all
+# traffic to it. Inventory traffic is pinned to PINNED_INVENTORY_REVISION by name,
+# and Cloud Run keeps a named-revision split for new revisions, so the revision
+# created by `services update` gets 0% until traffic is moved to it explicitly.
 log_info "--> Updating ata-inventory-api with invalid DB credentials on pinned image..."
 if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
     log_info "[MOCK/DRY-RUN] Simulating Cloud Run deployment with DB_USER=invalid_user on ${PINNED_INVENTORY_IMAGE}..."
 else
-    gcloud run services update "${NAME_PREFIX}-inventory-api" \
+    inventory_latest_created() {
+        gcloud run services describe "${NAME_PREFIX}-inventory-api" \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --format="value(status.latestCreatedRevisionName)"
+    }
+    PREV_REVISION="$(inventory_latest_created)" || {
+        log_error "FATAL: could not describe ${NAME_PREFIX}-inventory-api." >&2
+        exit 1
+    }
+    if ! gcloud run services update "${NAME_PREFIX}-inventory-api" \
         --project="${PROJECT_ID}" \
         --region="${REGION}" \
         --image="${PINNED_INVENTORY_IMAGE}" \
         --update-env-vars="ATA_INVENTORY_DB_USER=invalid-iam-user@${PROJECT_ID}.iam,DB_USER=invalid-iam-user@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false,MOCK_DB=false" \
-        --quiet || log_warn "Cloud Run update skipped or permission restricted in test environment."
+        --quiet; then
+        log_error "FATAL: Cloud Run update of ${NAME_PREFIX}-inventory-api failed; S5 not injected." >&2
+        log_error "The service template may already carry the invalid DB user; run '$0 --revert' to restore the baseline." >&2
+        exit 1
+    fi
+    BAD_REVISION="$(inventory_latest_created)" || BAD_REVISION=""
+    if [ -z "${BAD_REVISION}" ] || [ "${BAD_REVISION}" = "${PREV_REVISION}" ] || [ "${BAD_REVISION}" = "${PINNED_INVENTORY_REVISION}" ]; then
+        log_error "FATAL: no new ${NAME_PREFIX}-inventory-api revision after the update (latest created: '${BAD_REVISION:-<unknown>}', before: '${PREV_REVISION}')." >&2
+        exit 1
+    fi
+    log_info "    Faulty revision created: ${BAD_REVISION}. Routing 100% traffic to it..."
+    if ! gcloud run services update-traffic "${NAME_PREFIX}-inventory-api" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --to-revisions="${BAD_REVISION}=100" \
+        --quiet; then
+        log_error "FATAL: could not route traffic to ${BAD_REVISION}; S5 not injected." >&2
+        log_error "Run '$0 --revert' to restore the pinned traffic and the service template." >&2
+        exit 1
+    fi
+    if ! verify_inventory_serving_revision "${BAD_REVISION}"; then
+        log_error "FATAL: ${BAD_REVISION} is not serving 100% of traffic; S5 not injected. Run '$0 --revert'." >&2
+        exit 1
+    fi
+    log_success "    ${BAD_REVISION} is serving 100% of ${NAME_PREFIX}-inventory-api traffic."
 fi
 
 # 2. Check Service Health

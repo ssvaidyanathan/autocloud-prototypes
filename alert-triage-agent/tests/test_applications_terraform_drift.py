@@ -18,7 +18,8 @@ APPS_MAIN_TF = REPO_ROOT / "infra/terraform/applications/main.tf"
 # Scripts that update the Terraform-managed inventory service in place.
 INVENTORY_UPDATE_SCRIPTS = [
     "scripts/scenarios/s5_bad_deploy.sh",
-    "scripts/reset-scenarios.sh",
+    # restore_inventory_pinned_baseline, used by reset-scenarios.sh and the S5 revert.
+    "scripts/scenarios/common.sh",
 ]
 
 
@@ -38,6 +39,10 @@ def _script_env_names(script: str) -> set:
     text = (REPO_ROOT / script).read_text()
     names = set()
     for assignments in re.findall(r'--update-env-vars="([^"]+)"', text):
+        var = re.fullmatch(r"\$\{(\w+)\}", assignments)
+        if var:
+            # --update-env-vars="${VAR}": read VAR="..." from the same script.
+            assignments = re.search(rf'^(?:export )?{var.group(1)}="([^"]+)"', text, re.M).group(1)
         names.update(item.split("=", 1)[0] for item in assignments.split(","))
     return names
 

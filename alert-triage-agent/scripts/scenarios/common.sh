@@ -60,20 +60,117 @@ verify_pinned_inventory_revision() {
     fi
 }
 
-# Fail loudly unless ata-inventory-api serves 100% from PINNED_INVENTORY_REVISION.
-verify_inventory_serving_pinned() {
+# Print ata-inventory-api's live traffic as "revision,percent" (empty if describe fails).
+inventory_traffic() {
+    gcloud run services describe "${NAME_PREFIX}-inventory-api" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --format="csv[no-heading](status.traffic.revisionName,status.traffic.percent)" 2>/dev/null || true
+}
+
+# Fail loudly unless ata-inventory-api serves 100% from the given revision.
+verify_inventory_serving_revision() {
+    local revision="$1"
     if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
         return 0
     fi
     local traffic
-    traffic="$(gcloud run services describe "${NAME_PREFIX}-inventory-api" \
-        --project="${PROJECT_ID}" \
-        --region="${REGION}" \
-        --format="csv[no-heading](status.traffic.revisionName,status.traffic.percent)" 2>/dev/null || true)"
-    if [ "${traffic}" != "${PINNED_INVENTORY_REVISION},100" ]; then
-        log_error "${NAME_PREFIX}-inventory-api traffic is '${traffic:-<unknown>}', expected ${PINNED_INVENTORY_REVISION}=100." >&2
+    traffic="$(inventory_traffic)"
+    if [ "${traffic}" != "${revision},100" ]; then
+        log_error "${NAME_PREFIX}-inventory-api traffic is '${traffic:-<unknown>}', expected ${revision}=100." >&2
         return 1
     fi
+}
+
+# Fail loudly unless ata-inventory-api serves 100% from PINNED_INVENTORY_REVISION.
+verify_inventory_serving_pinned() {
+    if ! verify_inventory_serving_revision "${PINNED_INVENTORY_REVISION}"; then
+        log_error "If S5 was run, restore the baseline with: scripts/scenarios/s5_bad_deploy.sh --revert (or scripts/reset-scenarios.sh)." >&2
+        return 1
+    fi
+}
+
+# Baseline env that S5 overwrites on the inventory service template.
+INVENTORY_BASELINE_ENV_VARS="ATA_INVENTORY_DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false,MOCK_DB=false"
+
+# Exit 0 if the inventory service template already has PINNED_INVENTORY_IMAGE and
+# INVENTORY_BASELINE_ENV_VARS, 1 if it differs, 2 (with an error) if it cannot be read.
+inventory_template_matches_baseline() {
+    local svc_json
+    if ! svc_json="$(gcloud run services describe "${NAME_PREFIX}-inventory-api" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --format=json)"; then
+        log_error "Could not read the ${NAME_PREFIX}-inventory-api service template." >&2
+        return 2
+    fi
+    python3 -c '
+import json, sys
+image, wanted = sys.argv[1], dict(kv.split("=", 1) for kv in sys.argv[2].split(","))
+try:
+    container = json.loads(sys.stdin.read())["spec"]["template"]["spec"]["containers"][0]
+except (ValueError, KeyError, IndexError, TypeError) as exc:
+    print(f"unreadable service template: {exc!r}", file=sys.stderr)
+    sys.exit(2)
+env = {e.get("name"): e.get("value") for e in container.get("env", [])}
+live_image = container.get("image")
+diffs = [f"image={live_image}"] if live_image != image else []
+diffs += [f"{k}={env.get(k)}" for k, v in wanted.items() if env.get(k) != v]
+if diffs:
+    print("template differs from baseline: " + ", ".join(diffs), file=sys.stderr)
+    sys.exit(1)
+' "${PINNED_INVENTORY_IMAGE}" "${INVENTORY_BASELINE_ENV_VARS}" <<<"${svc_json}"
+}
+
+# Restore ata-inventory-api to the pinned baseline: 100% traffic on
+# PINNED_INVENTORY_REVISION and a baseline service template. Each write is skipped
+# when the live state already matches, because every `services update` creates a
+# new revision (which gets 0% while traffic is pinned by name). Fails loudly.
+restore_inventory_pinned_baseline() {
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        log_info "[MOCK/DRY-RUN] Restored ${NAME_PREFIX}-inventory-api to pinned revision ${PINNED_INVENTORY_REVISION}."
+        return 0
+    fi
+    verify_pinned_inventory_revision || return 1
+
+    # 1. Traffic back to the pinned revision.
+    if [ "$(inventory_traffic)" = "${PINNED_INVENTORY_REVISION},100" ]; then
+        log_info "    Traffic already 100% on ${PINNED_INVENTORY_REVISION}; not changing it."
+    elif ! gcloud run services update-traffic "${NAME_PREFIX}-inventory-api" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --to-revisions="${PINNED_INVENTORY_REVISION}=100" \
+        --quiet; then
+        log_error "Failed to route ${NAME_PREFIX}-inventory-api traffic to ${PINNED_INVENTORY_REVISION}." >&2
+        return 1
+    fi
+
+    # 2. Service template back to the baseline image and DB credentials. This does
+    # not serve traffic (traffic stays pinned), but it must not keep S5's invalid
+    # DB user: `update-traffic --to-latest` or a later deploy would put it live.
+    local rc=0
+    inventory_template_matches_baseline || rc=$?
+    case "${rc}" in
+        0)
+            log_info "    Service template already on the baseline image and DB env; skipping services update."
+            ;;
+        1)
+            if ! gcloud run services update "${NAME_PREFIX}-inventory-api" \
+                --project="${PROJECT_ID}" \
+                --region="${REGION}" \
+                --image="${PINNED_INVENTORY_IMAGE}" \
+                --update-env-vars="${INVENTORY_BASELINE_ENV_VARS}" \
+                --quiet; then
+                log_error "Failed to restore the ${NAME_PREFIX}-inventory-api service template." >&2
+                return 1
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    verify_inventory_serving_pinned
 }
 
 # Duration Parser (supports Xm, Xs, or raw seconds)

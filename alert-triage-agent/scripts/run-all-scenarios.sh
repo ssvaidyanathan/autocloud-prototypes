@@ -151,7 +151,12 @@ for sc in "${SCENARIOS_TO_RUN[@]}"; do
 
     # Reset environment between scenarios
     log_info "Resetting environment faults before next scenario..."
-    "${SCRIPT_DIR}/reset-scenarios.sh" >> "${LOG_FILE}" 2>&1 || true
+    if ! "${SCRIPT_DIR}/reset-scenarios.sh" >> "${LOG_FILE}" 2>&1; then
+        # Do not run further scenarios (or leave S5's bad revision serving) silently.
+        log_error "FATAL: reset after ${sc^^} failed; environment is NOT on the baseline. See ${LOG_FILE}. Halting."
+        SCENARIO_STATUS["${sc}"]="RESET_FAILED"
+        break
+    fi
 done
 
 # Summary Table

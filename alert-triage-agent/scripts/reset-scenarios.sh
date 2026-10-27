@@ -465,21 +465,13 @@ else
 fi
 
 # 5. Restore Cloud Run Configuration if altered by S5
+# Writes only what differs from the pinned baseline (see restore_inventory_pinned_baseline).
 log_info "--> 5. Restoring Cloud Run configuration for ata-inventory-api to pinned revision ${PINNED_INVENTORY_REVISION}..."
-if [ "${MOCK_MODE}" = "false" ] && [ "${DRY_RUN}" = "false" ]; then
-    gcloud run services update-traffic "${NAME_PREFIX}-inventory-api" \
-        --project="${PROJECT_ID}" \
-        --region="${REGION}" \
-        --to-revisions="${PINNED_INVENTORY_REVISION}=100" \
-        --quiet > /dev/null 2>&1 || true
-    gcloud run services update "${NAME_PREFIX}-inventory-api" \
-        --project="${PROJECT_ID}" \
-        --region="${REGION}" \
-        --image="${PINNED_INVENTORY_IMAGE}" \
-        --update-env-vars="ATA_INVENTORY_DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,DB_USER=${NAME_PREFIX}-inventory-sa@${PROJECT_ID}.iam,ATA_INVENTORY_MOCK_DB=false,MOCK_DB=false" \
-        --quiet > /dev/null 2>&1 || true
-    log_success "    Cloud Run configuration restored to pinned baseline."
+if ! restore_inventory_pinned_baseline; then
+    log_error "FATAL: could not restore ata-inventory-api to the pinned baseline." >&2
+    exit 1
 fi
+log_success "    Cloud Run configuration restored to pinned baseline."
 
 # 6. Wait for Open ATA Alerts to Close & Quiet Period (Apigee Metric Ingestion Lag)
 wait_for_open_alerts
