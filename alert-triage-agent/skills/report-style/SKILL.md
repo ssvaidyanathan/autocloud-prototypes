@@ -5,6 +5,8 @@ description: Standards for generating rich operational 4-bullet executive summar
 
 # Report Style & Documentation Skill
 
+> Resource names below use the default prefix `ata`. A stack deployed with another `NAME_PREFIX` uses `<prefix>-` instead of `ata-` (and `/<prefix>/...` base paths).
+
 ## Overview
 This skill defines formatting, tone, and structural standards for all alert triage outputs, including ServiceNow incident work notes, ticket descriptions, and standalone HTML diagnostic report attachments.
 
@@ -50,9 +52,9 @@ Issue Type: change_induced
 Change-Induced: Yes (revision ata-inventory-api-00004-abc deployed 18m ago)
 First Seen / Last Alert (UTC): 2026-10-23T00:13:00Z / 2026-10-23T00:19:00Z
 Alert List:
-  - ata-inventory-5xx | ata-inventory-api | alert-001 | open | 2026-10-23T00:13:00Z | https://console.cloud.google.com/monitoring/alerting/incidents/alert-001?project=cloud-assist-fde-2
-GCP Project: cloud-assist-fde-2
-Incident File: gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/incident-ata-inventory-5xx-ata-inventory-api-20261023t001300z.md
+  - ata-inventory-5xx | ata-inventory-api | alert-001 | open | 2026-10-23T00:13:00Z | https://console.cloud.google.com/monitoring/alerting/incidents/alert-001?project=<project-id>
+GCP Project: <project-id>
+Incident File: gs://<project-id>-ata-incidents/knowledge/incident-manager/incident-ata-inventory-5xx-ata-inventory-api-20261023t001300z.md
 
 ----------------------------------------------------------------------
 Executive Summary:

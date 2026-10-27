@@ -38,10 +38,10 @@ This skill provides structured procedures for diagnosing API proxy errors and la
 
 ## 3. MessageLogging Access Log Inspection
 
-Apigee proxies in the `ata` architecture write structured JSON access logs to Cloud Logging at `projects/cloud-assist-fde-2/logs/ata-apigee-access`.
+Apigee proxies write structured JSON access logs to Cloud Logging at `projects/<apigee-org>/logs/<prefix>-apigee-access` (the Apigee organization's project; `<prefix>` is the stack's `NAME_PREFIX`, default `ata`).
 
 ### Key Log Fields
-- `proxy_name`: API proxy name (`ata-orders-v1`, `ata-inventory-v1`).
+- `proxy_name`: API proxy name (`<prefix>-orders-v1`, `<prefix>-inventory-v1`).
 - `response_status_code`: Status code returned to the external client.
 - `target_status_code`: Status code returned by the downstream backend service (empty if fault occurred in proxy flow).
 - `client_received_start_timestamp`: Request arrival timestamp.
@@ -50,7 +50,7 @@ Apigee proxies in the `ata` architecture write structured JSON access logs to Cl
 
 ### Query Pattern
 ```
-logName = "projects/cloud-assist-fde-2/logs/ata-apigee-access"
+logName = "projects/<apigee-org>/logs/<prefix>-apigee-access"
 jsonPayload.proxy_name = "<proxy_name>"
 jsonPayload.response_status_code >= 400
 ```

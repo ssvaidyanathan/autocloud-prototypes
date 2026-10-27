@@ -5,6 +5,8 @@ description: Multi-factor correlation scoring, topology traversal, pre-analysis 
 
 # Alert Triage Skill
 
+> Resource names below use the default prefix `ata`. A stack deployed with another `NAME_PREFIX` uses `<prefix>-` instead of `ata-` (and `/<prefix>/...` base paths).
+
 ## Overview
 This skill defines operational procedures for ingesting, deduplicating, correlating, and grouping Cloud Monitoring alert events. It specifies exact shell pipeline construction for duplicate detection across incident store records, mathematical scoring for multi-factor alert correlation, and dependency graph traversal for blast radius mapping.
 

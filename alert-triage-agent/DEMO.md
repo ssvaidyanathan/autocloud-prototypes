@@ -2,6 +2,8 @@
 
 This guide is for SRE operators, site leads, and evaluators demonstrating the capabilities of the **Alert Triage Agent (ATA)** across 5 realistic failure scenarios (**S1 through S5**).
 
+Resource names in this guide use the default prefix `ata` (`ata-inventory-api`, `ata-orders-v1`, `/ata/inventory/v1`, ...). For a stack deployed with another `NAME_PREFIX`, read `<prefix>-` for `ata-`. Commands use `${PROJECT_ID}`, `${REGION}`, `${NAME_PREFIX}`, `${APIGEE_ORG}` and `${APIGEE_HOST}`: load the stack's inputs first ([DEPLOY.md §2.2](DEPLOY.md#22-inputs)). To deploy a stack, see [DEPLOY.md](DEPLOY.md).
+
 ---
 
 ## 1. Run It Yourself (Operator Runbook)
@@ -14,7 +16,7 @@ Follow this section to execute scenarios directly from your laptop.
    ```bash
    gcloud auth login
    gcloud auth application-default login
-   gcloud config set project cloud-assist-fde-2
+   gcloud config set project "${PROJECT_ID}"
    ```
    `gcloud auth application-default login` is needed because `reset-scenarios.sh` queries the Cloud Monitoring Alerts API with an Application Default Credentials token: federated gcloud user tokens are rejected there with `401 ACCESS_TOKEN_TYPE_UNSUPPORTED`.
    > [!IMPORTANT]
@@ -26,22 +28,23 @@ Follow this section to execute scenarios directly from your laptop.
    cd alert-triage-agent
    ```
 
-3. **Verify Required IAM Roles on `cloud-assist-fde-2`:**
+3. **Verify Required IAM Roles on `${PROJECT_ID}`:**
    Ensure your GCP user account has the following roles:
    - `roles/run.invoker` (Cloud Run Invoker) on `ata-inventory-api` and `ata-orders-api` (to trigger demo endpoints `/admin/fault/inject` and `/admin/leak-connections`)
    - `roles/apigee.admin` or `roles/apigee.readOnly` (to read developer app consumer keys)
-   - `roles/storage.objectViewer` on `gs://cloud-assist-fde-2-ata-incidents` (to read OKF incident files via `check-result.sh`)
+   - `roles/storage.objectViewer` on `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents` (to read OKF incident files via `check-result.sh`)
    - `roles/monitoring.viewer` (to query Cloud Monitoring alert states during resets)
 
 4. **Acquire Apigee Consumer API Key:**
-   Retrieve the consumer key for `ata-demo-app` using your gcloud user credentials:
+   `scripts/deploy-apigee-proxies.sh` writes the key to `.${NAME_PREFIX}-api-key` in the checkout that deployed the stack. From another checkout, retrieve the consumer key for `${NAME_PREFIX}-demo-app` using your gcloud user credentials:
    ```bash
    curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-     "https://apigee.googleapis.com/v1/organizations/cloud-assist-fde-2/developers/ata-dev@example.com/apps/ata-demo-app" \
-     | python3 -c "import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])" > .ata-api-key
-   chmod 600 .ata-api-key
+     "https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG}/developers/${NAME_PREFIX}-dev@example.com/apps/${NAME_PREFIX}-demo-app" \
+     | python3 -c "import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])" > ".${NAME_PREFIX}-api-key"
+   chmod 600 ".${NAME_PREFIX}-api-key"
+   export ATA_API_KEY="$(cat ".${NAME_PREFIX}-api-key")"
    ```
-   *(Alternatively: `export ATA_API_KEY="..."`). The `.ata-api-key` file is gitignored.*
+   The scenario scripts read `ATA_API_KEY`, else `.ata-api-key` (TODO(scripts-lane): confirm the key file name for other prefixes). The key files are gitignored.
 
 5. **Verify Baseline Health:**
    ```bash
@@ -323,6 +326,7 @@ This script:
 6. **Archives active OKF files:** Only after all alerts have closed, every incident group is terminal and the quiet period has elapsed does the script move active incident files from `gs://<bucket>/knowledge/incident-manager/*.md` to `archive/` and remove leftover root copies.
 7. **Verifies healthy baseline:** Confirms HTTP 200 health responses across all services and verifies 0 active incident groups on the bridge.
 8. **Preflights admin endpoints:** GETs the fault injection endpoints (`/admin/fault/inject` and `/admin/leak-connections`) on the pinned inventory revision. Only HTTP 2xx passes; 401/403, 404, connection errors and other codes fail the reset with a clear message.
+9. **Restocks the demo items (step 5b, before the alert wait):** `POST /admin/restock` on the pinned revision sets every item in `ATA_INVENTORY_RESTOCK_BASELINE` (default `item-101`..`item-105` = 1000 each) to that absolute stock. The reset then checks the response and reads the stock back with `GET /items`. Scenario traffic used to drain the stock across runs, until `POST /orders` returned HTTP 400. Any failure stops the reset. A 404 means the serving revision predates the restock endpoint: re-pin (DEPLOY.md, "Re-pinning the inventory baseline"). `./scripts/reset-scenarios.sh --restock-only` runs just the pinned-baseline checks and the restock.
 
 ### CLI Options & Flags
 
@@ -334,6 +338,8 @@ This script:
 | `--timeout <duration>` | Maximum time to wait for open alerts to clear and incident groups to reach a terminal state before failing with the still-open alerts or active groups listed | `1800s` (`30m`; S4's reset can take up to ~27 min) |
 | `--poll-interval <duration>`| Interval between Cloud Monitoring alert queries and incident group state reads | `15s` |
 | `--monitoring-token-source <adc\|gcloud>` | Token for the alert check: `adc` = `gcloud auth application-default print-access-token`, `gcloud` = `gcloud auth print-access-token`. Only the chosen source is tried; if it fails the reset fails (run `gcloud auth application-default login`, or use `--no-wait`). Env: `ATA_MONITORING_TOKEN_SOURCE` | `adc` |
+| `--no-restock` | Skips the restock with a warning (e.g. after `repin-inventory.sh rollback` to code without `/admin/restock`, where the restock would fail with 404) | `false` |
+| `--restock-only` | Only restocks the demo items (`POST /admin/restock` on the pinned revision, verified with `GET /items`) to `ATA_INVENTORY_RESTOCK_BASELINE`; no fault reset, no alert wait | `false` |
 | `--dry-run` | Simulates reset steps without issuing network mutations | `false` |
 | `--mock` | Executes in mock mode without GCP cloud dependencies | `false` |
 
@@ -379,13 +385,13 @@ Run the automated result checker to inspect OKF incident files in GCS and valida
 ### 2. View Raw GCS OKF Incident Files
 Inspect active incident Markdown files stored in Cloud Storage under `knowledge/incident-manager/`:
 ```bash
-gcloud storage ls -l gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/
-gcloud storage cat gs://cloud-assist-fde-2-ata-incidents/knowledge/incident-manager/<incident-filename>.md
+gcloud storage ls -l "gs://${PROJECT_ID}-${NAME_PREFIX}-incidents/knowledge/incident-manager/"
+gcloud storage cat "gs://${PROJECT_ID}-${NAME_PREFIX}-incidents/knowledge/incident-manager/<incident-filename>.md"
 ```
 
 Archived incidents from scenario resets are moved to:
 ```bash
-gcloud storage ls -l gs://cloud-assist-fde-2-ata-incidents/archive/
+gcloud storage ls -l "gs://${PROJECT_ID}-${NAME_PREFIX}-incidents/archive/"
 ```
 
 Each file contains YAML frontmatter:
@@ -393,7 +399,7 @@ Each file contains YAML frontmatter:
 ---
 type: incident
 group_id: grp_20261022t220216z_ata-inventory-api
-project: cloud-assist-fde-2
+project: <project-id>
 policy_name: ata-inventory-5xx
 resource_name: ata-inventory-api
 status: mitigation-in-progress
