@@ -63,7 +63,22 @@ Scenario Workflow:
 [Inject & Sustained Traffic] ---> [Wait for Hold Window] ---> [check-result.sh] ---> [Verify ServiceNow] ---> [reset-scenarios.sh]
 ```
 
-**Ticket state after the alerts close:** When a scenario's traffic stops, its alerts close even though the fault is still injected. With the default `AUTO_RESOLVE_ON_RECOVERY=false`, the agent does **not** resolve the ticket. About 180s after the last alert closes, the ticket gets one more work note: "Monitoring recovered at <time>: all <N> alerts closed and the 180s cool-down passed with no recurrence. No remediation was recorded by the agent. Please verify the fix and resolve this incident." The ServiceNow state stays **In Progress**, and the incident group's OKF `status` becomes `recovered`. Resolve the ticket yourself after `reset-scenarios.sh` removes the fault. A new alert after that point opens a new group and a new ticket. You will see "Incident resolved. All monitoring conditions recovered and cool-down expired." only if the agent is deployed with `AUTO_RESOLVE_ON_RECOVERY=true`.
+**When the alerts close:**
+- **Latency and 5xx alerts (S1, S2, S3, S5)** close after the scenario's traffic stops, even though the fault is still injected. With `evaluation_missing_data = EVALUATION_MISSING_DATA_INACTIVE` (Terraform `alert_evaluation_missing_data`, once applied) a series with no data counts as not violating, so they close about 1–2 evaluation periods after the last request. This is the expected behaviour; it has not been measured live yet. Without it, a latency series that stops reporting waits for `auto_close` (1800s): in the QA run of 2026-10-27, S2's alerts closed about 35 min after they opened, and S5's latency alert on the old revision about 28 min after it opened.
+- **S4's connections alert does not close on its own.** The leaked connections are held by `ata-inventory-api` until `reset-scenarios.sh` releases them, so `ata-cloudsql-connections-critical` keeps receiving data and stays OPEN. QA saw it still open 18 min after the traffic stopped. **For S4, run `./scripts/reset-scenarios.sh` first**; the alert then closes (about 2 min later in QA) and the recovery note follows.
+- **The ticket stays In Progress.** With the default `AUTO_RESOLVE_ON_RECOVERY=false` the agent does **not** resolve the ticket. About 180s after the last alert closes it posts one work note: "Monitoring alerts closed: all <N> alerts of this incident closed by <time> and none reopened during the 180s cool-down. An alert also closes when its service stops receiving traffic, so a close is not proof of a fix; the agent recorded no remediation. <traffic facts> A human must verify the remediation (...) before resolving this incident." The traffic facts come from Cloud Monitoring `request_count` for each affected Cloud Run service around the close: "recorded no requests ... (missing data)" when the traffic generator has stopped, or the request and HTTP 5xx counts. The incident group's OKF `status` becomes `recovered`. Verify the fault is gone (after `reset-scenarios.sh`, or the S5 revert) and resolve the ticket yourself. A new alert after that point opens a new group and a new ticket. "Incident resolved. All monitoring conditions recovered and cool-down expired." appears only if the agent is deployed with `AUTO_RESOLVE_ON_RECOVERY=true`.
+- **Do not reset while a recovery note is pending.** The reset archives the incident files after its quiet period (default 300s after the last alert closed), which is after the agent's 180s cool-down note.
+
+**Expected timing (QA run, 2026-10-27, `--hold 7m`):**
+
+| Scenario | First alert after start | Ticket after first alert | Alerts close | Recovery note |
+| :--- | :--- | :--- | :--- | :--- |
+| S1 | ~6 min | ~2.3 min | ~6 min after traffic stops | ~3 min after the last close |
+| S2 | ~6 min | ~3.8 min (the orders alert joins during the 120s settle) | via `auto_close` until the missing-data change is applied (QA: ~35 min after opening) | ~3 min after the last close |
+| S3 | ~6 min (inventory 5xx), ~9 min (orders 429) | ~2.3 min each | ~6–7 min after traffic stops | ~3 min after each group's last close |
+| S4 | ~8 min | ~2.3 min | only after `reset-scenarios.sh` (QA: ~2 min after the reset released the connections) | ~3 min after the close |
+| S5 | ~5 min | ~4.4 min | 5xx ~7 min after traffic stops; the latency alert on the old revision via `auto_close` until the missing-data change is applied (QA: ~28 min) | ~3 min after the last close |
+
 
 ---
 
@@ -76,7 +91,7 @@ Injects an internal 500 error fault at an 85% error rate into `ata-inventory-api
   ./scripts/scenarios/s1_backend_5xx.sh --hold 7m
   ```
 - **How Long to Wait:**
-  **7 minutes** (default `--hold 7m`). The script provides real-time progress every 15s. This duration ensures Cloud Monitoring 5-minute alignment windows evaluate and trigger `ata-inventory-5xx` and `ata-inventory-latency`, and allows the single-dispatch windowing lock to complete.
+  **7 minutes** (default `--hold 7m`). The script provides real-time progress every 15s. In QA, `ata-inventory-5xx` and `ata-orders-5xx` opened about 6 min after the start (orders-api returns 502 when inventory fails). No latency alert fires in S1.
   *(Press `Ctrl-C` at any time to safely stop traffic early and view next steps).*
 - **Check Results Command:**
   ```bash
@@ -89,6 +104,8 @@ Injects an internal 500 error fault at an 85% error rate into `ata-inventory-api
   - **Origin Attribution:** `ata-inventory-api`
   - **Work Notes & Links:**
     - Structured 4-bullet SRE summary (Problem, Systems, Observations, Recommended Actions)
+    - "Origin selection" line: `ata-orders-api` 5xx explained by upstream `ata-inventory-api`
+    - No traffic change or rollback is recommended (no recent change on the origin)
     - Blast radius: `ata-inventory-v1`, `ata-orders-api`, `ata-orders-v1`
     - Propagated alert labels: `app=alert-triage-agent`, `component=ata-inventory-api`, `severity=p1`, `signal=5xx`, `tier=service`
     - Attached self-contained diagnostic HTML investigation report
@@ -101,7 +118,7 @@ Injects an internal 500 error fault at an 85% error rate into `ata-inventory-api
 
 #### Scenario S2: Backend Latency Degradation
 
-Injects an artificial 6500ms latency delay into `ata-inventory-api`, exceeding Apigee's 5000ms target timeout.
+Injects an artificial 6500ms latency delay into `ata-inventory-api`. The `ata-inventory-v1` proxy's target timeout (5000ms in the proxy bundle) is shorter, so Apigee returns HTTP 504 GatewayTimeout.
 
 - **Exact Command:**
   ```bash
@@ -115,11 +132,11 @@ Injects an artificial 6500ms latency delay into `ata-inventory-api`, exceeding A
   ```
 - **What to Look for in ServiceNow:**
   - **Ticket Count:** Exactly **1** Incident Ticket.
-  - **Title / Short Description:** Backend latency degradation on `ata-inventory-api`.
+  - **Title / Short Description:** `[P2] ata-inventory-api: Elevated latency (<N> alerts)` (alerts: `ata-inventory-latency`, `ata-orders-latency`).
   - **Origin Attribution:** `ata-inventory-api` (Upstream origin).
   - **Work Notes & Links:**
-    - Root cause analysis attributing latency to backend response time exceeding Apigee 5s timeout
-    - Blast radius: `ata-inventory-api`, `ata-apigee-inventory-v1`, `ata-apigee-orders-v1`, `ata-orders-api`
+    - Root cause states the measured peak latency of `ata-inventory-api` and, from Apigee telemetry, the HTTP 504 responses with fault `GatewayTimeout` on `ata-inventory-v1`. The timeout value itself is not in the gathered telemetry, so it is not stated.
+    - Blast radius: `ata-inventory-api`, `ata-inventory-v1`, `ata-orders-api`, `ata-orders-v1`
     - Attached diagnostic HTML investigation report
 - **Reset Command Before Next Scenario:**
   ```bash
@@ -146,13 +163,13 @@ Simultaneously triggers Scenario S1 on `ata-inventory-api` and strict SpikeArres
   - **Ticket Count:** **EXACTLY 2 DISTINCT SERVICENOW TICKETS** (Proves the correlation engine splits concurrent independent incidents rather than false merging).
   - **Ticket 1 (Inventory Group):**
     - Origin: `ata-inventory-api`
-    - Root Cause: 5xx Application Error in inventory service
-    - Alerts: `ata-inventory-5xx`, `ata-inventory-latency`
+    - Root Cause: HTTP 5xx errors on the inventory service
+    - Alerts: `ata-inventory-5xx` (`ata-orders-5xx` does not fire: orders traffic is throttled at Apigee)
   - **Ticket 2 (Orders Group):**
     - Origin: `ata-orders-v1`
-    - Root Cause: SpikeArrest rate limiting in Apigee orders proxy
+    - Root Cause: the new `ata-orders-v1` proxy revision (deployed by the script with `Rate=1pm`) rejects requests with SpikeArrest faults, which the previous revision did not; action 1 redeploys the previous revision (explicit number)
     - Alerts: `ata-apigee-orders-429`
-  - **Work Notes & Links:** Correlation engine multi-factor score < 35 pts (below auto-new group threshold); separate blast radiuses and HTML diagnostic reports on each ticket.
+  - **Work Notes & Links:** each ticket has a "Correlation:" observation. The orders ticket states the best correlation score against the open inventory group and that it is below the 35 pts new-group threshold. Separate blast radiuses and HTML diagnostic reports on each ticket.
 - **Reset Command Before Next Scenario:**
   ```bash
   ./scripts/reset-scenarios.sh
@@ -176,16 +193,18 @@ Simulates a database connection leak exhausting Cloud SQL PostgreSQL backend con
   ```
 - **What to Look for in ServiceNow:**
   - **Ticket Count:** Exactly **1** Incident Ticket.
-  - **Title / Short Description:** Database connection pool exhaustion on Cloud SQL.
+  - **Title / Short Description:** `[P1] ata-inventory-db: Database connection pool saturation (1 alert)` (alert: `ata-cloudsql-connections-critical`).
   - **Origin Attribution:** `ata-inventory-db` (Cloud SQL instance identified by earliest onset timestamp).
   - **Work Notes & Links:**
-    - Causal failure chain: `ata-inventory-db` -> `ata-inventory-api` -> `ata-orders-api` -> Apigee proxies
-    - Root cause: PostgreSQL connection starvation / pool exhaustion
+    - Problem: connection pool saturation with the measured connection count. A 5xx cascade to dependents is stated only when a dependent's 5xx rate was measured; in QA no 5xx occurred, and the ticket says so.
+    - Actions: review the connection release in `ata-inventory-api` (the Cloud Run caller in TOPOLOGY.md) and a read-only `gcloud sql instances describe` of tier and flags (no flag patch)
     - Attached diagnostic HTML investigation report
-- **Reset Command Before Next Scenario:**
+  - **Order traffic** uses the in-stock item with the most stock (`GET /items`); the script stops with an error if no item is in stock, because every order would return HTTP 400.
+- **Reset Command (run it right after the hold; the alert does not close before it):**
   ```bash
   ./scripts/reset-scenarios.sh
   ```
+  The leaked connections persist until the reset releases them, so `ata-cloudsql-connections-critical` stays OPEN after the traffic stops. The reset waits for the close and then its 300s quiet period, so the recovery note lands before the incident file is archived.
 
 ---
 
@@ -205,12 +224,13 @@ Deploys a new Cloud Run revision of `ata-inventory-api` configured with invalid 
   ```
 - **What to Look for in ServiceNow:**
   - **Ticket Count:** Exactly **1** Incident Ticket.
-  - **Title / Short Description:** Database authentication / configuration deployment failure.
-  - **Origin Attribution:** Explicitly named Cloud Run revision (e.g. `ata-inventory-api-00062-6pj`).
+  - **Title / Short Description:** `[P1] ata-inventory-api: Deployment regression: database authentication failure (3 alerts)` (alerts: `ata-inventory-latency` on the old revision, `ata-inventory-5xx`, `ata-orders-5xx`). The priority is the most severe alert's `severity` label in the group.
+  - **Origin Attribution:** `ata-inventory-api` (the origin is a topology component). The bad revision (`ata-inventory-api-s5-<epoch>`) is named in the problem, the root cause and the rollback.
   - **Work Notes & Links:**
     - Distinction between change-induced configuration failure and runtime resource exhaustion
-    - Rollback instructions targeting previous healthy revision
+    - Rollback to the revision that **served** before the deploy, chosen from traffic history (Cloud Monitoring `request_count` by revision in the 30 min before the new revision was created; `ROLLBACK_TRAFFIC_LOOKBACK_MINUTES`), with that evidence in the action, e.g. `ata-inventory-api-00073-9vb`. The previously *created* revision is never used: after earlier S5 reverts it is a 0%-traffic revision. With split or no traffic the action says the target could not be identified.
     - Attached diagnostic HTML investigation report
+  - **Revert:** `./scripts/scenarios/s5_bad_deploy.sh --revert` restores the pinned revision. Each revert also creates a new 0%-traffic revision.
 - **Reset Command Before Next Scenario:**
   ```bash
   ./scripts/reset-scenarios.sh
@@ -256,7 +276,7 @@ Deploys a new Cloud Run revision of `ata-inventory-api` configured with invalid 
 | **S2** | **Backend Latency** | Cloud Run (`ata-inventory-api`) | 1 | 1 | `ata-inventory-api` (Upstream origin) |
 | **S3** | **Concurrent Disjoint** | Cloud Run & Apigee simultaneously | **2** | **2** | `ata-orders-v1` & `ata-inventory-api` |
 | **S4** | **DB Connection Pool** | Cloud SQL (`ata-inventory-db`) | 1 | 1 | `ata-inventory-db` |
-| **S5** | **Bad Deploy / Config Failure** | Cloud Run (`ata-inventory-api`) | 1 | 1 | Explicit revision (e.g. `ata-inventory-api-00062-6pj`) |
+| **S5** | **Bad Deploy / Config Failure** | Cloud Run (`ata-inventory-api`) | 1 | 1 | `ata-inventory-api` (bad revision named in root cause and rollback) |
 
 ---
 
@@ -276,22 +296,22 @@ For rapid development runs where waiting for metric stabilization is not require
 ### Reset Execution Sequence & Metric Lag Safeguards
 
 This script:
-1. Calls `POST /admin/fault/reset` on all Cloud Run demo services.
-2. Terminates background PostgreSQL sleep connections and releases leaks.
-3. Restores healthy Apigee proxy revisions (`demo/apigee/`).
+1. Calls `POST /admin/fault/reset` on `ata-inventory-api` and `ata-orders-api` (this releases S4's leaked connections). Every admin call mints a fresh ID token, and any non-2xx response stops the reset with the endpoint and HTTP status (401/403 name the `gcloud auth login` / `roles/run.invoker` fix).
+2. Terminates local background PostgreSQL sleep helpers and logs whether any were running.
+3. Restores healthy Apigee proxy revisions (`demo/apigee/`); a failed redeploy stops the reset.
 4. Reverts any modified Cloud Run environment variables (pinned revisions).
-5. **Waits for open alerts to close & observes quiet period:** Polls the Cloud Monitoring Alerts API (read-only) for active `OPEN` alerts on `ata-*` policies (labeled `app=alert-triage-agent`) and waits until none are open, followed by a configurable quiet period (default 3 minutes / 180s). If the Alerts API cannot be queried, the script exits non-zero with the cause; it never treats a failed query as zero open alerts. Transient errors (timeouts, HTTP 429/5xx) are retried for up to 3 polls first. Errors that cannot clear on their own fail at once: HTTP 401 (`gcloud auth application-default login` for the default ADC token source; `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` means the token type is not accepted, so switch source or use `--no-wait`), HTTP 403 (grant `roles/monitoring.viewer` on the project), and TLS `CERTIFICATE_VERIFY_FAILED`. On macOS, `export SSL_CERT_FILE=/etc/ssl/cert.pem` fixes the certificate error (the script also honours `REQUESTS_CA_BUNDLE`, then `certifi`, then `/etc/ssl/cert.pem` on macOS).
-   - **Why resets wait for alerts to clear (Metric Lag Rationale):** Telemetry ingestion pipelines—specifically Apigee proxy metrics published to Cloud Monitoring—experience an ingestion lag of 1 to 3 minutes. If incident files and group state are archived immediately upon proxy restoration, lagging Apigee metric data can trigger a delayed alert (such as `ata-apigee-orders-429`) minutes after the reset has completed. Because prior incident files are already archived, the agent treats the late-arriving alert as a brand new incident and creates a stray ServiceNow ticket (e.g., finding `INC0010294`). Waiting until all open alerts have cleared plus the 3-minute quiet period covers Apigee's documented 1-3 minute metric lag, so the ingestion window has stabilized before incident state is archived. Raise it with `--quiet-period` if you still see late alerts.
+5. **Waits for open alerts to close & observes quiet period:** Polls the Cloud Monitoring Alerts API (read-only) for active `OPEN` alerts on `ata-*` policies (labeled `app=alert-triage-agent`) and waits until none are open, followed by a configurable quiet period (default 5 minutes / 300s; longer than the agent's 180s cool-down, so the recovery note is posted before the files are archived). If the Alerts API cannot be queried, the script exits non-zero with the cause; it never treats a failed query as zero open alerts. Transient errors (timeouts, HTTP 429/5xx) are retried for up to 3 polls first. Errors that cannot clear on their own fail at once: HTTP 401 (`gcloud auth application-default login` for the default ADC token source; `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` means the token type is not accepted, so switch source or use `--no-wait`), HTTP 403 (grant `roles/monitoring.viewer` on the project), and TLS `CERTIFICATE_VERIFY_FAILED`. On macOS, `export SSL_CERT_FILE=/etc/ssl/cert.pem` fixes the certificate error (the script also honours `REQUESTS_CA_BUNDLE`, then `certifi`, then `/etc/ssl/cert.pem` on macOS).
+   - **Why resets wait for alerts to clear (Metric Lag Rationale):** Telemetry ingestion pipelines—specifically Apigee proxy metrics published to Cloud Monitoring—experience an ingestion lag of 1 to 3 minutes. If incident files and group state are archived immediately upon proxy restoration, lagging Apigee metric data can trigger a delayed alert (such as `ata-apigee-orders-429`) minutes after the reset has completed. Because prior incident files are already archived, the agent treats the late-arriving alert as a brand new incident and creates a stray ServiceNow ticket (e.g., finding `INC0010294`). Waiting until all open alerts have cleared plus the 5-minute quiet period covers Apigee's documented 1-3 minute metric lag and the agent's recovery note, so the ingestion window has stabilized before incident state is archived. Raise it with `--quiet-period` if you still see late alerts.
 6. **Archives active OKF files:** Only after all alerts have closed and the quiet period has elapsed does the script move active incident files from `gs://<bucket>/knowledge/incident-manager/*.md` to `archive/` and remove leftover root copies.
 7. **Verifies healthy baseline:** Confirms HTTP 200 health responses across all services and verifies 0 active incident groups on the bridge.
-8. **Preflights admin endpoints:** Verifies required fault injection endpoints (`/admin/fault/inject` and `/admin/leak-connections`) are active on deployed microservices.
+8. **Preflights admin endpoints:** GETs the fault injection endpoints (`/admin/fault/inject` and `/admin/leak-connections`) on the pinned inventory revision. Only HTTP 2xx passes; 401/403, 404, connection errors and other codes fail the reset with a clear message.
 
 ### CLI Options & Flags
 
 | Flag | Description | Default |
 | :--- | :--- | :--- |
 | `--no-wait` | Skips polling Cloud Monitoring and bypasses the quiet period for quick developer resets (also skips the alert query, so Monitoring/TLS errors cannot fail the reset) | `false` |
-| `--quiet-period <duration>` | Quiet period window to maintain after all open alerts close (e.g. `180s`, `3m`); covers Apigee's 1-3 min metric lag | `180s` (`3m`) |
+| `--quiet-period <duration>` | Quiet period window to maintain after all open alerts close (e.g. `300s`, `5m`); covers Apigee's 1-3 min metric lag and the agent's 180s cool-down recovery note | `300s` (`5m`) |
 | `--timeout <duration>` | Maximum timeout to wait for open alerts to clear before failing with still-open alerts listed | `900s` (`15m`) |
 | `--poll-interval <duration>`| Interval between Cloud Monitoring alert queries | `15s` |
 | `--monitoring-token-source <adc\|gcloud>` | Token for the alert check: `adc` = `gcloud auth application-default print-access-token`, `gcloud` = `gcloud auth print-access-token`. Only the chosen source is tried; if it fails the reset fails (run `gcloud auth application-default login`, or use `--no-wait`). Env: `ATA_MONITORING_TOKEN_SOURCE` | `adc` |

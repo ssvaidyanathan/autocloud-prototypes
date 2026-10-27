@@ -39,7 +39,9 @@ parse_duration() {
 
 # Configuration options & defaults
 NO_WAIT="${ATA_RESET_NO_WAIT:-${NO_WAIT:-false}}"
-QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-180}}")"
+# 300s: the agent posts its recovery note when the 180s cool-down after the last close ends;
+# archiving earlier races that note (QA S4). It also covers Apigee's 1-3 min metric lag.
+QUIET_PERIOD_SECS="$(parse_duration "${ATA_RESET_QUIET_PERIOD:-${QUIET_PERIOD:-300}}")"
 WAIT_TIMEOUT_SECS="$(parse_duration "${ATA_RESET_TIMEOUT:-${WAIT_TIMEOUT:-900}}")"
 POLL_INTERVAL_SECS="$(parse_duration "${ATA_RESET_POLL_INTERVAL:-${POLL_INTERVAL:-15}}")"
 MAX_ALERT_AGE_SECS="$(parse_duration "${ATA_RESET_MAX_ALERT_AGE:-${MAX_ALERT_AGE:-3600}}")"
@@ -115,7 +117,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --no-wait                  Skip waiting for open alerts to close and quiet period"
-            echo "  --quiet-period <duration>  Quiet period after alerts close (default: 180s / 3m)"
+            echo "  --quiet-period <duration>  Quiet period after alerts close (default: 300s / 5m)"
             echo "  --timeout <duration>       Max timeout waiting for alerts to close (default: 900s / 15m)"
             echo "  --poll-interval <duration> Polling interval for alert queries (default: 15s)"
             echo "  --max-alert-age <duration> Max age of open alerts before reset start (default: 60m / 3600s)"

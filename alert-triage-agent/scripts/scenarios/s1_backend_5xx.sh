@@ -4,7 +4,8 @@
 #
 # Target: Cloud Run (ata-inventory-api)
 # Mechanism: POST /admin/fault/inject with {"type": "500", "rate": 0.85}
-# Alerts: Cloud Run 5xx alert on ata-inventory-api, Apigee 5xx alert on ata-inventory-v1
+# Alerts (QA 2026-10-27): ata-inventory-5xx and ata-orders-5xx (orders-api returns 502
+#   when inventory fails); no latency alert
 # Output: 1 Group, 1 Ticket
 #   - Origin: ata-inventory-api
 #   - Blast Radius: ata-inventory-v1, ata-orders-api, ata-orders-v1
@@ -160,7 +161,8 @@ log_info "  - Total Groups: 1 Incident Group"
 log_info "  - Total Tickets: 1 ServiceNow Incident Ticket"
 log_info "  - Origin Attribution: ata-inventory-api"
 log_info "  - Blast Radius: ata-inventory-v1, ata-orders-api, ata-orders-v1"
-log_info "  - Root Cause: Internal application exception in inventory service."
+log_info "  - Alerts: ata-inventory-5xx, ata-orders-5xx"
+log_info "  - Root Cause: HTTP 5xx errors on ata-inventory-api (injected fault)."
 
 cat <<EOF
 

@@ -160,7 +160,7 @@ log_info "  - Total Groups: 1 Incident Group"
 log_info "  - Total Tickets: 1 ServiceNow Incident Ticket"
 log_info "  - Origin Attribution: ata-inventory-api"
 log_info "  - Blast Radius: All downstream proxies & callers"
-log_info "  - Root Cause: Backend response time exceeding Apigee 5s target timeout."
+log_info "  - Root Cause: Latency on ata-inventory-api; Apigee ata-inventory-v1 returns HTTP 504 GatewayTimeout (the timeout value is not stated)."
 
 cat <<EOF
 

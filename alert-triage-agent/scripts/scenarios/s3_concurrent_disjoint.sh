@@ -218,8 +218,8 @@ log_info "Expected Triage & Correlation Outcome:"
 log_info "  - Total Groups: 2 Distinct Incident Groups"
 log_info "  - Total Tickets: 2 ServiceNow Incident Tickets"
 log_info "  - Group 1 (Inventory): Origin ata-inventory-api, Root Cause 5xx Application Error"
-log_info "  - Group 2 (Orders): Origin ata-orders-v1, Root Cause SpikeArrest Rate Limiting"
-log_info "  - Validation: Correlation Engine score < 35 threshold prevents false group merger."
+log_info "  - Group 2 (Orders): Origin ata-orders-v1, Root Cause new proxy revision rejecting requests with SpikeArrest faults"
+log_info "  - Validation: the orders ticket's 'Correlation:' observation states the best score against the open group and the 35 pts threshold."
 
 cat <<EOF
 

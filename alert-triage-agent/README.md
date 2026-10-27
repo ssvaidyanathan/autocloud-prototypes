@@ -183,6 +183,7 @@ Paths not shown in the diagram:
 - **Late alerts**: Alerts that correlate to an already-ticketed (or cooling-down) group are added to the ServiceNow ticket as work notes (`POST /instructions/ticket/work-note`). A recent repeat (within 30 minutes) of a policy and resource already in the group is caught by the duplicate check instead: it is appended to the incident group only, with no work note.
 - **Cool-down and resolution**: When every alert in a ticketed group has closed (or all are already closed when the ticket is created), the group enters `COOLING_DOWN` and a 180s cooling timer is scheduled. A new alert that attaches during cool-down returns the group to `TICKETED`. If none arrives before that timer fires, what happens depends on `AUTO_RESOLVE_ON_RECOVERY`:
   - `false` (default): the agent does **not** resolve the ticket. Monitoring recovery is not proof of a fix, because low traffic can hide a fault that is still there. The agent posts one work note (`POST /instructions/ticket/work-note`): "Monitoring alerts closed: all <N> alerts of this incident closed by <time> and none reopened during the 180s cool-down. An alert also closes when its service stops receiving traffic, so a close is not proof of a fix; the agent recorded no remediation. <traffic facts> A human must verify the remediation (...) before resolving this incident." The traffic facts come from Cloud Monitoring `run.googleapis.com/request_count` for each affected Cloud Run service, from `RECOVERY_TRAFFIC_LOOKBACK_SECONDS` before the last close until the note is written: either "recorded no requests ... (missing data)", or the request and HTTP 5xx counts, or "not checked" with the reason. The alert state itself carries no close reason. The ServiceNow incident stays In Progress, and the group moves to the terminal `RECOVERED` state. Like `RESOLVED`, a `RECOVERED` group takes no new alerts, so a later alert opens a new group. A retried cooling wake posts no second note.
+  - When alerts close in the demo: latency and 5xx alerts close shortly after a scenario's traffic stops once the Terraform `alert_evaluation_missing_data` (`EVALUATION_MISSING_DATA_INACTIVE`) change is applied (before that, a latency series without data waits for `auto_close`, 1800s). S4's connections alert closes only after `reset-scenarios.sh` releases the leaked connections. Expected timing per scenario: [DEMO.md §1.2](DEMO.md#12-scenario-by-scenario-guide-s1-through-s5).
   - `true`: the agent calls `POST /instructions/ticket/resolve` and marks the group `RESOLVED`.
 
   An unticketed group with an explicit suppression reason has no ServiceNow incident, so it is marked `RESOLVED` whatever the flag says.
@@ -285,7 +286,7 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 | **IAM DB Auth Flag**   | `DB_IAM_AUTH` | `true` | Enables IAM database authentication via pg8000 connector. |
 | **Mock Database Flag** | `MOCK_DB` | `false` | Enables in-memory catalog fallback when Cloud SQL is unreachable. |
 | **Local Mode Flag**    | `IS_LOCAL` | `false` | Enables mock storage and local adapters for offline testing. |
-| **Auto-Resolve on Recovery** | `AUTO_RESOLVE_ON_RECOVERY` | `false` | When all alerts close and the 180s cool-down passes: `false` leaves the ServiceNow ticket In Progress and adds a work note asking a human to verify and resolve it. `true` resolves the ticket. See "Cool-down and resolution" under [Sequence Flow](#sequence-flow-mermaid). |
+| **Auto-Resolve on Recovery** | `AUTO_RESOLVE_ON_RECOVERY` | `false` | When all alerts close and the 180s cool-down passes: `false` leaves the ServiceNow ticket In Progress and adds a work note stating that the alerts closed (with the measured traffic around the close) and that a human must verify the remediation before resolving it. `true` resolves the ticket. See "Cool-down and resolution" under [Sequence Flow](#sequence-flow-mermaid). |
 
 ### Secret Manager Secret Names
 Sensitive credentials reside exclusively in Google Secret Manager:
@@ -786,9 +787,9 @@ Execute scenarios with logging and automated assertions:
 ```
 
 ### 4. Resetting Between Scenarios
-Reset injected faults, clear database sleep connections, restore Apigee proxies, wait for open alerts to close plus metric ingestion quiet period (3 min, covering Apigee's 1-3 min metric lag), and move active incidents to `archive/`:
+Reset injected faults, clear database sleep connections, restore Apigee proxies, wait for open alerts to close plus a quiet period (5 min: Apigee's 1-3 min metric lag and the agent's 180s cool-down recovery note), and move active incidents to `archive/`. Admin calls use a fresh ID token each and fail the reset on any non-2xx response. For S4, run the reset right after the scenario: the leaked connections keep `ata-cloudsql-connections-critical` open until the reset releases them:
 ```bash
-# Standard reset (waits for open ata-* alerts to close + 3m quiet period).
+# Standard reset (waits for open ata-* alerts to close + 5m quiet period).
 # Fails if Cloud Monitoring cannot be queried. The alert check uses an ADC token by default
 # (run: gcloud auth application-default login; or --monitoring-token-source gcloud).
 # On macOS CERTIFICATE_VERIFY_FAILED: export SSL_CERT_FILE=/etc/ssl/cert.pem

@@ -205,8 +205,9 @@ log_info "Expected Triage & Correlation Outcome:"
 log_info "  - Total Groups: 1 Incident Group"
 log_info "  - Total Tickets: 1 ServiceNow Incident Ticket"
 log_info "  - Origin Attribution: ata-inventory-db (Earliest onset timestamp)"
-log_info "  - Blast Radius: ata-inventory-db -> ata-inventory-api -> ata-orders-api -> Apigee Proxies"
-log_info "  - Root Cause: PostgreSQL connection starvation / pool exhaustion."
+log_info "  - Blast Radius: ata-inventory-db, ata-inventory-api, ata-inventory-v1, ata-orders-api, ata-orders-v1 (topology; a 5xx cascade is stated only if measured)"
+log_info "  - Root Cause: Database connection pool saturation on ata-inventory-db."
+log_warn "  - The leaked connections persist after traffic stops: ata-cloudsql-connections-critical stays OPEN until ./scripts/reset-scenarios.sh releases them. Run the reset first, then expect the close and the recovery note."
 
 cat <<EOF
 
