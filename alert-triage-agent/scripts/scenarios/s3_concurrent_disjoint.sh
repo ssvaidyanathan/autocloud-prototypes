@@ -2,14 +2,14 @@
 # ==============================================================================
 # Scenario S3: Concurrent Disjoint Incidents
 #
-# Target: Cloud Run (ata-inventory-api) AND Apigee X (ata-orders-v1) simultaneously
+# Target: Cloud Run (<prefix>-inventory-api) AND Apigee X (<prefix>-orders-v1) simultaneously
 # Mechanism: Concurrently trigger S1 on inventory and SpikeArrest rate limiting on orders
 # Alerts:
 #   - Group 1: Cloud Run 5xx + latency on inventory
 #   - Group 2: Apigee 429 on orders
 # Output: Exactly 2 Distinct Groups, 2 ServiceNow Tickets
-#   - Group 1: Origin ata-inventory-api, Root Cause 5xx Application Error
-#   - Group 2: Origin ata-orders-v1, Root Cause SpikeArrest Rate Limiting
+#   - Group 1: Origin <prefix>-inventory-api, Root Cause 5xx Application Error
+#   - Group 2: Origin <prefix>-orders-v1, Root Cause SpikeArrest Rate Limiting
 #   - Proves correlation engine correctly splits independent incidents using
 #     causal failure chains and change timelines (disjoint scoring < 35)
 # ==============================================================================
@@ -59,28 +59,51 @@ SCENARIO_START_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
 # Resolve the Apigee key before any fault is injected: traffic needs it.
 API_KEY="$(resolve_api_key)" || exit 1
+require_apigee_host || exit 1
 
 log_info "=== Starting Scenario S3: Concurrent Disjoint Incidents ==="
 log_info "Start Time: ${SCENARIO_START_TIME} | Hold Duration: ${HOLD_SECS}s (${HOLD_DURATION})"
 
 # The strict SpikeArrest bundle and the Apigee token are prepared before any fault is
 # injected: a missing bundle or a failed zip then stops the run with nothing to undo.
+require_apigee_mgmt || exit 1
 TOKEN="$(resolve_apigee_token)"
-BASE_URL="https://apigee.googleapis.com/v1/organizations/${PROJECT_ID}"
-SA_EMAIL="ata-apigee-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+BASE_URL="https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG}"
+SA_EMAIL="${APIGEE_SA_EMAIL}"
 
-BUNDLE_SRC="${SCRIPT_DIR}/../../demo/apigee/ata-orders-v1"
-TMP_DIR="/tmp/ata-orders-s3-$$"
-ZIP_FILE="/tmp/ata-orders-v1-s3.zip"
-
-if [ ! -d "${BUNDLE_SRC}/apiproxy/policies" ]; then
-    log_error "FATAL: Apigee bundle ${BUNDLE_SRC} (apiproxy/policies) not found; S3 not started, no fault injected." >&2
-    exit 1
+APIGEE_LIVE=true
+if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ] || [ -z "${TOKEN}" ] || [ "${TOKEN}" = "mock-apigee-token" ]; then
+    APIGEE_LIVE=false
 fi
-mkdir -p "${TMP_DIR}"
-cp -r "${BUNDLE_SRC}"/* "${TMP_DIR}/"
 
-cat <<'EOF' > "${TMP_DIR}/apiproxy/policies/SA-SpikeArrest.xml"
+# The strict bundle is this stack's own orders proxy (${PROXY_ORDERS}, base path
+# ${BASEPATH_ORDERS}), rendered from the prefix-neutral template by demo/apigee/render-bundle.sh
+# (the renderer deploy-apigee-proxies.sh uses), with SA-SpikeArrest replaced. Importing any
+# other bundle as ${PROXY_ORDERS} could deploy another stack's base path.
+RENDER_BUNDLE="${SCRIPT_DIR}/../../demo/apigee/render-bundle.sh"
+TMP_DIR=""
+ZIP_FILE=""
+if [ ! -f "${RENDER_BUNDLE}" ]; then
+    if [ "${APIGEE_LIVE}" = "true" ]; then
+        log_error "FATAL: ${RENDER_BUNDLE} not found: S3 needs the prefix-templated Apigee bundles to build the strict ${PROXY_ORDERS} revision; S3 not started, no fault injected." >&2
+        exit 1
+    fi
+    log_warn "[MOCK/DRY-RUN] ${RENDER_BUNDLE} not found; the strict bundle is not built (nothing is imported in this mode)." >&2
+else
+    TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/${NAME_PREFIX}-orders-s3.XXXXXX")"
+    ZIP_FILE="${TMP_DIR}.zip"
+    if ! bash "${RENDER_BUNDLE}" orders-v1 "${NAME_PREFIX}" "${TMP_DIR}" >/dev/null; then
+        log_error "FATAL: rendering the orders-v1 bundle for ${NAME_PREFIX} failed (above); S3 not started, no fault injected." >&2
+        rm -rf "${TMP_DIR}"
+        exit 1
+    fi
+    if [ ! -d "${TMP_DIR}/apiproxy/policies" ]; then
+        log_error "FATAL: the rendered bundle ${TMP_DIR} has no apiproxy/policies; S3 not started, no fault injected." >&2
+        rm -rf "${TMP_DIR}"
+        exit 1
+    fi
+
+    cat <<'EOF' > "${TMP_DIR}/apiproxy/policies/SA-SpikeArrest.xml"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <SpikeArrest continueOnError="false" enabled="true" name="SA-SpikeArrest">
     <DisplayName>Spike Arrest Rate Limiting (Strict 1pm)</DisplayName>
@@ -88,30 +111,26 @@ cat <<'EOF' > "${TMP_DIR}/apiproxy/policies/SA-SpikeArrest.xml"
 </SpikeArrest>
 EOF
 
-rm -f "${ZIP_FILE}"
-python3 -c "import zipfile, os, sys
+    rm -f "${ZIP_FILE}"
+    python3 -c "import zipfile, os, sys
 bundle_dir, zip_path = sys.argv[1], sys.argv[2]
-if os.path.exists(bundle_dir):
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(bundle_dir):
-            for f in files:
-                full_path = os.path.join(root, f)
-                rel_path = os.path.relpath(full_path, bundle_dir)
-                zf.write(full_path, rel_path)
-" "${TMP_DIR}" "${ZIP_FILE}" 2>/dev/null || true
-
-APIGEE_LIVE=true
-if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ] || [ -z "${TOKEN}" ] || [ "${TOKEN}" = "mock-apigee-token" ]; then
-    APIGEE_LIVE=false
+with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+    for root, _, files in os.walk(bundle_dir):
+        for f in files:
+            full_path = os.path.join(root, f)
+            rel_path = os.path.relpath(full_path, bundle_dir)
+            zf.write(full_path, rel_path)
+" "${TMP_DIR}" "${ZIP_FILE}" || rm -f "${ZIP_FILE}"
 fi
+
 if [ "${APIGEE_LIVE}" = "true" ] && [ ! -s "${ZIP_FILE}" ]; then
     log_error "FATAL: could not build the Apigee bundle zip ${ZIP_FILE} from ${TMP_DIR}; S3 not started, no fault injected." >&2
-    rm -rf "${TMP_DIR}"
+    rm -rf ${TMP_DIR:+"${TMP_DIR}"} ${ZIP_FILE:+"${ZIP_FILE}"}
     exit 1
 fi
 
 # 1. Trigger S1 fault directly on inventory API
-INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
+INV_URL="$(require_service_url "${SVC_INVENTORY}")" || exit 1
 ID_TOKEN="$(resolve_id_token "${INV_URL}")"
 AUTH_HEADER=()
 if [ -n "${ID_TOKEN}" ] && [ "${ID_TOKEN}" != "mock-id-token" ]; then
@@ -129,7 +148,7 @@ REVISION=""
 restore_orders_proxy_after_abort() {
     local code
     if [ -z "${PREV_PROXY_REVISION}" ]; then
-        log_error "FATAL: the ata-orders-v1 revision deployed before S3 is unknown; the proxy was NOT restored." >&2
+        log_error "FATAL: the ${PROXY_ORDERS} revision deployed before S3 is unknown; the proxy was NOT restored." >&2
         return 1
     fi
     if [ "${PREV_PROXY_REVISION}" = "${REVISION}" ]; then
@@ -137,15 +156,15 @@ restore_orders_proxy_after_abort() {
     fi
     code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 60 -X POST \
         -H "Authorization: Bearer ${TOKEN}" \
-        "${BASE_URL}/environments/${ENV_NAME}/apis/ata-orders-v1/revisions/${PREV_PROXY_REVISION}/deployments?override=true&serviceAccount=projects/-/serviceAccounts/${SA_EMAIL}" \
+        "${BASE_URL}/environments/${APIGEE_ENV}/apis/${PROXY_ORDERS}/revisions/${PREV_PROXY_REVISION}/deployments?override=true&serviceAccount=projects/-/serviceAccounts/${SA_EMAIL}" \
         2>/dev/null) || code="000"
     case "${code}" in
         2??)
-            log_warn "Redeployed ata-orders-v1 revision ${PREV_PROXY_REVISION} (HTTP ${code})." >&2
+            log_warn "Redeployed ${PROXY_ORDERS} revision ${PREV_PROXY_REVISION} (HTTP ${code})." >&2
             return 0
             ;;
     esac
-    log_error "FATAL: redeploying ata-orders-v1 revision ${PREV_PROXY_REVISION} returned HTTP ${code:-<none>}." >&2
+    log_error "FATAL: redeploying ${PROXY_ORDERS} revision ${PREV_PROXY_REVISION} returned HTTP ${code:-<none>}." >&2
     return 1
 }
 undo_s3_on_error() {
@@ -155,12 +174,12 @@ undo_s3_on_error() {
     fi
     log_error "S3 aborted (exit ${rc}) after injecting faults; undoing them." >&2
     if ! reset_inventory_fault_after_abort "the 500 error fault"; then
-        left="the 500 error fault on ${NAME_PREFIX}-inventory-api"
+        left="the 500 error fault on ${SVC_INVENTORY}"
     fi
     if [ "${PROXY_DEPLOYED}" = "true" ] && ! restore_orders_proxy_after_abort; then
-        left="${left:+${left}; }ata-orders-v1 deployed with the strict 1pm SpikeArrest revision ${REVISION:-<unknown>}"
+        left="${left:+${left}; }${PROXY_ORDERS} deployed with the strict 1pm SpikeArrest revision ${REVISION:-<unknown>}"
     fi
-    rm -rf "${TMP_DIR}" "${ZIP_FILE}"
+    rm -rf ${TMP_DIR:+"${TMP_DIR}"} ${ZIP_FILE:+"${ZIP_FILE}"}
     if [ -n "${left}" ]; then
         log_error "STILL LEFT after the S3 abort: ${left}. Run ./scripts/reset-scenarios.sh now." >&2
     else
@@ -170,29 +189,29 @@ undo_s3_on_error() {
 }
 trap undo_s3_on_error EXIT
 
-log_info "--> Injecting 500 error fault (rate: 0.85) on ata-inventory-api..."
+log_info "--> Injecting 500 error fault (rate: 0.85) on ${SVC_INVENTORY}..."
 FAULT_INJECTED=true
 if [ "${DRY_RUN}" = "true" ]; then
     log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/fault/inject -d '{\"type\": \"500\", \"rate\": 0.85}'"
 else
-    HTTP_CODE=$(curl -s -o /tmp/ata-s3-inject-resp.txt -w "%{http_code}" -X POST \
+    HTTP_CODE=$(curl -s -o "/tmp/${NAME_PREFIX}-s3-inject-resp.txt" -w "%{http_code}" -X POST \
         ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} \
         -H "Content-Type: application/json" \
         -d '{"type": "500", "rate": 0.85}' \
         "${INV_URL}/admin/fault/inject" || echo "000")
     check_cloud_run_auth "${HTTP_CODE}" "${INV_URL}/admin/fault/inject" || true
-    rm -f /tmp/ata-s3-inject-resp.txt
+    rm -f "/tmp/${NAME_PREFIX}-s3-inject-resp.txt"
 fi
 
 # 2. Trigger Orders proxy SpikeArrest 429 fault concurrently
-log_info "--> Deploying strict 1pm SpikeArrest on ata-orders-v1 Apigee proxy..."
+log_info "--> Deploying strict 1pm SpikeArrest on ${PROXY_ORDERS} Apigee proxy..."
 
 if [ "${APIGEE_LIVE}" != "true" ]; then
     log_info "    [MOCK/DRY-RUN] Simulating import and deployment of strict SpikeArrest revision..."
 else
     # The revision serving now, so an abort after the deploy can put it back.
     DEPLOYMENTS_RESP=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
-        "${BASE_URL}/environments/${ENV_NAME}/apis/ata-orders-v1/deployments" 2>/dev/null) || DEPLOYMENTS_RESP=""
+        "${BASE_URL}/environments/${APIGEE_ENV}/apis/${PROXY_ORDERS}/deployments" 2>/dev/null) || DEPLOYMENTS_RESP=""
     PREV_PROXY_REVISION=$(printf '%s' "${DEPLOYMENTS_RESP}" | python3 -c '
 import json, sys
 try:
@@ -202,9 +221,9 @@ except Exception:
     sys.exit(1)
 ' 2>/dev/null) || PREV_PROXY_REVISION=""
     if [ -n "${PREV_PROXY_REVISION}" ]; then
-        log_info "    ata-orders-v1 revision ${PREV_PROXY_REVISION} is deployed in ${ENV_NAME} before S3."
+        log_info "    ${PROXY_ORDERS} revision ${PREV_PROXY_REVISION} is deployed in ${APIGEE_ENV} before S3."
     else
-        log_warn "    Could not read the deployed ata-orders-v1 revision; an abort after the deploy cannot restore it (reset-scenarios.sh does)." >&2
+        log_warn "    Could not read the deployed ${PROXY_ORDERS} revision; an abort after the deploy cannot restore it (reset-scenarios.sh does)." >&2
     fi
 
     log_info "    Importing strict SpikeArrest revision to Apigee..."
@@ -212,8 +231,8 @@ except Exception:
         -H "Authorization: Bearer ${TOKEN}" \
         -H "Content-Type: multipart/form-data" \
         -F "file=@${ZIP_FILE}" \
-        "${BASE_URL}/apis?name=ata-orders-v1&action=import"); then
-        log_error "FATAL: the Apigee import request for ata-orders-v1 failed (curl error); strict SpikeArrest not deployed." >&2
+        "${BASE_URL}/apis?name=${PROXY_ORDERS}&action=import"); then
+        log_error "FATAL: the Apigee import request for ${PROXY_ORDERS} failed (curl error); strict SpikeArrest not deployed." >&2
         exit 1
     fi
 
@@ -228,26 +247,26 @@ if not rev:
     print("JSON without a revision", file=sys.stderr)
     sys.exit(1)
 print(rev)
-' 2>/tmp/ata-s3-import-err.txt); then
-        log_error "FATAL: the Apigee import response for ata-orders-v1 is $(cat /tmp/ata-s3-import-err.txt 2>/dev/null); strict SpikeArrest not deployed. Response: ${IMPORT_RESP:0:300}" >&2
-        rm -f /tmp/ata-s3-import-err.txt
+' 2>"/tmp/${NAME_PREFIX}-s3-import-err.txt"); then
+        log_error "FATAL: the Apigee import response for ${PROXY_ORDERS} is $(cat "/tmp/${NAME_PREFIX}-s3-import-err.txt" 2>/dev/null); strict SpikeArrest not deployed. Response: ${IMPORT_RESP:0:300}" >&2
+        rm -f "/tmp/${NAME_PREFIX}-s3-import-err.txt"
         exit 1
     fi
-    rm -f /tmp/ata-s3-import-err.txt
+    rm -f "/tmp/${NAME_PREFIX}-s3-import-err.txt"
     log_info "    Imported revision: ${REVISION}"
 
-    log_info "    Deploying revision ${REVISION} to environment ${ENV_NAME}..."
+    log_info "    Deploying revision ${REVISION} to environment ${APIGEE_ENV}..."
     PROXY_DEPLOYED=true
     curl -s -X POST \
         -H "Authorization: Bearer ${TOKEN}" \
-        "${BASE_URL}/environments/${ENV_NAME}/apis/ata-orders-v1/revisions/${REVISION}/deployments?override=true&serviceAccount=projects/-/serviceAccounts/${SA_EMAIL}" > /dev/null 2>&1 || true
+        "${BASE_URL}/environments/${APIGEE_ENV}/apis/${PROXY_ORDERS}/revisions/${REVISION}/deployments?override=true&serviceAccount=projects/-/serviceAccounts/${SA_EMAIL}" > /dev/null 2>&1 || true
 fi
-rm -rf "${TMP_DIR}" "${ZIP_FILE}"
+rm -rf ${TMP_DIR:+"${TMP_DIR}"} ${ZIP_FILE:+"${ZIP_FILE}"}
 
 # 3. Generate Sustained Concurrent Traffic
 log_info "--> Initiating sustained dual-stream traffic loop (hold duration: ${HOLD_SECS}s / ${HOLD_DURATION})..."
-log_info "    Traffic stream 1: GET /ata/inventory/v1/items (driving 5xx errors)"
-log_info "    Traffic stream 2: GET /ata/orders/v1/orders/test (breaching SpikeArrest 429 threshold)"
+log_info "    Traffic stream 1: GET ${BASEPATH_INVENTORY}/items (driving 5xx errors)"
+log_info "    Traffic stream 2: GET ${BASEPATH_ORDERS}/orders/test (breaching SpikeArrest 429 threshold)"
 
 KEY_HEADER=()
 if [ -n "${API_KEY}" ]; then
@@ -290,7 +309,7 @@ else
         # Inventory traffic (500)
         STATUS_INV=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
             ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
-            "https://${APIGEE_HOST}/ata/inventory/v1/items") || { rc=$?; traffic_interrupted "${rc}" && break; STATUS_INV="000"; }
+            "https://${APIGEE_HOST}${BASEPATH_INVENTORY}/items") || { rc=$?; traffic_interrupted "${rc}" && break; STATUS_INV="000"; }
         traffic_interrupted && break
         TOTAL_INV=$((TOTAL_INV + 1))
         if [ "${STATUS_INV}" = "500" ]; then
@@ -301,7 +320,7 @@ else
         for b in 1 2 3; do
             STATUS_ORD=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 \
                 ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
-                "https://${APIGEE_HOST}/ata/orders/v1/orders/test") || { rc=$?; traffic_interrupted "${rc}" && break 2; STATUS_ORD="000"; }
+                "https://${APIGEE_HOST}${BASEPATH_ORDERS}/orders/test") || { rc=$?; traffic_interrupted "${rc}" && break 2; STATUS_ORD="000"; }
             traffic_interrupted && break 2
             TOTAL_ORD=$((TOTAL_ORD + 1))
             if [ "${STATUS_ORD}" = "429" ]; then
@@ -326,8 +345,8 @@ log_success "=== Scenario S3 Injected Successfully ==="
 log_info "Expected Triage & Correlation Outcome:"
 log_info "  - Total Groups: 2 Distinct Incident Groups"
 log_info "  - Total Tickets: 2 ServiceNow Incident Tickets"
-log_info "  - Group 1 (Inventory): Origin ata-inventory-api, Root Cause 5xx Application Error"
-log_info "  - Group 2 (Orders): Origin ata-orders-v1, Root Cause new proxy revision rejecting requests with SpikeArrest faults"
+log_info "  - Group 1 (Inventory): Origin ${SVC_INVENTORY}, Root Cause 5xx Application Error"
+log_info "  - Group 2 (Orders): Origin ${PROXY_ORDERS}, Root Cause new proxy revision rejecting requests with SpikeArrest faults"
 log_info "  - Validation: the orders ticket's 'Correlation:' observation states the best score against the open group and the 35 pts threshold."
 
 cat <<EOF
@@ -340,8 +359,8 @@ cat <<EOF
 
 2. Check Incidents in ServiceNow:
    - Expected Ticket Count: EXACTLY 2 DISTINCT TICKETS
-   - Ticket 1: Origin ata-inventory-api (Inventory 5xx application error)
-   - Ticket 2: Origin ata-orders-v1 (Apigee orders SpikeArrest 429 rate limiting)
+   - Ticket 1: Origin ${SVC_INVENTORY} (Inventory 5xx application error)
+   - Ticket 2: Origin ${PROXY_ORDERS} (Apigee orders SpikeArrest 429 rate limiting)
    - Proves correlation engine does NOT incorrectly merge concurrent independent incidents
    - Verify separate HTML diagnostic reports are attached to both tickets
 

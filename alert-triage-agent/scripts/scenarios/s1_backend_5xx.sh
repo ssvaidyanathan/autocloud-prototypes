@@ -2,13 +2,13 @@
 # ==============================================================================
 # Scenario S1: Backend 5xx Error Spike
 #
-# Target: Cloud Run (ata-inventory-api)
+# Target: Cloud Run (<prefix>-inventory-api)
 # Mechanism: POST /admin/fault/inject with {"type": "500", "rate": 0.85}
-# Alerts (QA 2026-10-27): ata-inventory-5xx and ata-orders-5xx (orders-api returns 502
+# Alerts (QA 2026-10-27): <prefix>-inventory-5xx and <prefix>-orders-5xx (orders-api returns 502
 #   when inventory fails); no latency alert
 # Output: 1 Group, 1 Ticket
-#   - Origin: ata-inventory-api
-#   - Blast Radius: ata-inventory-v1, ata-orders-api, ata-orders-v1
+#   - Origin: <prefix>-inventory-api
+#   - Blast Radius: <prefix>-inventory-v1, <prefix>-orders-api, <prefix>-orders-v1
 #   - Root Cause: Internal application exception in inventory service
 # ==============================================================================
 
@@ -57,6 +57,7 @@ SCENARIO_START_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
 # Resolve the Apigee key before any fault is injected: traffic needs it.
 API_KEY="$(resolve_api_key)" || exit 1
+require_apigee_host || exit 1
 
 log_info "=== Starting Scenario S1: Backend 5xx Error Spike ==="
 log_info "Start Time: ${SCENARIO_START_TIME} | Hold Duration: ${HOLD_SECS}s (${HOLD_DURATION})"
@@ -66,7 +67,7 @@ if [ "${RUN_PREFLIGHT:-false}" = "true" ]; then
 fi
 
 # 1. Resolve Targets
-INV_URL="$(resolve_service_url "${NAME_PREFIX}-inventory-api" "https://ata-inventory-api-4klvlqnmpa-uw.a.run.app")"
+INV_URL="$(require_service_url "${SVC_INVENTORY}")" || exit 1
 ID_TOKEN="$(resolve_id_token "${INV_URL}")"
 
 AUTH_HEADER=()
@@ -78,14 +79,14 @@ log_info "Target Inventory Service: ${INV_URL}"
 log_info "Apigee Ingress Host: ${APIGEE_HOST}"
 
 # From the fault injection on, an exit with an error resets the fault instead of leaving
-# ata-inventory-api faulty with no traffic. A successful run keeps it until reset-scenarios.sh.
+# <prefix>-inventory-api faulty with no traffic. A successful run keeps it until reset-scenarios.sh.
 FAULT_INJECTED=false
 reset_fault_on_error() {
     local rc=$?
     if [ "${rc}" -eq 0 ] || [ "${FAULT_INJECTED}" != "true" ]; then
         return 0
     fi
-    log_error "S1 aborted (exit ${rc}) after injecting the 500 error fault on ${NAME_PREFIX}-inventory-api; resetting it via POST ${INV_URL}/admin/fault/reset." >&2
+    log_error "S1 aborted (exit ${rc}) after injecting the 500 error fault on ${SVC_INVENTORY}; resetting it via POST ${INV_URL}/admin/fault/reset." >&2
     if ! reset_inventory_fault_after_abort "the 500 error fault"; then
         log_error "Run ./scripts/reset-scenarios.sh now." >&2
     fi
@@ -94,25 +95,25 @@ reset_fault_on_error() {
 trap reset_fault_on_error EXIT
 
 # 2. Inject Fault: POST /admin/fault/inject
-log_info "--> Injecting 500 error fault (rate: 0.85) on ata-inventory-api..."
+log_info "--> Injecting 500 error fault (rate: 0.85) on ${SVC_INVENTORY}..."
 FAULT_INJECTED=true
 if [ "${DRY_RUN}" = "true" ]; then
     log_info "[DRY-RUN] curl -s -X POST ${INV_URL}/admin/fault/inject -d '{\"type\": \"500\", \"rate\": 0.85}'"
 else
-    HTTP_CODE=$(curl -s -o /tmp/ata-s1-inject-resp.txt -w "%{http_code}" -X POST \
+    HTTP_CODE=$(curl -s -o "/tmp/${NAME_PREFIX}-s1-inject-resp.txt" -w "%{http_code}" -X POST \
         ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} \
         -H "Content-Type: application/json" \
         -d '{"type": "500", "rate": 0.85}' \
         "${INV_URL}/admin/fault/inject" || echo "000")
     check_cloud_run_auth "${HTTP_CODE}" "${INV_URL}/admin/fault/inject" || true
-    INJECT_RESP="$(cat /tmp/ata-s1-inject-resp.txt 2>/dev/null || echo '{"status":"mocked"}')"
-    rm -f /tmp/ata-s1-inject-resp.txt
+    INJECT_RESP="$(cat "/tmp/${NAME_PREFIX}-s1-inject-resp.txt" 2>/dev/null || echo '{"status":"mocked"}')"
+    rm -f "/tmp/${NAME_PREFIX}-s1-inject-resp.txt"
     log_info "    Fault injection response (HTTP ${HTTP_CODE}): ${INJECT_RESP}"
 fi
 
 # 3. Generate Sustained Traffic via Apigee
 log_info "--> Initiating sustained traffic loop (hold duration: ${HOLD_SECS}s / ${HOLD_DURATION})..."
-log_info "    Driving traffic through Apigee (/ata/inventory/v1/items and /ata/orders/v1/orders)..."
+log_info "    Driving traffic through Apigee (${BASEPATH_INVENTORY}/items and ${BASEPATH_ORDERS}/orders)..."
 
 KEY_HEADER=()
 if [ -n "${API_KEY}" ]; then
@@ -146,12 +147,12 @@ else
 
         STATUS_INV=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
             ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
-            "https://${APIGEE_HOST}/ata/inventory/v1/items") || { rc=$?; traffic_interrupted "${rc}" && break; STATUS_INV="000"; }
+            "https://${APIGEE_HOST}${BASEPATH_INVENTORY}/items") || { rc=$?; traffic_interrupted "${rc}" && break; STATUS_INV="000"; }
         traffic_interrupted && break
         STATUS_ORD=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
             ${KEY_HEADER[@]+"${KEY_HEADER[@]}"} \
             -H "Content-Type: application/json" -X POST \
-            "https://${APIGEE_HOST}/ata/orders/v1/orders" \
+            "https://${APIGEE_HOST}${BASEPATH_ORDERS}/orders" \
             -d '{"item_id":"item-101","quantity":1}') || { rc=$?; traffic_interrupted "${rc}" && break; STATUS_ORD="000"; }
         traffic_interrupted && break
 
@@ -180,10 +181,10 @@ log_success "=== Scenario S1 Injected Successfully ==="
 log_info "Expected Triage & Correlation Outcome:"
 log_info "  - Total Groups: 1 Incident Group"
 log_info "  - Total Tickets: 1 ServiceNow Incident Ticket"
-log_info "  - Origin Attribution: ata-inventory-api"
-log_info "  - Blast Radius: ata-inventory-v1, ata-orders-api, ata-orders-v1"
-log_info "  - Alerts: ata-inventory-5xx, ata-orders-5xx"
-log_info "  - Root Cause: HTTP 5xx errors on ata-inventory-api (injected fault)."
+log_info "  - Origin Attribution: ${SVC_INVENTORY}"
+log_info "  - Blast Radius: ${PROXY_INVENTORY}, ${SVC_ORDERS}, ${PROXY_ORDERS}"
+log_info "  - Alerts: ${POLICY_INVENTORY_5XX}, ${POLICY_ORDERS_5XX}"
+log_info "  - Root Cause: HTTP 5xx errors on ${SVC_INVENTORY} (injected fault)."
 
 cat <<EOF
 
@@ -195,9 +196,9 @@ cat <<EOF
 
 2. Check Incident in ServiceNow:
    - Expected Ticket Count: 1
-   - Expected Origin: ata-inventory-api
+   - Expected Origin: ${SVC_INVENTORY}
    - Expected Root Cause: Internal application exception in inventory service
-   - Blast Radius: ata-inventory-v1, ata-orders-api, ata-orders-v1
+   - Blast Radius: ${PROXY_INVENTORY}, ${SVC_ORDERS}, ${PROXY_ORDERS}
    - Verify HTML diagnostic report is attached to ServiceNow ticket
 
 3. Reset Environment Before Running Next Scenario:

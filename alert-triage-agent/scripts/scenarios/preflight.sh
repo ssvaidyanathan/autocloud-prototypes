@@ -5,17 +5,17 @@
 # Validates system health and operational readiness before executing scenarios:
 # 1. Cloud Run Demo Microservice Admin Endpoints:
 #    - Pinned inventory revision serving; service-level max instances (ATA_DEMO_MAX_INSTANCES)
-#      on ${NAME_PREFIX}-inventory-api and ${NAME_PREFIX}-orders-api
-#    - ${NAME_PREFIX}-inventory-api: /health, /admin/leak-connections,
+#      on <prefix>-inventory-api and <prefix>-orders-api
+#    - <prefix>-inventory-api: /health, /admin/leak-connections,
 #      /admin/fault/inject, /admin/fault/reset
-#    - ${NAME_PREFIX}-orders-api: /health, /admin/reset, /admin/fault/latency, /admin/fault/5xx
+#    - <prefix>-orders-api: /health, /admin/reset, /admin/fault/latency, /admin/fault/5xx
 # 2. Apigee Proxies & SpikeArrest Configuration:
 #    - Gateway ingress health for inventory and orders
 #    - Active proxy revisions deployed to environment
 #    - SpikeArrest policy configuration calibrated to baseline (300pm)
 # 3. Cloud Monitoring Alert Policy Thresholds:
-#    - Enabled policies: ata-inventory-5xx, ata-inventory-latency, ata-orders-5xx,
-#      ata-orders-latency, ata-apigee-orders-429, ata-cloudsql-connections-critical
+#    - Enabled policies: <prefix>-inventory-5xx, <prefix>-inventory-latency, <prefix>-orders-5xx,
+#      <prefix>-orders-latency, <prefix>-apigee-orders-429, <prefix>-cloudsql-connections-critical
 #    - Calibrated thresholds reachable
 # 4. Cloud SQL Database Connectivity:
 #    - Cloud SQL instance state is RUNNABLE
@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 log_info "==================================================================="
-log_info "  Starting ATA Demo Preflight Health Verification"
+log_info "  Starting ${NAME_PREFIX} Demo Preflight Health Verification"
 log_info "  Project: ${PROJECT_ID} | Region: ${REGION} | Prefix: ${NAME_PREFIX}"
 log_info "==================================================================="
 
@@ -42,8 +42,8 @@ record_failure() {
 }
 
 # Resolve Service URLs
-INV_URL="$(require_service_url "${NAME_PREFIX}-inventory-api")"
-ORD_URL="$(require_service_url "${NAME_PREFIX}-orders-api")"
+INV_URL="$(require_service_url "${SVC_INVENTORY}")" || exit 1
+ORD_URL="$(require_service_url "${SVC_ORDERS}")" || exit 1
 
 ID_TOKEN_INV="$(resolve_id_token "${INV_URL}")"
 AUTH_HEADER_INV=()
@@ -59,6 +59,8 @@ fi
 
 APIGEE_TOKEN="$(resolve_apigee_token)"
 API_KEY="$(resolve_api_key)" || exit 1
+require_apigee_host || exit 1
+require_apigee_mgmt || exit 1
 KEY_HEADER=()
 if [ -n "${API_KEY}" ]; then
     KEY_HEADER=(-H "x-api-key: ${API_KEY}")
@@ -75,27 +77,27 @@ else
     # 1a. Inventory API health & admin endpoints
     # The GET probes below are only harmless on the pinned code; never send them elsewhere.
     if ! verify_pinned_inventory_revision || ! verify_inventory_serving_pinned; then
-        log_error "FATAL: ${NAME_PREFIX}-inventory-api is not on the pinned baseline; refusing to probe admin endpoints."
+        log_error "FATAL: ${SVC_INVENTORY} is not on the pinned baseline; refusing to probe admin endpoints."
         exit 1
     fi
     log_success "      Serving pinned revision ${PINNED_INVENTORY_REVISION} (${PINNED_INVENTORY_DIGEST})"
     # One instance per demo service: fault state and leaked connections are per instance, and
     # /admin/fault/reset clears only the instance it reaches. The service-level limit covers
     # every revision, including a pinned revision created before the cap.
-    for svc in "${NAME_PREFIX}-inventory-api" "${NAME_PREFIX}-orders-api"; do
+    for svc in "${SVC_INVENTORY}" "${SVC_ORDERS}"; do
         if service_max_matches_baseline "${svc}"; then
             log_success "      ${svc}: service-level max instances ${DEMO_MAX_INSTANCES}"
         else
             record_failure "${svc} service-level max instances is not ${DEMO_MAX_INSTANCES} (see above); a fault or reset can miss an instance. Fix: scripts/set-demo-instance-caps.sh --apply"
         fi
     done
-    log_info "    Probing ${NAME_PREFIX}-inventory-api (${INV_URL})..."
+    log_info "    Probing ${SVC_INVENTORY} (${INV_URL})..."
     INV_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
         ${AUTH_HEADER_INV[@]+"${AUTH_HEADER_INV[@]}"} "${INV_URL}/health" || echo "000")
     if [ "${INV_HEALTH}" = "200" ]; then
         log_success "      /health -> HTTP 200 OK"
     else
-        record_failure "${NAME_PREFIX}-inventory-api /health returned HTTP ${INV_HEALTH} (expected 200)"
+        record_failure "${SVC_INVENTORY} /health returned HTTP ${INV_HEALTH} (expected 200)"
     fi
 
 
@@ -104,7 +106,7 @@ else
     if [ "${INV_LEAK}" = "200" ]; then
         log_success "      /admin/leak-connections -> HTTP 200 OK (Endpoint Present)"
     else
-        record_failure "${NAME_PREFIX}-inventory-api /admin/leak-connections returned HTTP ${INV_LEAK} (expected 200)"
+        record_failure "${SVC_INVENTORY} /admin/leak-connections returned HTTP ${INV_LEAK} (expected 200)"
     fi
 
     INV_INJECT=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
@@ -112,7 +114,7 @@ else
     if [ "${INV_INJECT}" = "200" ]; then
         log_success "      /admin/fault/inject -> HTTP 200 OK (Endpoint Present)"
     else
-        record_failure "${NAME_PREFIX}-inventory-api /admin/fault/inject returned HTTP ${INV_INJECT} (expected 200)"
+        record_failure "${SVC_INVENTORY} /admin/fault/inject returned HTTP ${INV_INJECT} (expected 200)"
     fi
 
     INV_RESET=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
@@ -120,17 +122,17 @@ else
     if [ "${INV_RESET}" = "200" ]; then
         log_success "      /admin/fault/reset -> HTTP 200 OK"
     else
-        record_failure "${NAME_PREFIX}-inventory-api /admin/fault/reset returned HTTP ${INV_RESET} (expected 200)"
+        record_failure "${SVC_INVENTORY} /admin/fault/reset returned HTTP ${INV_RESET} (expected 200)"
     fi
 
     # 1b. Orders API health & admin endpoints
-    log_info "    Probing ${NAME_PREFIX}-orders-api (${ORD_URL})..."
+    log_info "    Probing ${SVC_ORDERS} (${ORD_URL})..."
     ORD_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
         ${AUTH_HEADER_ORD[@]+"${AUTH_HEADER_ORD[@]}"} "${ORD_URL}/health" || echo "000")
     if [ "${ORD_HEALTH}" = "200" ]; then
         log_success "      /health -> HTTP 200 OK"
     else
-        record_failure "${NAME_PREFIX}-orders-api /health returned HTTP ${ORD_HEALTH} (expected 200)"
+        record_failure "${SVC_ORDERS} /health returned HTTP ${ORD_HEALTH} (expected 200)"
     fi
 
     ORD_RESET=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
@@ -138,7 +140,7 @@ else
     if [ "${ORD_RESET}" = "200" ]; then
         log_success "      /admin/reset -> HTTP 200 OK"
     else
-        record_failure "${NAME_PREFIX}-orders-api /admin/reset returned HTTP ${ORD_RESET} (expected 200)"
+        record_failure "${SVC_ORDERS} /admin/reset returned HTTP ${ORD_RESET} (expected 200)"
     fi
 fi
 
@@ -152,28 +154,28 @@ if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
 else
     # 2a. Ingress Gateway Health
     APIGEE_INV_HEALTH=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-        "https://${APIGEE_HOST}/ata/inventory/v1/health" || echo "000")
+        "https://${APIGEE_HOST}${BASEPATH_INVENTORY}/health" || echo "000")
     if [ "${APIGEE_INV_HEALTH}" = "200" ]; then
-        log_success "    Apigee Ingress: /ata/inventory/v1/health -> HTTP 200 OK"
+        log_success "    Apigee Ingress: ${BASEPATH_INVENTORY}/health -> HTTP 200 OK"
     else
-        record_failure "Apigee Ingress /ata/inventory/v1/health returned HTTP ${APIGEE_INV_HEALTH}"
+        record_failure "Apigee Ingress ${BASEPATH_INVENTORY}/health returned HTTP ${APIGEE_INV_HEALTH}"
     fi
 
     APIGEE_ORD_HEALTH=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
-        "https://${APIGEE_HOST}/ata/orders/v1/health" || echo "000")
+        "https://${APIGEE_HOST}${BASEPATH_ORDERS}/health" || echo "000")
     if [ "${APIGEE_ORD_HEALTH}" = "200" ]; then
-        log_success "    Apigee Ingress: /ata/orders/v1/health -> HTTP 200 OK"
+        log_success "    Apigee Ingress: ${BASEPATH_ORDERS}/health -> HTTP 200 OK"
     else
-        record_failure "Apigee Ingress /ata/orders/v1/health returned HTTP ${APIGEE_ORD_HEALTH}"
+        record_failure "Apigee Ingress ${BASEPATH_ORDERS}/health returned HTTP ${APIGEE_ORD_HEALTH}"
     fi
 
     # 2b. Apigee Management API Deployment and SpikeArrest Policy Inspection
     if [ -n "${APIGEE_TOKEN}" ] && [ "${APIGEE_TOKEN}" != "mock-apigee-token" ]; then
-        BASE_URL="https://apigee.googleapis.com/v1/organizations/${PROJECT_ID}"
+        BASE_URL="https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG}"
 
-        # Check deployed revision of ata-orders-v1
+        # Check deployed revision of <prefix>-orders-v1
         DEPLOYMENTS_JSON=$(curl -s -H "Authorization: Bearer ${APIGEE_TOKEN}" \
-            "${BASE_URL}/environments/${ENV_NAME}/apis/ata-orders-v1/deployments" || echo "{}")
+            "${BASE_URL}/environments/${APIGEE_ENV}/apis/${PROXY_ORDERS}/deployments" || echo "{}")
         ACTIVE_ORD_REV=$(echo "${DEPLOYMENTS_JSON}" | python3 -c "
 import sys, json
 try:
@@ -187,11 +189,11 @@ except Exception:
     print('unknown')
 ")
         if [ "${ACTIVE_ORD_REV}" != "none" ] && [ "${ACTIVE_ORD_REV}" != "unknown" ]; then
-            log_success "    Apigee ata-orders-v1 active deployed revision: ${ACTIVE_ORD_REV}"
+            log_success "    Apigee ${PROXY_ORDERS} active deployed revision: ${ACTIVE_ORD_REV}"
 
             # Verify SpikeArrest policy presence on deployed revision
             REV_JSON=$(curl -s -H "Authorization: Bearer ${APIGEE_TOKEN}" \
-                "${BASE_URL}/apis/ata-orders-v1/revisions/${ACTIVE_ORD_REV}" || echo "{}")
+                "${BASE_URL}/apis/${PROXY_ORDERS}/revisions/${ACTIVE_ORD_REV}" || echo "{}")
             HAS_SPIKE=$(echo "${REV_JSON}" | python3 -c "
 import sys, json
 try:
@@ -211,7 +213,7 @@ except Exception:
             RAPID_429=0
             for i in 1 2 3; do
                 CODE=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 2 --max-time 3 \
-                    "https://${APIGEE_HOST}/ata/orders/v1/health" || echo "200")
+                    "https://${APIGEE_HOST}${BASEPATH_ORDERS}/health" || echo "200")
                 if [ "${CODE}" = "429" ]; then
                     RAPID_429=$((RAPID_429 + 1))
                 fi
@@ -222,7 +224,7 @@ except Exception:
                 record_failure "Apigee SpikeArrest is throttled at baseline rate (observed ${RAPID_429} 429s)! Re-run scripts/reset-scenarios.sh."
             fi
         else
-            record_failure "No active deployment found for ata-orders-v1 in ${ENV_NAME}"
+            record_failure "No active deployment found for ${PROXY_ORDERS} in ${APIGEE_ENV}"
         fi
     fi
 fi
@@ -236,12 +238,12 @@ if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
     log_info "    [MOCK/DRY-RUN] Cloud Monitoring policy calibration simulated OK."
 else
     REQUIRED_POLICIES=(
-        "ata-inventory-5xx"
-        "ata-inventory-latency"
-        "ata-orders-5xx"
-        "ata-orders-latency"
-        "ata-apigee-orders-429"
-        "ata-cloudsql-connections-critical"
+        "${POLICY_INVENTORY_5XX}"
+        "${POLICY_INVENTORY_LATENCY}"
+        "${POLICY_ORDERS_5XX}"
+        "${POLICY_ORDERS_LATENCY}"
+        "${POLICY_APIGEE_ORDERS_429}"
+        "${POLICY_CLOUDSQL_CONNECTIONS}"
     )
 
     POLICIES_JSON=$(gcloud monitoring policies list --project="${PROJECT_ID}" --format=json 2>/dev/null || echo "[]")
@@ -283,12 +285,12 @@ if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
     log_info "    [MOCK/DRY-RUN] Cloud SQL database reachability simulated OK."
 else
     # 4a. Cloud SQL instance status
-    SQL_STATE=$(gcloud sql instances describe "${NAME_PREFIX}-inventory-db" \
+    SQL_STATE=$(gcloud sql instances describe "${DB_INSTANCE}" \
         --project="${PROJECT_ID}" --format="value(state)" 2>/dev/null || echo "UNKNOWN")
     if [ "${SQL_STATE}" = "RUNNABLE" ]; then
-        log_success "    Cloud SQL Instance ${NAME_PREFIX}-inventory-db: ${SQL_STATE}"
+        log_success "    Cloud SQL Instance ${DB_INSTANCE}: ${SQL_STATE}"
     else
-        record_failure "Cloud SQL Instance ${NAME_PREFIX}-inventory-db state is ${SQL_STATE} (expected RUNNABLE)"
+        record_failure "Cloud SQL Instance ${DB_INSTANCE} state is ${SQL_STATE} (expected RUNNABLE)"
     fi
 
     # 4b. Read-only probe via microservice endpoint (inventory catalog query)
