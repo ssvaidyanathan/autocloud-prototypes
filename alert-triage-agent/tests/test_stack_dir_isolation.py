@@ -56,7 +56,7 @@ def _env(prefix, **extra):
     return env
 
 
-def test_conftest_stack_dir_is_an_empty_dir_outside_the_checkout():
+def test_conftest_stack_dir_is_a_dir_outside_the_checkout():
     stack_dir = Path(os.environ["ATA_STACK_DIR"]).resolve()
     assert stack_dir.is_dir()
     assert ROOT not in stack_dir.parents and stack_dir != ROOT
