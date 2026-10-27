@@ -15,9 +15,12 @@ regexTarget = "secret"
 regexes = [
   # Apigee API proxy names, e.g. ata-apigee-orders-v1. Non-secret resource
   # identifiers used as topology nodes in alert-triage-agent (issue #46).
-  '''^ata-apigee-[a-z]+-v[0-9]+$''',
+  # Name and version slots are length-bounded so the pattern cannot mask an
+  # arbitrary high-entropy string.
+  '''^ata-apigee-[a-z]{2,20}-v[0-9]{1,3}$''',
   # Cloud Run revision names, e.g. ata-inventory-api-00003-prev, optionally with
   # the traffic percentage from `--to-revisions=REVISION=PERCENT`. Non-secret
   # resource identifiers in alert-triage-agent tests and docs (issue #46).
-  '''^ata-[a-z]+-api-[0-9]{5}-[a-z0-9]{3,4}(?:=[0-9]{1,3})?$''',
+  # The name slot is length-bounded for the same reason.
+  '''^ata-[a-z]{2,20}-api-[0-9]{5}-[a-z0-9]{3,4}(?:=[0-9]{1,3})?$''',
 ]
