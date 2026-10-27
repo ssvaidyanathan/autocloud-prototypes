@@ -84,7 +84,7 @@ def deploy(tmp_path):
     def run(component, **env_overrides):
         log.write_text("")
         env = {k: v for k, v in os.environ.items()
-               if k not in ("PROJECT_NUMBER", "VERIFIER_SA", "AUTO_RESOLVE_ON_RECOVERY", "BRIDGE_URL", "AGENT_URL",
+               if k not in ("PROJECT_ID", "REGION", "APIGEE_ORG", "PROJECT_NUMBER", "VERIFIER_SA", "AUTO_RESOLVE_ON_RECOVERY", "BRIDGE_URL", "AGENT_URL",
                             "SERVICENOW_INSTANCE_URL", "GCP_PROJECT", "GCP_REGION")}
         env.update(
             PATH=f"{bin_dir}{os.pathsep}{env['PATH']}",
@@ -96,6 +96,7 @@ def deploy(tmp_path):
             SERVICENOW_INSTANCE_URL="https://example.service-now.com",
         )
         env.update(env_overrides)
+        env = {k: v for k, v in env.items() if v is not None}  # None: unset
         res = subprocess.run([TEST_BASH, str(work / component / "scripts" / "deploy.sh")], cwd=str(work / component),
                              capture_output=True, text=True, env=env, timeout=60)
         calls = [json.loads(line) for line in log.read_text().splitlines()]
@@ -245,3 +246,53 @@ def test_bridge_first_deploy_sets_bridge_url_after_the_deploy(deploy):
     assert len(updates) == 1, calls
     assert _env(updates[0]) == {"BRIDGE_URL": "https://ata-bridge-hash1234-uw.a.run.app"}
     assert calls.index(updates[0]) > calls.index(_deploy_call(calls))
+
+
+@pytest.mark.parametrize("component", ["agent", "bridge", "tools"])
+@pytest.mark.parametrize("unset", ["PROJECT_ID", "REGION"])
+def test_project_and_region_are_required(deploy, component, unset):
+    res, calls = deploy(component, **{unset: None})
+
+    assert res.returncode == 1
+    assert "PROJECT_ID (or GCP_PROJECT) and REGION (or GCP_REGION) are required" in res.stderr
+    assert calls == []
+
+
+def test_gcp_project_and_region_aliases_still_work(deploy):
+    res, calls = deploy("tools", PROJECT_ID=None, REGION=None, GCP_PROJECT="proj-y", GCP_REGION="asia-east1")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    call = _deploy_call(calls)
+    assert (_opt(call, "project"), _opt(call, "region")) == ("proj-y", "asia-east1")
+    assert _env(call)["APIGEE_ORG"] == "proj-y"
+
+
+def test_tools_apigee_org_can_be_set(deploy):
+    res, calls = deploy("tools", APIGEE_ORG="org-z")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert _env(_deploy_call(calls))["APIGEE_ORG"] == "org-z"
+
+
+def test_agent_sets_timer_queue_location_and_oidc_sa_from_prefix_project_and_region(deploy):
+    res, calls = deploy("agent", NAME_PREFIX="abc")
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    env = _env(_deploy_call(calls))
+    assert env["LOCATION"] == "europe-west1"
+    assert env["TIMER_QUEUE_NAME"] == "abc-timer-queue"
+    assert env["SERVICE_ACCOUNT_EMAIL"] == "abc-agent-sa@proj-x.iam.gserviceaccount.com"
+
+
+def test_bridge_reads_servicenow_url_from_tfvars_with_posix_classes(deploy, tmp_path):
+    """BSD sed has no \\s: the tfvars parse uses [[:space:]] (macOS)."""
+    tfvars = tmp_path / "ata" / "infra" / "terraform" / "foundation" / "terraform.tfvars"
+    tfvars.parent.mkdir(parents=True)
+    tfvars.write_text('project_id = "proj-x"\n\tservicenow_instance_url\t=  "https://dev1.service-now.com"\n')
+
+    res, calls = deploy("bridge", SERVICENOW_INSTANCE_URL=None)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert _env(_deploy_call(calls))["SERVICENOW_INSTANCE_URL"] == "https://dev1.service-now.com"
+    text = (ROOT / "bridge" / "scripts" / "deploy.sh").read_text()
+    assert "\\s" not in text

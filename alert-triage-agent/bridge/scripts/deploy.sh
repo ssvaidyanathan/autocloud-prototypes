@@ -10,8 +10,9 @@ BRIDGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=SCRIPTDIR/../../scripts/cloud-run-deploy-lib.sh
 source "${BRIDGE_DIR}/../scripts/cloud-run-deploy-lib.sh"
 
-PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-cloud-assist-fde-2}}"
-REGION="${REGION:-${GCP_REGION:-us-west1}}"
+PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-}}"
+REGION="${REGION:-${GCP_REGION:-}}"
+require_project_and_region || exit 1
 NAME_PREFIX="${NAME_PREFIX:-ata}"
 SERVICE_NAME="${NAME_PREFIX}-bridge"
 IMAGE_TAG="${REGION}-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${SERVICE_NAME}:latest"
@@ -22,7 +23,7 @@ OWNER="${OWNER:-sre-prototypes}"
 # Resolve SERVICENOW_INSTANCE_URL if not provided in environment
 if [ -z "${SERVICENOW_INSTANCE_URL:-}" ]; then
     if [ -f "${BRIDGE_DIR}/../infra/terraform/foundation/terraform.tfvars" ]; then
-        SERVICENOW_INSTANCE_URL=$(grep -E '^\s*servicenow_instance_url\s*=' "${BRIDGE_DIR}/../infra/terraform/foundation/terraform.tfvars" | sed -E 's/.*=\s*"([^"]+)".*/\1/' || true)
+        SERVICENOW_INSTANCE_URL=$(grep -E '^[[:space:]]*servicenow_instance_url[[:space:]]*=' "${BRIDGE_DIR}/../infra/terraform/foundation/terraform.tfvars" | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' || true)
     fi
     if [ -z "${SERVICENOW_INSTANCE_URL:-}" ]; then
         SERVICENOW_INSTANCE_URL=$(gcloud run services describe "${SERVICE_NAME}" --project="${PROJECT_ID}" --region="${REGION}" --format="yaml(spec.template.spec.containers[0].env)" 2>/dev/null | grep -A1 "name: SERVICENOW_INSTANCE_URL" | grep "value:" | awk '{print $2}' || true)

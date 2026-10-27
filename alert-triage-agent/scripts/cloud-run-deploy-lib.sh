@@ -7,6 +7,15 @@
 # never treated as "service not deployed", and no URL is hardcoded.
 # ==============================================================================
 
+# Fail unless the deploy target is configured. PROJECT_ID and REGION have no defaults: a
+# missing value must not deploy into some other project or region.
+require_project_and_region() {
+    if [ -z "${PROJECT_ID:-}" ] || [ -z "${REGION:-}" ]; then
+        echo "ERROR: PROJECT_ID (or GCP_PROJECT) and REGION (or GCP_REGION) are required, e.g. PROJECT_ID=my-project REGION=us-west1 ./scripts/deploy.sh" >&2
+        return 1
+    fi
+}
+
 # Print the status.url of Cloud Run service $1, or nothing when the service does not exist.
 # Returns 1 (after an error on stderr) when the services cannot be listed.
 existing_service_url() {

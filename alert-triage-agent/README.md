@@ -275,7 +275,7 @@ Configuration is managed strictly through typed Pydantic models (`config.py`) lo
 | **Bridge Service URL** | `BRIDGE_URL` | `http://localhost:8080` | On `ata-agent`: URL of `ata-bridge` for instruction endpoints (`/instructions/ticket/*`). On `ata-bridge`: its own `status.url`, an accepted ID-token audience (required unless `IS_LOCAL=true`; see [CONFIGURATION.md §1.1](CONFIGURATION.md#11-bridge-service-ata-bridge)). |
 | **Agent Service URL**  | `AGENT_URL` | `http://localhost:8080` | URL of `ata-agent` called by Cloud Tasks at `POST /triage`. |
 | **Triage Queue Name**  | `TASKS_QUEUE` | `ata-triage-queue` | Cloud Tasks queue for serialized alert dispatches. |
-| **Timer Queue Name**   | `TIMER_QUEUE` | `ata-timer-queue` | Dedicated Cloud Tasks queue for delayed settle/cool-down timers. |
+| **Timer Queue Name**   | `TIMER_QUEUE_NAME` | `ata-timer-queue` | Dedicated Cloud Tasks queue for delayed settle/cool-down timers. |
 | **Gemini Reasoning**   | `MODEL_NAME` | `gemini-3.8-flash` | Gemini model used strictly for gray-zone correlation (scores 35–65). |
 | **ServiceNow URL**     | `SERVICENOW_INSTANCE_URL` | *None* | **Configuration (NOT a secret)**: Base URL of ServiceNow instance (e.g. `https://<instance>.service-now.com`). |
 | **ServiceNow Caller**  | `SERVICENOW_CALLER` | `ATA Integration` | Caller ID populated on created ServiceNow incident records. |
@@ -545,6 +545,8 @@ cd ../../..
 6. `ata-apigee-orders-429`: Apigee proxy `ata-orders-v1` HTTP 429 SpikeArrest rate count > 1.
 7. `ata-cloudsql-connections-critical`: Cloud SQL `ata-inventory-db` connection count > 20 backends.
 8. `ata-cloudsql-cpu-high`: Cloud SQL `ata-inventory-db` CPU utilization > 85%.
+
+Every policy closes an open incident whose condition has received no data for `alert_auto_close_secs` (Terraform variable, default 1800 s, at least 1800: Cloud Monitoring's 30-minute minimum).
 
 ---
 

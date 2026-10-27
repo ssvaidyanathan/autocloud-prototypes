@@ -10,8 +10,9 @@ AGENT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=SCRIPTDIR/../../scripts/cloud-run-deploy-lib.sh
 source "${AGENT_DIR}/../scripts/cloud-run-deploy-lib.sh"
 
-PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-cloud-assist-fde-2}}"
-REGION="${REGION:-${GCP_REGION:-us-west1}}"
+PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT:-}}"
+REGION="${REGION:-${GCP_REGION:-}}"
+require_project_and_region || exit 1
 NAME_PREFIX="${NAME_PREFIX:-ata}"
 SERVICE_NAME="${NAME_PREFIX}-agent"
 IMAGE_TAG="${REGION}-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}-docker/${SERVICE_NAME}:latest"
@@ -59,8 +60,10 @@ if [ -z "${AGENT_URL:-}" ]; then
 fi
 
 # --update-env-vars changes only the variables listed here and keeps every other variable
-# already on the service. --set-env-vars would replace the whole list.
-ENV_VARS="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${INCIDENTS_BUCKET},INCIDENT_STORE_PATH=/knowledge/incident-manager,BRIDGE_URL=${BRIDGE_URL},AGENT_URL=${AGENT_URL}"
+# already on the service. --set-env-vars would replace the whole list. The timer queue
+# (foundation: ${NAME_PREFIX}-timer-queue in var.region) and the timer tasks' OIDC service
+# account are set explicitly: the app defaults name one particular project and region.
+ENV_VARS="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${INCIDENTS_BUCKET},INCIDENT_STORE_PATH=/knowledge/incident-manager,BRIDGE_URL=${BRIDGE_URL},AGENT_URL=${AGENT_URL},LOCATION=${REGION},TIMER_QUEUE_NAME=${NAME_PREFIX}-timer-queue,SERVICE_ACCOUNT_EMAIL=${AGENT_SA}"
 if [ -n "${AUTO_RESOLVE_ON_RECOVERY:-}" ]; then
     ENV_VARS="${ENV_VARS},AUTO_RESOLVE_ON_RECOVERY=${AUTO_RESOLVE_ON_RECOVERY}"
 fi
