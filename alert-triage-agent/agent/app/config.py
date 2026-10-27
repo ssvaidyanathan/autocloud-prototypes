@@ -65,6 +65,18 @@ class AgentConfig(BaseSettings):
     # entries in the -15/+5 min window. When the cap is hit, the report says so, no revision
     # switch is evaluated and log-derived counts are stated as lower bounds.
     apigee_access_log_max_entries: int = Field(default=5000, alias="APIGEE_ACCESS_LOG_MAX_ENTRIES", ge=1)
+    # Entries per Cloud Logging entries.list page. Each page is one call against the project's
+    # 'Read requests per minute' quota. The API default is 50, so 651 access-log entries cost 14
+    # read requests and a 5000-entry cap up to 100. The API maximum is 1000.
+    logging_read_page_size: int = Field(default=1000, alias="LOGGING_READ_PAGE_SIZE", ge=1, le=1000)
+    # Telemetry reads that fail with a quota error (HTTP 429 / RESOURCE_EXHAUSTED) are retried
+    # up to this many attempts in total, with full-jitter exponential backoff: before retry n
+    # the wait is uniform in [0, min(MAX, BASE * 2**(n-1))] seconds. The Logging read quota is
+    # per minute and shared with other workloads in the project (live S3, 2026-10-27 13:03Z).
+    # After the last attempt the data is reported as unavailable, never as a negative finding.
+    gcp_read_retry_attempts: int = Field(default=5, alias="GCP_READ_RETRY_ATTEMPTS", ge=1)
+    gcp_read_retry_base_seconds: float = Field(default=2.0, alias="GCP_READ_RETRY_BASE_SECONDS", ge=0)
+    gcp_read_retry_max_seconds: float = Field(default=30.0, alias="GCP_READ_RETRY_MAX_SECONDS", ge=0)
     # Latency reports: below this many requests/min on the origin over the investigation window
     # the report says the latency rests on little traffic (it may be a cold start) instead of
     # calling it a service-wide degradation. Live 2026-10-27: the stray cold-start ticket

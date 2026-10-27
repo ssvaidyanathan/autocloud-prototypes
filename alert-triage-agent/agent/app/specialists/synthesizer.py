@@ -36,6 +36,7 @@ from .apigee import ACCESS_LOG_NAME, SPIKE_ARREST_FAULT, ApigeeSpecialist, acces
 from .cloud_sql import CloudSQLSpecialist
 from .change import ChangeSpecialist, is_genuine_change
 from .origin_selection import OriginSelection, alert_event_from_entry, onset_allows_explanation, select_origin
+from .telemetry_reads import change_detection_incomplete_text, gap_text, unavailable_telemetry
 
 try:
     from topology.topology_graph import (
@@ -130,6 +131,22 @@ def db_caller_actions(origin: str, project_id: str) -> list[ActionItem]:
         )
         for caller in callers
     ]
+
+
+def degraded_evidence_observation(dossiers: list[EvidenceDossier]) -> Optional[str]:
+    """One observation naming every telemetry source that could not be read, or None.
+
+    Ends with the change-detection consequence when a change source is among them, so the
+    ticket says the change attribution was not assessed instead of implying "no change".
+    """
+    gaps = unavailable_telemetry(dossiers)
+    if not gaps:
+        return None
+    text = "Evidence degraded: " + "; ".join(gap_text(g) for g in gaps)
+    change_gap = change_detection_incomplete_text(gaps)
+    if change_gap:
+        text += f"; {change_gap}"
+    return text
 
 
 def _alert_field(a: dict[str, Any], *keys: str) -> Optional[str]:
@@ -494,13 +511,24 @@ class SynthesizerAgent:
             if d not in blast_radius:
                 blast_radius.append(d)
 
-        # Consolidate evidence and queries
+        # Upstream dependencies were investigated to choose the origin. Their evidence belongs
+        # in this report only when the service is part of this incident: the origin, its blast
+        # radius, or a service alerting in this group. Otherwise a concurrent, disjoint incident
+        # on a shared upstream (S3: inventory 5xx under an orders 429) leaks into this ticket.
+        all_dossiers = dossiers
+        dossiers = self._scope_report_dossiers(
+            dossiers, all_results[len(spec_tasks):], origin, blast_radius, selection, group_id
+        )
+
+        # Consolidate evidence and queries. Several dossiers can share an area (Cloud Run of
+        # the origin and of a dependency): their items are appended, not overwritten.
         all_evidence: dict[str, list[EvidenceItem]] = {}
         all_queries: dict[str, list[str]] = {}
 
-        for d in dossiers:
-            area_key = d.specialist_name.lower().replace("specialist", "")
-            all_evidence[area_key] = d.evidence_items
+        for d in all_dossiers:
+            if any(d is kept for kept in dossiers):
+                area_key = d.specialist_name.lower().replace("specialist", "")
+                all_evidence.setdefault(area_key, []).extend(d.evidence_items)
             for q_type, q_list in d.queries_executed.items():
                 if q_type not in all_queries:
                     all_queries[q_type] = []
@@ -543,6 +571,19 @@ class SynthesizerAgent:
             root_cause_analysis["supporting_evidence"].append(f"{label}: {origin_notes['explanation']}")
             root_cause_analysis["alternatives_ruled_out"].extend(origin_notes["ruled_out"])
         longer_term_fixes = self._build_longer_term_fixes(origin, alert)
+        # Telemetry that could not be read is stated, never read as a negative finding. With a
+        # change source missing and no change implicated, "Change-Induced: No" is unverified.
+        gaps = unavailable_telemetry(dossiers)
+        change_gap = change_detection_incomplete_text(gaps)
+        change_induced: Optional[str] = None
+        if change_gap and not (verdict is not None and verdict.get("implicated")):
+            change_induced = f"Not assessed ({change_gap})"
+            all_evidence.setdefault("change", []).append(
+                EvidenceItem(headline="Change detection incomplete", content=f"{change_gap[0].upper()}{change_gap[1:]}.")
+            )
+            root_cause_analysis.setdefault("contradicting_evidence", []).append(
+                f"Not assessed: {change_gap}"
+            )
         execution_duration = time.monotonic() - start_time
         agent_run_metadata = self._build_agent_metadata(config, duration_seconds=execution_duration)
         tools_used = [
@@ -568,6 +609,7 @@ class SynthesizerAgent:
             blast_radius=blast_radius,
             priority=priority,
             status="In Progress",
+            change_induced=change_induced,
             first_seen=first_seen,
             last_alert=last_alert,
             report_generated_at=now_str,
@@ -962,6 +1004,37 @@ class SynthesizerAgent:
                 return str(labels["signal"])
             return ""
         return signal_of
+
+    @staticmethod
+    def _scope_report_dossiers(
+        dossiers: list[EvidenceDossier],
+        dependency_dossiers: Any,
+        origin: str,
+        blast_radius: list[str],
+        selection: Optional[OriginSelection],
+        group_id: str,
+    ) -> list[EvidenceDossier]:
+        """Dossiers whose evidence may appear in this group's report.
+
+        The primary specialists' dossiers are kept. A dependency dossier (Cloud Run of an
+        upstream service, investigated only to choose the origin) is kept when its service is
+        the origin, in the blast radius, or alerting in this group.
+        """
+        deps = [id(d) for d in dependency_dossiers]
+        in_scope = set(blast_radius) | {origin}
+        if selection is not None:
+            in_scope |= set(selection.degraded_services)
+        kept: list[EvidenceDossier] = []
+        for d in dossiers:
+            if id(d) in deps and d.target_resource not in in_scope:
+                logger.info(
+                    "Group %s: evidence of upstream dependency %s not reported (not the origin %s, "
+                    "not in its blast radius, no alert in this group)",
+                    group_id, d.target_resource, origin,
+                )
+                continue
+            kept.append(d)
+        return kept
 
     @staticmethod
     def _neutralize_change_dossier(chg: EvidenceDossier, verdict: dict[str, Any]) -> EvidenceDossier:
@@ -1779,6 +1852,11 @@ class SynthesizerAgent:
                 alert.policy_name, alert.resource_name, started_at, alert.state, alert.incident_id
             )
         )
+
+        # Degraded evidence second, so the 5-item cap never drops it.
+        degraded = degraded_evidence_observation(dossiers)
+        if degraded:
+            obs_items.append(degraded)
 
         # 2. Metric evidence items
         for d in dossiers:

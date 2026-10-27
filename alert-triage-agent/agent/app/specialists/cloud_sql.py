@@ -12,8 +12,12 @@ from ..config import AgentConfig
 from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
 from .base import BaseSpecialist, EvidenceDossier
+from .telemetry_reads import UNAVAILABLE_KEY, failure_reason, gap_text, read_log_entries, record_unavailable
 
 logger = logging.getLogger(__name__)
+
+# Lock-wait / deadlock log entries read per investigation (one page).
+CLOUD_SQL_LOCK_LOG_MAX_ENTRIES = 20
 
 
 def _parse_time_window(alert: AlertEvent) -> tuple[datetime, datetime]:
@@ -136,6 +140,7 @@ class CloudSQLSpecialist(BaseSpecialist):
                     ),
                 ]
                 conns_by_timestamp: dict[float, int] = {}
+                conn_failures: list[Exception] = []
                 for c_filter in conn_filters:
                     try:
                         req_conns = monitoring_v3.ListTimeSeriesRequest(
@@ -176,6 +181,13 @@ class CloudSQLSpecialist(BaseSpecialist):
                             break
                     except Exception as filter_exc:
                         logger.warning("Cloud SQL connections query attempt failed for filter %s: %s", c_filter, filter_exc)
+                        conn_failures.append(filter_exc)
+
+                if active_connections_val is None and conn_failures:
+                    record_unavailable(
+                        metrics, source="Cloud Monitoring Cloud SQL connections", target=short_db_instance,
+                        reason=failure_reason(conn_failures[-1], "Cloud Monitoring"),
+                    )
 
                 # Query CPU utilization
                 req_cpu = monitoring_v3.ListTimeSeriesRequest(
@@ -196,6 +208,10 @@ class CloudSQLSpecialist(BaseSpecialist):
                             cpu_utilization_pct_val = pct
             except Exception as exc:
                 logger.warning("Cloud SQL Cloud Monitoring query failed for %s: %s", short_db_instance, exc)
+                record_unavailable(
+                    metrics, source="Cloud Monitoring Cloud SQL metrics", target=short_db_instance,
+                    reason=failure_reason(exc, "Cloud Monitoring"),
+                )
 
             # 2. Cloud SQL Admin API Describe
             try:
@@ -230,17 +246,31 @@ class CloudSQLSpecialist(BaseSpecialist):
                             max_connections_val = 100
             except Exception as exc:
                 logger.warning("Cloud SQL Admin API query failed for %s: %s", short_db_instance, exc)
+                record_unavailable(
+                    metrics, source="Cloud SQL Admin API instance describe", target=short_db_instance,
+                    reason=f"Cloud SQL Admin API read failed ({type(exc).__name__})",
+                )
 
             # 3. Cloud Logging for lock wait / deadlock events
             try:
                 import google.cloud.logging
 
                 log_client = google.cloud.logging.Client(project=config.project_id)
-                log_entries = list(log_client.list_entries(filter_=query_sql_logs, max_results=20))
+                log_entries = await read_log_entries(
+                    log_client,
+                    filter_=query_sql_logs,
+                    max_results=CLOUD_SQL_LOCK_LOG_MAX_ENTRIES,
+                    config=config,
+                    what=f"Cloud Logging lock-wait read for {short_db_instance}",
+                )
                 if log_entries:
                     active_lock_waits_val = len(log_entries)
             except Exception as exc:
                 logger.warning("Cloud SQL Logging query failed for %s: %s", short_db_instance, exc)
+                record_unavailable(
+                    metrics, source="Cloud SQL lock-wait logs", target=short_db_instance,
+                    reason=failure_reason(exc, "Cloud Logging"),
+                )
 
         # Assign metrics or 'N/A (not captured)'
         metrics["active_connections"] = (
@@ -328,6 +358,19 @@ class CloudSQLSpecialist(BaseSpecialist):
                         f"Active Connections: {metrics['active_connections']} / {metrics['max_connections']}\n"
                         f"CPU Utilization: {metrics['cpu_utilization_pct']}\n"
                         f"Lock Wait Events: {metrics['active_lock_waits']}"
+                    ),
+                )
+            )
+        elif metrics.get(UNAVAILABLE_KEY):
+            # Reads failed: "healthy" would be an unverified claim.
+            gaps = "; ".join(gap_text(g) for g in metrics[UNAVAILABLE_KEY])
+            findings.append(f"Cloud SQL database instance `{short_db_instance}` health not assessed: {gaps}.")
+            evidence_items.append(
+                EvidenceItem(
+                    headline=f"Cloud SQL Health not assessed: {short_db_instance}",
+                    content=(
+                        f"Telemetry unavailable for `{short_db_instance}`: {gaps}. Captured: connections "
+                        f"{metrics['active_connections']}/{metrics['max_connections']}, CPU {metrics['cpu_utilization_pct']}."
                     ),
                 )
             )

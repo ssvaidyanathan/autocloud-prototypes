@@ -13,8 +13,16 @@ from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
 from ..request_count import REQUEST_COUNT_METRIC, request_count_filter, request_count_series
 from .base import BaseSpecialist, EvidenceDossier
+from .telemetry_reads import UNAVAILABLE_KEY, failure_reason, gap_text, read_log_entries, record_unavailable
 
 logger = logging.getLogger(__name__)
+
+# Cloud Run audit-log entries read per investigation (one page).
+AUDIT_LOG_MAX_ENTRIES = 20
+
+
+class _SourceAbsent(Exception):
+    """The change source is not part of this deployment (not a failed read)."""
 
 
 # Evaluate genuine changes within the 2-hour window:
@@ -211,9 +219,16 @@ class ChangeSpecialist(BaseSpecialist):
         # below query Cloud Run alone, so a "no deployments" finding must say which it covered.
         apigee_queried = False
 
-        # 1. First attempt querying via tools fastmcp server if available
+        # 1. First attempt querying via tools fastmcp server if available. The agent image
+        # does not ship the tools package, so ImportError means "source not present", not a
+        # failed read; any other error is a failed read and is recorded as such.
         try:
             from tools.app.server import get_change_timeline
+        except ImportError:
+            get_change_timeline = None
+        try:
+            if get_change_timeline is None:
+                raise _SourceAbsent()
             tl = get_change_timeline(window_hours=2, project_id=config.project_id, region=config.region)
             apigee_queried = not any(
                 c.get("source") == "apigee" and c.get("error") for c in tl.get("changes", [])
@@ -263,8 +278,14 @@ class ChangeSpecialist(BaseSpecialist):
                     "details": chg.get("details", {}),
                     "status": "Ready",
                 })
+        except (_SourceAbsent, ImportError):
+            logger.debug("Tools get_change_timeline not available in this image; querying Cloud Run directly")
         except Exception as e:
-            logger.debug("Tools get_change_timeline query skipped or failed: %s", e)
+            logger.warning("Tools get_change_timeline query failed: %s", e)
+            record_unavailable(
+                metrics, source="change timeline (ata-tools get_change_timeline)", target=alert.resource_name,
+                reason=f"change timeline read failed ({type(e).__name__})", affects_change_detection=True,
+            )
 
         # 2. Self-contained Cloud Run Admin API query (runs directly inside Cloud Run container)
         if not recent_changes and not config.is_local:
@@ -281,6 +302,12 @@ class ChangeSpecialist(BaseSpecialist):
                 cutoff = now - timedelta(hours=2)
                 services_url = f"https://run.googleapis.com/v2/projects/{config.project_id}/locations/{config.region}/services"
                 resp = requests.get(services_url, headers=headers, timeout=15)
+                if resp.status_code != 200:
+                    record_unavailable(
+                        metrics, source="Cloud Run Admin API services list", target=config.region,
+                        reason=f"Cloud Run Admin API returned HTTP {resp.status_code}",
+                        affects_change_detection=True,
+                    )
                 if resp.status_code == 200:
                     services = resp.json().get("services", [])
                     for svc in services:
@@ -292,6 +319,12 @@ class ChangeSpecialist(BaseSpecialist):
                         rev_resp = requests.get(rev_url, headers=headers, timeout=15)
                         new_revisions_in_window = []
                         all_service_revs = []
+                        if rev_resp.status_code != 200:
+                            record_unavailable(
+                                metrics, source="Cloud Run Admin API revisions list", target=svc_short,
+                                reason=f"Cloud Run Admin API returned HTTP {rev_resp.status_code}",
+                                affects_change_detection=True,
+                            )
                         if rev_resp.status_code == 200:
                             all_service_revs = rev_resp.json().get("revisions", [])
                             for rev in all_service_revs:
@@ -413,6 +446,10 @@ class ChangeSpecialist(BaseSpecialist):
                                 pass
             except Exception as e:
                 logger.warning("Direct Cloud Run Admin API change query failed: %s", e)
+                record_unavailable(
+                    metrics, source="Cloud Run Admin API revision history", target=config.region,
+                    reason=f"Cloud Run Admin API read failed ({type(e).__name__})", affects_change_detection=True,
+                )
 
         # 3. Direct Cloud Logging audit query for Services.ReplaceService / UpdateService events
         if not config.is_local:
@@ -425,7 +462,13 @@ class ChangeSpecialist(BaseSpecialist):
                     f'protoPayload.serviceName="run.googleapis.com" AND '
                     f'timestamp >= "{cutoff_iso}"'
                 )
-                audit_entries = list(log_client.list_entries(filter_=audit_filter, max_results=20))
+                audit_entries = await read_log_entries(
+                    log_client,
+                    filter_=audit_filter,
+                    max_results=AUDIT_LOG_MAX_ENTRIES,
+                    config=config,
+                    what="Cloud Logging Cloud Run audit-log read",
+                )
                 for ae in audit_entries:
                     pld = ae.payload if isinstance(ae.payload, dict) else {}
                     method = str(pld.get("methodName", ""))
@@ -456,7 +499,12 @@ class ChangeSpecialist(BaseSpecialist):
                                     "status": "Ready",
                                 })
             except Exception as e:
-                logger.debug("Cloud Logging audit change query skipped or failed: %s", e)
+                logger.warning("Cloud Logging audit change query failed: %s", e)
+                record_unavailable(
+                    metrics, source="Cloud Run audit log (cloudaudit.googleapis.com/activity)",
+                    target=config.project_id, reason=failure_reason(e, "Cloud Logging"),
+                    affects_change_detection=True,
+                )
 
         metrics["all_changes"] = recent_changes
         target = alert.resource_name
@@ -513,6 +561,12 @@ class ChangeSpecialist(BaseSpecialist):
                     ),
                 )
             )
+        elif metrics.get(UNAVAILABLE_KEY):
+            # A change source could not be read: "no deployments" would be an unverified claim.
+            gaps = "; ".join(gap_text(g) for g in metrics[UNAVAILABLE_KEY])
+            content = f"Change detection incomplete: {gaps}; change attribution not assessed."
+            findings.append(content)
+            evidence_items.append(EvidenceItem(headline="Deployment History Analysis (incomplete)", content=content))
         else:
             if apigee_queried:
                 findings.append("No configuration or revision deployments detected in the 2-hour window prior to alert onset.")

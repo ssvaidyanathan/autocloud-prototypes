@@ -14,6 +14,7 @@ from ..config import AgentConfig
 from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
 from .base import BaseSpecialist, EvidenceDossier
+from .telemetry_reads import UNAVAILABLE_KEY, failure_reason, gap_text, read_log_entries, record_unavailable
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,8 @@ LATENCY_P95_BREACH_MS = 2000.0
 LATENCY_STAT_MINUTE_MEAN = "peak per-minute mean latency"
 LATENCY_STAT_LOGGED_REQUEST = "slowest logged request latency"
 LATENCY_STAT_GENERIC = "peak observed latency"
+# Newest application/request log entries read per service (one page).
+CLOUD_RUN_LOG_MAX_ENTRIES = 50
 
 
 def latency_label(metrics: Optional[dict[str, Any]]) -> str:
@@ -246,6 +249,7 @@ class CloudRunSpecialist(BaseSpecialist):
         error_logs_captured: list[dict[str, Any]] = []
         detected_db_auth_in_logs: bool = False
         detected_db_connect_failure_in_logs: bool = False
+        logs_unavailable = False
 
         # 1. Cloud Monitoring time series query
         try:
@@ -326,6 +330,10 @@ class CloudRunSpecialist(BaseSpecialist):
                                 earliest_anomaly_time = pt_time
         except Exception as exc:
             logger.warning("Live Cloud Monitoring query failed for %s: %s", target_service, exc)
+            record_unavailable(
+                metrics, source="Cloud Monitoring request metrics", target=target_service,
+                reason=failure_reason(exc, "Cloud Monitoring"),
+            )
 
         # 2. Cloud Logging query with endpoint filtering
         try:
@@ -338,14 +346,14 @@ class CloudRunSpecialist(BaseSpecialist):
             )
 
             log_client = google.cloud.logging.Client(project=config.project_id)
-            try:
-                log_entries = log_client.list_entries(
-                    filter_=query_logs,
-                    max_results=50,
-                    order_by=google.cloud.logging.DESCENDING,
-                )
-            except TypeError:
-                log_entries = log_client.list_entries(filter_=query_logs, max_results=50)
+            log_entries = await read_log_entries(
+                log_client,
+                filter_=query_logs,
+                max_results=CLOUD_RUN_LOG_MAX_ENTRIES,
+                order_by=google.cloud.logging.DESCENDING,
+                config=config,
+                what=f"Cloud Logging application log read for {target_service}",
+            )
 
             detected_db_auth_in_logs = False
 
@@ -428,7 +436,13 @@ class CloudRunSpecialist(BaseSpecialist):
                         "latency_ms": entry_lat_ms,
                     })
         except Exception as exc:
-            logger.debug("Live Cloud Logging query skipped or failed for %s: %s", target_service, exc)
+            # Without the logs, "no error logs" and "no database auth failure" are not facts.
+            logs_unavailable = True
+            logger.warning("Live Cloud Logging query failed for %s: %s", target_service, exc)
+            record_unavailable(
+                metrics, source="Cloud Run application logs", target=target_service,
+                reason=failure_reason(exc, "Cloud Logging"),
+            )
 
         # 3. Cloud Run Service Describe
         if not config.is_local:
@@ -553,6 +567,13 @@ class CloudRunSpecialist(BaseSpecialist):
                 log_lines = "\n".join(
                     f"- {e['formatted_line']}" for e in error_logs_captured[:5]
                 )
+            elif logs_unavailable:
+                gap = metrics[UNAVAILABLE_KEY][-1]
+                findings.append(
+                    f"Application logs of `{target_service}` could not be read ({gap['reason']}): error log "
+                    "excerpts and database failure signatures not assessed."
+                )
+                log_lines = f"- Not assessed: {gap['reason']}"
             else:
                 findings.append("No active error logs captured in query window (excluding /admin/*).")
                 log_lines = "- N/A (not captured)"
@@ -571,6 +592,16 @@ class CloudRunSpecialist(BaseSpecialist):
                 EvidenceItem(
                     headline=f"Cloud Run Anomaly Distribution: {target_service}",
                     content=evidence_content,
+                )
+            )
+        elif metrics.get(UNAVAILABLE_KEY):
+            # No anomaly found because reads failed: not evidence of baseline operation.
+            gaps = "; ".join(gap_text(g) for g in metrics[UNAVAILABLE_KEY])
+            findings.append(f"Cloud Run service `{target_service}` health not assessed: {gaps}.")
+            evidence_items.append(
+                EvidenceItem(
+                    headline=f"Cloud Run Service Health not assessed: {target_service}",
+                    content=f"Telemetry unavailable for `{target_service}`: {gaps}.",
                 )
             )
         else:

@@ -15,6 +15,7 @@ from ..config import AgentConfig
 from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
 from .base import BaseSpecialist, EvidenceDossier
+from .telemetry_reads import UNAVAILABLE_KEY, failure_reason, gap_text, read_log_entries, record_unavailable
 
 logger = logging.getLogger(__name__)
 
@@ -170,9 +171,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 f'fetch apigee.googleapis.com/proxy/response_count | filter resource.proxy_name == "{target_proxy}"',
                 f'fetch apigee.googleapis.com/target/latencies | filter resource.proxy_name == "{target_proxy}"',
             ],
-            "cloud_logging": [
-                f'logName="{access_log_name(config.project_id)}" AND jsonPayload.proxy="{target_proxy}"'
-            ],
+            "cloud_logging": [],
         }
 
         is_apigee_incident = "apigee" in alert.resource_name.lower() or any(
@@ -219,6 +218,7 @@ class ApigeeSpecialist(BaseSpecialist):
         metric_envs: set[str] = set()
         log_envs: set[str] = set()
         access_log_truncated = False
+        access_log_unavailable = False
 
         # 1. Query Cloud Monitoring: proxy/response_count
         try:
@@ -266,6 +266,10 @@ class ApigeeSpecialist(BaseSpecialist):
                     gt_response_code = code or gt_response_code
         except Exception as exc:
             logger.warning("Cloud Monitoring proxy/response_count query error: %s", exc)
+            record_unavailable(
+                metrics, source="Cloud Monitoring apigee.googleapis.com/proxy/response_count",
+                target=target_proxy, reason=failure_reason(exc, "Cloud Monitoring"),
+            )
 
         # 2. Query Cloud Monitoring: target/latencies
         try:
@@ -290,6 +294,10 @@ class ApigeeSpecialist(BaseSpecialist):
                         minute_means_ms.append(float(getattr(dist, "mean", 0.0)))
         except Exception as exc:
             logger.warning("Cloud Monitoring target/latencies query error: %s", exc)
+            record_unavailable(
+                metrics, source=f"Cloud Monitoring {TARGET_LATENCIES_METRIC}",
+                target=target_proxy, reason=failure_reason(exc, "Cloud Monitoring"),
+            )
 
         # 3. Query Cloud Logging: ata-apigee-access
         try:
@@ -297,24 +305,25 @@ class ApigeeSpecialist(BaseSpecialist):
             logging_client = google.cloud.logging.Client(project=config.project_id)
             start_ts = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
             end_ts = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+            # One read per window: the proxy-name variants are one OR clause instead of a
+            # second query run when the first returned nothing. Pages are LOGGING_READ_PAGE_SIZE
+            # entries, so the cap costs ceil(cap / page size) read requests, not cap / 50.
             log_filter = (
                 f'logName="{access_log_name(config.project_id)}" AND '
-                f'jsonPayload.proxy="{target_proxy}" AND '
+                f'(jsonPayload.proxy="{target_proxy}" OR jsonPayload.proxy_name="{target_proxy}" '
+                f'OR textPayload:"{target_proxy}") AND '
                 f'timestamp>="{start_ts}" AND timestamp<="{end_ts}"'
             )
+            queries_executed["cloud_logging"].append(log_filter)
             log_cap = config.apigee_access_log_max_entries
-            entries = list(logging_client.list_entries(
-                filter_=log_filter, max_results=log_cap, order_by=google.cloud.logging.ASCENDING
-            ))
-            if not entries:
-                alt_filter = (
-                    f'logName="{access_log_name(config.project_id)}" AND '
-                    f'(jsonPayload.proxy_name="{target_proxy}" OR textPayload:"{target_proxy}") AND '
-                    f'timestamp>="{start_ts}" AND timestamp<="{end_ts}"'
-                )
-                entries = list(logging_client.list_entries(
-                    filter_=alt_filter, max_results=log_cap, order_by=google.cloud.logging.ASCENDING
-                ))
+            entries = await read_log_entries(
+                logging_client,
+                filter_=log_filter,
+                max_results=log_cap,
+                order_by=google.cloud.logging.ASCENDING,
+                config=config,
+                what=f"Cloud Logging {ACCESS_LOG_NAME} read for {target_proxy}",
+            )
 
             if len(entries) >= log_cap:
                 # Oldest-first and capped: the newest entries were not read, so per-revision
@@ -375,6 +384,23 @@ class ApigeeSpecialist(BaseSpecialist):
                 top_client_ip = client_counter.most_common(1)[0][0]
         except Exception as exc:
             logger.warning("Cloud Logging ata-apigee-access query error: %s", exc)
+            access_log_unavailable = True
+            reason = failure_reason(exc, "Cloud Logging")
+            # Proxy revision switches come only from this log: without it change detection is
+            # incomplete and the report must not say the incident is not change-induced.
+            record_unavailable(
+                metrics, source=f"Apigee access log {ACCESS_LOG_NAME}", target=target_proxy,
+                reason=reason, affects_change_detection=True,
+            )
+            gap_msg = (
+                f"Apigee access log {ACCESS_LOG_NAME} for `{target_proxy}` could not be read ({reason}) in "
+                f"[{window_start.strftime('%Y-%m-%dT%H:%M:%SZ')}, {window_end.strftime('%Y-%m-%dT%H:%M:%SZ')}]: "
+                "proxy revision switch, client and per-request counts not assessed."
+            )
+            findings.append(gap_msg)
+            evidence_items.append(
+                EvidenceItem(headline=f"Apigee access log unavailable: {target_proxy}", content=gap_msg)
+            )
 
         # Calculate latency metrics if captured
         lat_summary = target_latency_summary(logged_latencies_ms, minute_means_ms)
@@ -431,7 +457,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 "fault_code": sa_fault_code or SPIKE_ARREST_FAULT,
             }
         revision_change = None
-        if not access_log_truncated and len(envs) <= 1:
+        if not access_log_truncated and not access_log_unavailable and len(envs) <= 1:
             revision_change = summarize_revision_change(
                 revision_stats, latest_entry[1] if latest_entry else None
             )
@@ -549,6 +575,13 @@ class ApigeeSpecialist(BaseSpecialist):
                 codes_summary = ", ".join(f"HTTP {c}: {cnt}" for c, cnt in sorted(status_counts.items()))
                 findings.append(f"Observed response codes in window: {codes_summary}.")
                 content_str = f"Access log metrics for `{target_proxy}`: {codes_summary}."
+            elif metrics.get(UNAVAILABLE_KEY):
+                # Empty because reads failed: not evidence that nothing happened.
+                findings.append(
+                    "Error spike and policy breach not assessed: "
+                    + "; ".join(gap_text(g) for g in metrics[UNAVAILABLE_KEY]) + "."
+                )
+                content_str = f"Access log metrics for `{target_proxy}`: not assessed (telemetry unavailable)."
             else:
                 findings.append("No anomalous error spike or policy breach detected in query window.")
                 content_str = f"Access log metrics for `{target_proxy}`: N/A (not captured)."
