@@ -76,8 +76,18 @@ async def verify_agent_caller(
     expected_audiences = {
         str(request.base_url).rstrip("/"),
         f"https://{settings.name_prefix}-bridge-4klvlqnmpa-uw.a.run.app",
-        f"https://{settings.name_prefix}-bridge-185099261133.{settings.region}.run.app",
     }
+    if settings.project_number:
+        expected_audiences.add(f"https://{settings.name_prefix}-bridge-{settings.project_number}.{settings.region}.run.app")
+    elif not settings.is_local:
+        logger.error(
+            "ata-bridge misconfigured: PROJECT_NUMBER is not set, so the bridge Cloud Run URL audience "
+            "cannot be built; rejecting the request. Set PROJECT_NUMBER (bridge/scripts/deploy.sh sets it)."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Bridge misconfigured: PROJECT_NUMBER is not set",
+        )
     if settings.is_local:
         expected_audiences.add("mock-bridge-aud")
 

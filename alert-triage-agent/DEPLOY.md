@@ -253,6 +253,7 @@ cd alert-triage-agent/bridge
 > - `OWNER`: Owning engineering team or contact (`sre-prototypes`, `devops`; default: `sre-prototypes`).
 > - `NAME_PREFIX`: Resource name prefix (default: `ata`).
 > - `VERIFIER_SA`: Optional service account email authorized to invoke the read-only ticket verification endpoint.
+> - `PROJECT_NUMBER` (bridge only): Numeric GCP project number. If unset, `bridge/scripts/deploy.sh` looks it up with `gcloud projects describe` and exits if that fails. The bridge refuses to start without it.
 >
 > Example: `ENVIRONMENT=staging OWNER=infra-team ./scripts/deploy.sh`
 

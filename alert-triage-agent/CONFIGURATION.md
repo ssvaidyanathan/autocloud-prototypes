@@ -13,6 +13,7 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
 | `PROJECT_ID` | `cloud-assist-fde-2` | Google Cloud project ID. |
+| `PROJECT_NUMBER` | *None (required unless `IS_LOCAL=true`)* | Numeric GCP project number. The bridge accepts `https://<NAME_PREFIX>-bridge-<PROJECT_NUMBER>.<REGION>.run.app` as an ID-token audience on `/instructions/*`. Without it a non-local bridge fails at startup, and auth returns HTTP 500. `bridge/scripts/deploy.sh` sets it from `gcloud projects describe` unless it is already in the environment. |
 | `NAME_PREFIX` | `ata` | Resource namespace prefix. |
 | `REGION` | `us-west1` | GCP region for Cloud Tasks and Cloud Run. |
 | `ENVIRONMENT` | `prod` | Runtime environment name read by the service. The deploy scripts do not set it, so the default applies. Not the `env` resource label (see [§7.1](#71-label-scheme--value-requirements)). |

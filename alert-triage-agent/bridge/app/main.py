@@ -36,7 +36,16 @@ _adapter: Optional[ServiceNowAdapter] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Stateless lifespan without background evaluation loops."""
+    """Stateless lifespan without background evaluation loops.
+
+    Fails startup when a required setting is missing, so a misconfigured revision never
+    takes traffic (Cloud Run keeps serving the previous one).
+    """
+    missing = get_settings().missing_required_settings()
+    if missing:
+        message = f"ata-bridge cannot start: required setting(s) not set: {', '.join(missing)}"
+        logger.error(message)
+        raise RuntimeError(message)
     yield
 
 

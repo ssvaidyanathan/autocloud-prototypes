@@ -32,9 +32,20 @@ if [ -z "${SERVICENOW_INSTANCE_URL:-}" ]; then
     exit 1
 fi
 
+# Resolve PROJECT_NUMBER (numeric GCP project number) if not provided in environment.
+# The bridge builds its Cloud Run URL ID-token audience from it and refuses to start without it.
+if [ -z "${PROJECT_NUMBER:-}" ]; then
+    PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)" 2>/dev/null || true)"
+fi
+
+if [ -z "${PROJECT_NUMBER:-}" ]; then
+    echo "PROJECT_NUMBER is required: set it or grant access to 'gcloud projects describe ${PROJECT_ID}'" >&2
+    exit 1
+fi
+
 # Resolve AGENT_URL if not provided in environment
 if [ -z "${AGENT_URL:-}" ]; then
-    AGENT_URL="$(gcloud run services describe "${NAME_PREFIX}-agent" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)" 2>/dev/null || echo "https://${NAME_PREFIX}-agent-185099261133.${REGION}.run.app")"
+    AGENT_URL="$(gcloud run services describe "${NAME_PREFIX}-agent" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)" 2>/dev/null || echo "https://${NAME_PREFIX}-agent-${PROJECT_NUMBER}.${REGION}.run.app")"
 fi
 
 echo "==================================================================="
@@ -51,7 +62,7 @@ gcloud builds submit "${BRIDGE_DIR}" \
 # 2. Deploy to Cloud Run
 # A single bridge instance is sufficient for this prototype; the bridge holds no grouping state (grouping, timers and suppression live in the agent).
 echo "Deploying Cloud Run service ${SERVICE_NAME}..."
-ENV_VARS="PROJECT_ID=${PROJECT_ID},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${PROJECT_ID}-${NAME_PREFIX}-incidents,TASKS_QUEUE=${NAME_PREFIX}-triage-queue,AGENT_URL=${AGENT_URL},SERVICENOW_INSTANCE_URL=${SERVICENOW_INSTANCE_URL}"
+ENV_VARS="PROJECT_ID=${PROJECT_ID},PROJECT_NUMBER=${PROJECT_NUMBER},NAME_PREFIX=${NAME_PREFIX},REGION=${REGION},INCIDENTS_BUCKET=${PROJECT_ID}-${NAME_PREFIX}-incidents,TASKS_QUEUE=${NAME_PREFIX}-triage-queue,AGENT_URL=${AGENT_URL},SERVICENOW_INSTANCE_URL=${SERVICENOW_INSTANCE_URL}"
 if [ -n "${VERIFIER_SA:-}" ]; then
     ENV_VARS="${ENV_VARS},VERIFIER_SA=${VERIFIER_SA}"
 fi

@@ -1,7 +1,8 @@
 import logging
 import os
+import re
 from typing import Optional
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,10 @@ class BridgeConfig(BaseSettings):
     )
 
     project_id: str = Field(default="cloud-assist-fde-2", alias="PROJECT_ID")
+    # Numeric GCP project number. Used to build the bridge's deterministic Cloud Run URL
+    # (https://<prefix>-bridge-<number>.<region>.run.app), an accepted ID-token audience.
+    # Required when not local: startup fails and auth returns 500 without it.
+    project_number: Optional[str] = Field(default=None, alias="PROJECT_NUMBER")
     name_prefix: str = Field(default="ata", alias="NAME_PREFIX")
     region: str = Field(default="us-west1", alias="REGION")
     environment: str = Field(default="prod", alias="ENVIRONMENT")
@@ -46,6 +51,21 @@ class BridgeConfig(BaseSettings):
     verifier_sa: Optional[str] = Field(default=None, alias="VERIFIER_SA")
     adapter_timeout_seconds: float = Field(default=30.0, alias="ADAPTER_TIMEOUT_SECONDS")
     cool_down_duration: float = Field(default=180.0, alias="COOL_DOWN_DURATION")
+
+    @field_validator("project_number", mode="before")
+    @classmethod
+    def _validate_project_number(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        if not re.fullmatch(r"[0-9]+", str(value)):
+            raise ValueError(f"PROJECT_NUMBER must be the numeric GCP project number, got {value!r}")
+        return str(value)
+
+    def missing_required_settings(self) -> list[str]:
+        """Settings without which a non-local bridge cannot authenticate callers correctly."""
+        if self.is_local:
+            return []
+        return ["PROJECT_NUMBER"] if self.project_number is None else []
 
     @property
     def effective_incidents_bucket(self) -> str:
