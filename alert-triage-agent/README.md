@@ -439,7 +439,7 @@ cd ../../..
 
 **Resources Created**:
 - GCS Bucket: `gs://${PROJECT_ID}-${NAME_PREFIX}-incidents` (versioning enabled).
-- Cloud Tasks Queues: `ata-triage-queue` (max concurrent: 1, retried within `triage_queue_max_retry_duration`) and `ata-timer-queue` (max concurrent: 50, GCP default retries).
+- Cloud Tasks Queues: `ata-triage-queue` (max concurrent: 1, retried within `triage_queue_max_retry_duration`) and `ata-timer-queue` (max concurrent: 50, retried within `timer_queue_max_retry_duration`).
 - Service Accounts: `ata-orders-sa`, `ata-inventory-sa`, `ata-apigee-sa`, `ata-bridge-sa`, `ata-agent-sa`, `ata-tools-sa`.
 - Secret Placeholders: `ata-webhook-token`, `ata-servicenow-username`, `ata-servicenow-password`.
 

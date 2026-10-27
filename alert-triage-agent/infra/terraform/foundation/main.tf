@@ -53,6 +53,15 @@ resource "google_cloud_tasks_queue" "timer_queue" {
     max_concurrent_dispatches = 50
     max_dispatches_per_second = 50
   }
+
+  # Same rule as the triage queue: retrying stops only once BOTH max_attempts and
+  # max_retry_duration are satisfied, so the duration is the binding limit.
+  retry_config {
+    max_attempts       = var.timer_queue_max_attempts
+    max_retry_duration = var.timer_queue_max_retry_duration
+    min_backoff        = var.timer_queue_min_backoff
+    max_backoff        = var.timer_queue_max_backoff
+  }
 }
 
 # 3. Artifact Registry Docker Repository

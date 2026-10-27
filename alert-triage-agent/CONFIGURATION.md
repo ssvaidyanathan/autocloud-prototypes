@@ -191,10 +191,19 @@ resource "google_cloud_tasks_queue" "timer_queue" {
     max_concurrent_dispatches = 50
     max_dispatches_per_second = 50
   }
+
+  # Same rule as the triage queue: retrying stops only once BOTH max_attempts and
+  # max_retry_duration are satisfied, so the duration is the binding limit.
+  retry_config {
+    max_attempts       = var.timer_queue_max_attempts
+    max_retry_duration = var.timer_queue_max_retry_duration
+    min_backoff        = var.timer_queue_min_backoff
+    max_backoff        = var.timer_queue_max_backoff
+  }
 }
 ```
 
-The triage queue retry values come from variables in `infra/terraform/foundation/variables.tf`. The defaults below are copied from that file, which is the source of truth. The rest of the documentation refers to the retry window as `triage_queue_max_retry_duration` and does not repeat its value. Terraform validation rejects `max_attempts` below 1, malformed durations, and a `max_backoff` smaller than `min_backoff`. It also enforces these ranges, which follow the Cloud Tasks limits:
+The retry values of both queues come from variables in `infra/terraform/foundation/variables.tf` (`triage_queue_*` and `timer_queue_*`). The defaults below are copied from that file, which is the source of truth. The rest of the documentation refers to the retry windows as `triage_queue_max_retry_duration` and `timer_queue_max_retry_duration` and does not repeat their values. For each queue, Terraform validation rejects `max_attempts` below 1, malformed durations, and a `max_backoff` smaller than `min_backoff`. It also enforces these ranges, which follow the Cloud Tasks limits:
 - **Retry duration:** greater than `0s` and at most `"2678400s"`, the 31-day [maximum task retention](https://cloud.google.com/tasks/docs/quotas).
 - **Both backoffs:** from `"1s"` to `"2592000s"`. The upper bound is the 30-day [maximum schedule time](https://cloud.google.com/tasks/docs/quotas), since no retry can be scheduled further ahead. The lower bound is there because the [`RetryConfig` reference](https://cloud.google.com/tasks/docs/reference/rpc/google.cloud.tasks.v2#retryconfig) says backoffs are truncated to whole seconds, so `"0s"` and sub-second values are rejected.
 
@@ -206,12 +215,16 @@ The `max_backoff >= min_backoff` check runs only when both values are well forme
 | `triage_queue_min_backoff` | `"1s"` | First wait between retries. The wait doubles on each retry, up to `max_backoff` (16 doublings by default). |
 | `triage_queue_max_backoff` | `"300s"` (5 min) | Longest wait between retries. |
 | `triage_queue_max_attempts` | `5` | Minimum attempts per task. Cloud Tasks stops retrying only when **both** this and the retry duration are satisfied. It is kept at a small positive value so that the retry window sets the limit. `-1` is rejected by validation: the [Cloud Tasks `RetryConfig` reference](https://cloud.google.com/tasks/docs/reference/rest/v2/RetryConfig) describes `-1` only together with a `maxRetryDuration` of `0` (retry until the task retention limit), and [Configuring queues](https://cloud.google.com/tasks/docs/configuring-queues#retry) states that the retry duration still applies when attempts are set to `-1`. It would add nothing here. |
+| `timer_queue_max_retry_duration` | `"86400s"` (24h) | Retry window for a failed settle, max-wait, or cool-down wake, measured from its first attempt. Must be greater than `0s`. With the default, a wake that fails during an outage of up to about 24h is still delivered, so a group still gets its ticket. That is about 1445 attempts per wake if each failure returns quickly (fewer if requests hang until the dispatch deadline). |
+| `timer_queue_min_backoff` | `"1s"` | First wait between retries. The wait doubles on each retry, up to `max_backoff` (16 doublings by default). |
+| `timer_queue_max_backoff` | `"60s"` (1 min) | Longest wait between retries, so a wake runs at most about a minute after the agent recovers. |
+| `timer_queue_max_attempts` | `5` | Minimum attempts per wake. Same rule as `triage_queue_max_attempts`: kept small and positive so that the retry window sets the limit, and `-1` is rejected. |
 
 - **Serialized `ata-triage-queue` (`max_concurrent_dispatches = 1`):** Alerts are processed one at a time, which keeps correlation and grouping deterministic and prevents one incident from being split across groups.
 - **Explicit triage retry window:** A failed `/triage` dispatch is retried until `triage_queue_max_retry_duration` has passed since its first attempt. With fast failures, the backoff runs 1s, 2s, 4s … 256s and then holds at 300s. The window is measured per task, so an alert is lost only if its first delivery attempt was more than one window before the agent recovered. Alerts that arrive later in a long outage are still delivered.
 - **Dropped alerts are silent:** When the window ends, Cloud Tasks deletes the task. Cloud Tasks has no dead-letter queue, and the foundation module does not enable queue logging (`stackdriver_logging_config`), so nothing records the drop.
-- **Timer queue retries:** `ata-timer-queue` sets no `retry_config`, so it uses the GCP default retry policy.
-- **Applying changes:** Queue settings change only when you apply the foundation module. Editing `main.tf` or the variables does not affect the live queues until then. To change only the triage queue, use a targeted apply as described in [DEPLOY.md, Applying Queue-Only Changes](DEPLOY.md#applying-queue-only-changes).
+- **Explicit timer retry window:** A failed `/timer/wake` dispatch is retried until `timer_queue_max_retry_duration` has passed since its first attempt. With fast failures, the backoff runs 1s, 2s, 4s … 32s and then holds at 60s. Retrying a wake is safe: a wake that arrives before its deadline, or for a group that is already ticketed or resolved, returns `ignored` without side effects. A late wake still tickets the group, and the bridge returns the existing ticket if one was already created for the group. When the window ends, a still-failing wake is deleted silently, as on the triage queue.
+- **Applying changes:** Queue settings change only when you apply the foundation module. Editing `main.tf` or the variables does not affect the live queues until then. To change only one queue, use a targeted apply as described in [DEPLOY.md, Applying Queue-Only Changes](DEPLOY.md#applying-queue-only-changes).
 - **Dedicated `ata-timer-queue`:** Prevents delayed timers from being head-of-line blocked behind high-volume alert webhook bursts.
 - **OIDC Dispatch Authentication:** Cloud Tasks generates Google-signed ID tokens for both raw alert dispatch (`/triage`) and timer wakeups (`/timer/wake`), validated via `verify_agent_caller`.
 
