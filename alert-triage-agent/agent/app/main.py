@@ -20,7 +20,11 @@ from .config import AgentConfig, get_agent_settings
 from .contracts.alert import AlertEvent, is_ata_alert
 from .contracts.instructions import CreateTicketRequest, ResolveTicketRequest
 from .contracts.timers import TimerWakeRequest, TimerWakeResponse
-from .duplicate_checker import append_duplicate_alert_to_incident, check_for_duplicate
+from .duplicate_checker import (
+    DuplicateTargetMissingError,
+    append_duplicate_alert_to_incident,
+    check_for_duplicate,
+)
 from .grouping.manager import GroupingManager
 from .grouping.models import COOLING_WINDOW_SECONDS, IncidentGroupStatus, OKFDocument
 from .grouping.store import OKFStore, read_okf, update_okf_atomically
@@ -117,17 +121,28 @@ async def triage_alert(
             resource_name=alert.resource_name,
             store_path=store_path,
         )
+        appended = False
         if dup_res.is_duplicate and dup_res.active_file:
             logger.info(
                 "Alert %s is an active duplicate of %s; appending alert and refreshing timestamp.",
                 alert.incident_id,
                 dup_res.active_file,
             )
-            append_duplicate_alert_to_incident(
-                file_path=dup_res.active_file,
-                alert=alert,
-                config=settings,
-            )
+            # Storage failures propagate (HTTP 5xx) so Cloud Tasks redelivers; the append is idempotent.
+            try:
+                append_duplicate_alert_to_incident(
+                    file_path=dup_res.active_file,
+                    alert=alert,
+                    config=settings,
+                )
+                appended = True
+            except DuplicateTargetMissingError:
+                logger.warning(
+                    "Duplicate target %s vanished before append; routing alert %s through grouping.",
+                    dup_res.active_file,
+                    alert.incident_id,
+                )
+        if appended:
             act_path = Path(dup_res.active_file)
             clean_grp = act_path.stem.replace("incident-", "")
             return {

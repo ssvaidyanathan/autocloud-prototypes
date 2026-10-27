@@ -13,13 +13,15 @@ Evaluates timestamp in matching records:
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 import logging
 from pathlib import Path
 import re
 from typing import Any, Optional
 import yaml
 
-from .grouping.models import format_okf_alert_entry
+from .grouping.models import OKFDocument, format_okf_alert_entry
+from .grouping.store import OKFStore, get_canonical_file_path
 from .tools.shell import DEFAULT_INCIDENT_STORE, execute_incident_command
 
 logger = logging.getLogger(__name__)
@@ -62,93 +64,121 @@ def build_multi_grep_pipeline(
     return cmd
 
 
+class DuplicateTargetMissingError(Exception):
+    """Raised when the matched incident group no longer exists at write time.
+
+    The duplicate path must not resurrect an empty group, so the caller falls back
+    to the normal grouping path instead of reporting the alert as a duplicate.
+    """
+
+
+def _duplicate_target_store(path: Path, config: Optional[Any]) -> tuple[OKFStore, str]:
+    """Return the OKF store and identifier addressing the same object as ``path``.
+
+    In cloud mode the file is the GCS FUSE view of
+    ``knowledge/incident-manager/<filename>``; the update goes through the GCS API
+    with generation preconditions. Locally it goes through the file-locked path.
+    """
+    if config is not None and not getattr(config, "is_local", True) and getattr(config, "incidents_bucket", None):
+        bucket_name = getattr(config, "effective_incidents_bucket", None) or config.incidents_bucket
+        store = OKFStore(bucket_name=bucket_name, config=config, is_local=False)
+        return store, f"knowledge/incident-manager/{path.name}"
+
+    if get_canonical_file_path(path.parent, path.name) != path:
+        raise ValueError(f"Incident file {path} does not follow the incident-<group>.md naming convention")
+    store = OKFStore(storage_path=path.parent, config=config, is_local=True)
+    return store, path.name
+
+
 def append_duplicate_alert_to_incident(
     file_path: str | Path,
     alert: Any,
     config: Optional[Any] = None,
 ) -> dict[str, Any]:
-    """Append duplicate alert to existing incident markdown file, refresh timestamp, and preserve ticket."""
+    """Append duplicate alert to existing incident group, refresh timestamp, and preserve ticket.
+
+    The update is an optimistic-concurrency read-modify-write (``OKFStore.update_atomically``),
+    so concurrent timer-path writes (e.g. ticket linkage) are re-read and preserved rather than
+    overwritten. Re-delivery of the same alert is idempotent. Storage errors, including
+    exhausted precondition retries (``ConcurrencyLockError``), propagate to the caller.
+
+    Raises:
+        DuplicateTargetMissingError: the incident group no longer exists.
+    """
     path = Path(file_path)
-    if not path.exists():
-        logger.warning("Target incident file %s does not exist for duplicate append", file_path)
-        return {}
+    store, identifier = _duplicate_target_store(path, config)
 
-    content = path.read_text(encoding="utf-8")
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        logger.warning("Malformed incident markdown file %s (missing frontmatter)", file_path)
-        return {}
-
-    try:
-        meta = yaml.safe_load(parts[1]) or {}
-    except Exception as exc:
-        logger.warning("Failed to parse YAML frontmatter in %s: %s", file_path, exc)
-        meta = {}
-
-    # 1. Refresh timestamp to current or alert started_at
+    # Computed once, outside the mutation, which is re-run on every precondition retry.
     new_ts = getattr(alert, "started_at", None) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if not str(new_ts).strip():
         new_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    meta["timestamp"] = new_ts
+    base_entry = format_okf_alert_entry(alert, valid_ts=new_ts)
 
-    # 2. Preserve active status and ticket fields
-    if "status" not in meta or meta["status"] in ("open", "investigating"):
-        meta["status"] = "mitigation-in-progress"
+    def _mutate(doc: OKFDocument) -> OKFDocument:
+        # The store yields a bare document (only group_id set) when the object is missing.
+        if doc.model_fields_set <= {"group_id"}:
+            raise DuplicateTargetMissingError(str(path))
 
-    # 3. Append or update alert in alerts list
-    alerts_list = list(meta.get("alerts", [])) if isinstance(meta.get("alerts"), list) else []
-    new_alert_entry = format_okf_alert_entry(alert, valid_ts=new_ts)
+        # 1. Refresh timestamp to current or alert started_at
+        doc.timestamp = new_ts
 
-    found = False
-    for i, a in enumerate(alerts_list):
-        if isinstance(a, dict) and a.get("incident_id") == new_alert_entry["incident_id"]:
-            if not new_alert_entry.get("labels") and a.get("labels"):
-                new_alert_entry["labels"] = a["labels"]
-                new_alert_entry["policy_user_labels"] = a.get("policy_user_labels") or a["labels"]
-            if not new_alert_entry.get("component") and a.get("component"):
-                new_alert_entry["component"] = a["component"]
-            if not new_alert_entry.get("signal") and a.get("signal"):
-                new_alert_entry["signal"] = a["signal"]
-            alerts_list[i] = new_alert_entry
-            found = True
-            break
-    if not found:
-        alerts_list.append(new_alert_entry)
-    meta["alerts"] = [format_okf_alert_entry(a, valid_ts=new_ts) for a in alerts_list]
+        # 2. Preserve active status and ticket fields
+        status_val = doc.status.value if isinstance(doc.status, Enum) else doc.status
+        if not status_val or status_val in ("open", "investigating"):
+            doc.status = "mitigation-in-progress"
 
-    # Reconstruct file
-    yaml_header = yaml.dump(meta, sort_keys=False, default_flow_style=False).strip()
-    body = parts[2]
-    comp_line = f"- Component: `{new_alert_entry.get('component')}`\n" if new_alert_entry.get("component") else ""
-    sig_line = f"- Signal: `{new_alert_entry.get('signal')}`\n" if new_alert_entry.get("signal") else ""
-    dup_note = (
-        f"\n\n**Duplicate Alert Appended**\n"
-        f"- Incident ID: `{new_alert_entry['incident_id']}`\n"
-        f"- Policy: `{new_alert_entry['policy']}`\n"
-        f"- Resource: `{new_alert_entry['resource']}`\n"
-        f"{comp_line}"
-        f"{sig_line}"
-        f"- State: `{new_alert_entry['state']}`\n"
-        f"- Timestamp: `{new_ts}`\n"
+        # 3. Upsert alert by incident_id
+        new_alert_entry = dict(base_entry)
+        alerts_list = list(doc.alerts)
+        already_recorded = False
+        found = False
+        for i, a in enumerate(alerts_list):
+            if isinstance(a, dict) and a.get("incident_id") == new_alert_entry["incident_id"]:
+                already_recorded = (
+                    a.get("state") == new_alert_entry.get("state")
+                    and a.get("started_at") == new_alert_entry.get("started_at")
+                )
+                if not new_alert_entry.get("labels") and a.get("labels"):
+                    new_alert_entry["labels"] = a["labels"]
+                    new_alert_entry["policy_user_labels"] = a.get("policy_user_labels") or a["labels"]
+                if not new_alert_entry.get("component") and a.get("component"):
+                    new_alert_entry["component"] = a["component"]
+                if not new_alert_entry.get("signal") and a.get("signal"):
+                    new_alert_entry["signal"] = a["signal"]
+                alerts_list[i] = new_alert_entry
+                found = True
+                break
+        if not found:
+            alerts_list.append(new_alert_entry)
+        doc.alerts = [format_okf_alert_entry(a, valid_ts=new_ts) for a in alerts_list]
+
+        # 4. Record the duplicate in the body once per distinct delivery
+        if not already_recorded:
+            comp_line = f"- Component: `{new_alert_entry.get('component')}`\n" if new_alert_entry.get("component") else ""
+            sig_line = f"- Signal: `{new_alert_entry.get('signal')}`\n" if new_alert_entry.get("signal") else ""
+            dup_note = (
+                f"\n\n**Duplicate Alert Appended**\n"
+                f"- Incident ID: `{new_alert_entry['incident_id']}`\n"
+                f"- Policy: `{new_alert_entry['policy']}`\n"
+                f"- Resource: `{new_alert_entry['resource']}`\n"
+                f"{comp_line}"
+                f"{sig_line}"
+                f"- State: `{new_alert_entry['state']}`\n"
+                f"- Timestamp: `{new_ts}`\n"
+            )
+            doc.body = f"{doc.body.rstrip()}{dup_note}"
+        return doc
+
+    updated = store.update_atomically(identifier, _mutate)
+    logger.info(
+        "Appended duplicate alert %s to %s and refreshed timestamp to %s",
+        base_entry["incident_id"],
+        identifier,
+        new_ts,
     )
-    new_content = f"---\n{yaml_header}\n---{body}{dup_note}"
-    path.write_text(new_content, encoding="utf-8")
-    logger.info("Appended duplicate alert %s to %s and refreshed timestamp to %s", new_alert_entry["incident_id"], path, new_ts)
-
-    # API fallback if mount unavailable or running in cloud environment
-    if config and not getattr(config, "is_local", True) and getattr(config, "incidents_bucket", None):
-        try:
-            from google.cloud import storage
-            client = storage.Client(project=getattr(config, "project_id", None))
-            bucket_name = getattr(config, "effective_incidents_bucket", getattr(config, "incidents_bucket", None))
-            bucket = client.bucket(bucket_name)
-            filename = path.name
-            blob_path = f"knowledge/incident-manager/{filename}"
-            bucket.blob(blob_path).upload_from_string(new_content, content_type="text/markdown")
-            logger.info("Saved updated duplicate file to GCS: gs://%s/%s", bucket_name, blob_path)
-        except Exception as exc:
-            logger.debug("GCS fallback for duplicate skipped: %s", exc)
-
+    meta = updated.model_dump(exclude={"body"})
+    if isinstance(meta.get("status"), Enum):
+        meta["status"] = meta["status"].value
     return meta
 
 

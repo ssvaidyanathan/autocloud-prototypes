@@ -20,6 +20,7 @@ from agent.app.duplicate_checker import (
     check_for_duplicate,
 )
 from agent.app.triage import write_preanalysis_lock
+from tests.test_agent_grouping_and_timers import ConcurrencyMockBlob, ConcurrencyMockStorageClient
 
 
 @pytest.fixture
@@ -108,22 +109,22 @@ def test_append_duplicate_alert_single_gcs_path(tmp_path: Path, sample_alert: Al
         started_at="2026-10-23T03:05:00Z",
     )
 
+    # Generation-enforcing GCS mock seeded with the same object the FUSE file mirrors.
+    mock_storage_client = ConcurrencyMockStorageClient()
+    expected_blob = f"knowledge/incident-manager/{inc_file.name}"
+    mock_storage_client.bucket(cfg.incidents_bucket).blob(expected_blob).upload_from_string(
+        inc_file.read_text(encoding="utf-8")
+    )
     uploaded_blobs: list[str] = []
+    real_blob = ConcurrencyMockBlob.upload_from_string
 
-    mock_bucket = MagicMock()
+    def recording_upload(self, data, content_type="text/markdown", if_generation_match=None):
+        uploaded_blobs.append(self.name)
+        assert if_generation_match is not None
+        return real_blob(self, data, content_type=content_type, if_generation_match=if_generation_match)
 
-    def mock_blob_factory(blob_name: str):
-        uploaded_blobs.append(blob_name)
-        blob = MagicMock()
-        blob.name = blob_name
-        return blob
-
-    mock_bucket.blob.side_effect = mock_blob_factory
-
-    mock_storage_client = MagicMock()
-    mock_storage_client.bucket.return_value = mock_bucket
-
-    with patch("google.cloud.storage.Client", return_value=mock_storage_client):
+    with patch("google.cloud.storage.Client", return_value=mock_storage_client), \
+         patch.object(ConcurrencyMockBlob, "upload_from_string", recording_upload):
         updated_meta = append_duplicate_alert_to_incident(
             file_path=inc_file,
             alert=alert2,
@@ -131,8 +132,8 @@ def test_append_duplicate_alert_single_gcs_path(tmp_path: Path, sample_alert: Al
         )
 
     assert updated_meta["timestamp"] == "2026-10-23T03:05:00Z"
-    assert len(uploaded_blobs) == 1
-    assert uploaded_blobs[0] == f"knowledge/incident-manager/{inc_file.name}"
+    assert uploaded_blobs == [expected_blob]
+    assert set(mock_storage_client.bucket_inst.blobs) == {expected_blob}
     # Assert zero writes to root bucket path
     assert inc_file.name not in uploaded_blobs
 
