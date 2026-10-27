@@ -78,6 +78,15 @@ ALERT_WINDOW_FROM_START="${ATA_RESET_ALERT_WINDOW_FROM_START:-false}"
 ALERT_WINDOW_UNTIL=0
 RESET_START_TIME="$(date +%s)"
 
+# Usage error for an option given without its value ($1 = option, $2 = args left incl. it),
+# instead of set -u's '$2: unbound variable'.
+require_option_value() {
+    if [ "$2" -lt 2 ]; then
+        log_error "Option $1 requires a value (see --help)." >&2
+        exit 1
+    fi
+}
+
 # Parse CLI arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -86,6 +95,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --ignore-group)
+            require_option_value "$1" "$#"
             IGNORE_GROUPS="${IGNORE_GROUPS:+${IGNORE_GROUPS} }$2"
             shift 2
             ;;
@@ -94,6 +104,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --quiet-period)
+            require_option_value "$1" "$#"
             QUIET_PERIOD_SECS="$(parse_duration "$2")"
             shift 2
             ;;
@@ -102,6 +113,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --timeout)
+            require_option_value "$1" "$#"
             WAIT_TIMEOUT_SECS="$(parse_duration "$2")"
             shift 2
             ;;
@@ -110,6 +122,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --poll-interval)
+            require_option_value "$1" "$#"
             POLL_INTERVAL_SECS="$(parse_duration "$2")"
             shift 2
             ;;
@@ -118,6 +131,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --max-alert-age)
+            require_option_value "$1" "$#"
             MAX_ALERT_AGE_SECS="$(parse_duration "$2")"
             shift 2
             ;;
@@ -126,6 +140,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --alert-lag)
+            require_option_value "$1" "$#"
             ALERT_LAG_SECS="$(parse_duration "$2")"
             shift 2
             ;;
@@ -138,6 +153,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --serving-revisions)
+            require_option_value "$1" "$#"
             ATA_SERVING_REVISIONS="$2"
             shift 2
             ;;
@@ -146,6 +162,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --monitoring-token-source)
+            require_option_value "$1" "$#"
             ATA_MONITORING_TOKEN_SOURCE="$2"
             shift 2
             ;;
@@ -344,14 +361,22 @@ group_state() {
 
 # --ignore-group: true if incident file name $1 (incident-<id>.md) is listed in IGNORE_GROUPS
 # (file names or group ids, comma or space separated).
+# Entries are compared literally: noglob is on while the list is word-split (a '*' entry must
+# not expand to the files in the cwd), then restored to the caller's setting.
 is_ignored_group() {
-    local entry
+    local entry found=1 had_noglob=false
+    case "$-" in *f*) had_noglob=true ;; esac
+    set -f
     for entry in ${IGNORE_GROUPS//,/ }; do
         if [ "$1" = "${entry}" ] || [ "$1" = "incident-${entry}.md" ]; then
-            return 0
+            found=0
+            break
         fi
     done
-    return 1
+    if [ "${had_noglob}" = "false" ]; then
+        set +f
+    fi
+    return "${found}"
 }
 
 # Print "<file> (<status or reason>)" for every incident file in knowledge/incident-manager/
