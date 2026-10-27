@@ -326,7 +326,7 @@ fi
 # --- Inventory image build (Cloud Build as the stack's build SA) ----------------------
 # Same flags as the stack's other image builds (scripts/build-image.sh): build SA
 # BUILD_SA_EMAIL, sources and logs in BUILD_BUCKET.
-INVENTORY_DEMO_DIR="${ALERT_TRIAGE_DIR}/demo/ata-inventory-api"
+INVENTORY_DEMO_DIR="${ALERT_TRIAGE_DIR}/demo/ata-inventory-api"  # prefix-ok: repo directory name
 
 # build_inventory_image <tag>: build INVENTORY_DEMO_DIR into
 # ${PINNED_INVENTORY_IMAGE_BASE}:<tag>. Prints the pushed sha256 digest on stdout (progress on
