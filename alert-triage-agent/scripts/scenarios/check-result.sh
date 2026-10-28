@@ -11,6 +11,7 @@
 #
 # Options:
 #   --since <ISO-8601-time>   Filter incidents created or updated on or after <time>
+#                             (a file whose time cannot be determined is excluded, with a WARNING)
 #   --scenario <s1..s5>       Highlight expected results for a specific scenario
 #   --bucket <bucket-name>    Override GCS incidents bucket (default: ${PROJECT_ID}-${NAME_PREFIX}-incidents)
 #   --dry-run                 Simulate output using mock incident data
@@ -103,6 +104,7 @@ python3 - "${BUCKET_NAME}" "${SINCE_TIME}" "${FILTER_SCENARIO}" "${DRY_RUN}" "${
 import sys
 import os
 import re
+import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -165,17 +167,91 @@ DEMO_EXPECTATIONS = {
     },
 }
 
-def parse_iso(ts_str):
-    if not ts_str:
-        return None
+def parse_iso(ts_val):
+    """ISO-8601 (or a PyYAML datetime) -> aware UTC datetime; None if empty or unparseable.
+
+    Accepts a trailing Z, +0000 / +00:00 offsets and any number of fractional digits
+    (gcloud's object times), on every Python 3 that macOS ships. A time without a zone is UTC.
+    """
+    if isinstance(ts_val, datetime):
+        dt = ts_val
+    else:
+        if not isinstance(ts_val, str) or not ts_val.strip():
+            return None
+        m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})[Tt ](\d{2}:\d{2}:\d{2})(\.\d+)?\s*(Z|z|[+-]\d{2}:?\d{2})?",
+                         ts_val.strip())
+        if not m:
+            return None
+        day, clock, frac, zone = m.groups()
+        frac = (frac or ".0")[1:7].ljust(6, "0")
+        if not zone or zone in ("Z", "z"):
+            zone = "+00:00"
+        elif ":" not in zone:
+            zone = zone[:3] + ":" + zone[3:]
+        try:
+            dt = datetime.fromisoformat(f"{day}T{clock}.{frac}{zone}")
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+# The agent's group ids and file names carry the group's creation time: ..._20261027t202220z...
+_ID_STAMP = re.compile(r"(?<![0-9])(\d{4})(\d{2})(\d{2})t(\d{2})(\d{2})(\d{2})z(?![0-9a-z])", re.I)
+
+
+def doc_time(data):
+    """(datetime, source) from the incident file's own fields, or (None, None).
+
+    Order: timestamp, updated_at, created_at (the fields the agent writes; empty strings are
+    skipped, as in an old stub file with timestamp: ''), then the latest alert started_at,
+    then the creation stamp in group_id.
+    """
+    for key in ("timestamp", "updated_at", "created_at"):
+        dt = parse_iso(data.get(key))
+        if dt:
+            return dt, key
+    starts = [parse_iso(a.get("started_at")) for a in (data.get("alerts") or []) if isinstance(a, dict)]
+    starts = [dt for dt in starts if dt]
+    if starts:
+        return max(starts), "alerts[].started_at"
+    m = _ID_STAMP.search(str(data.get("group_id") or ""))
+    if m:
+        dt = parse_iso("{}-{}-{}T{}:{}:{}Z".format(*m.groups()))
+        if dt:
+            return dt, "group_id"
+    return None, None
+
+
+def gcs_object_time(uri):
+    """(datetime, source) from the object's update/creation time, or (None, None).
+
+    Only for active files: `gcloud storage mv` to archive/ rewrites the object, so an archived
+    object's times are those of the reset that moved it, not of the incident.
+    """
     try:
-        # Normalize trailing Z
-        clean = ts_str.strip().replace("Z", "+00:00")
-        return datetime.fromisoformat(clean)
-    except Exception:
-        return None
+        res = subprocess.run(["gcloud", "storage", "objects", "describe", uri, "--format=json"],
+                             capture_output=True, text=True)
+    except OSError:
+        return None, None
+    if res.returncode != 0:
+        return None, None
+    try:
+        meta = json.loads(res.stdout)
+    except ValueError:
+        return None, None
+    for key in ("update_time", "updated", "creation_time", "timeCreated"):
+        dt = parse_iso(meta.get(key)) if isinstance(meta, dict) else None
+        if dt:
+            return dt, f"GCS object {key}"
+    return None, None
+
 
 since_dt = parse_iso(since_str) if since_str else None
+if since_str and not since_dt:
+    print(f"[ERROR] --since {since_str!r} is not an ISO-8601 time (e.g. 2026-10-26T22:00:00Z).", file=sys.stderr)
+    sys.exit(1)
 
 # Standard-library parser for the block-style YAML subset the agent writes (yaml.safe_dump):
 # nested mappings, lists of scalars and of mappings, quoted and wrapped scalars. Used when
@@ -334,6 +410,7 @@ def get_incident_files_mock():
     ]
 
 incidents = []
+undetermined = []
 
 if is_dry_run:
     print("[MOCK/DRY-RUN] Simulating GCS incident retrieval...")
@@ -376,10 +453,21 @@ else:
             if not data or data.get("type") != "incident":
                 continue
 
-            ts_raw = data.get("timestamp") or data.get("updated_at") or data.get("created_at")
-            doc_dt = parse_iso(ts_raw)
-            if since_dt and doc_dt and doc_dt < since_dt:
-                continue
+            doc_dt, ts_source = doc_time(data)
+            if since_dt:
+                if not doc_dt and uri.startswith(f"gs://{bucket_name}/knowledge/incident-manager/"):
+                    doc_dt, ts_source = gcs_object_time(uri)
+                if not doc_dt:
+                    # Never count a file the window cannot place (it inflated S1's group count).
+                    print(f"[WARNING] {uri}: undetermined time; excluded from --since window", file=sys.stderr)
+                    undetermined.append(uri)
+                    continue
+                if doc_dt < since_dt:
+                    continue
+                if ts_source not in ("timestamp", "updated_at", "created_at"):
+                    print(f"[INFO] {uri}: time {doc_dt.strftime('%Y-%m-%dT%H:%M:%SZ')} taken from {ts_source}",
+                          file=sys.stderr)
+            ts_raw = doc_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if doc_dt else None
 
             alerts_raw = data.get("alerts") or []
             incidents.append({
@@ -400,6 +488,9 @@ else:
             continue
 
 print(f"\nFound {len(incidents)} incident group(s) in GCS:\n")
+if undetermined:
+    print(f"  ({len(undetermined)} incident file(s) with undetermined time excluded from the --since window; "
+          "see the WARNING lines)\n")
 
 if not incidents:
     print("  (No matching incident groups found in GCS for the specified timeframe)")

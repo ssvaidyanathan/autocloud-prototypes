@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,17 @@ if args[:1] != ["storage"]:
     sys.exit(0)  # other gcloud calls print nothing
 cmd, urls = args[1], args[2:]
 root = os.environ["ATA_FAKE_GCS_ROOT"]
+
+if cmd == "objects" and urls[:1] == ["describe"]:
+    # The object's update time is the local file's mtime, in gcloud's format.
+    import json, time
+    path = os.path.join(root, urls[1][len("gs://"):])
+    if not os.path.isfile(path):
+        sys.stderr.write("ERROR: (gcloud.storage.objects.describe) %s not found: 404.\\n" % urls[1])
+        sys.exit(1)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S+0000", time.gmtime(os.path.getmtime(path)))
+    print(json.dumps({{"name": os.path.basename(path), "update_time": stamp, "creation_time": stamp}}))
+    sys.exit(0)
 
 if cmd in os.environ.get("ATA_FAKE_GCS_FAIL", "").split(","):
     sys.stderr.write("ERROR: (gcloud.storage.%s) {auth_error}\\n" % cmd)
@@ -432,3 +444,164 @@ def test_stdlib_frontmatter_parser_matches_pyyaml_on_safe_dump_output():
     text = yaml.safe_dump(doc, sort_keys=False)
     assert "&id001" in text and "*id001" in text  # the alias path is exercised
     assert _stdlib_parser()(text) == yaml.safe_load(text) == doc
+
+
+# --- check-result.sh --since: a file the window cannot place is not counted -------------
+# Live QA S1 re-run (INC0010344): an archived stub from 2026-10-22 with timestamp: '' and
+# started_at: '' passed the --since filter (no time -> no comparison), so S1 showed 2 groups.
+
+SINCE = "2026-10-27T23:52:48Z"
+
+
+def incident_md(group_id, timestamp, started_at, number="", origin="ata-inventory-api", status="recovered"):
+    return f"""---
+type: incident
+group_id: {group_id}
+project: proj
+status: {status}
+timestamp: {timestamp}
+origin: {origin}
+servicenow_number: '{number}'
+alerts:
+- incident_id: x
+  policy: p
+  state: open
+  started_at: {started_at}
+---
+body
+"""
+
+
+# The archived file of the live finding, with its fields as they are in the bucket.
+LIVE_UNDATED_STUB = incident_md("grp_20261022t234418z_ata-inventory-db", "''", "''",
+                                origin="ata-inventory-db", status="mitigation-in-progress")
+UNDATED = incident_md("grp-undated", "''", "''", number="INC0000001", status="mitigation-in-progress")
+OLD = incident_md("grp-old", "'2026-10-22T23:40:09Z'", "'2026-10-22T23:40:09Z'", number="INC0000002")
+IN_WINDOW = incident_md("grp_20261028t000139z_ata-inventory-api", "'2026-10-28T00:01:39Z'",
+                        "'2026-10-28T00:01:39Z'", number="INC0010344")
+
+
+def check_since(tmp_path, gcs, since=SINCE, no_pyyaml=False):
+    if no_pyyaml:  # `python3 -` puts the working directory first on sys.path: this hides PyYAML.
+        (tmp_path / "yaml.py").write_text("raise ImportError('test: PyYAML not installed')\n")
+    return run_script(tmp_path, gcs, [SCRIPTS_DIR / "scenarios" / "check-result.sh", "--since", since,
+                                      "--scenario", "s1"])
+
+
+def test_check_result_since_excludes_undated_archived_file_with_warning(tmp_path, gcs):
+    _, root = gcs
+    put(root, "archive/incident-undated.md", UNDATED)
+
+    res = check_since(tmp_path, gcs)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Found 0 incident group(s) in GCS" in res.stdout
+    assert (f"[WARNING] gs://{BUCKET}/archive/incident-undated.md: undetermined time; "
+            "excluded from --since window") in res.stderr
+    assert "1 incident file(s) with undetermined time excluded" in res.stdout
+    assert "INC0000001" not in res.stdout
+
+
+def test_check_result_since_excludes_dated_old_file(tmp_path, gcs):
+    _, root = gcs
+    put(root, "archive/incident-old.md", OLD)
+
+    res = check_since(tmp_path, gcs)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Found 0 incident group(s) in GCS" in res.stdout
+    assert "INC0000002" not in res.stdout
+    assert "WARNING" not in res.stderr
+
+
+@pytest.mark.parametrize("prefix", ["knowledge/incident-manager", "archive"])
+def test_check_result_since_counts_dated_in_window_file(tmp_path, gcs, prefix):
+    _, root = gcs
+    put(root, f"{prefix}/incident-s1.md", IN_WINDOW)
+
+    res = check_since(tmp_path, gcs)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Found 1 incident group(s) in GCS" in res.stdout
+    assert "INC0010344" in res.stdout
+    assert "Timestamp:      2026-10-28T00:01:39Z" in res.stdout
+
+
+@pytest.mark.parametrize("no_pyyaml", [False, True], ids=["pyyaml", "stdlib-yaml"])
+def test_check_result_since_s1_shaped_bucket_counts_one_group(tmp_path, gcs, no_pyyaml):
+    if not no_pyyaml:
+        pytest.importorskip("yaml")
+    _, root = gcs
+    put(root, "knowledge/incident-manager/incident-ata-inventory-5xx-ata-inventory-api-20261028t000139z.md",
+        IN_WINDOW)
+    put(root, "archive/incident-ata-cloudsql-connections-critical-ata-inventory-db-20261022t234418z.md",
+        LIVE_UNDATED_STUB)
+    put(root, "archive/incident-test-test-20261022t234009z.md", OLD)
+    put(root, "archive/incident-undated.md", UNDATED)
+
+    res = check_since(tmp_path, gcs, no_pyyaml=no_pyyaml)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Found 1 incident group(s) in GCS" in res.stdout
+    assert "Group Count:      Expected 1 -> [MATCH]" in res.stdout
+    # The live stub has no time fields, but its group id carries its creation time (old).
+    assert ("incident-ata-cloudsql-connections-critical-ata-inventory-db-20261022t234418z.md: "
+            "undetermined time") not in res.stderr
+    assert f"[WARNING] gs://{BUCKET}/archive/incident-undated.md: undetermined time" in res.stderr
+
+
+@pytest.mark.parametrize("age_s, found", [(60, 1), (10 * 86400, 0)])
+def test_check_result_since_undated_active_file_uses_gcs_object_time(tmp_path, gcs, age_s, found):
+    _, root = gcs
+    put(root, "knowledge/incident-manager/incident-undated.md", UNDATED)
+    path = root / BUCKET / "knowledge/incident-manager/incident-undated.md"
+    mtime = time.time() - age_s
+    os.utime(path, (mtime, mtime))
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+
+    res = check_since(tmp_path, gcs, since=since)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert f"Found {found} incident group(s) in GCS" in res.stdout
+    assert "undetermined time" not in res.stderr
+    if found:
+        assert "taken from GCS object update_time" in res.stderr
+
+
+def test_check_result_since_ignores_gcs_time_of_archived_file(tmp_path, gcs):
+    """An archived object's GCS time is the reset's move: it must not place the file in the window."""
+    _, root = gcs
+    put(root, "archive/incident-undated.md", UNDATED)  # mtime: now, after --since
+
+    res = check_since(tmp_path, gcs, since="2026-01-01T00:00:00Z")
+
+    assert "Found 0 incident group(s) in GCS" in res.stdout
+    assert "undetermined time; excluded from --since window" in res.stderr
+    assert not [c for c in gcloud_calls(tmp_path) if "objects describe" in c]
+
+
+def test_check_result_invalid_since_is_an_error(tmp_path, gcs):
+    _, root = gcs
+    put(root, "archive/incident-old.md", OLD)
+
+    res = check_since(tmp_path, gcs, since="yesterday")
+
+    assert res.returncode != 0
+    assert "--since 'yesterday' is not an ISO-8601 time" in res.stderr
+
+
+def test_check_result_parse_iso_accepts_gcloud_and_agent_formats():
+    src = (SCRIPTS_DIR / "scenarios" / "check-result.sh").read_text()
+    py = src.split("<< 'PYEOF'\n", 1)[1].split("\nPYEOF", 1)[0]
+    from datetime import datetime, timezone
+    ns = {"re": re, "datetime": datetime, "timezone": timezone}
+    exec(py[py.index("def parse_iso("):py.index("# The agent's group ids")], ns)
+    parse_iso = ns["parse_iso"]
+    want = datetime(2026, 10, 28, 0, 1, 39, tzinfo=timezone.utc)
+    for text in ("2026-10-28T00:01:39Z", "2026-10-28T00:01:39+0000", "2026-10-28T00:01:39+00:00",
+                 "2026-10-28T00:01:39", "2026-10-28T02:01:39+02:00"):
+        assert parse_iso(text) == want, text
+    assert parse_iso("2026-10-28T00:01:39.1234567Z").replace(microsecond=0) == want
+    assert parse_iso(datetime(2026, 10, 28, 0, 1, 39)) == want  # PyYAML's unquoted timestamp
+    for empty in ("", "''", None, "N/A", "yesterday"):
+        assert parse_iso(empty) is None, empty

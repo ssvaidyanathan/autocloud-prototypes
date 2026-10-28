@@ -381,6 +381,8 @@ Run the automated result checker to inspect OKF incident files in GCS and valida
 ./scripts/scenarios/check-result.sh --scenario s3
 ```
 
+`check-result.sh` reads both `knowledge/incident-manager/` and `archive/` (the reset archives a scenario's groups, so a check after the reset still finds them). With `--since`, a file's time is its `timestamp`, `updated_at` or `created_at`, else its latest alert `started_at`, else the creation stamp in its `group_id`, else (active files only) the object's GCS update time; the GCS time of an archived file is the reset's move, not the incident. A file whose time cannot be determined is not counted: the script prints `WARNING ... undetermined time; excluded from --since window` naming it. An invalid `--since` is an error.
+
 ### 2. View Raw GCS OKF Incident Files
 Inspect active incident Markdown files stored in Cloud Storage under `knowledge/incident-manager/`:
 ```bash
