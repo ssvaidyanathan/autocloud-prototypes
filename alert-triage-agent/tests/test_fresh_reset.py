@@ -355,4 +355,7 @@ def test_a_successful_db_check_overlaps_the_quiet_period(tmp_path, gcs):
 def test_demo_md_states_the_new_reset_duration():
     demo = (Path(__file__).resolve().parents[1] / "DEMO.md").read_text()
     assert "--thorough" in demo
-    assert re.search(r"~4 min", demo)
+    # Measured live 2026-10-28 (no longer an estimate), with the S4 / cold-start exception.
+    assert "227–234 s typical (measured live, 2026-10-28)" in demo
+    assert "not yet measured" not in demo
+    assert re.search(r"up to about 10–11 min after S4", demo)
