@@ -462,11 +462,17 @@ else:
                     print(f"[WARNING] {uri}: undetermined time; excluded from --since window", file=sys.stderr)
                     undetermined.append(uri)
                     continue
-                if doc_dt < since_dt:
-                    continue
                 if ts_source not in ("timestamp", "updated_at", "created_at"):
+                    # Logged before the window check, so a file a fallback time excludes leaves a trace.
+                    bad = [k for k in ("timestamp", "updated_at", "created_at")
+                           if data.get(k) not in (None, "") and not parse_iso(data.get(k))]
+                    if bad:
+                        print(f"[WARNING] {uri}: unparseable {', '.join(bad)}; using a fallback time",
+                              file=sys.stderr)
                     print(f"[INFO] {uri}: time {doc_dt.strftime('%Y-%m-%dT%H:%M:%SZ')} taken from {ts_source}",
                           file=sys.stderr)
+                if doc_dt < since_dt:
+                    continue
             ts_raw = doc_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if doc_dt else None
 
             alerts_raw = data.get("alerts") or []

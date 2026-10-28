@@ -564,8 +564,9 @@ def test_check_result_since_undated_active_file_uses_gcs_object_time(tmp_path, g
     assert res.returncode == 0, res.stdout + res.stderr
     assert f"Found {found} incident group(s) in GCS" in res.stdout
     assert "undetermined time" not in res.stderr
-    if found:
-        assert "taken from GCS object update_time" in res.stderr
+    # Logged before the window check: an old file excluded by its GCS time leaves a trace too.
+    assert "incident-undated.md: time " in res.stderr
+    assert "taken from GCS object update_time" in res.stderr
 
 
 def test_check_result_since_ignores_gcs_time_of_archived_file(tmp_path, gcs):
@@ -605,3 +606,81 @@ def test_check_result_parse_iso_accepts_gcloud_and_agent_formats():
     assert parse_iso(datetime(2026, 10, 28, 0, 1, 39)) == want  # PyYAML's unquoted timestamp
     for empty in ("", "''", None, "N/A", "yesterday"):
         assert parse_iso(empty) is None, empty
+
+
+# --- fallback times are logged before the window check (fresh-rev-cr Optional 1 and 2) ----
+
+def multi_alert_md(group_id, timestamp, starts, number):
+    alerts = "".join(f"- incident_id: a{i}\n  policy: p\n  state: open\n  started_at: {s}\n"
+                     for i, s in enumerate(starts))
+    return f"""---
+type: incident
+group_id: {group_id}
+project: proj
+status: recovered
+timestamp: {timestamp}
+origin: ata-inventory-api
+servicenow_number: '{number}'
+alerts:
+{alerts}---
+body
+"""
+
+
+def test_check_result_since_uses_latest_alert_started_at(tmp_path, gcs):
+    """timestamp empty: the time is the latest alert started_at (step 2 of the documented order)."""
+    _, root = gcs
+    put(root, "archive/incident-alerts.md", multi_alert_md(
+        "grp-alerts", "''", ["'2026-10-22T10:00:00Z'", "'2026-10-28T00:05:00Z'", "'2026-10-27T23:00:00Z'"],
+        "INC0000003"))
+
+    res = check_since(tmp_path, gcs)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Found 1 incident group(s) in GCS" in res.stdout
+    assert "Timestamp:      2026-10-28T00:05:00Z" in res.stdout
+    assert (f"[INFO] gs://{BUCKET}/archive/incident-alerts.md: time 2026-10-28T00:05:00Z "
+            "taken from alerts[].started_at") in res.stderr
+
+
+def test_check_result_since_logs_file_excluded_by_old_alert_started_at(tmp_path, gcs):
+    _, root = gcs
+    put(root, "archive/incident-alerts-old.md", multi_alert_md(
+        "grp-alerts-old", "''", ["'2026-10-22T10:00:00Z'", "'2026-10-22T11:00:00Z'"], "INC0000004"))
+
+    res = check_since(tmp_path, gcs)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Found 0 incident group(s) in GCS" in res.stdout
+    assert "INC0000004" not in res.stdout
+    assert (f"[INFO] gs://{BUCKET}/archive/incident-alerts-old.md: time 2026-10-22T11:00:00Z "
+            "taken from alerts[].started_at") in res.stderr
+
+
+def test_check_result_since_logs_live_stub_excluded_by_group_id(tmp_path, gcs):
+    """The live stub is excluded through its group_id stamp, and the output now says so."""
+    _, root = gcs
+    name = "archive/incident-ata-cloudsql-connections-critical-ata-inventory-db-20261022t234418z.md"
+    put(root, name, LIVE_UNDATED_STUB)
+
+    res = check_since(tmp_path, gcs)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Found 0 incident group(s) in GCS" in res.stdout
+    assert f"[INFO] gs://{BUCKET}/{name}: time 2026-10-22T23:44:18Z taken from group_id" in res.stderr
+    assert "WARNING" not in res.stderr  # empty fields are not "unparseable"
+
+
+def test_check_result_since_warns_on_unparseable_timestamp(tmp_path, gcs):
+    _, root = gcs
+    put(root, "archive/incident-badts.md",
+        incident_md("grp_20261022t234418z_x", "'2026-10-28 00:01:39 UTC'", "''", number="INC0000005"))
+
+    res = check_since(tmp_path, gcs)
+
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Found 0 incident group(s) in GCS" in res.stdout
+    assert (f"[WARNING] gs://{BUCKET}/archive/incident-badts.md: unparseable timestamp; "
+            "using a fallback time") in res.stderr
+    assert (f"[INFO] gs://{BUCKET}/archive/incident-badts.md: time 2026-10-22T23:44:18Z "
+            "taken from group_id") in res.stderr
