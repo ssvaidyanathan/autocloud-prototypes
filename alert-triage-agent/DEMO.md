@@ -91,7 +91,7 @@ Scenario Workflow:
 
 The first reset after a cold `verify-demo-infra.sh` warning, with `--alert-window-from-start`, took 616 s.
 
-**Reset duration now: ~4 min (about 3.5–4.5 min) after S1, S2, S3 and S5.** The final QA run of 2026-10-28 measured 645 s (after S1) and 662 s (after S2): the 600s alert window armed by the reset's own cold start (above), plus step 5c's wait for a fresh `num_backends` sample (50–100 s) before the quiet period could start. With the cold start checked against the live 240s retest window and step 5c running alongside the alert wait, a reset is about 40 s of restore and warm-up, then the 180s quiet period (or the recovery note, whichever is later), then about 15 s of archiving. The quiet period is the floor: 180s is the default you asked for, covering Apigee's 1–3 min metric lag. `--thorough` brings back the ~11 min wait after a cold start. S4 is unchanged (alert close and recovery note: about 10–15 min, see S4).
+**Reset duration now: ~4 min (about 3.5–4.5 min) after S1, S2, S3 and S5** (expected from the steps below; not yet measured on a live run since this change). The "Reset after the scenario" column above is QA round 3, before the services scaled to zero during the recovery wait. The final QA run of 2026-10-28, before this change, measured 645 s (after S1), 662 s (S2), 717 s (S3) and 639 s (S5, plus 21 s for `--revert`); only S1's first run, with warm services, took 352 s. The cause: the 600s alert window armed by the reset's own cold start (above), plus step 5c's wait for a fresh `num_backends` sample (50–100 s) before the quiet period could start. With the cold start checked against the live 240s retest window and step 5c running alongside the alert wait, a reset is about 40 s of restore and warm-up, then the 180s quiet period (or the recovery note, whichever is later), then about 15 s of archiving. The quiet period is the floor: 180s is the default you asked for, covering Apigee's 1–3 min metric lag. `--thorough` brings back the ~11 min wait after a cold start. S4 is unchanged (alert close and recovery note: about 10–15 min, see S4; final QA: 609 s).
 
 
 ---
@@ -211,7 +211,7 @@ Simulates a database connection leak exhausting Cloud SQL PostgreSQL backend con
   - **Origin Attribution:** `ata-inventory-db` (Cloud SQL instance identified by earliest onset timestamp).
   - **Work Notes & Links:**
     - Problem: connection pool saturation with the measured connection count. A 5xx cascade to dependents is stated only when a dependent's 5xx rate was measured; in QA no 5xx occurred, and the ticket says so.
-    - Actions: review the connection release in `ata-inventory-api` (the Cloud Run caller in TOPOLOGY.md) and a read-only `gcloud sql instances describe` of tier and flags (no flag patch)
+    - Actions: (1) review the connection release in `ata-inventory-api` (the Cloud Run caller in TOPOLOGY.md, read-only log read); (2) `pg_terminate_backend` of idle sessions, labelled "Mutating, operator judgement required" and only after the review shows leaked connections; (3) a read-only `gcloud sql instances describe` of tier and flags (no flag patch)
     - Attached diagnostic HTML investigation report
   - **Order traffic** uses the in-stock item with the most stock (`GET /items`); the script stops with an error if no item is in stock, because every order would return HTTP 400.
 - **Reset Command (run it right after the hold; the alert does not close before it):**
@@ -317,6 +317,11 @@ If the reset times out on a group that will never become terminal (for example a
 ./scripts/reset-scenarios.sh --ignore-group incident-<group-id>.md
 ```
 
+**Stale OPEN alerts from earlier revisions (troubleshooting).** The Alerts API and the console can list old `ata-inventory-latency` / `ata-orders-latency` alerts that are still OPEN on revisions that no longer serve traffic (final QA, 2026-10-27/28: 16 such alerts, opened 2026-10-23/24, on the current policy IDs). They do not block anything:
+- the reset ignores them and lists them once at its first poll: `Ignored 16 stale/non-serving open alert(s):`, one line each with the policy, the revision and the reason (`Non-serving revision (...)`, or `Opened > 60m before reset started`; the age limit is `--max-alert-age`, default 1 h);
+- Cloud Monitoring sends no new notification for an alert that stays open, so the agent does nothing with them (none led to a ticket in the final QA).
+They are clutter only. The policies' `alert_strategy.auto_close` is `alert_auto_close_secs` (default 1800 s), yet these alerts stayed open for days; why is not established (they may predate that setting, whose Cloud Monitoring default is 7 days). To clear them, close them in the console (Monitoring > Alerting > the alert > Close), with no scenario running. Do not change the reset's ignore rules for them: an alert on a serving revision, opened within the age limit, is still waited for.
+
 ### Reset Execution Sequence & Metric Lag Safeguards
 
 This script:
@@ -385,9 +390,14 @@ Run the automated result checker to inspect OKF incident files in GCS and valida
 
 # Compare against specific scenario expectation
 ./scripts/scenarios/check-result.sh --scenario s3
+
+# Re-check an earlier scenario after later ones ran: bound the window on both sides
+./scripts/scenarios/check-result.sh --since "<S1 start>" --until "<S2 start>" --scenario s1
 ```
 
 `check-result.sh` reads both `knowledge/incident-manager/` and `archive/` (the reset archives a scenario's groups, so a check after the reset still finds them). With `--since`, a file's time is its `timestamp`, `updated_at` or `created_at`, else its latest alert `started_at`, else the creation stamp in its `group_id`, else (active files only) the object's GCS update time; the GCS time of an archived file is the reset's move, not the incident. A file whose time cannot be determined is not counted: the script prints `WARNING ... undetermined time; excluded from --since window` naming it. An invalid `--since` is an error.
+
+`--until <time>` (optional) is the upper bound. Without it, a check is meaningful only right after its scenario: re-checking S1 after S3 ran also counts S3's groups (Origin and Ticket then name the newest group). `--until` compares the time the group **opened** (its first alert `started_at`, else the creation stamp in its `group_id`), not its last update, so a group updated later (recovery note, archive) still belongs to its scenario. A file excluded by `--until` is logged as `INFO ... opened <time> (...), after --until; excluded`; a file with no opening time is not counted, with `WARNING ... opening time undetermined; excluded from --until window`. An invalid `--until`, or one before `--since`, is an error. Use the next scenario's start time as `--until`.
 
 ### 2. View Raw GCS OKF Incident Files
 Inspect active incident Markdown files stored in Cloud Storage under `knowledge/incident-manager/`:

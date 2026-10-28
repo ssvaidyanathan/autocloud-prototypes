@@ -36,6 +36,17 @@ The bridge serves as a thin ingestion and integration layer: it validates Cloud 
 | `VERIFIER_SA` | *None* | Comma-separated emails allowed to call `/instructions/*` besides `<NAME_PREFIX>-agent-sa` and `<NAME_PREFIX>-bridge-sa` (e.g. operators using the read-only view endpoint, §3.1). No other caller is built in. `bridge/scripts/deploy.sh` passes it only when it is exported, so a redeploy without it keeps the value on the service; `VERIFIER_SA=none` removes it. Entries must be email addresses (lowercased; any other entry stops the bridge at startup). |
 | `ADAPTER_TIMEOUT_SECONDS` | `30.0` | HTTP timeout for outbound ServiceNow API calls. |
 
+**ServiceNow urgency/impact.** The bridge sets urgency and impact from the ticket priority so that ServiceNow's default priority matrix (`dl_u_priority`) shows the same number as the `[Pn]` in the title. The table is `SERVICENOW_URGENCY_IMPACT` in `contracts/instructions.py` (identical in agent and bridge); it is code, not an environment variable. An unknown priority stops the ticket write with an error; it is never guessed.
+
+| Ticket priority | Urgency | Impact | ServiceNow priority (default matrix) |
+|---|---|---|---|
+| P1 | 1 - High | 1 - High | 1 - Critical |
+| P2 | 1 - High | 2 - Medium | 2 - High |
+| P3 | 2 - Medium | 2 - Medium | 3 - Moderate |
+| P4 | 2 - Medium | 3 - Low | 4 - Low |
+
+The demo PDI's matrix was read on 2026-10-28 (read-only, Table API `dl_u_priority`) and is the default. On an instance with a customised matrix, read `dl_u_priority` and adjust the table. Escalations (a late, more severe alert) use the same table. Before this change P2 was sent as 2/2 and showed as "3 - Moderate".
+
 ---
 
 ### 1.2 Multi-Agent ADK Runtime (`ata-agent`)

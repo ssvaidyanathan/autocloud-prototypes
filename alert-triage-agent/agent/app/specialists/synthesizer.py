@@ -33,8 +33,8 @@ from ..grouping.store import OKFStore, get_canonical_blob_name, resolve_local_ta
 from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches
 from .apigee import SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_id, access_log_name
-from .cloud_sql import CloudSQLSpecialist
-from .change import NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_candidate_cause
+from .cloud_sql import DB_POOL_NEAR_SATURATION_RATIO, CloudSQLSpecialist
+from .change import APIGEE_HISTORY, NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_candidate_cause
 from .origin_selection import (
     OriginSelection,
     alert_category,
@@ -66,6 +66,30 @@ logger = logging.getLogger(__name__)
 
 
 _DB_AUTH_PHRASE = "database authentication"
+
+
+def _parse_iso_utc(value: Any) -> Optional[datetime]:
+    """An ISO-8601 timestamp as an aware UTC datetime, or None when absent or unparseable."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _measured_pct(value: Any) -> bool:
+    """True for a measured, non-zero percentage ("85.1%"); N/A and 0% are not signals."""
+    if isinstance(value, (int, float)):
+        return value > 0
+    if not isinstance(value, str) or "%" not in value:
+        return False
+    try:
+        return float(value.replace("%", "").strip()) > 0
+    except ValueError:
+        return False
+
 
 # Sentinel: _determine_probable_origin computes the change verdict itself when none is passed.
 _VERDICT_NOT_COMPUTED: Any = object()
@@ -113,6 +137,39 @@ def dependency_path_for(origin: str) -> Optional[str]:
     if path is None:
         logger.warning("No topology dependency path for %s: not a component of TOPOLOGY.md", origin)
     return path
+
+
+def db_pool_actions(origin: str, project_id: str, caller_actions: list[ActionItem]) -> list[ActionItem]:
+    """Actions for a Cloud SQL connection-pool incident: read-only review first.
+
+    Order: the connection-release review on each caller (read-only), then the session
+    termination, labelled as mutating and left to operator judgement, then the read-only
+    describe of tier and flags. With no known caller the describe comes first, so the
+    mutating step never leads.
+    """
+    terminate = ActionItem(
+        title=(
+            f"Mutating, operator judgement required: terminate idle database sessions on {origin} via a SQL "
+            "client, only after the review above shows they are leaked connections (this ends those sessions)"
+        ),
+        command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
+        verification=(
+            f"Confirm active connections drop below {int(DB_POOL_NEAR_SATURATION_RATIO * 100)}% of max_connections "
+            "via Cloud Monitoring"
+        ),
+    )
+    describe = ActionItem(
+        title=(
+            f"Review the tier and database flags of {origin} before any max_connections change "
+            "(gcloud sql instances patch --database-flags replaces the whole flag set, so every "
+            "existing flag must be repeated)"
+        ),
+        command=f'gcloud sql instances describe {origin} --format="yaml(settings.tier,settings.databaseFlags)"',
+        verification="List the current flags and tier; any change must keep all existing flags",
+    )
+    if caller_actions:
+        return [*caller_actions, terminate, describe]
+    return [describe, terminate]
 
 
 def db_caller_actions(origin: str, project_id: str) -> list[ActionItem]:
@@ -640,7 +697,7 @@ class SynthesizerAgent:
             root_cause_analysis["origin_selection"] = origin_notes
             root_cause_analysis["supporting_evidence"].append(f"{label}: {origin_notes['explanation']}")
             root_cause_analysis["alternatives_ruled_out"].extend(origin_notes["ruled_out"])
-        longer_term_fixes = self._build_longer_term_fixes(origin, alert)
+        longer_term_fixes = self._build_longer_term_fixes(origin, alert, dossiers)
         # Telemetry that could not be read is stated, never read as a negative finding. With a
         # change source missing and no change implicated, "Change-Induced: No" is unverified.
         gaps = unavailable_telemetry(dossiers)
@@ -696,6 +753,7 @@ class SynthesizerAgent:
             revision_diffs=revision_diffs,
             root_cause_analysis=root_cause_analysis,
             longer_term_fixes=longer_term_fixes,
+            apigee_history=self._apigee_history_line(dossiers),
             queries_appendix=all_queries,
             tools_used=tools_used,
             skills_loaded=skills_loaded,
@@ -1516,7 +1574,8 @@ class SynthesizerAgent:
         for d in dossiers:
             if d.specialist_name == "CloudRunSpecialist":
                 err_rate = d.metrics.get("error_rate_5xx")
-                if err_rate and err_rate != "0.1%":
+                # Only a measured, non-trivial rate corroborates; N/A is not a signal.
+                if _measured_pct(err_rate) and err_rate != "0.1%":
                     signal_items.append(f"HTTP 5xx rate {err_rate} on {d.target_resource}")
                 restarts = d.metrics.get("container_restarts")
                 if isinstance(restarts, (int, float)) and restarts > 0:
@@ -1568,6 +1627,28 @@ class SynthesizerAgent:
             else:
                 score_change = 0.00
                 detail_change = f"{rev_label} deployed {mins}m prior to alert onset (outside causality window)"
+        elif (proxy_chg := self._proxy_change_evidence(dossiers, origin)) is not None:
+            # An attributed Apigee proxy revision change is a change too (same proximity buckets).
+            rev_label = (
+                f"Apigee proxy `{proxy_chg['proxy']}` revision {proxy_chg['new_revision']} "
+                f"(replacing {proxy_chg['previous_revision']}) first served {proxy_chg.get('new_first_served_at') or 'at an unknown time'}"
+            )
+            first = _parse_iso_utc(proxy_chg.get("new_first_served_at"))
+            onset = _parse_iso_utc(alert.started_at)
+            if first is None or onset is None:
+                score_change = 0.00
+                detail_change = f"{rev_label}; proximity to alert onset not determined (timestamp unknown)"
+            else:
+                mins = max(0, int((onset - first).total_seconds() // 60))
+                if mins <= 15:
+                    score_change, window = 0.15, "high temporal proximity"
+                elif mins <= 30:
+                    score_change, window = 0.10, "moderate proximity"
+                elif mins <= 60:
+                    score_change, window = 0.05, "extended window"
+                else:
+                    score_change, window = 0.00, "outside causality window"
+                detail_change = f"{rev_label}, {mins}m prior to alert onset ({window})"
         else:
             score_change = 0.00
             detail_change = "Zero recent deployments detected within lookback window"
@@ -2469,23 +2550,7 @@ class SynthesizerAgent:
         # 3. Database Failure (Cloud SQL)
         is_sql = ((sql_dossier and sql_dossier.anomaly_detected) or "db" in origin) and not (cr_dossier and cr_dossier.metrics.get("has_db_auth_error"))
         if is_sql:
-            return [
-                ActionItem(
-                    title="Terminate idle database sessions via SQL client",
-                    command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
-                    verification="Confirm active connections drop below 80% capacity via Cloud Monitoring",
-                ),
-                *self._db_caller_actions(origin, project_id),
-                ActionItem(
-                    title=(
-                        f"Review the tier and database flags of {origin} before any max_connections change "
-                        "(gcloud sql instances patch --database-flags replaces the whole flag set, so every "
-                        "existing flag must be repeated)"
-                    ),
-                    command=f'gcloud sql instances describe {origin} --format="yaml(settings.tier,settings.databaseFlags)"',
-                    verification="List the current flags and tier; any change must keep all existing flags",
-                ),
-            ]
+            return db_pool_actions(origin, project_id, self._db_caller_actions(origin, project_id))
 
         # 4. Generic Service Failure: no change on the origin is implicated, so no traffic change
         # is recommended; confirm which named revision serves traffic first.
@@ -2697,7 +2762,7 @@ class SynthesizerAgent:
                         "variance": var_val,
                     })
                 elif any(k.startswith("proxy_response_code_5") for k in d.metrics):
-                    code_key = next((k for k in ["proxy_response_code_504", "proxy_response_code_503", "proxy_response_code_502", "proxy_response_code_500"] if k in d.metrics), None)
+                    code_key = next((k for k in ["proxy_response_code_504", "proxy_response_code_5xx", "proxy_response_code_503", "proxy_response_code_502", "proxy_response_code_500"] if k in d.metrics), None)
                     code_name = code_key.replace("proxy_response_code_", "") if code_key else "5xx"
                     val = d.metrics.get(code_key) if code_key else "N/A (no telemetry captured)"
                     during_val = f"{val} req" if isinstance(val, (int, float)) else str(val)
@@ -2832,11 +2897,19 @@ class SynthesizerAgent:
             has_sql_check = bool(sql_dossier.queries_executed) or bool(sql_dossier.metrics)
             if has_sql_check and not sql_dossier.anomaly_detected:
                 conns = sql_dossier.metrics.get("active_connections")
-                conns_val = f"{conns} active connections" if conns is not None else "N/A"
-                alternatives.append({
-                    "alternative": "Database Connection Pool Saturation",
-                    "reason": f"Cloud SQL connections queried on {sql_dossier.target_resource} ({conns_val}), below saturation threshold.",
-                })
+                max_conns = sql_dossier.metrics.get("max_connections")
+                if isinstance(conns, (int, float)):
+                    of_max = f"/{max_conns:g}" if isinstance(max_conns, (int, float)) else ""
+                    reason = (
+                        f"Cloud SQL connections queried on {sql_dossier.target_resource} "
+                        f"({conns:g}{of_max} active connections), below saturation threshold."
+                    )
+                else:
+                    reason = (
+                        f"Cloud SQL connections on {sql_dossier.target_resource}: not available; "
+                        "pool saturation not ruled out."
+                    )
+                alternatives.append({"alternative": "Database Connection Pool Saturation", "reason": reason})
 
         # 2. Upstream Apigee Gateway Rate Limiting Check
         apigee_dossier = next((d for d in dossiers if d.specialist_name == "ApigeeSpecialist"), None)
@@ -2844,11 +2917,17 @@ class SynthesizerAgent:
             has_apigee_check = bool(apigee_dossier.queries_executed) or bool(apigee_dossier.metrics)
             if has_apigee_check and not apigee_dossier.anomaly_detected:
                 rate_429 = apigee_dossier.metrics.get("status_429_rate") or apigee_dossier.metrics.get("proxy_response_code_429")
-                rate_val = f"{rate_429}" if rate_429 is not None else "N/A"
-                alternatives.append({
-                    "alternative": "Upstream API Gateway Rate-Limiting",
-                    "reason": f"Apigee proxy metrics queried on {apigee_dossier.target_resource} (429 rate: {rate_val}), ruling out SpikeArrest throttling.",
-                })
+                if rate_429 is None or (isinstance(rate_429, str) and rate_429.startswith("N/A")):
+                    reason = (
+                        f"Apigee 429 count on {apigee_dossier.target_resource}: not available; "
+                        "SpikeArrest throttling not ruled out."
+                    )
+                else:
+                    reason = (
+                        f"Apigee proxy metrics queried on {apigee_dossier.target_resource} (429: {rate_429}), "
+                        "ruling out SpikeArrest throttling."
+                    )
+                alternatives.append({"alternative": "Upstream API Gateway Rate-Limiting", "reason": reason})
 
         # 3. Application Deployment Check
         chg_dossier = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist"), None)
@@ -2868,10 +2947,12 @@ class SynthesizerAgent:
                     "reason": f"Recent changes (likely unrelated): {unrelated}.",
                 })
             elif has_chg_check and not chg_dossier.anomaly_detected and not not_implicated and not proxy_changed:
-                rev = chg_dossier.metrics.get("recent_revision", "N/A")
                 alternatives.append({
                     "alternative": "Recent Application Deployment Regression",
-                    "reason": f"Deployment history queried for {chg_dossier.target_resource} (active revision: {rev}); zero rollback or build failures recorded.",
+                    "reason": (
+                        f"Deployment history queried for {chg_dossier.target_resource} "
+                        f"({self._serving_revision_text(dossiers, chg_dossier)}); zero rollback or build failures recorded."
+                    ),
                 })
 
         # 4. Container Crash Loop Check
@@ -2880,28 +2961,44 @@ class SynthesizerAgent:
             has_cr_check = bool(cr_dossier.queries_executed) or bool(cr_dossier.metrics)
             restarts = cr_dossier.metrics.get("container_restarts")
             if has_cr_check and (restarts == 0 or (restarts is None and not cr_dossier.anomaly_detected)):
-                restarts_val = f"{restarts} restarts" if restarts is not None else "N/A"
-                alternatives.append({
-                    "alternative": "Container Crash Loop / Crash Throttling",
-                    "reason": f"Container restart count queried on {cr_dossier.target_resource} ({restarts_val}), ruling out crash loop termination.",
-                })
+                if isinstance(restarts, (int, float)):
+                    reason = (
+                        f"Container restart count queried on {cr_dossier.target_resource} ({restarts:g} restarts), "
+                        "ruling out crash loop termination."
+                    )
+                else:
+                    reason = (
+                        f"Container restart count on {cr_dossier.target_resource}: not available; "
+                        "crash loop not ruled out."
+                    )
+                alternatives.append({"alternative": "Container Crash Loop / Crash Throttling", "reason": reason})
 
         # 5. Host Memory OOM Throttling (only if memory was queried or measured)
         memory_queried = any("memory" in q.lower() for q in all_queries_flat) or any("memory" in str(k).lower() for d in dossiers for k in d.metrics)
         if memory_queried:
-            mem_val = next((f"{d.metrics['memory_utilization_pct']}%" for d in dossiers if "memory_utilization_pct" in d.metrics), "N/A")
+            mem_val = next((d.metrics["memory_utilization_pct"] for d in dossiers
+                            if isinstance(d.metrics.get("memory_utilization_pct"), (int, float))), None)
             alternatives.append({
                 "alternative": "Host Memory OOM Throttling",
-                "reason": f"Container memory utilization queried ({mem_val}), ruling out Out-Of-Memory container termination.",
+                "reason": (
+                    f"Container memory utilization queried ({mem_val:g}%), ruling out Out-Of-Memory container termination."
+                    if mem_val is not None
+                    else "Container memory utilization: not available; Out-Of-Memory termination not ruled out."
+                ),
             })
 
         # 6. Network VPC Egress Partition (only if VPC or latency was queried or measured)
         vpc_queried = any("vpc" in q.lower() or "latency" in q.lower() for q in all_queries_flat) or any("vpc_latency" in str(k).lower() for d in dossiers for k in d.metrics)
         if vpc_queried:
-            vpc_val = next((f"{d.metrics['vpc_latency_ms']}ms" for d in dossiers if "vpc_latency_ms" in d.metrics), "N/A")
+            vpc_val = next((d.metrics["vpc_latency_ms"] for d in dossiers
+                            if isinstance(d.metrics.get("vpc_latency_ms"), (int, float))), None)
             alternatives.append({
                 "alternative": "Network VPC egress partition",
-                "reason": f"Internal VPC round-trip latency queried ({vpc_val}), ruling out network partitioning.",
+                "reason": (
+                    f"Internal VPC round-trip latency queried ({vpc_val:g}ms), ruling out network partitioning."
+                    if vpc_val is not None
+                    else "Internal VPC round-trip latency: not available; network partitioning not ruled out."
+                ),
             })
         rationale = getattr(self, "_last_confidence_rationale", None) or (
             f"Calibrated confidence of {int(confidence * 100)}% based on observed telemetry facts and temporal correlation."
@@ -2917,12 +3014,81 @@ class SynthesizerAgent:
             "alternatives_ruled_out": alternatives,
         }
 
-    def _build_longer_term_fixes(self, origin: str, alert: AlertEvent) -> list[str]:
-        return [
-            "Deploy Cloud SQL PgBouncer connection pooling sidecar to multiplex container client connections.",
-            f"Tune database connection pool max_size and connection recycling timeouts in {origin} service configuration.",
-            "Implement circuit breaker and automated fallback caching policies in upstream Apigee API proxies.",
-        ]
+    @staticmethod
+    def _apigee_history_line(dossiers: list[EvidenceDossier]) -> Optional[str]:
+        """The change specialist's one-line Apigee deployment history, for the ticket text.
+
+        The proxy glob ("proxies ata-*") is spelled out, since ticket text carries no asterisks.
+        """
+        chg = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist"), None)
+        if chg is None:
+            return None
+        line = next((f for f in chg.findings if f.startswith(APIGEE_HISTORY)), None)
+        if not line:
+            return None
+        return re.sub(r"proxies (\S+?)\*", r"proxies with prefix \1", line).replace("`", "")
+
+    @staticmethod
+    def _serving_revision_text(dossiers: list[EvidenceDossier], chg_dossier: EvidenceDossier) -> str:
+        """The serving revision of the change target as Cloud Run reported it, or why it is unknown."""
+        service = chg_dossier.target_resource
+        cr = next(
+            (d for d in dossiers if d.specialist_name == "CloudRunSpecialist" and d.target_resource == service),
+            None,
+        )
+        if cr is None:
+            return f"serving revision not known: no Cloud Run read of {service} in this investigation"
+        serving = cr.metrics.get("serving_revisions")
+        if isinstance(serving, dict) and serving:
+            return "serving revision: " + ", ".join(
+                f"{rev} ({pct}% of traffic)" for rev, pct in sorted(serving.items(), key=lambda kv: -kv[1])
+            )
+        return f"serving revision not known: the Cloud Run service describe of {service} returned no traffic split"
+
+    def _build_longer_term_fixes(
+        self, origin: str, alert: AlertEvent, dossiers: Optional[list[EvidenceDossier]] = None,
+    ) -> list[str]:
+        """Only fixes backed by this investigation's measurements, each with the measured fact."""
+        fixes: list[str] = []
+        dossiers = dossiers or []
+        for d in dossiers:
+            if d.specialist_name != "CloudSQLSpecialist":
+                continue
+            conns = d.metrics.get("active_connections")
+            max_conns = d.metrics.get("max_connections")
+            if (
+                isinstance(conns, (int, float)) and isinstance(max_conns, (int, float)) and max_conns > 0
+                and conns / max_conns >= DB_POOL_NEAR_SATURATION_RATIO
+            ):
+                callers = [
+                    c.target_resource for c in dossiers
+                    if c.specialist_name == "CloudRunSpecialist" and c.target_resource != d.target_resource
+                ]
+                where = ", ".join(sorted(set(callers))) or "the services that connect to it"
+                fixes.append(
+                    f"Deploy Cloud SQL connection pooling (e.g. PgBouncer) in front of {d.target_resource}: "
+                    f"connections measured at {conns:g}/{max_conns:g}."
+                )
+                fixes.append(
+                    f"Tune the database connection pool size and connection recycling in {where} "
+                    f"({d.target_resource} connections measured at {conns:g}/{max_conns:g})."
+                )
+        cascading = sorted({
+            d.target_resource for d in dossiers
+            if d.specialist_name == "CloudRunSpecialist" and d.target_resource != origin
+            and measured_breaches(d.metrics)
+        })
+        if cascading and origin:
+            facts = "; ".join(
+                f"{d.target_resource}: {', '.join(measured_breaches(d.metrics))}"
+                for d in dossiers
+                if d.specialist_name == "CloudRunSpecialist" and d.target_resource in cascading
+            )
+            fixes.append(
+                f"Implement a circuit breaker on calls to {origin}: failures measured on other services "
+                f"({facts})."
+            )
+        return fixes
 
     def _build_agent_metadata(
         self,

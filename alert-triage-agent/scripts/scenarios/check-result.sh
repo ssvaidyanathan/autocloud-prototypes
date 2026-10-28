@@ -12,6 +12,9 @@
 # Options:
 #   --since <ISO-8601-time>   Filter incidents created or updated on or after <time>
 #                             (a file whose time cannot be determined is excluded, with a WARNING)
+#   --until <ISO-8601-time>   Optional upper bound: only groups that opened on or before <time>
+#                             (first alert started_at, else the group id's creation stamp), so an
+#                             earlier scenario can be re-checked after later ones ran
 #   --scenario <s1..s5>       Highlight expected results for a specific scenario
 #   --bucket <bucket-name>    Override GCS incidents bucket (default: ${PROJECT_ID}-${NAME_PREFIX}-incidents)
 #   --dry-run                 Simulate output using mock incident data
@@ -32,6 +35,7 @@ INVENTORY_PIN_OPTIONAL=true
 source "${SCRIPT_DIR}/common.sh"
 
 SINCE_TIME=""
+UNTIL_TIME=""
 FILTER_SCENARIO=""
 BUCKET_NAME="${INCIDENTS_BUCKET:-${PROJECT_ID}-${NAME_PREFIX}-incidents}"
 
@@ -43,6 +47,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --since=*)
             SINCE_TIME="${1#*=}"
+            shift
+            ;;
+        --until)
+            UNTIL_TIME="$2"
+            shift 2
+            ;;
+        --until=*)
+            UNTIL_TIME="${1#*=}"
             shift
             ;;
         --scenario)
@@ -71,10 +83,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Usage: $0 [--since <ISO-8601-time>] [--scenario <s1..s5>] [--bucket <name>] [--dry-run|--mock]"
+            echo "Usage: $0 [--since <ISO-8601-time>] [--until <ISO-8601-time>] [--scenario <s1..s5>] [--bucket <name>] [--dry-run|--mock]"
             echo ""
             echo "Options:"
             echo "  --since <time>       Filter incident files with timestamps >= <time> (e.g. 2026-10-26T22:00:00Z)"
+            echo "  --until <time>       Only groups that opened on or before <time> (first alert started_at), to re-check an earlier scenario"
             echo "  --scenario <id>      Compare against a specific scenario (s1, s2, s3, s4, s5)"
             echo "  --bucket <name>      Override incident GCS bucket (default: ${BUCKET_NAME})"
             echo "  --dry-run, --mock    Simulate output without network calls or cloud dependencies"
@@ -94,13 +107,16 @@ echo "  Project: ${PROJECT_ID} | Bucket: gs://${BUCKET_NAME}"
 if [ -n "${SINCE_TIME}" ]; then
     echo "  Filter Since: ${SINCE_TIME}"
 fi
+if [ -n "${UNTIL_TIME}" ]; then
+    echo "  Filter Until: ${UNTIL_TIME} (group opening time)"
+fi
 if [ -n "${FILTER_SCENARIO}" ]; then
     echo "  Target Scenario: $(to_upper "${FILTER_SCENARIO}")"
 fi
 echo "==================================================================="
 
 # Python helper to parse OKF markdown files and compare against DEMO.md expectations
-python3 - "${BUCKET_NAME}" "${SINCE_TIME}" "${FILTER_SCENARIO}" "${DRY_RUN}" "${MOCK_MODE}" "${NAME_PREFIX}" << 'PYEOF'
+python3 - "${BUCKET_NAME}" "${SINCE_TIME}" "${FILTER_SCENARIO}" "${DRY_RUN}" "${MOCK_MODE}" "${NAME_PREFIX}" "${UNTIL_TIME}" << 'PYEOF'
 import sys
 import os
 import re
@@ -115,6 +131,7 @@ target_scenario = sys.argv[3].lower() if len(sys.argv) > 3 else ""
 is_dry_run = sys.argv[4].lower() == "true" or (len(sys.argv) > 5 and sys.argv[5].lower() == "true")
 # Every expected name is derived from the stack's NAME_PREFIX (common.sh validated it).
 P = sys.argv[6]
+until_str = sys.argv[7] if len(sys.argv) > 7 else ""
 INV_API, ORD_API, INV_DB = f"{P}-inventory-api", f"{P}-orders-api", f"{P}-inventory-db"
 INV_PROXY, ORD_PROXY = f"{P}-inventory-v1", f"{P}-orders-v1"
 
@@ -252,6 +269,29 @@ since_dt = parse_iso(since_str) if since_str else None
 if since_str and not since_dt:
     print(f"[ERROR] --since {since_str!r} is not an ISO-8601 time (e.g. 2026-10-26T22:00:00Z).", file=sys.stderr)
     sys.exit(1)
+until_dt = parse_iso(until_str) if until_str else None
+if until_str and not until_dt:
+    print(f"[ERROR] --until {until_str!r} is not an ISO-8601 time (e.g. 2026-10-26T23:00:00Z).", file=sys.stderr)
+    sys.exit(1)
+if since_dt and until_dt and until_dt < since_dt:
+    print(f"[ERROR] --until {until_str} is before --since {since_str}.", file=sys.stderr)
+    sys.exit(1)
+
+
+def group_open_time(data):
+    """(datetime, source) when the group opened: its first alert's started_at, else the group
+    id's creation stamp; (None, None) when neither is known. Used by --until: a group keeps
+    its opening time when it is updated later (recovery note, archive)."""
+    starts = [parse_iso(a.get("started_at")) for a in (data.get("alerts") or []) if isinstance(a, dict)]
+    starts = [dt for dt in starts if dt]
+    if starts:
+        return min(starts), "first alert started_at"
+    m = _ID_STAMP.search(str(data.get("group_id") or ""))
+    if m:
+        dt = parse_iso("{}-{}-{}T{}:{}:{}Z".format(*m.groups()))
+        if dt:
+            return dt, "group_id"
+    return None, None
 
 # Standard-library parser for the block-style YAML subset the agent writes (yaml.safe_dump):
 # nested mappings, lists of scalars and of mappings, quoted and wrapped scalars. Used when
@@ -473,6 +513,16 @@ else:
                           file=sys.stderr)
                 if doc_dt < since_dt:
                     continue
+            if until_dt:
+                open_dt, open_src = group_open_time(data)
+                if not open_dt:
+                    print(f"[WARNING] {uri}: opening time undetermined; excluded from --until window", file=sys.stderr)
+                    undetermined.append(uri)
+                    continue
+                if open_dt > until_dt:
+                    print(f"[INFO] {uri}: opened {open_dt.strftime('%Y-%m-%dT%H:%M:%SZ')} ({open_src}), "
+                          f"after --until; excluded", file=sys.stderr)
+                    continue
             ts_raw = doc_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if doc_dt else None
 
             alerts_raw = data.get("alerts") or []
@@ -495,7 +545,7 @@ else:
 
 print(f"\nFound {len(incidents)} incident group(s) in GCS:\n")
 if undetermined:
-    print(f"  ({len(undetermined)} incident file(s) with undetermined time excluded from the --since window; "
+    print(f"  ({len(undetermined)} incident file(s) with undetermined time excluded from the --since/--until window; "
           "see the WARNING lines)\n")
 
 if not incidents:

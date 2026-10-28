@@ -207,6 +207,40 @@ def _parse_time_window(alert: AlertEvent) -> tuple[datetime, datetime]:
     return start_window, end_window
 
 
+NOT_APPLICABLE_KEY = "not_applicable"
+
+
+def topology_component_type(name: str) -> Optional[str]:
+    """The topology type of a component ("Cloud Run", "Apigee proxy", "Cloud SQL"), or None if unknown."""
+    try:
+        from topology.loader import get_loader
+
+        loader = get_loader()
+        comp = loader.components.get(loader.canonicalize(name) or name)
+    except Exception as exc:
+        logger.warning("Topology component lookup failed for %s: %s", name, type(exc).__name__)
+        return None
+    return str(comp.type) if comp else None
+
+
+def not_applicable_dossier(specialist: str, target: str, component_type: str) -> EvidenceDossier:
+    """A Cloud Run dossier for a component that is not a Cloud Run service: nothing is queried."""
+    text = (
+        f"Cloud Run service health and metrics: not applicable to `{target}` "
+        f"({component_type}, not a Cloud Run service); not queried."
+    )
+    logger.info("Cloud Run health/metrics skipped for %s: %s, not a Cloud Run service", target, component_type)
+    return EvidenceDossier(
+        specialist_name=specialist,
+        target_resource=target,
+        findings=[text],
+        metrics={NOT_APPLICABLE_KEY: text},
+        evidence_items=[EvidenceItem(headline=f"Cloud Run Service Health: not applicable to {target}", content=text)],
+        queries_executed={},
+        anomaly_detected=False,
+    )
+
+
 class CloudRunSpecialist(BaseSpecialist):
     """Specialist agent diagnosing Cloud Run container service degradation."""
 
@@ -221,6 +255,9 @@ class CloudRunSpecialist(BaseSpecialist):
     ) -> EvidenceDossier:
         if not target_service:
             target_service = alert.resource_labels.get("service_name") or alert.resource_name
+        component_type = topology_component_type(target_service)
+        if component_type is not None and component_type.strip().lower() != "cloud run":
+            return not_applicable_dossier(self.name, target_service, component_type)
         findings: list[str] = []
         evidence_items: list[EvidenceItem] = []
         metrics: dict[str, Any] = {}
@@ -538,6 +575,18 @@ class CloudRunSpecialist(BaseSpecialist):
             latest_ready = service_describe_info.get("latestReadyRevision", "")
             if latest_ready:
                 metrics["latest_ready_revision"] = latest_ready.split("/")[-1]
+            # The serving revision(s) as Cloud Run reports the traffic split; a LATEST target
+            # carries no revision name and resolves to latestReadyRevision.
+            serving: dict[str, int] = {}
+            for t in service_describe_info.get("trafficStatuses") or []:
+                pct = int(t.get("percent") or 0)
+                rev = (t.get("revision") or "").split("/")[-1]
+                if not rev and str(t.get("type", "")).endswith("LATEST"):
+                    rev = metrics.get("latest_ready_revision", "")
+                if rev and pct > 0:
+                    serving[rev] = serving.get(rev, 0) + pct
+            if serving:
+                metrics["serving_revisions"] = serving
 
         # Evaluate anomaly condition
         rate_val = 0.0

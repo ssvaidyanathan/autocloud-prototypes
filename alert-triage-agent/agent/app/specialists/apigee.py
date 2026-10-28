@@ -556,12 +556,29 @@ class ApigeeSpecialist(BaseSpecialist):
             )
         elif "5xx" in alert.policy_name.lower() or "504" in alert.policy_name:
             findings.append(f"Gateway errors detected on Apigee proxy `{target_proxy}` originating from upstream target.")
-            err_code = "504" if "504" in alert.policy_name else ("503" if "503" in status_counts else "5xx")
-            err_count = status_counts.get(err_code) or status_counts.get("504") or status_counts.get("503")
+            # Every 5xx status counts (a passed-through 500/502 as well as 503/504);
+            # a 504 policy keeps its own 504 count.
+            five_xx = {
+                c: n for c, n in status_counts.items()
+                if n and len(c) == 3 and c.startswith("5") and (c[1:].isdigit() or c == "5xx")
+            }
+            err_code = "504" if "504" in alert.policy_name else "5xx"
+            if err_code == "504":
+                err_count = status_counts.get("504")
+            else:
+                err_count = sum(five_xx.values()) if five_xx else None
             if err_count is not None and err_count > 0:
                 metrics[f"proxy_response_code_{err_code}"] = err_count
-                findings.append(f"Telemetry confirms {err_count} HTTP {err_code} responses within alert window.")
+                if err_code == "5xx":
+                    metrics["proxy_response_codes_5xx"] = dict(sorted(five_xx.items()))
+                breakdown = ", ".join(f"HTTP {c}: {n}" for c, n in sorted(five_xx.items()))
+                findings.append(
+                    f"Telemetry confirms {err_count} HTTP {err_code} responses within alert window"
+                    + (f" ({breakdown})." if err_code == "5xx" and breakdown else ".")
+                )
                 err_str = f"HTTP {err_code} responses from backend service ({err_count})"
+                if err_code == "5xx" and breakdown:
+                    err_str += f" [{breakdown}]"
             else:
                 metrics[f"proxy_response_code_{err_code}"] = "N/A (not captured)"
                 findings.append(f"HTTP {err_code} response count: N/A (not captured).")
