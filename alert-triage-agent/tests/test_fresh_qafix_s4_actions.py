@@ -11,7 +11,7 @@ def test_s4_order_review_then_mutating_terminate_then_describe():
     assert acts[0].title.startswith("Inspect connection pool release logic and pool size in ata-inventory-api")
     assert "pg_terminate_backend" in acts[1].command
     assert acts[1].title.startswith("Mutating, operator judgement required:")
-    assert "only after the review above" in acts[1].title
+    assert "only after a connection-release review" in acts[1].title
     assert "gcloud sql instances describe ata-inventory-db" in acts[2].command
     assert "80% of max_connections" in acts[1].verification
 

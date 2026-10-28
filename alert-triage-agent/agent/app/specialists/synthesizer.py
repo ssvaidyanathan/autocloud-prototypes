@@ -150,7 +150,7 @@ def db_pool_actions(origin: str, project_id: str, caller_actions: list[ActionIte
     terminate = ActionItem(
         title=(
             f"Mutating, operator judgement required: terminate idle database sessions on {origin} via a SQL "
-            "client, only after the review above shows they are leaked connections (this ends those sessions)"
+            "client, only after a connection-release review shows they are leaked connections (this ends those sessions)"
         ),
         command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
         verification=(
@@ -452,6 +452,17 @@ def apply_correlation_note(report: InvestigationReport, correlation: Optional[di
         pos += 1
     items[pos:pos] = [line]
     report.observations = " | ".join(items)
+
+
+def _proximity_score(mins: int) -> tuple[float, str]:
+    """Change-proximity score and label for a change ``mins`` minutes before the alert onset."""
+    if mins <= 15:
+        return 0.15, "high temporal proximity"
+    if mins <= 30:
+        return 0.10, "moderate proximity"
+    if mins <= 60:
+        return 0.05, "extended window"
+    return 0.00, "outside causality window"
 
 
 def priority_rank(priority: Optional[str]) -> int:
@@ -1615,18 +1626,8 @@ class SynthesizerAgent:
             mins = origin_change.get("deployed_minutes_ago", 999)
             rev = origin_change.get("revision")
             rev_label = f"Revision `{rev}`" if rev else "Deployment (revision not identified)"
-            if mins <= 15:
-                score_change = 0.15
-                detail_change = f"{rev_label} deployed {mins}m prior to alert onset (high temporal proximity)"
-            elif mins <= 30:
-                score_change = 0.10
-                detail_change = f"{rev_label} deployed {mins}m prior to alert onset (moderate proximity)"
-            elif mins <= 60:
-                score_change = 0.05
-                detail_change = f"{rev_label} deployed {mins}m prior to alert onset (extended window)"
-            else:
-                score_change = 0.00
-                detail_change = f"{rev_label} deployed {mins}m prior to alert onset (outside causality window)"
+            score_change, window = _proximity_score(mins)
+            detail_change = f"{rev_label} deployed {mins}m prior to alert onset ({window})"
         elif (proxy_chg := self._proxy_change_evidence(dossiers, origin)) is not None:
             # An attributed Apigee proxy revision change is a change too (same proximity buckets).
             rev_label = (
@@ -1638,16 +1639,14 @@ class SynthesizerAgent:
             if first is None or onset is None:
                 score_change = 0.00
                 detail_change = f"{rev_label}; proximity to alert onset not determined (timestamp unknown)"
+            elif first > onset:
+                # First served after the onset: it cannot have caused the alert by timing.
+                after = int((first - onset).total_seconds() // 60)
+                score_change = 0.00
+                detail_change = f"{rev_label}, {after}m after the alert onset (not before the onset)"
             else:
-                mins = max(0, int((onset - first).total_seconds() // 60))
-                if mins <= 15:
-                    score_change, window = 0.15, "high temporal proximity"
-                elif mins <= 30:
-                    score_change, window = 0.10, "moderate proximity"
-                elif mins <= 60:
-                    score_change, window = 0.05, "extended window"
-                else:
-                    score_change, window = 0.00, "outside causality window"
+                mins = int((onset - first).total_seconds() // 60)
+                score_change, window = _proximity_score(mins)
                 detail_change = f"{rev_label}, {mins}m prior to alert onset ({window})"
         else:
             score_change = 0.00

@@ -109,3 +109,16 @@ def test_s4_proximity_and_signals_without_cloud_run():
     detail = factors["corroborating_signals"]["detail"]
     assert detail.startswith("1 corroborating") and "24/25" in detail
     assert factors["change_proximity"]["detail"] == "Zero recent deployments detected within lookback window"
+
+
+def test_proxy_revision_first_served_after_onset_scores_zero():
+    """N2: a proxy revision first served after the alert onset is not 'prior to' it and earns no proximity score."""
+    synth = SynthesizerAgent()
+    apigee = _s3_apigee()
+    apigee.metrics["proxy_revision_change"]["new_first_served_at"] = "2026-10-28T01:45:30Z"  # onset 01:41:30
+    na_cr = EvidenceDossier("CloudRunSpecialist", "ata-orders-v1", metrics={NOT_APPLICABLE_KEY: "n/a"})
+    _, factors, _ = synth.calculate_confidence([apigee, na_cr], "ata-orders-v1", _s3_alert(), ["ata-orders-v1"], None)
+    detail = factors["change_proximity"]["detail"]
+    assert "4m after the alert onset" in detail
+    assert "prior to alert onset" not in detail and "proximity)" not in detail
+    assert factors["change_proximity"]["score"] == 0.0
