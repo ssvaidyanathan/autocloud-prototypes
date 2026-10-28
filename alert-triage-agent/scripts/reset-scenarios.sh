@@ -251,7 +251,7 @@ while [[ $# -gt 0 ]]; do
             echo "                             reset was slow: for slow requests made just before it (verify-demo-infra.sh"
             echo "                             says when; env ATA_RESET_ALERT_WINDOW_FROM_START=true)"
             echo "  --thorough                 Wait the full --alert-lag after any slow demo request, even one the live latency"
-            echo "                             policies' retest window (240s) cannot turn into an alert (env ATA_RESET_THOROUGH=true)."
+            echo "                             policies' live retest window (240s by default) cannot turn into an alert (env ATA_RESET_THOROUGH=true)."
             echo "                             Default: a slow non-5xx request (e.g. a cold start) arms the window only when the"
             echo "                             retest window read from Cloud Monitoring does not outlast it (~11 min vs ~4 min reset)"
             echo "  --serving-revisions <list> Comma or space separated list of active Cloud Run revisions"

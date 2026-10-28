@@ -91,6 +91,25 @@ def test_prefix_is_honoured():
                                  "xyz", 10, 2000)["safe"] is True
 
 
+@pytest.mark.parametrize("order", [0, 1])
+def test_a_duplicate_policy_name_is_evaluated_too_and_the_strictest_wins(order):
+    """Display names are not unique: a 60s copy of ata-inventory-latency keeps the window, in either order."""
+    dupes = [_policy("ata-inventory-latency", "60s"), _policy("ata-inventory-latency")]
+    if order:
+        dupes.reverse()
+    d = latency_retest.decide(dupes + [_policy("ata-orders-latency")], "ata", 35, 2000)
+    assert d["safe"] is False, d
+    assert "not within its 60s retest window" in d["reason"]
+    assert "ata-inventory-latency [" in d["reason"] and "of 2 policies with this name]" in d["reason"]
+
+
+def test_duplicate_policies_that_are_all_safe_still_release():
+    d = latency_retest.decide([_policy("ata-inventory-latency"), _policy("ata-inventory-latency", "300s"),
+                               _policy("ata-orders-latency")], "ata", 35, 2000)
+    assert d["safe"] is True and d["min_duration_secs"] == 240
+    assert len([p for p in d["policies"] if p.startswith("ata-inventory-latency [")]) == 2
+
+
 def test_a_disabled_policy_cannot_alert():
     d = latency_retest.decide([_policy("ata-inventory-latency", enabled=False), _policy("ata-orders-latency")],
                               "ata", 10, 2000)
@@ -150,6 +169,9 @@ if mode == "fail":
 if mode == "garbage":
     print("not json")
     sys.exit(0)
+if mode == "nosafe":
+    print(json.dumps({"reason": "x"}))
+    sys.exit(0)
 print(json.dumps({"safe": mode == "safe", "reason": "REASON-" + mode, "policies": ["ata-inventory-latency (p99 > 2000 ms for 240s, 60s alignment)"]}))
 """
 
@@ -191,6 +213,7 @@ def test_qa_reset_cold_start_releases_the_window_and_states_the_remaining_risk(t
     ("unsafe", "Alert window kept ("),
     ("fail", "could not read the latency alert policies: ERROR: Cloud Monitoring API returned HTTP 403"),
     ("garbage", "unparseable latency_retest.py output: not json"),
+    ("nosafe", 'unparseable latency_retest.py output: {"reason": "x"}'),
 ])
 def test_window_is_kept_unless_the_live_policies_say_it_is_safe(tmp_path, mode, msg):
     res = _settle(tmp_path, QA_REQUESTS, mode=mode, statuses=QA_STATUSES)

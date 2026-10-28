@@ -16,7 +16,8 @@ alert when that, plus one alignment period of margin (the margin ata-stray chose
 is at most the retest window of every enabled condition. With the Terraform defaults
 (240s retest, 60s alignment) a burst shorter than 60 s holds the condition for under
 180 s (+60 s margin = 240 s): safe; a burst of 60 s or more is not. A missing policy, a non-threshold condition, a
-threshold below SLOW_REQUEST_MS or an unreadable field is never assumed safe.
+threshold below SLOW_REQUEST_MS or an unreadable field is never assumed safe. Every policy carrying
+a name is evaluated (display names are not unique), so a duplicate 60s policy keeps the window.
 
 Prints {"safe": bool, "reason": str, "hold_secs": int|null, "min_duration_secs": int|null,
 "policies": [...]}. Errors follow open_alerts.py: the cause on stderr, exit 3 when
@@ -92,14 +93,21 @@ def fetch_policies(project_id: str, token: str, urlopen: Callable = urllib.reque
 
 def decide(policies: list, name_prefix: str, span_secs: int, slow_request_ms: float) -> dict:
     result = {"safe": False, "reason": "", "hold_secs": None, "min_duration_secs": None, "policies": []}
-    by_name = {p.get("displayName"): p for p in policies}
     hold_max, min_duration = 0, None
+    # (name, policy) for EVERY policy carrying each name: Cloud Monitoring does not enforce unique
+    # display names, so a duplicate (a manual copy, a leftover) is evaluated too; the strictest wins.
+    checks = []
     for svc in SERVICES:
         name = f"{name_prefix}-{svc}-latency"
-        policy = by_name.get(name)
-        if policy is None:
+        matches = [p for p in policies if p.get("displayName") == name]
+        if not matches:
             result["reason"] = f"alert policy {name} not found, so its retest window is unknown"
             return result
+        if len(matches) > 1:
+            checks.extend((f"{name} [{i} of {len(matches)} policies with this name]", p) for i, p in enumerate(matches, 1))
+        else:
+            checks.append((name, matches[0]))
+    for name, policy in checks:
         if policy.get("enabled") is False:
             result["policies"].append(f"{name} (disabled)")
             continue
@@ -141,7 +149,7 @@ def decide(policies: list, name_prefix: str, span_secs: int, slow_request_ms: fl
         f"slow requests spanning {span_secs}s keep a latency condition true for under {hold_max}s, "
         f"which with one alignment period of margin is within the shortest retest window ({min_duration}s)"
         if min_duration is not None
-        else "both latency policies are disabled"))
+        else "all latency policies are disabled"))
     return result
 
 
