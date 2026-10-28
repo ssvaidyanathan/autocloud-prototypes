@@ -235,3 +235,62 @@ def test_python_comments_and_docstrings_are_not_scanned(tmp_path):
     lines = _python_code_lines(src.read_text())
     assert "ata-agent" not in lines[0] and "ata-bridge" not in lines[1]
     assert "ata-tools" in lines[2]
+
+
+# Example config files (*.example) are skipped above because they document the default `ata`
+# prefix. They must still carry only placeholders, never a live stack identifier.
+EXAMPLE_LIVE_IDS = LIVE_IDS + (
+    "dev377204",                 # live ServiceNow instance
+    "ssvaidyanathan",            # personal account / email
+    "8.233.247.52",              # live Apigee nip.io hostname
+    "scion-fde-ops",             # live operator service account
+    "deploy-demo-test",          # live deployer service account
+)
+EXAMPLE_VIOLATIONS = [
+    re.compile("|".join(re.escape(x) for x in EXAMPLE_LIVE_IDS)),
+    VIOLATIONS[-1],  # GCP region literal
+]
+
+
+EXAMPLE_EXCLUDED_PARTS = {".terraform", "node_modules", ".venv", "__pycache__"}
+
+
+def example_files() -> list[Path]:
+    return [
+        p for p in sorted(ROOT.rglob("*.example"))
+        if p.is_file() and not EXAMPLE_EXCLUDED_PARTS.intersection(p.relative_to(ROOT).parts)
+    ]
+
+
+def test_example_configs_carry_no_live_identifiers():
+    files = example_files()
+    rels = {p.relative_to(ROOT).as_posix() for p in files}
+    # Non-vacuous: the env and tfvars examples are all in scope.
+    assert {"agent/.env.example", "bridge/.env.example",
+            "infra/terraform/foundation/terraform.tfvars.example"} <= rels, rels
+    bad = [
+        f"{p.relative_to(ROOT).as_posix()}:{n}:{m.group(0)}"
+        for p in files
+        for n, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), start=1)
+        for rx in EXAMPLE_VIOLATIONS
+        for m in rx.finditer(line)
+    ]
+    assert not bad, "live identifier(s) in example config; use your-project-id / your-region placeholders:\n" + "\n".join(bad)
+
+
+@pytest.mark.parametrize(
+    "line, flagged",
+    [
+        ("PROJECT_ID=cloud-assist-fde-2", True),
+        ("REGION=us-west1", True),
+        ("SERVICENOW_INSTANCE_URL=https://dev377204.service-now.com", True),
+        ('deployer_members = ["user:ssvaidyanathan@google.com"]', True),
+        ("APIGEE_HOST=8.233.247.52.nip.io", True),
+        ("SA=deploy-demo-test@x.iam.gserviceaccount.com", True),
+        ("PROJECT_ID=your-project-id", False),
+        ("REGION=your-region", False),
+        ("SERVICENOW_INSTANCE_URL=https://your-instance.service-now.com", False),
+    ],
+)
+def test_example_guard_patterns(line, flagged):
+    assert any(rx.search(line) for rx in EXAMPLE_VIOLATIONS) is flagged
