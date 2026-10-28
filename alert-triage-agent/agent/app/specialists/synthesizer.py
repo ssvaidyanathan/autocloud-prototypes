@@ -2402,6 +2402,10 @@ class SynthesizerAgent:
                     code_5xx = next(k for k in d.metrics if k.startswith("proxy_response_code_5"))
                     if d.metrics[code_5xx] != "N/A (not captured)":
                         obs_items.append(f"Apigee proxy {d.target_resource} recorded {d.metrics[code_5xx]} {code_5xx.replace('proxy_response_code_', 'HTTP ')} responses")
+                log_5xx = d.metrics.get("access_log_5xx")
+                if isinstance(log_5xx, dict) and log_5xx.get("statement"):
+                    # Log-based count, stated as such (the metric had none).
+                    obs_items.append(f"Apigee proxy {d.target_resource}: {log_5xx['statement']}")
 
         # 3. Log excerpt items
         for d in dossiers:
@@ -2871,6 +2875,10 @@ class SynthesizerAgent:
                     code_name = code_key.replace("proxy_response_code_", "") if code_key else "5xx"
                     val = d.metrics.get(code_key) if code_key else "N/A (no telemetry captured)"
                     during_val = f"{val} req" if isinstance(val, (int, float)) else str(val)
+                    log_5xx = d.metrics.get("access_log_5xx")
+                    if not isinstance(val, (int, float)) and isinstance(log_5xx, dict) and log_5xx.get("statement"):
+                        # The metric row has no value; name the log-based count as such.
+                        during_val = log_5xx["statement"]
                     var_val = f"+{val} req" if isinstance(val, (int, float)) else "N/A (no baseline captured)"
                     before_val = "0 req/min" if isinstance(val, (int, float)) else "N/A (no baseline captured)"
                     metrics.append({

@@ -646,8 +646,31 @@ class ApigeeSpecialist(BaseSpecialist):
                     err_str += f" [{breakdown}]"
             else:
                 metrics[f"proxy_response_code_{err_code}"] = "N/A (not captured)"
-                findings.append(f"HTTP {err_code} response count: N/A (not captured).")
-                err_str = f"HTTP {err_code}: N/A (not captured)"
+                # The metric has no such responses. The access log is a separate, partial count
+                # (status_code is empty on the fault path; reads can be capped): state it as
+                # log-based, never as the metric count and never added to it.
+                log_errs = {
+                    c: n for c, n in log_status_counts.items()
+                    if n and (c == "504" if err_code == "504" else (len(c) == 3 and c.startswith("5")))
+                }
+                if log_errs:
+                    log_n = sum(log_errs.values())
+                    statement = (
+                        f"HTTP {err_code}: not in metric; access log shows {log_n} {err_code} responses "
+                        "(log-based, may be partial)"
+                    )
+                    metrics["access_log_5xx"] = {
+                        "count": log_n,
+                        "codes": dict(sorted(log_errs.items())),
+                        "count_source": f"{access_log_id()} log entries",
+                        "may_be_partial": True,
+                        "statement": statement,
+                    }
+                    findings.append(f"{statement}.")
+                    err_str = statement
+                else:
+                    findings.append(f"HTTP {err_code} response count: N/A (not captured).")
+                    err_str = f"HTTP {err_code}: N/A (not captured)"
                 logger.warning(
                     "HTTP %s response count on %s is N/A: zero %s error points found in window [%s, %s]",
                     err_code, target_proxy, err_code, window_start.isoformat(), window_end.isoformat(),
