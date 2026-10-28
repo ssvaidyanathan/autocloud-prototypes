@@ -103,6 +103,7 @@ def deploy(tmp_path):
                             "SERVICENOW_INSTANCE_URL", "GCP_PROJECT", "GCP_REGION", "NAME_PREFIX", "APIGEE_ENV", "TOOLS_URL",
                             "AGENT_IMAGE", "BRIDGE_IMAGE", "TOOLS_IMAGE", "IMAGE_TAG", "ASSUME_YES", "MODEL_NAME", "GEMINI_LOCATION",
                             "ALLOWED_SERVICE_ACCOUNTS", "ENVIRONMENT", "OWNER", "TOOLS_TIMEOUT_SECONDS",
+                            "CHANGE_ONSET_WINDOW_MINUTES", "CHANGE_HEALTHY_PERIOD_MINUTES",
                             "ALLOW_CUSTOM_SERVICE_URLS")}
         env.update(
             PATH=f"{bin_dir}{os.pathsep}{env['PATH']}",
@@ -403,6 +404,26 @@ def test_agent_sets_tools_url_and_passes_optional_tuning_only_when_exported(depl
     env = _env(_deploy_call(calls))
     assert (env["MODEL_NAME"], env["GEMINI_LOCATION"], env["TOOLS_TIMEOUT_SECONDS"]) == ("gemini-x", "global", "20")
     assert env["TOOLS_URL"] == "https://ata-tools-hash1234-uw.a.run.app"
+
+
+def test_agent_passes_change_attribution_tuning_only_when_exported(deploy):
+    res, calls = deploy("agent", STUB_DEPLOYED="ata-agent ata-bridge")
+    assert res.returncode == 0, res.stdout + res.stderr
+    env = _env(_deploy_call(calls))
+    assert "CHANGE_ONSET_WINDOW_MINUTES" not in env
+    assert "CHANGE_HEALTHY_PERIOD_MINUTES" not in env
+
+    res, calls = deploy("agent", STUB_DEPLOYED="ata-agent ata-bridge", CHANGE_ONSET_WINDOW_MINUTES="20")
+    assert res.returncode == 0, res.stdout + res.stderr
+    env = _env(_deploy_call(calls))
+    assert env["CHANGE_ONSET_WINDOW_MINUTES"] == "20"
+    assert "CHANGE_HEALTHY_PERIOD_MINUTES" not in env
+
+    res, calls = deploy("agent", STUB_DEPLOYED="ata-agent ata-bridge",
+                        CHANGE_ONSET_WINDOW_MINUTES="20", CHANGE_HEALTHY_PERIOD_MINUTES="5")
+    assert res.returncode == 0, res.stdout + res.stderr
+    env = _env(_deploy_call(calls))
+    assert (env["CHANGE_ONSET_WINDOW_MINUTES"], env["CHANGE_HEALTHY_PERIOD_MINUTES"]) == ("20", "5")
 
 
 def test_agent_no_longer_grants_invoker_bindings(deploy):
