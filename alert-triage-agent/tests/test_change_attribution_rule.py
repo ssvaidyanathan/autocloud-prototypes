@@ -160,8 +160,8 @@ def test_inc0010343_deploy_then_healthy_period_then_fault_is_not_change_induced(
     expected = (
         f"revision {PIN_REV} on ata-inventory-api deployed {INC0010343_DEPLOY}: deployed 59m before the alert onset, "
         "beyond the 15-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES); healthy period: Cloud Monitoring "
-        f"shows {PIN_REV} served 41 requests from {_minute(-59):%Y-%m-%dT%H:%M:%SZ} to {_minute(-6):%Y-%m-%dT%H:%M:%SZ} "
-        "(53 min, at least 10) with HTTP 5xx under 5% and mean latency under 2000 ms in every minute with requests, "
+        f"shows {PIN_REV} served 41 requests from {INC0010343_DEPLOY} to {_minute(-6):%Y-%m-%dT%H:%M:%SZ} "
+        "(53 one-minute intervals, at least 10) with HTTP 5xx under 5% and mean latency under 2000 ms in every minute with requests, "
         f"before the alert onset at {ONSET}"
     )
     assert report.change_induced == (

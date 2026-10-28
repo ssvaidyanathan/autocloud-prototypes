@@ -461,19 +461,22 @@ def healthy_period(
     thresholds = f"HTTP 5xx under {ERROR_RATE_5XX_BREACH_PCT:g}% and mean latency under {LATENCY_P95_BREACH_MS:g} ms"
     result: dict[str, Any] = {"window_start": _iso(deploy_dt), "window_end": _iso(onset)}
     span = int((best[1] - best[0]).total_seconds() // 60) + 1 if best else 0
+    # The first minute can start before the deploy; the stated span starts no earlier than it.
+    shown_start = _iso(max(best[0], deploy_dt)) if best else ""
     if best is not None and span >= min_minutes:
         result.update(
             status="healthy",
-            start=_iso(best[0]), end=_iso(best[1] + timedelta(minutes=1)), minutes=span, requests=best[2],
+            start=shown_start, end=_iso(best[1] + timedelta(minutes=1)), minutes=span, requests=best[2],
             evidence=(
                 f"healthy period: Cloud Monitoring shows {revision} served {best[2]} requests from "
-                f"{_iso(best[0])} to {_iso(best[1] + timedelta(minutes=1))} ({span} min, at least {min_minutes}) with {thresholds} "
+                f"{shown_start} to {_iso(best[1] + timedelta(minutes=1))} ({span} one-minute intervals, at least "
+                f"{min_minutes}) with {thresholds} "
                 f"in every minute with requests, before the alert onset at {_iso(onset)}"
             ),
         )
     else:
         longest = (
-            f"its longest span of normal traffic was {span} min ({_iso(best[0])} to "
+            f"its longest span of normal traffic was {span} one-minute intervals ({shown_start} to "
             f"{_iso(best[1] + timedelta(minutes=1))}), under {min_minutes}"
             if best is not None else "it had no minute of normal traffic"
         )
