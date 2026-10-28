@@ -383,9 +383,14 @@ Run the automated result checker to inspect OKF incident files in GCS and valida
 
 # Compare against specific scenario expectation
 ./scripts/scenarios/check-result.sh --scenario s3
+
+# Re-check an earlier scenario after later ones ran: bound the window on both sides
+./scripts/scenarios/check-result.sh --since "<S1 start>" --until "<S2 start>" --scenario s1
 ```
 
 `check-result.sh` reads both `knowledge/incident-manager/` and `archive/` (the reset archives a scenario's groups, so a check after the reset still finds them). With `--since`, a file's time is its `timestamp`, `updated_at` or `created_at`, else its latest alert `started_at`, else the creation stamp in its `group_id`, else (active files only) the object's GCS update time; the GCS time of an archived file is the reset's move, not the incident. A file whose time cannot be determined is not counted: the script prints `WARNING ... undetermined time; excluded from --since window` naming it. An invalid `--since` is an error.
+
+`--until <time>` (optional) is the upper bound. Without it, a check is meaningful only right after its scenario: re-checking S1 after S3 ran also counts S3's groups (Origin and Ticket then name the newest group). `--until` compares the time the group **opened** (its first alert `started_at`, else the creation stamp in its `group_id`), not its last update, so a group updated later (recovery note, archive) still belongs to its scenario. A file excluded by `--until` is logged as `INFO ... opened <time> (...), after --until; excluded`; a file with no opening time is not counted, with `WARNING ... opening time undetermined; excluded from --until window`. An invalid `--until`, or one before `--since`, is an error. Use the next scenario's start time as `--until`.
 
 ### 2. View Raw GCS OKF Incident Files
 Inspect active incident Markdown files stored in Cloud Storage under `knowledge/incident-manager/`:
