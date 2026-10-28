@@ -319,7 +319,9 @@ def previous_serving_revision(
 
 REQUEST_LATENCIES_METRIC = "run.googleapis.com/request_latencies"
 # Per-call deadline of the healthy-period Cloud Monitoring reads. A timeout is a failed read:
-# the healthy period is "unavailable" and only the onset-window rule applies, stated.
+# the healthy period is "unavailable" and only the onset-window rule applies, stated. Worst case:
+# 2 reads per genuine Cloud Run deploy beyond the onset window, run one after another in a worker
+# thread (the event loop stays free), so a Monitoring outage adds up to ~60 s per such deploy.
 MONITORING_READ_TIMEOUT_SECONDS = 30.0
 
 

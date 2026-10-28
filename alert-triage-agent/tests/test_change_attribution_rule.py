@@ -869,6 +869,8 @@ def test_probe3_more_healthy_minutes_then_idle_then_fault_is_never_blamed(health
     expected = "insufficient_traffic" if healthy < 3 else "inconclusive"
     assert result["healthy_period"]["reason"] == expected
     assert result["evidence"].endswith(", so only the onset-window rule was applied")
+    # Undetermined, not missing data: the verdict is stated as such, not as "data unavailable".
+    assert "healthy-period data unavailable" not in result["evidence"]
     if expected == "inconclusive":
         assert f"healthy period inconclusive ({healthy} healthy active minutes, but no span of at least 10" in result["evidence"]
 
