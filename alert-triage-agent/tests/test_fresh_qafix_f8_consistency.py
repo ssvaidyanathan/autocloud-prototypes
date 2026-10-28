@@ -108,7 +108,30 @@ def test_s4_proximity_and_signals_without_cloud_run():
     _, factors, _ = synth.calculate_confidence([sql, na_cr], "ata-inventory-db", _s4_alert(), [], None)
     detail = factors["corroborating_signals"]["detail"]
     assert detail.startswith("1 corroborating") and "24/25" in detail
-    assert factors["change_proximity"]["detail"] == "Zero recent deployments detected within lookback window"
+    # No change source in these dossiers: proximity is not claimed (N4/O3).
+    assert factors["change_proximity"]["detail"] == (
+        "Change proximity not assessed: no change source was read for the origin `ata-inventory-db`"
+    )
+
+
+def test_s4_proximity_states_what_was_assessed_with_an_off_path_proxy_deploy():
+    """final-qa3 O3: S4 listed ata-orders-v1 r191 deployed 12m before onset (not upstream of the
+    origin) while the factor said 'Zero recent deployments detected within lookback window'."""
+    synth = SynthesizerAgent()
+    sql = EvidenceDossier("CloudSQLSpecialist", "ata-inventory-db", anomaly_detected=True,
+                          metrics={"active_connections": 24, "max_connections": 25})
+    change = EvidenceDossier("ChangeSpecialist", "ata-inventory-db", metrics={
+        "change_sources_checked": ["ata-tools change timeline (Cloud Run revision history)"],
+        "apigee_deployments_in_window": [{"proxy": "ata-orders-v1", "revision": "191", "deployed_minutes_ago": 12}],
+    })
+    _, factors, rationale = synth.calculate_confidence([sql, change], "ata-inventory-db", _s4_alert(), [], None)
+    detail = factors["change_proximity"]["detail"]
+    assert "Zero recent deployments" not in detail and "Zero recent deployments" not in rationale
+    assert detail == (
+        "No deployment of the origin `ata-inventory-db` within the change window before alert onset "
+        "(deployments of other components are not scored)"
+    )
+    assert factors["change_proximity"]["score"] == 0.0
 
 
 def test_proxy_revision_first_served_after_onset_scores_zero():

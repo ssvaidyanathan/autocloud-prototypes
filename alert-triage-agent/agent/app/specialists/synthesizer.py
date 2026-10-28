@@ -1682,7 +1682,19 @@ class SynthesizerAgent:
                 detail_change = f"{rev_label}, {mins}m prior to alert onset ({window})"
         else:
             score_change = 0.00
-            detail_change = "Zero recent deployments detected within lookback window"
+            # State what was assessed: only the origin's (and the alerted resource's) deployments
+            # score here. The report can list other components' deploys in the window (S4: a proxy
+            # not upstream of the origin), so "zero recent deployments" would contradict it.
+            subject = f"the origin `{origin}`"
+            if alert.resource_name and alert.resource_name != origin:
+                subject += f" or the alerted resource `{alert.resource_name}`"
+            if change_sources_checked(dossiers):
+                detail_change = (
+                    f"No deployment of {subject} within the change window before alert onset "
+                    "(deployments of other components are not scored)"
+                )
+            else:
+                detail_change = f"Change proximity not assessed: no change source was read for {subject}"
 
         calc_conf = base_score + score_topology + score_signals + score_onset + score_change
         total_conf = round(min(0.99, max(0.40, calc_conf)), 2)
