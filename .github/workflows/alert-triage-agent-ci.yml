@@ -1,0 +1,131 @@
+name: Alert Triage Agent CI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'alert-triage-agent/**'
+      - '.github/workflows/alert-triage-agent-ci.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'alert-triage-agent/**'
+      - '.github/workflows/alert-triage-agent-ci.yml'
+
+defaults:
+  run:
+    working-directory: alert-triage-agent
+
+# Read-only token: the jobs only check out and test. No secrets are used.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Actions are pinned to full commit SHAs (tag in the comment).
+# Test dependencies: the three service packages plus what tests/ imports directly.
+env:
+  TEST_DEPS: >-
+    pytest==9.1.1 pytest-asyncio==1.4.1 shellcheck-py==0.11.0.1
+    sqlalchemy cloud-sql-python-connector[pg8000] pg8000
+
+jobs:
+  test:
+    name: Test suite (Linux, bash 5)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./bridge -e ./agent -e ./tools ${TEST_DEPS} \
+            -r demo/ata-inventory-api/requirements.txt -r demo/ata-orders-api/requirements.txt
+      - name: Run pytest (services, scripts, Terraform guards)
+        run: python -m pytest tests -q -p no:cacheprovider
+
+  scripts-macos:
+    # The demo scripts run on operators' Macs: /bin/bash 3.2 and BSD userland.
+    # Script tests run with /bin/bash first on PATH (a `bash` shim), so nested
+    # `#!/usr/bin/env bash` scripts use it too, and ATA_TEST_BASH points at it.
+    name: Script tests (macOS, /bin/bash 3.2, BSD userland)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./bridge -e ./agent -e ./tools ${TEST_DEPS}
+      - name: Put /bin/bash first on PATH
+        run: |
+          /bin/bash -c 'echo "$BASH_VERSION"' | grep -q '^3\.2\.'
+          mkdir -p "${RUNNER_TEMP}/bash32"
+          ln -sf /bin/bash "${RUNNER_TEMP}/bash32/bash"
+          echo "${RUNNER_TEMP}/bash32" >> "${GITHUB_PATH}"
+      - name: Run script tests
+        env:
+          ATA_TEST_BASH: /bin/bash
+        run: |
+          bash -c 'echo "bash on PATH: $BASH_VERSION"'
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_bash32_compat.py \
+            tests/test_macos_userland.py \
+            tests/test_run_all_ctrl_c.py \
+            tests/test_run_all_halt_on_reset_failure.py \
+            tests/test_deploy_scripts_env_vars.py \
+            tests/test_fresh_deploy_scripts.py \
+            tests/test_apigee_prefix.py
+
+  shellcheck:
+    name: ShellCheck (errors)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install ShellCheck
+        run: python -m pip install shellcheck-py==0.11.0.1
+      - name: ShellCheck every script (fails on errors; warnings are listed)
+        run: |
+          find . -name '*.sh' -not -path '*/node_modules/*' -print0 | sort -z > "${RUNNER_TEMP}/scripts"
+          xargs -0 shellcheck -x --severity=warning < "${RUNNER_TEMP}/scripts" || true
+          xargs -0 shellcheck -x --severity=error < "${RUNNER_TEMP}/scripts"
+
+  terraform:
+    name: Terraform format & validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+      - name: Format check
+        run: terraform -chdir=infra/terraform fmt -check -recursive
+      - name: Validate each stack (no backend, no credentials)
+        run: |
+          for stack in foundation database applications observability triage-iam; do
+            echo "Validating ${stack}..."
+            terraform -chdir="infra/terraform/${stack}" init -backend=false -input=false
+            terraform -chdir="infra/terraform/${stack}" validate
+          done

@@ -1,0 +1,4 @@
+project_id                     = "your-project-id"
+region                         = "your-region"
+name_prefix                    = "your-prefix"
+cloudsql_connections_threshold = 20

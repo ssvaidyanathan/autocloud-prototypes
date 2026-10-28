@@ -1,0 +1,729 @@
+"""ApigeeSpecialist Agent for Alert Triage Runtime.
+
+Analyzes Apigee Cloud Monitoring metrics (proxy/response_count, target/latencies),
+ata-apigee-access Cloud Logging records, and client access distribution.
+All telemetry is anchored to the alert start time using real read-only GCP queries.
+"""
+
+from collections import Counter
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
+import logging
+from typing import Any, Optional
+
+from ..config import AgentConfig, get_agent_settings
+from ..contracts.alert import AlertEvent
+from ..contracts.report import EvidenceItem
+from .base import BaseSpecialist, EvidenceDossier
+from .measurements import (
+    ACCESS_LOG_5XX_KEY,
+    APIGEE_RESPONSE_COUNT_SOURCE,
+    access_log_5xx_statement,
+    is_5xx_code,
+    response_count_unavailable,
+)
+from .telemetry_reads import (
+    UNAVAILABLE_KEY,
+    failure_reason,
+    gap_text,
+    read_log_entries,
+    record_change_source,
+    record_unavailable,
+)
+
+logger = logging.getLogger(__name__)
+
+# Apigee fault raised when the target does not answer within the proxy's target timeout.
+GATEWAY_TIMEOUT_FAULT = "GatewayTimeout"
+# Apigee fault raised by a SpikeArrest policy (metric fault_code ends with it, access-log fault_source equals it).
+SPIKE_ARREST_FAULT = "SpikeArrestViolation"
+
+
+def access_log_id() -> str:
+    """Log id written by the Apigee proxies' MessageLogging policy: {NAME_PREFIX}-apigee-access."""
+    return get_agent_settings().apigee_access_log_id
+
+
+TARGET_LATENCIES_METRIC = "apigee.googleapis.com/target/latencies"
+
+
+def _nearest_rank(sorted_vals: list[float], q: float) -> int:
+    return int(round(sorted_vals[min(int(len(sorted_vals) * q), len(sorted_vals) - 1)]))
+
+
+def target_latency_summary(logged_ms: list[float], minute_means_ms: list[float]) -> Optional[dict[str, Any]]:
+    """P50/P95/P99 over one population, with the population named in `basis`.
+
+    Per-request access-log latencies are used when there are any. Otherwise the percentiles
+    are over the per-minute target/latencies means, each minute counted once: a percentile of
+    means, not of requests. The two are never mixed. None when neither was captured.
+    """
+    if logged_ms:
+        vals, noun, source = logged_ms, "logged request", access_log_id()
+    elif minute_means_ms:
+        vals, noun, source = minute_means_ms, "per-minute mean", TARGET_LATENCIES_METRIC
+    else:
+        return None
+    ordered = sorted(vals)
+    n = len(ordered)
+    return {
+        "p50_ms": _nearest_rank(ordered, 0.50),
+        "p95_ms": _nearest_rank(ordered, 0.95),
+        "p99_ms": _nearest_rank(ordered, 0.99),
+        "population": f"{n} {noun}{'' if n == 1 else 's'}",
+        "basis": f"percentiles of {n} {noun}{'' if n == 1 else 's'} ({source})",
+    }
+
+
+# Nearest-rank quantiles reported for Apigee target latency, in integer percent (no float
+# rounding at the boundary: 1.0 - 0.95 is 0.05000000000000004).
+_LATENCY_QUANTILES = (("p50", 50), ("p95", 95), ("p99", 99))
+
+
+def apply_gateway_timeout_gap(
+    summary: dict[str, Any], timeouts_without_latency: int, requests_with_latency: int
+) -> dict[str, Any]:
+    """Mark the percentiles that GatewayTimeout faults make unknowable.
+
+    A GatewayTimeout fault gets no target response, so it records no target latency: the
+    percentiles above cover only the requests that got one. When the faults are more than
+    (1 - q) of all requests, the true q-th percentile lies among them and is not known, so
+    it is "not available" with the reason. Lower percentiles stay numeric, and the basis
+    names the excluded faults. Returns a new dict; `summary` is not changed.
+    """
+    if timeouts_without_latency <= 0:
+        return summary
+    total = timeouts_without_latency + max(requests_with_latency, 0)
+    out = dict(summary)
+    reason = (
+        f"not available: {timeouts_without_latency} of {total} requests were {GATEWAY_TIMEOUT_FAULT} "
+        "faults, which record no target latency"
+    )
+    for key, pct in _LATENCY_QUANTILES:
+        # Faults above (100 - pct)% of requests: the pct-th percentile lies among them.
+        if timeouts_without_latency * 100 > total * (100 - pct):
+            out[f"{key}_ms"] = reason
+    out["basis"] = (
+        f"{summary['basis']}; excludes {timeouts_without_latency} {GATEWAY_TIMEOUT_FAULT} "
+        "faults, which record no target latency"
+    )
+    return out
+
+
+def access_log_name(project_id: str) -> str:
+    """Full Cloud Logging log name of the Apigee access log in `project_id`."""
+    return f"projects/{project_id}/logs/{access_log_id()}"
+
+
+def _entry_time(entry: Any) -> Optional[datetime]:
+    ts = getattr(entry, "timestamp", None)
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _iso(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def summarize_revision_change(
+    revisions: dict[str, dict[str, Any]], latest_revision: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    """Describe the switch to the newest proxy revision seen in the access log, or None.
+
+    ``revisions`` maps revision -> {first, last, requests, spike_arrest_faults} for one
+    environment; ``latest_revision`` is the revision of the newest entry read. Only facts from
+    the log are returned: which revision served before and after, when each was first and
+    last seen, and the per-revision request and SpikeArrest fault counts. A request rate is
+    given only for a revision that served for at least a minute. None when the newest entry
+    is not on the most recently introduced revision (e.g. A -> B -> A): the switch is not the
+    current state, so it is not reported as one.
+    """
+    timed = [(r, v) for r, v in revisions.items() if v.get("first") and v.get("last")]
+    if len(timed) < 2:
+        return None
+    timed.sort(key=lambda rv: rv[1]["first"])
+    (prev_rev, prev), (new_rev, new) = timed[-2], timed[-1]
+    if latest_revision is not None and latest_revision != new_rev:
+        logger.info(
+            "Access log: newest entry is on revision %s, not on the last introduced revision %s; no revision switch reported",
+            latest_revision,
+            new_rev,
+        )
+        return None
+
+    def rate(v: dict[str, Any]) -> Optional[float]:
+        minutes = (v["last"] - v["first"]).total_seconds() / 60.0
+        return round(v["requests"] / minutes, 1) if minutes >= 1.0 else None
+
+    return {
+        "previous_revision": prev_rev,
+        "new_revision": new_rev,
+        "previous_last_served_at": _iso(prev["last"]),
+        "new_first_served_at": _iso(new["first"]),
+        "previous_requests": prev["requests"],
+        "new_requests": new["requests"],
+        "previous_spike_arrest_faults": prev["spike_arrest_faults"],
+        "new_spike_arrest_faults": new["spike_arrest_faults"],
+        "previous_requests_per_minute": rate(prev),
+        "new_requests_per_minute": rate(new),
+    }
+
+try:
+    from topology.topology_graph import get_loader
+except ImportError:
+    try:
+        from alert_triage_agent.topology.topology_graph import get_loader
+    except ImportError as err:
+        logger.error("Failed to import topology_graph: %s", err)
+        raise
+
+
+class ApigeeSpecialist(BaseSpecialist):
+    """Specialist agent diagnosing Apigee ingress proxy faults via real read-only telemetry."""
+
+    def __init__(self):
+        super().__init__("ApigeeSpecialist")
+
+    async def investigate(
+        self,
+        alert: AlertEvent,
+        config: AgentConfig,
+    ) -> EvidenceDossier:
+        raw_proxy = (
+            alert.resource_labels.get("proxy_name")
+            or alert.resource_labels.get("apiproxy")
+            or alert.resource_labels.get("proxy")
+            or alert.resource_name
+        )
+        target_proxy = str(raw_proxy)
+        loader = get_loader()
+        canon = loader.canonicalize(target_proxy)
+        comp = loader.components.get(canon) if canon else None
+        if comp and "apigee" in comp.type.lower():
+            target_proxy = canon
+        else:
+            callers = loader.downstream(canon) if canon else []
+            proxy_caller = next(
+                (c for c in callers if loader.components.get(c) and "apigee" in loader.components[c].type.lower()),
+                None,
+            )
+            if proxy_caller:
+                target_proxy = proxy_caller
+            elif canon:
+                target_proxy = canon
+            elif target_proxy.startswith(f"{config.name_prefix}-apigee-"):
+                # Legacy alias form {prefix}-apigee-<proxy> -> {prefix}-<proxy>.
+                target_proxy = f"{config.name_prefix}-" + target_proxy[len(f"{config.name_prefix}-apigee-"):]
+
+        findings: list[str] = []
+        evidence_items: list[EvidenceItem] = []
+        metrics: dict[str, Any] = {}
+        queries_executed: dict[str, list[str]] = {
+            "cloud_monitoring": [
+                f'fetch apigee.googleapis.com/proxy/response_count | filter resource.proxy_name == "{target_proxy}"',
+                f'fetch apigee.googleapis.com/target/latencies | filter resource.proxy_name == "{target_proxy}"',
+            ],
+            "cloud_logging": [],
+        }
+
+        is_apigee_incident = "apigee" in alert.resource_name.lower() or any(
+            k in alert.policy_name.lower() for k in ["apigee", "spikearrest", "429", "proxy"]
+        ) or "v1" in alert.resource_name.lower()
+
+        now_utc = datetime.now(timezone.utc)
+        # Parse alert start time to anchor query window
+        try:
+            alert_dt = datetime.fromisoformat(alert.started_at.replace("Z", "+00:00"))
+        except Exception:
+            alert_dt = now_utc
+
+        window_start = alert_dt - timedelta(minutes=15)
+        window_end = min(alert_dt + timedelta(minutes=5), now_utc)
+        if window_end <= window_start:
+            window_end = window_start + timedelta(minutes=15)
+        elif (window_end - window_start).total_seconds() < 60:
+            window_start = window_end - timedelta(minutes=5)
+
+        # Real telemetry containers
+        # Two sources, never summed: both count the same requests (an access-log entry per
+        # request, and the proxy/response_count metric), so adding them double-counts.
+        # status_counts: apigee.googleapis.com/proxy/response_count per response_code, the only
+        # source of the published response counts. log_status_counts: access-log status_code.
+        status_counts: dict[str, int] = {}
+        log_status_counts: dict[str, int] = {}
+        # Kept apart: per-minute distribution means and per-request access-log latencies.
+        minute_means_ms: list[float] = []
+        logged_latencies_ms: list[float] = []
+        # Requests behind the per-minute means, and GatewayTimeout log entries with no latency value.
+        minute_requests = 0
+        gt_log_without_latency = 0
+        top_client_ip: Optional[str] = None
+        fault_codes: set[str] = set()
+        # GatewayTimeout evidence: metric series (response_code/fault_code/fault_source labels)
+        # and access-log entries (fault_source field, proxy revision).
+        gt_metric_count = 0
+        gt_fault_code: Optional[str] = None
+        gt_fault_source: Optional[str] = None
+        gt_response_code: Optional[str] = None
+        gt_log_count = 0
+        log_revisions: Counter[str] = Counter()
+        # SpikeArrest evidence and per-revision access-log facts; org/env as Apigee reports them.
+        sa_metric_count = 0
+        sa_fault_code: Optional[str] = None
+        sa_response_code: Optional[str] = None
+        sa_log_count = 0
+        revision_stats: dict[str, dict[str, Any]] = {}
+        latest_entry: Optional[tuple[datetime, str]] = None
+        metric_orgs: set[str] = set()
+        metric_envs: set[str] = set()
+        log_envs: set[str] = set()
+        access_log_truncated = False
+        access_log_unavailable = False
+
+        # 1. Query Cloud Monitoring: proxy/response_count
+        try:
+            from google.cloud import monitoring_v3
+            client = monitoring_v3.MetricServiceClient()
+            interval = monitoring_v3.TimeInterval(
+                start_time={"seconds": int(window_start.timestamp())},
+                end_time={"seconds": int(window_end.timestamp())},
+            )
+            req = monitoring_v3.ListTimeSeriesRequest(
+                name=f"projects/{config.project_id}",
+                filter=(
+                    f'metric.type = "apigee.googleapis.com/proxy/response_count" AND '
+                    f'resource.labels.proxy_name = "{target_proxy}"'
+                ),
+                interval=interval,
+            )
+            for ts in client.list_time_series(request=req):
+                code = str(ts.metric.labels.get("response_code") or "")
+                fc = ts.metric.labels.get("fault_code")
+                if fc:
+                    fault_codes.add(fc)
+                pts_sum = sum(
+                    pt.value.int64_value
+                    for pt in ts.points
+                    if hasattr(pt.value, "int64_value")
+                )
+                if code and pts_sum > 0:
+                    status_counts[code] = status_counts.get(code, 0) + pts_sum
+                # Real responses carry a protobuf map (a Mapping, not a dict).
+                res_labels = getattr(getattr(ts, "resource", None), "labels", None)
+                if isinstance(res_labels, Mapping):
+                    if res_labels.get("org"):
+                        metric_orgs.add(str(res_labels["org"]))
+                    if res_labels.get("env"):
+                        metric_envs.add(str(res_labels["env"]))
+                if fc and str(fc).endswith(SPIKE_ARREST_FAULT) and pts_sum > 0:
+                    sa_metric_count += pts_sum
+                    sa_fault_code = str(fc)
+                    sa_response_code = code or sa_response_code
+                if fc and str(fc).endswith(GATEWAY_TIMEOUT_FAULT) and pts_sum > 0:
+                    gt_metric_count += pts_sum
+                    gt_fault_code = str(fc)
+                    gt_fault_source = ts.metric.labels.get("fault_source") or gt_fault_source
+                    gt_response_code = code or gt_response_code
+        except Exception as exc:
+            logger.warning("Cloud Monitoring proxy/response_count query error: %s", exc)
+            record_unavailable(
+                metrics, source=APIGEE_RESPONSE_COUNT_SOURCE,
+                target=target_proxy, reason=failure_reason(exc, "Cloud Monitoring"),
+            )
+
+        # 2. Query Cloud Monitoring: target/latencies
+        try:
+            from google.cloud import monitoring_v3
+            client = monitoring_v3.MetricServiceClient()
+            interval = monitoring_v3.TimeInterval(
+                start_time={"seconds": int(window_start.timestamp())},
+                end_time={"seconds": int(window_end.timestamp())},
+            )
+            req = monitoring_v3.ListTimeSeriesRequest(
+                name=f"projects/{config.project_id}",
+                filter=(
+                    f'metric.type = "apigee.googleapis.com/target/latencies" AND '
+                    f'resource.labels.proxy_name = "{target_proxy}"'
+                ),
+                interval=interval,
+            )
+            for ts in client.list_time_series(request=req):
+                for pt in ts.points:
+                    dist = getattr(pt.value, "distribution_value", None)
+                    if dist and getattr(dist, "count", 0) > 0:
+                        minute_means_ms.append(float(getattr(dist, "mean", 0.0)))
+                        minute_requests += int(getattr(dist, "count", 0))
+        except Exception as exc:
+            logger.warning("Cloud Monitoring target/latencies query error: %s", exc)
+            record_unavailable(
+                metrics, source=f"Cloud Monitoring {TARGET_LATENCIES_METRIC}",
+                target=target_proxy, reason=failure_reason(exc, "Cloud Monitoring"),
+            )
+
+        # 3. Query Cloud Logging: ata-apigee-access
+        try:
+            import google.cloud.logging
+            logging_client = google.cloud.logging.Client(project=config.project_id)
+            start_ts = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+            end_ts = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+            # One read per window: the proxy-name variants are one OR clause instead of a
+            # second query run when the first returned nothing. Pages are LOGGING_READ_PAGE_SIZE
+            # entries, so the cap costs ceil(cap / page size) read requests, not cap / 50.
+            log_filter = (
+                f'logName="{access_log_name(config.project_id)}" AND '
+                f'(jsonPayload.proxy="{target_proxy}" OR jsonPayload.proxy_name="{target_proxy}" '
+                f'OR textPayload:"{target_proxy}") AND '
+                f'timestamp>="{start_ts}" AND timestamp<="{end_ts}"'
+            )
+            queries_executed["cloud_logging"].append(log_filter)
+            log_cap = config.apigee_access_log_max_entries
+            entries = await read_log_entries(
+                logging_client,
+                filter_=log_filter,
+                max_results=log_cap,
+                order_by=google.cloud.logging.ASCENDING,
+                config=config,
+                what=f"Cloud Logging {access_log_id()} read for {target_proxy}",
+            )
+
+            if len(entries) >= log_cap:
+                # Oldest-first and capped: the newest entries were not read, so per-revision
+                # counts are partial and the current revision is unknown.
+                access_log_truncated = True
+                metrics["access_log_cap_hit"] = {"cap": log_cap, "window_start": start_ts, "window_end": end_ts}
+                cap_text = (
+                    f"Apigee access log for `{target_proxy}` hit the {log_cap}-entry read cap "
+                    f"(APIGEE_ACCESS_LOG_MAX_ENTRIES) in [{start_ts}, {end_ts}]: entries after the cap were "
+                    "not read, so no proxy revision switch was evaluated and log-derived counts are lower bounds."
+                )
+                findings.append(cap_text)
+                evidence_items.append(EvidenceItem(headline=f"Apigee access log truncated: {target_proxy}", content=cap_text))
+                logger.warning(
+                    "Access log for %s hit the %d-entry cap in [%s, %s]; revision switch not evaluated, "
+                    "log-derived counts are lower bounds",
+                    target_proxy, log_cap, start_ts, end_ts,
+                )
+            client_counter: Counter[str] = Counter()
+            for entry in entries:
+                payload = entry.payload if isinstance(entry.payload, dict) else {}
+                sc = str(payload.get("status_code") or "")
+                if sc:
+                    log_status_counts[sc] = log_status_counts.get(sc, 0) + 1
+                cip = payload.get("client_ip")
+                if cip:
+                    client_counter[cip] += 1
+                fault_name = str(payload.get("fault_source") or "")
+                if fault_name == SPIKE_ARREST_FAULT:
+                    sa_log_count += 1
+                if payload.get("environment"):
+                    log_envs.add(str(payload["environment"]))
+                entry_rev = str(payload.get("revision") or "").strip()
+                entry_ts = _entry_time(entry)
+                if entry_rev and entry_ts:
+                    if latest_entry is None or entry_ts >= latest_entry[0]:
+                        latest_entry = (entry_ts, entry_rev)
+                    st = revision_stats.setdefault(
+                        entry_rev, {"first": entry_ts, "last": entry_ts, "requests": 0, "spike_arrest_faults": 0}
+                    )
+                    st["first"] = min(st["first"], entry_ts)
+                    st["last"] = max(st["last"], entry_ts)
+                    st["requests"] += 1
+                    if fault_name == SPIKE_ARREST_FAULT:
+                        st["spike_arrest_faults"] += 1
+                if fault_name == GATEWAY_TIMEOUT_FAULT:
+                    gt_log_count += 1
+                    rev = str(payload.get("revision") or "").strip()
+                    if rev:
+                        log_revisions[rev] += 1
+                tlat = payload.get("target_latency_ms")
+                has_latency = False
+                if tlat and str(tlat).strip():
+                    try:
+                        logged_latencies_ms.append(float(tlat))
+                        has_latency = True
+                    except ValueError:
+                        pass
+                if fault_name == GATEWAY_TIMEOUT_FAULT and not has_latency:
+                    gt_log_without_latency += 1
+            if client_counter:
+                top_client_ip = client_counter.most_common(1)[0][0]
+            if not access_log_truncated:
+                # The whole window was read, so proxy revision switches were evaluated.
+                record_change_source(metrics, f"Apigee access log {access_log_id()} (proxy revisions of {target_proxy})")
+        except Exception as exc:
+            logger.warning("Cloud Logging %s query error: %s", access_log_id(), exc)
+            access_log_unavailable = True
+            reason = failure_reason(exc, "Cloud Logging")
+            # Proxy revision switches come only from this log: without it change detection is
+            # incomplete and the report must not say the incident is not change-induced.
+            record_unavailable(
+                metrics, source=f"Apigee access log {access_log_id()}", target=target_proxy,
+                reason=reason, affects_change_detection=True,
+            )
+            gap_msg = (
+                f"Apigee access log {access_log_id()} for `{target_proxy}` could not be read ({reason}) in "
+                f"[{window_start.strftime('%Y-%m-%dT%H:%M:%SZ')}, {window_end.strftime('%Y-%m-%dT%H:%M:%SZ')}]: "
+                "proxy revision switch, client and per-request counts not assessed."
+            )
+            findings.append(gap_msg)
+            evidence_items.append(
+                EvidenceItem(headline=f"Apigee access log unavailable: {target_proxy}", content=gap_msg)
+            )
+
+        # Calculate latency metrics if captured
+        lat_summary = target_latency_summary(logged_latencies_ms, minute_means_ms)
+        if lat_summary:
+            # GatewayTimeout faults carry no target latency, so they are missing from the
+            # population: per-minute means never include them; logged entries only when blank.
+            if logged_latencies_ms:
+                missing, covered = gt_log_without_latency, len(logged_latencies_ms)
+            else:
+                missing, covered = (gt_metric_count or gt_log_count), minute_requests
+            lat_summary = apply_gateway_timeout_gap(lat_summary, missing, covered)
+        # Each is an int (ms), a "not available: <reason>" string, or None when not captured.
+        p50_ms: Any = lat_summary["p50_ms"] if lat_summary else None
+        p95_ms: Any = lat_summary["p95_ms"] if lat_summary else None
+        p99_ms: Any = lat_summary["p99_ms"] if lat_summary else None
+        if lat_summary:
+            # What the p50/p95/p99 values are percentiles of; every label of them names it.
+            metrics["target_latency_basis"] = lat_summary["basis"]
+
+        def _ms(v: Any) -> str:
+            return f"{v}ms" if isinstance(v, int) else str(v)
+
+        # Assign metrics without static numbers
+        if p50_ms is not None:
+            metrics["target_latency_p50"] = _ms(p50_ms)
+        else:
+            metrics["target_latency_p50"] = "N/A (not captured)"
+
+        if p95_ms is not None:
+            metrics["target_latency_p95_ms"] = p95_ms
+            metrics["target_latency_p95"] = _ms(p95_ms)
+        else:
+            metrics["target_latency_p95_ms"] = "N/A (not captured)"
+            metrics["target_latency_p95"] = "N/A (not captured)"
+
+        if p99_ms is not None:
+            metrics["target_latency_p99"] = _ms(p99_ms)
+        else:
+            metrics["target_latency_p99"] = "N/A (not captured)"
+
+        metrics["top_client_ip"] = top_client_ip if top_client_ip else "<CLIENT_IP>/32"
+
+        # Org and environment only when Apigee reported exactly one; never assumed.
+        if len(metric_orgs) == 1:
+            metrics["apigee_org"] = next(iter(metric_orgs))
+        elif metric_orgs:
+            logger.warning("Apigee proxy %s reported in several orgs %s; org not recorded", target_proxy, sorted(metric_orgs))
+        envs = metric_envs | log_envs
+        if len(envs) == 1:
+            metrics["apigee_environment"] = next(iter(envs))
+        elif envs:
+            logger.warning(
+                "Apigee proxy %s seen in several environments %s; environment and revision switch not recorded",
+                target_proxy, sorted(envs),
+            )
+        lower_bound = access_log_truncated
+        if sa_metric_count or sa_log_count:
+            metrics["spike_arrest"] = {
+                "count": sa_metric_count or sa_log_count,
+                "count_source": (
+                    "apigee.googleapis.com/proxy/response_count" if sa_metric_count
+                    else f"{access_log_id()} log entries"
+                ),
+                "count_is_lower_bound": bool(not sa_metric_count and lower_bound),
+                "response_code": sa_response_code,
+                "fault_code": sa_fault_code or SPIKE_ARREST_FAULT,
+            }
+        revision_change = None
+        if not access_log_truncated and not access_log_unavailable and len(envs) <= 1:
+            revision_change = summarize_revision_change(
+                revision_stats, latest_entry[1] if latest_entry else None
+            )
+        if revision_change:
+            metrics["proxy_revision_change"] = revision_change
+            findings.append(
+                f"Apigee proxy `{target_proxy}` switched from revision {revision_change['previous_revision']} "
+                f"to {revision_change['new_revision']} (first served {revision_change['new_first_served_at']})."
+            )
+
+        # Only observed facts: counts, fault code and source as reported, the proxy revision
+        # named by the access log. The proxy's timeout value is not part of this telemetry.
+        if gt_metric_count or gt_log_count:
+            metrics["gateway_timeout"] = {
+                "proxy": target_proxy,
+                "count": gt_metric_count or gt_log_count,
+                "count_source": (
+                    "apigee.googleapis.com/proxy/response_count" if gt_metric_count
+                    else f"{access_log_id()} log entries"
+                ),
+                "response_code": gt_response_code,
+                "fault_code": gt_fault_code or GATEWAY_TIMEOUT_FAULT,
+                "fault_source": gt_fault_source,
+                "count_is_lower_bound": bool(not gt_metric_count and lower_bound),
+                # With a truncated log the revision may not be the one serving now.
+                "revision": (
+                    log_revisions.most_common(1)[0][0] if log_revisions and not access_log_truncated else None
+                ),
+            }
+            findings.append(
+                f"Apigee proxy `{target_proxy}` returned {metrics['gateway_timeout']['count']} "
+                f"{GATEWAY_TIMEOUT_FAULT} faults in the window [{window_start.isoformat()}, {window_end.isoformat()}]."
+            )
+        # apigee.googleapis.com/proxy/response_count, per response_code (metric only).
+        metrics["response_codes"] = status_counts if status_counts else {}
+        if log_status_counts:
+            # Access-log entries per status_code; a separate count of the same requests.
+            metrics["access_log_status_codes"] = dict(sorted(log_status_counts.items()))
+
+        # Log WARNING for genuinely absent data per Quality Gates
+        if p50_ms is None or p95_ms is None:
+            logger.warning(
+                "Target latency on Apigee proxy %s is N/A: no latency distribution points or access log latency values captured in window [%s, %s]",
+                target_proxy, window_start.isoformat(), window_end.isoformat(),
+            )
+
+        # Policy-specific findings & evidence items
+        if "429" in alert.policy_name or "spikearrest" in alert.policy_name.lower():
+            findings.append(f"SpikeArrest rate limit violation detected on Apigee proxy `{target_proxy}`.")
+            c429 = status_counts.get("429")
+            if c429 is not None and c429 > 0:
+                metrics["proxy_response_code_429"] = c429
+                findings.append(f"Telemetry confirms {c429} HTTP 429 rate-limited responses within alert window.")
+                total_429_str = f"{c429} in window"
+            else:
+                metrics["proxy_response_code_429"] = "N/A (not captured)"
+                findings.append("HTTP 429 response count: N/A (not captured).")
+                total_429_str = "N/A (not captured)"
+                logger.warning(
+                    "HTTP 429 response count on %s is N/A: zero 429 responses found in window [%s, %s]",
+                    target_proxy, window_start.isoformat(), window_end.isoformat(),
+                )
+
+            if top_client_ip:
+                findings.append(f"Top offending client identified from access logs: `{top_client_ip}`.")
+                client_disp = top_client_ip
+            else:
+                client_disp = "<CLIENT_IP>/32"
+
+            if p95_ms is not None:
+                backend_status = f"Target latency P95 of {lat_summary['population']}: {_ms(p95_ms)}"
+            else:
+                backend_status = "Target latency: N/A (not captured)"
+
+            evidence_items.append(
+                EvidenceItem(
+                    headline=f"Apigee Proxy Policy Breach: {target_proxy}",
+                    content=(
+                        f"Proxy: {target_proxy}\n"
+                        f"Policy Fault: SpikeArrest 429\n"
+                        f"Total 429 Responses: {total_429_str}\n"
+                        f"Target Backend Status: {backend_status}\n"
+                        f"Top Offending Client: {client_disp}"
+                    ),
+                )
+            )
+        elif "5xx" in alert.policy_name.lower() or "504" in alert.policy_name:
+            findings.append(f"Gateway errors detected on Apigee proxy `{target_proxy}` originating from upstream target.")
+            # Every 5xx status counts (a passed-through 500/502 as well as 503/504);
+            # a 504 policy keeps its own 504 count.
+            five_xx = {c: n for c, n in status_counts.items() if n and is_5xx_code(c)}
+            err_code = "504" if "504" in alert.policy_name else "5xx"
+            if err_code == "504":
+                err_count = status_counts.get("504")
+            else:
+                err_count = sum(five_xx.values()) if five_xx else None
+            if err_count is not None and err_count > 0:
+                metrics[f"proxy_response_code_{err_code}"] = err_count
+                if err_code == "5xx":
+                    metrics["proxy_response_codes_5xx"] = dict(sorted(five_xx.items()))
+                breakdown = ", ".join(f"HTTP {c}: {n}" for c, n in sorted(five_xx.items()))
+                findings.append(
+                    f"Telemetry confirms {err_count} HTTP {err_code} responses within alert window"
+                    + (f" ({breakdown})." if err_code == "5xx" and breakdown else ".")
+                )
+                err_str = f"HTTP {err_code} responses from backend service ({err_count})"
+                if err_code == "5xx" and breakdown:
+                    err_str += f" [{breakdown}]"
+            else:
+                metrics[f"proxy_response_code_{err_code}"] = "N/A (not captured)"
+                # The metric has no such responses. The access log is a separate, partial count
+                # (status_code is empty on the fault path; reads can be capped): state it as
+                # log-based, never as the metric count and never added to it.
+                # measurements.ApigeeResponses reads this key, so the proxy's metric statement
+                # in the ticket and the HTML states the log count too.
+                log_errs = {
+                    c: n for c, n in log_status_counts.items()
+                    if n and (c == "504" if err_code == "504" else is_5xx_code(c))
+                }
+                if log_errs:
+                    log_n = sum(log_errs.values())
+                    statement = access_log_5xx_statement(
+                        err_code, log_n, metric_unavailable=response_count_unavailable(metrics),
+                    )
+                    metrics[ACCESS_LOG_5XX_KEY] = {
+                        "code": err_code,
+                        "count": log_n,
+                        "codes": dict(sorted(log_errs.items())),
+                        "count_source": f"{access_log_id()} log entries",
+                        "may_be_partial": True,
+                        "statement": statement,
+                    }
+                    findings.append(f"{statement}.")
+                    err_str = statement
+                else:
+                    findings.append(f"HTTP {err_code} response count: N/A (not captured).")
+                    err_str = f"HTTP {err_code}: N/A (not captured)"
+                logger.warning(
+                    "HTTP %s response count on %s is N/A: zero %s error points found in window [%s, %s]",
+                    err_code, target_proxy, err_code, window_start.isoformat(), window_end.isoformat(),
+                )
+
+            lat_label = f"Target Latency (P95 of {lat_summary['population']})" if lat_summary else "Target Latency"
+            lat_str = _ms(p95_ms) if p95_ms is not None else "N/A (not captured)"
+            evidence_items.append(
+                EvidenceItem(
+                    headline=f"Apigee Upstream Latency / {err_code}: {target_proxy}",
+                    content=(
+                        f"Proxy: {target_proxy}\n"
+                        f"{lat_label}: {lat_str}\n"
+                        f"Target Errors: {err_str}"
+                    ),
+                )
+            )
+        else:
+            findings.append(f"Apigee proxy `{target_proxy}` telemetry evaluated.")
+            if status_counts:
+                codes_summary = ", ".join(f"HTTP {c}: {cnt}" for c, cnt in sorted(status_counts.items()))
+                findings.append(f"Observed response codes in window: {codes_summary}.")
+                content_str = f"Apigee proxy/response_count for `{target_proxy}`: {codes_summary}."
+            elif metrics.get(UNAVAILABLE_KEY):
+                # Empty because reads failed: not evidence that nothing happened.
+                findings.append(
+                    "Error spike and policy breach not assessed: "
+                    + "; ".join(gap_text(g) for g in metrics[UNAVAILABLE_KEY]) + "."
+                )
+                content_str = f"Apigee proxy/response_count for `{target_proxy}`: not assessed (telemetry unavailable)."
+            else:
+                findings.append("No anomalous error spike or policy breach detected in query window.")
+                content_str = f"Apigee proxy/response_count for `{target_proxy}`: N/A (not captured)."
+
+            evidence_items.append(
+                EvidenceItem(
+                    headline=f"Apigee Baseline Telemetry: {target_proxy}",
+                    content=content_str,
+                )
+            )
+
+        return EvidenceDossier(
+            specialist_name=self.name,
+            target_resource=target_proxy,
+            findings=findings,
+            metrics=metrics,
+            evidence_items=evidence_items,
+            queries_executed=queries_executed,
+            anomaly_detected=is_apigee_incident,
+            confidence=0.89,
+        )

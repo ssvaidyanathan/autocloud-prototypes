@@ -1,0 +1,8 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+cloud-sql-python-connector[pg8000]>=1.14.0
+sqlalchemy>=2.0.0
+pg8000>=1.31.0
+google-auth>=2.28.0
