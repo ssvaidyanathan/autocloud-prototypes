@@ -10,7 +10,9 @@ only if
   (a) the alert onset is at most CHANGE_ONSET_WINDOW_MINUTES (default 15) after it, or
   (b) the new revision had no healthy period before the onset: no span of at least
       CHANGE_HEALTHY_PERIOD_MINUTES (default 10) in which every minute with requests on it
-      stayed under the alert-policy thresholds (Cloud Monitoring, per revision).
+      was healthy: HTTP 5xx share under CHANGE_HEALTHY_MAX_5XX_SHARE (0.05) and mean latency
+      under CHANGE_HEALTHY_MAX_LATENCY_MS (2000) (Cloud Monitoring, per revision). These are
+      agent heuristics, not the alert-policy thresholds (5xx rate > 0.05/s, p99 latency).
 
 Without healthy-period data only (a) applies, and the ticket says so. Other deploys are
 listed under "Recent changes (likely unrelated)" with their evidence: no causation, no
@@ -61,13 +63,20 @@ class FakeTrafficHistory:
     """Cloud Monitoring fake for request_count (by response code class) and request_latencies.
 
     `minutes` maps service -> revision -> [(minute, 2xx count, 5xx count, mean latency ms)].
+    A mean latency of None gives that minute no request_latencies point. With `latency=False`
+    request_latencies returns no series; with `requests=False` request_count returns none.
     Like the real API, only points inside the request interval of the filtered service are
     returned, each with an interval end time.
     """
 
-    def __init__(self, minutes: dict[str, dict[str, list[tuple]]] | None = None, error: Exception | None = None):
+    def __init__(
+        self, minutes: dict[str, dict[str, list[tuple]]] | None = None, error: Exception | None = None,
+        latency: bool = True, requests: bool = True,
+    ):
         self.minutes = minutes or {}
         self.error = error
+        self.latency = latency
+        self.requests = requests
         self.calls: list[Any] = []
 
     def list_time_series(self, request: Any = None, **kwargs: Any) -> list[Any]:
@@ -83,14 +92,18 @@ class FakeTrafficHistory:
             rows = [r for r in rows if start <= r[0].timestamp() + 60 <= end + 60]
             res = SimpleNamespace(labels={"revision_name": revision})
             if "request_latencies" in flt:
+                if not self.latency:
+                    continue
                 pts = [
                     SimpleNamespace(
                         interval=SimpleNamespace(end_time=m + timedelta(minutes=1)),
                         value=SimpleNamespace(distribution_value=SimpleNamespace(count=ok + bad, mean=lat)),
                     )
-                    for m, ok, bad, lat in rows if ok + bad
+                    for m, ok, bad, lat in rows if ok + bad and lat is not None
                 ]
                 series.append(SimpleNamespace(resource=res, metric=SimpleNamespace(labels={}), points=pts))
+                continue
+            if not self.requests:
                 continue
             for cls, idx in (("2xx", 1), ("5xx", 2)):
                 pts = [
@@ -125,6 +138,9 @@ INC0010343_TRAFFIC = {
         PIN_REV: INC0010343_PIN,
     }
 }
+THRESHOLDS_NOTE = (
+    "CHANGE_HEALTHY_MAX_5XX_SHARE 0.05, CHANGE_HEALTHY_MAX_LATENCY_MS 2000; agent heuristics, not the alert-policy thresholds"
+)
 INC0010343_DEPLOY = (ONSET_DT - timedelta(minutes=59, seconds=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -161,7 +177,8 @@ def test_inc0010343_deploy_then_healthy_period_then_fault_is_not_change_induced(
         f"revision {PIN_REV} on ata-inventory-api deployed {INC0010343_DEPLOY}: deployed 59m before the alert onset, "
         "beyond the 15-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES); healthy period: Cloud Monitoring "
         f"shows {PIN_REV} served 41 requests from {INC0010343_DEPLOY} to {_minute(-6):%Y-%m-%dT%H:%M:%SZ} "
-        "(53 one-minute intervals, at least 10) with HTTP 5xx under 5% and mean latency under 2000 ms in every minute with requests, "
+        "(53 one-minute intervals, at least 10) with HTTP 5xx under 5% of requests and mean latency under 2000 ms "
+        f"({THRESHOLDS_NOTE}) in every minute with requests, "
         f"before the alert onset at {ONSET}"
     )
     assert report.change_induced == (
@@ -188,6 +205,9 @@ def test_inc0010343_deploy_then_healthy_period_then_fault_is_not_change_induced(
     alts = report.root_cause_analysis["alternatives_ruled_out"]
     assert any(a["reason"] == f"Recent changes (likely unrelated): {expected}." for a in alts)
     assert not report.revision_diffs
+    # The root cause names no revision: the unrelated deploy is not the origin change.
+    assert PIN_REV not in report.probable_root_cause.text
+    assert "revision deployment" not in report.probable_root_cause.text
 
 
 def test_inc0010343_shape_old_rule_window_still_reports_the_deploy_time(agent_cfg, telemetry, monkeypatch):
@@ -329,6 +349,177 @@ def test_config_defaults_and_validation(monkeypatch):
         monkeypatch.setenv(name, "10")
 
 
+def test_healthy_threshold_config_defaults_and_validation(monkeypatch):
+    monkeypatch.delenv("CHANGE_HEALTHY_MAX_5XX_SHARE", raising=False)
+    monkeypatch.delenv("CHANGE_HEALTHY_MAX_LATENCY_MS", raising=False)
+    default = _config()
+    assert (default.change_healthy_max_5xx_share, default.change_healthy_max_latency_ms) == (0.05, 2000.0)
+    monkeypatch.setenv("CHANGE_HEALTHY_MAX_5XX_SHARE", "0.01")
+    monkeypatch.setenv("CHANGE_HEALTHY_MAX_LATENCY_MS", "500")
+    assert (_config().change_healthy_max_5xx_share, _config().change_healthy_max_latency_ms) == (0.01, 500.0)
+    for name, bads, good in (
+        ("CHANGE_HEALTHY_MAX_5XX_SHARE", ("0", "-0.1", "1.5", "5%", "nan"), "0.05"),
+        ("CHANGE_HEALTHY_MAX_LATENCY_MS", ("0", "-1", "300001", "abc", "nan"), "2000"),
+    ):
+        for bad in bads:
+            monkeypatch.setenv(name, bad)
+            with pytest.raises(ValidationError):
+                _config()
+        monkeypatch.setenv(name, good)
+
+
+def test_configured_healthy_thresholds_are_applied_and_stated():
+    """A 3 % 5xx minute is healthy at the default 0.05 and unhealthy at 0.02; the text states the values used."""
+    rows = [(_minute(-30 + i), 97, 3, 900.0) for i in range(20)]
+    client = FakeTrafficHistory({"ata-inventory-api": {PIN_REV: rows}})
+    default = assess_deploy_causation(_deploy(31), ONSET_DT, _config(), client)
+    assert default["causal"] is False
+    assert f"({THRESHOLDS_NOTE})" in default["evidence"]
+    strict = assess_deploy_causation(_deploy(31), ONSET_DT, _config(change_healthy_max_5xx_share=0.02), client)
+    assert strict["causal"] is True and strict["rule"] == "b"
+    assert "HTTP 5xx under 2% of requests" in strict["evidence"] and "CHANGE_HEALTHY_MAX_5XX_SHARE 0.02" in strict["evidence"]
+    slow = assess_deploy_causation(_deploy(31), ONSET_DT, _config(change_healthy_max_latency_ms=800), client)
+    assert slow["causal"] is True
+    assert "mean latency 900 ms" in slow["evidence"] and "CHANGE_HEALTHY_MAX_LATENCY_MS 800" in slow["evidence"]
+
+
+# ---------------------------------------------------------------------------------------
+# Healthy-minute checks: latency breach, the exact 5xx boundary, this revision only
+# ---------------------------------------------------------------------------------------
+
+
+def _hp(client, deploy_mins: int = 41, min_minutes: int = 10):
+    return healthy_period(
+        client, "p", "us-west1", "ata-inventory-api", PIN_REV,
+        (ONSET_DT - timedelta(minutes=deploy_mins)).strftime("%Y-%m-%dT%H:%M:%SZ"), ONSET_DT, min_minutes,
+    )
+
+
+def test_latency_over_the_threshold_alone_makes_a_minute_unhealthy():
+    """Error-free traffic with a mean latency at 2000 ms every minute is no healthy period."""
+    rows = [(_minute(-40 + i), 10, 0, 2000.0) for i in range(30)]
+    result = _hp(FakeTrafficHistory({"ata-inventory-api": {PIN_REV: rows}}))
+    assert result["status"] == "no_healthy_period"
+    assert f"first minute over the thresholds {_minute(-40):%Y-%m-%dT%H:%M:%SZ} (mean latency 2000 ms)" in result["evidence"]
+    just_under = _hp(FakeTrafficHistory({"ata-inventory-api": {PIN_REV: [(m, ok, bad, 1999.0) for m, ok, bad, _ in rows]}}))
+    assert just_under["status"] == "healthy"
+
+
+@pytest.mark.parametrize("errors,status", [(1, "no_healthy_period"), (0, "healthy")])
+def test_a_5xx_share_of_exactly_the_threshold_is_unhealthy(errors, status):
+    """1 in 20 is exactly 5 %: at the threshold is unhealthy, matching the measured-breach semantics."""
+    rows = [(_minute(-40 + i), 20 - errors, errors, 80.0) for i in range(30)]
+    assert _hp(FakeTrafficHistory({"ata-inventory-api": {PIN_REV: rows}}))["status"] == status
+
+
+def test_only_the_new_revisions_traffic_counts():
+    """The previous revision served healthy traffic all along; the new one failed from its first request."""
+    client = FakeTrafficHistory({"ata-inventory-api": {
+        PIN_PREV: [(_minute(-40 + i), 400, 0, 80.0) for i in range(35)],
+        PIN_REV: [(_minute(-40 + i), 1, 4, 300.0) for i in range(35)],
+    }})
+    # Mixed with the previous revision the service is healthy (4 of 405 requests are 5xx, 1 %).
+    result = _hp(client)
+    assert result["status"] == "no_healthy_period"
+    assert "it had no minute of normal traffic" in result["evidence"]
+    assert "HTTP 5xx 80.0% of 5 requests" in result["evidence"]
+    assert assess_deploy_causation(_deploy(41), ONSET_DT, _config(), client)["rule"] == "b"
+    # The same for latency: the new revision is slow (3000 ms) and error-free, the previous one fast.
+    slow = FakeTrafficHistory({"ata-inventory-api": {
+        PIN_PREV: [(_minute(-40 + i), 400, 0, 80.0) for i in range(35)],
+        PIN_REV: [(_minute(-40 + i), 5, 0, 3000.0) for i in range(35)],
+    }})
+    slow_result = _hp(slow)
+    assert slow_result["status"] == "no_healthy_period"
+    assert "(mean latency 3000 ms)" in slow_result["evidence"]
+
+
+def test_root_cause_names_the_causal_deploy_not_an_earlier_unrelated_one(agent_cfg, telemetry, monkeypatch):
+    """An earlier healthy re-pin (40 min, listed first) and a bad revision 6 min before onset:
+    the root cause and rollback name the bad revision, never the unrelated re-pin."""
+    _use_traffic(monkeypatch, FakeTrafficHistory({"ata-inventory-api": {
+        PIN_PREV: [(_minute(-50 + i), 8, 0, 90.0) for i in range(8)],
+        PIN_REV: [(_minute(-40 + i), 8, 0, 90.0) for i in range(33)],
+        INVENTORY_BAD_REV: [(_minute(-6 + i), 1, 7, 150.0) for i in range(6)],
+    }}))
+    telemetry["degraded"] = {"ata-inventory-api": "5xx"}
+    telemetry["changes"] = [
+        _change("ata-inventory-api", PIN_REV, PIN_PREV, (ONSET_DT - timedelta(minutes=40)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        _change("ata-inventory-api", INVENTORY_BAD_REV, PIN_REV, (ONSET_DT - timedelta(minutes=6, seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+    ]
+    report = _investigate(_event(_entry("0.rc-inv", "ata-inventory-5xx", "ata-inventory-api", "5xx")), agent_cfg)
+
+    assert report.infer_issue_type() == "change_induced"
+    assert f"`{INVENTORY_BAD_REV}`" in report.probable_root_cause.text
+    assert PIN_REV not in report.probable_root_cause.text
+    assert any(i.headline == "Recent changes (likely unrelated)" and PIN_REV in i.content for i in report.evidence_by_area["change"])
+
+
+# ---------------------------------------------------------------------------------------
+# Partial data: latency or request_count missing must not imply "no healthy period"
+# ---------------------------------------------------------------------------------------
+
+
+def test_inc0010343_with_an_empty_latency_series_falls_back_to_the_onset_window(agent_cfg, telemetry, monkeypatch):
+    """R1 regression: no request_latencies data is incomplete evidence, not "no minute of normal traffic"."""
+    _use_traffic(monkeypatch, FakeTrafficHistory(INC0010343_TRAFFIC, latency=False))
+    report = _investigate(_inventory_5xx(telemetry, INC0010343_DEPLOY), agent_cfg)
+
+    assert report.change_induced.startswith("No (recent changes likely unrelated: ")
+    assert (
+        "deployed 59m before the alert onset, beyond the 15-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES); "
+        f"healthy-period data unavailable (Cloud Monitoring run.googleapis.com/request_latencies returned no data for {PIN_REV} "
+        f"between {INC0010343_DEPLOY} (deploy) and {ONSET} (alert onset), although run.googleapis.com/request_count recorded "
+        "340 requests on it), so only the onset-window rule was applied"
+    ) in report.change_induced
+    assert "no minute of normal traffic" not in report.change_induced
+    assert "no healthy period" not in report.change_induced
+    assert report.infer_issue_type() != "change_induced"
+    assert "update-traffic" not in _all_action_text(report)
+    assert "Deployment regression" not in _desc(report)
+
+
+def test_request_count_without_latency_beyond_the_window_is_not_causal():
+    """Even a failing-looking revision is not blamed by rule (b) when its latency read is empty."""
+    client = FakeTrafficHistory({"ata-inventory-api": {PIN_REV: [(_minute(-30 + i), 1, 7, 150.0) for i in range(20)]}}, latency=False)
+    result = assess_deploy_causation(_deploy(31), ONSET_DT, _config(), client)
+    assert result["causal"] is False and result["rule"] is None
+    assert result["healthy_period"]["status"] == "unavailable"
+    assert "so only the onset-window rule was applied" in result["evidence"]
+
+
+def test_latency_without_request_count_is_unavailable():
+    client = FakeTrafficHistory({"ata-inventory-api": {PIN_REV: [(_minute(-30 + i), 5, 0, 80.0) for i in range(20)]}}, requests=False)
+    result = assess_deploy_causation(_deploy(31), ONSET_DT, _config(), client)
+    assert result["causal"] is False
+    assert result["healthy_period"]["status"] == "unavailable"
+    assert "run.googleapis.com/request_count recorded no requests on" in result["evidence"]
+
+
+def test_minutes_missing_a_latency_point_are_judged_on_5xx_alone_and_counted():
+    """Late or missing latency points must not shrink a healthy span into a "causal" verdict."""
+    rows = [(_minute(-40 + i), 5, 0, 80.0 if i % 3 == 0 else None) for i in range(30)]
+    result = _hp(FakeTrafficHistory({"ata-inventory-api": {PIN_REV: rows}}))
+    assert result["status"] == "healthy" and result["minutes"] == 30
+    assert "run.googleapis.com/request_latencies had no point for 20 of 30 minutes with requests, judged on the 5xx share alone" in result["evidence"]
+    # A 5xx breach in a minute without latency still breaks the span.
+    failing = [(m, 1, 4, None) for m, *_ in rows]
+    failing[0] = (failing[0][0], 5, 0, 80.0)
+    bad = _hp(FakeTrafficHistory({"ata-inventory-api": {PIN_REV: failing}}))
+    assert bad["status"] == "no_healthy_period"
+    assert "had no point for 29 of 30 minutes" in bad["evidence"]
+
+
+def test_unknown_deploy_time_is_stated_not_negative():
+    chg = _deploy(40)
+    del chg["deployed_minutes_ago"]
+    result = assess_deploy_causation(chg, ONSET_DT, _config(), HEALTHY_SINCE_DEPLOY)
+    assert "-1m" not in result["evidence"]
+    assert result["evidence"].startswith(
+        "deploy time relative to the alert onset unknown, so the 15-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES) does not apply"
+    )
+
+
 # ---------------------------------------------------------------------------------------
 # Missing healthy-period data: rule (a) only, and the ticket says so
 # ---------------------------------------------------------------------------------------
@@ -461,5 +652,8 @@ def test_configuration_md_documents_the_settings_with_their_defaults():
     agent_section = (root / "CONFIGURATION.md").read_text().split("### 1.2", 1)[1].split("### 1.3", 1)[0]
     assert "| `CHANGE_ONSET_WINDOW_MINUTES` | `15` |" in agent_section
     assert "| `CHANGE_HEALTHY_PERIOD_MINUTES` | `10` |" in agent_section
+    assert "| `CHANGE_HEALTHY_MAX_5XX_SHARE` | `0.05` |" in agent_section
+    assert "| `CHANGE_HEALTHY_MAX_LATENCY_MS` | `2000` |" in agent_section
+    assert "These are the alert-policy thresholds" not in agent_section
     readme = (root / "README.md").read_text()
     assert "Recent changes (likely unrelated)" in readme and "CHANGE_HEALTHY_PERIOD_MINUTES" in readme

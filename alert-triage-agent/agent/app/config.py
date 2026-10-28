@@ -76,13 +76,19 @@ class AgentConfig(BaseSettings):
     # Change attribution: a Cloud Run deploy in the change window is the cause (change_induced,
     # rollback) only if (a) the alert onset is at most CHANGE_ONSET_WINDOW_MINUTES after it, or
     # (b) the new revision had no healthy period before the onset: no span of at least
-    # CHANGE_HEALTHY_PERIOD_MINUTES in which every minute with requests on it stayed under the
-    # alert-policy thresholds (HTTP 5xx < 5 %, mean latency < 2000 ms; Cloud Monitoring per
-    # revision). Without that data only (a) applies, and the ticket says so. Otherwise the deploy
-    # is listed under "Recent changes (likely unrelated)". Live INC0010343: a re-pin 59 min
-    # before an S1 fault, healthy 21:52-22:44Z, was blamed under the old any-deploy-in-window rule.
+    # CHANGE_HEALTHY_PERIOD_MINUTES in which every minute with requests on it was healthy
+    # (Cloud Monitoring per revision, per minute). Without that data only (a) applies, and the
+    # ticket says so. Otherwise the deploy is listed under "Recent changes (likely unrelated)".
+    # Live INC0010343: a re-pin 59 min before an S1 fault, healthy 21:52-22:44Z, was blamed
+    # under the old any-deploy-in-window rule.
     change_onset_window_minutes: int = Field(default=15, alias="CHANGE_ONSET_WINDOW_MINUTES", ge=1, le=120)
     change_healthy_period_minutes: int = Field(default=10, alias="CHANGE_HEALTHY_PERIOD_MINUTES", ge=1, le=120)
+    # Healthy minute (rule b): HTTP 5xx share of the revision's requests under this fraction and
+    # its mean request latency under CHANGE_HEALTHY_MAX_LATENCY_MS. These are agent heuristics,
+    # NOT the alert policies (infra/terraform/observability: 5xx rate > 0.05/s, p99 latency >
+    # 2000 ms), so a revision can count as healthy in a minute in which its alert condition held.
+    change_healthy_max_5xx_share: float = Field(default=0.05, alias="CHANGE_HEALTHY_MAX_5XX_SHARE", gt=0, le=1)
+    change_healthy_max_latency_ms: float = Field(default=2000.0, alias="CHANGE_HEALTHY_MAX_LATENCY_MS", gt=0, le=300000)
     # Recovery note: request_count of the group's Cloud Run services is read from this many
     # seconds before the last alert closed until the note is written, to state whether the
     # close coincided with traffic stopping (missing data).

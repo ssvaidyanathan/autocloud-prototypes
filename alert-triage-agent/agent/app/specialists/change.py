@@ -15,7 +15,6 @@ from ..contracts.report import EvidenceItem
 from ..request_count import REQUEST_COUNT_METRIC, request_count_filter, request_count_series
 from ..tools.tools_client import ToolsCallError, ToolsNotConfigured, fetch_change_timeline
 from .base import BaseSpecialist, EvidenceDossier
-from .cloud_run import ERROR_RATE_5XX_BREACH_PCT, LATENCY_P95_BREACH_MS
 from .telemetry_reads import (
     CHANGE_SOURCES_KEY,
     UNAVAILABLE_KEY,
@@ -365,19 +364,26 @@ def healthy_period(
     deploy_timestamp: Any,
     onset: datetime,
     min_minutes: int,
+    max_5xx_share: float = 0.05,
+    max_latency_ms: float = 2000.0,
 ) -> dict[str, Any]:
     """Whether `revision` had a healthy period between its deploy and the alert onset.
 
     Read per minute from Cloud Monitoring for this revision only: request_count by response
     code class and request_latencies. A minute with requests is healthy when its HTTP 5xx share
-    is under ERROR_RATE_5XX_BREACH_PCT and its mean latency under LATENCY_P95_BREACH_MS (the
-    alert-policy thresholds); it is unhealthy when either is at or over the threshold. A
-    healthy period is a span of at least `min_minutes` (first to last healthy minute, both
-    counted) with no unhealthy minute inside. Minutes without requests neither count nor break.
+    is under `max_5xx_share` (a fraction, CHANGE_HEALTHY_MAX_5XX_SHARE) and its mean latency
+    under `max_latency_ms` (CHANGE_HEALTHY_MAX_LATENCY_MS); it is unhealthy when either is at
+    or over its threshold. These are heuristics, not the alert-policy conditions. A minute with
+    requests but no latency point is judged on the 5xx share alone, and the evidence states how
+    many minutes that was. A healthy period is a span of at least `min_minutes` (first to last
+    healthy minute, both counted) with no unhealthy minute inside. Minutes without requests
+    neither count nor break.
 
     Returns {"status": "healthy" | "no_healthy_period" | "unavailable", "evidence": str, ...}.
-    "unavailable" (a read failed, or no requests reached the revision) means the test could not
-    be applied; the caller falls back to the onset-window rule and says so.
+    "unavailable" means the test could not be applied: a read failed, no request reached the
+    revision, or request_latencies returned no point for it (the evidence is incomplete, so no
+    verdict is drawn from the 5xx share alone). The caller falls back to the onset-window rule
+    and says so.
     """
     deploy_dt = _parse_ts(deploy_timestamp)
     if deploy_dt is None:
@@ -415,6 +421,14 @@ def healthy_period(
                 acc = latency.setdefault(_point_minute(pt), [0.0, 0])
                 acc[0] += float(dist.mean) * count
                 acc[1] += count
+        if not latency:
+            return {
+                "status": "unavailable",
+                "evidence": (
+                    f"Cloud Monitoring {REQUEST_LATENCIES_METRIC} returned no data for {revision} {window}, "
+                    f"although {REQUEST_COUNT_METRIC} recorded {sum(v[0] for v in per_minute.values())} requests on it"
+                ),
+            }
     except Exception as exc:
         logger.warning("Healthy-period query for %s on %s failed: %s", revision, service, exc)
         return {
@@ -427,6 +441,7 @@ def healthy_period(
     run_end: Optional[datetime] = None
     run_requests = 0
     first_bad: Optional[tuple[datetime, str]] = None
+    no_latency = 0
 
     def close_run() -> None:
         nonlocal best
@@ -440,10 +455,12 @@ def healthy_period(
         share = errors * 100.0 / total
         lat = latency.get(minute)
         mean_ms = lat[0] / lat[1] if lat else None
+        if mean_ms is None:
+            no_latency += 1
         breach = []
-        if share >= ERROR_RATE_5XX_BREACH_PCT:
+        if errors / total >= max_5xx_share:
             breach.append(f"HTTP 5xx {share:.1f}% of {total} requests")
-        if mean_ms is not None and mean_ms >= LATENCY_P95_BREACH_MS:
+        if mean_ms is not None and mean_ms >= max_latency_ms:
             breach.append(f"mean latency {mean_ms:.0f} ms")
         if breach:
             if first_bad is None:
@@ -451,14 +468,23 @@ def healthy_period(
             close_run()
             run_start = run_end = None
             run_requests = 0
-        elif mean_ms is not None:
+        else:
             run_start = run_start or minute
             run_end = minute
             run_requests += total
-        # A minute with requests but no latency point is neither healthy nor unhealthy.
     close_run()
 
-    thresholds = f"HTTP 5xx under {ERROR_RATE_5XX_BREACH_PCT:g}% and mean latency under {LATENCY_P95_BREACH_MS:g} ms"
+    thresholds = (
+        f"HTTP 5xx under {max_5xx_share * 100:g}% of requests and mean latency under {max_latency_ms:g} ms "
+        f"(CHANGE_HEALTHY_MAX_5XX_SHARE {max_5xx_share:g}, CHANGE_HEALTHY_MAX_LATENCY_MS {max_latency_ms:g}; "
+        "agent heuristics, not the alert-policy thresholds)"
+    )
+    gaps = ""
+    if no_latency:
+        gaps = (
+            f"; {REQUEST_LATENCIES_METRIC} had no point for {no_latency} of {len(per_minute)} minutes with requests, "
+            "judged on the 5xx share alone"
+        )
     result: dict[str, Any] = {"window_start": _iso(deploy_dt), "window_end": _iso(onset)}
     span = int((best[1] - best[0]).total_seconds() // 60) + 1 if best else 0
     # The first minute can start before the deploy; the stated span starts no earlier than it.
@@ -471,21 +497,21 @@ def healthy_period(
                 f"healthy period: Cloud Monitoring shows {revision} served {best[2]} requests from "
                 f"{shown_start} to {_iso(best[1] + timedelta(minutes=1))} ({span} one-minute intervals, at least "
                 f"{min_minutes}) with {thresholds} "
-                f"in every minute with requests, before the alert onset at {_iso(onset)}"
+                f"in every minute with requests, before the alert onset at {_iso(onset)}{gaps}"
             ),
         )
     else:
         longest = (
             f"its longest span of normal traffic was {span} one-minute intervals ({shown_start} to "
             f"{_iso(best[1] + timedelta(minutes=1))}), under {min_minutes}"
-            if best is not None else "it had no minute of normal traffic"
+            if best is not None else "it had no minute of normal traffic (every minute with requests was over a threshold)"
         )
         bad = f"; first minute over the thresholds {_iso(first_bad[0])} ({first_bad[1]})" if first_bad else ""
         result.update(
             status="no_healthy_period", minutes=span,
             evidence=(
                 f"no healthy period: Cloud Monitoring shows {revision} {window}: {longest} "
-                f"({thresholds}){bad}"
+                f"({thresholds}){bad}{gaps}"
             ),
         )
     return result
@@ -499,10 +525,11 @@ def assess_deploy_causation(chg: dict[str, Any], onset: datetime, config: AgentC
     When the healthy-period data is unavailable, only (a) is applied and the evidence says so.
     Returns {"causal": bool, "rule": "a" | "b" | None, "evidence": str, "healthy_period": ...}.
     """
-    mins = int(chg.get("deployed_minutes_ago", -1))
+    raw_mins = chg.get("deployed_minutes_ago")
+    mins = int(raw_mins) if raw_mins is not None else None
     window = config.change_onset_window_minutes
     revision, service = chg.get("revision") or "", chg.get("service") or ""
-    if 0 <= mins <= window:
+    if mins is not None and 0 <= mins <= window:
         return {
             "causal": True, "rule": "a", "healthy_period": None,
             "evidence": (
@@ -510,7 +537,12 @@ def assess_deploy_causation(chg: dict[str, Any], onset: datetime, config: AgentC
                 "(CHANGE_ONSET_WINDOW_MINUTES)"
             ),
         }
-    beyond = f"deployed {mins}m before the alert onset, beyond the {window}-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES)"
+    beyond = (
+        f"deployed {mins}m before the alert onset, beyond the {window}-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES)"
+        if mins is not None
+        else f"deploy time relative to the alert onset unknown, so the {window}-minute change onset window "
+        "(CHANGE_ONSET_WINDOW_MINUTES) does not apply"
+    )
     if metric_client is None:
         hp: dict[str, Any] = {
             "status": "unavailable",
@@ -520,6 +552,8 @@ def assess_deploy_causation(chg: dict[str, Any], onset: datetime, config: AgentC
         hp = healthy_period(
             metric_client, config.project_id, config.region, service, revision, chg.get("timestamp"),
             onset, config.change_healthy_period_minutes,
+            max_5xx_share=config.change_healthy_max_5xx_share,
+            max_latency_ms=config.change_healthy_max_latency_ms,
         )
     if hp["status"] == "unavailable":
         evidence = (
@@ -629,6 +663,8 @@ class ChangeSpecialist(BaseSpecialist):
         inventory-api origin); their deploys must not be named as a "Deployment regression"
         alternative without the same rule. Returns the dossier with any newly unrelated changes
         listed under "Recent changes (likely unrelated)" (the same dossier when nothing changed).
+        The assessed change records are shared with the input dossier's all_changes: their
+        "causation" key is set in place, so the input dossier sees it too.
         """
         changes = dossier.metrics.get("all_changes") or []
         pending = [
