@@ -1683,14 +1683,17 @@ class SynthesizerAgent:
         else:
             score_change = 0.00
             # State what was assessed: only the origin's (and the alerted resource's) deployments
-            # score here. The report can list other components' deploys in the window (S4: a proxy
-            # not upstream of the origin), so "zero recent deployments" would contradict it.
+            # attributed as a cause score here. The report can list other components' deploys in
+            # the window (S4: a proxy not upstream of the origin), and the origin's own deploys the
+            # attribution rule judged non-causal (Change-Induced "Recent changes (likely unrelated)"
+            # / "(not attributed: ...)"), so neither "zero recent deployments" nor "no deployment of
+            # the origin" may be claimed.
             subject = f"the origin `{origin}`"
             if alert.resource_name and alert.resource_name != origin:
                 subject += f" or the alerted resource `{alert.resource_name}`"
             if change_sources_checked(dossiers):
                 detail_change = (
-                    f"No deployment of {subject} within the change window before alert onset "
+                    f"No deployment of {subject} attributed as a cause within the change window before alert onset "
                     "(deployments of other components are not scored)"
                 )
             else:

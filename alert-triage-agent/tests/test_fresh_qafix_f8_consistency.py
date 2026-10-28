@@ -128,7 +128,7 @@ def test_s4_proximity_states_what_was_assessed_with_an_off_path_proxy_deploy():
     detail = factors["change_proximity"]["detail"]
     assert "Zero recent deployments" not in detail and "Zero recent deployments" not in rationale
     assert detail == (
-        "No deployment of the origin `ata-inventory-db` within the change window before alert onset "
+        "No deployment of the origin `ata-inventory-db` attributed as a cause within the change window before alert onset "
         "(deployments of other components are not scored)"
     )
     assert factors["change_proximity"]["score"] == 0.0
@@ -153,3 +153,33 @@ def test_change_proximity_bucket_boundaries(mins, score):
     """N6: one bucket table for the Cloud Run and proxy branches; boundaries are inclusive."""
     from agent.app.specialists.synthesizer import _proximity_score
     assert _proximity_score(mins)[0] == score
+
+
+def test_proximity_does_not_deny_a_non_causal_deploy_of_the_origin():
+    """fresh-rev-n4 R2: the origin ata-inventory-api had revision -00042-abc deployed 20m before
+    onset, judged non-causal and listed by Change-Induced as "Recent changes (likely unrelated)".
+    The factor said "No deployment of the origin ..." for it. Driven through _determine_root_cause,
+    which leaves origin_change None for a non-causal deploy."""
+    synth = SynthesizerAgent()
+    alert = AlertEvent(incident_id="0.r2", policy_name="ata-inventory-5xx", resource_name="ata-inventory-api",
+                       state="open", started_at="2026-10-28T04:32:27Z")
+    deploy = {
+        "service": "ata-inventory-api", "revision": "ata-inventory-api-00042-abc",
+        "timestamp": "2026-10-28T04:12:27Z", "deployed_minutes_ago": 20,
+        "causation": {"causal": False, "rule": "b", "healthy_period": {"status": "healthy"},
+                      "evidence": "healthy for 15 min after the deploy"},
+    }
+    change = EvidenceDossier("ChangeSpecialist", "ata-inventory-api", anomaly_detected=True, metrics={
+        "change_sources_checked": ["ata-tools change timeline (Cloud Run revision history)"],
+        "all_changes": [deploy],
+    })
+    cr = EvidenceDossier("CloudRunSpecialist", "ata-inventory-api", anomaly_detected=True,
+                         metrics={"error_rate_5xx": "83.4%"})
+    synth._determine_root_cause([cr, change], "ata-inventory-api", alert)
+    factor = synth._last_contributing_factors["change_proximity"]
+    assert factor["score"] == 0.0
+    assert factor["detail"] == (
+        "No deployment of the origin `ata-inventory-api` attributed as a cause within the change window "
+        "before alert onset (deployments of other components are not scored)"
+    )
+    assert not factor["detail"].startswith("No deployment of the origin `ata-inventory-api` within")
