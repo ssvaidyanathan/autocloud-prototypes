@@ -2694,7 +2694,7 @@ class SynthesizerAgent:
                         "variance": var_val,
                     })
                 elif any(k.startswith("proxy_response_code_5") for k in d.metrics):
-                    code_key = next((k for k in ["proxy_response_code_504", "proxy_response_code_503", "proxy_response_code_502", "proxy_response_code_500"] if k in d.metrics), None)
+                    code_key = next((k for k in ["proxy_response_code_504", "proxy_response_code_5xx", "proxy_response_code_503", "proxy_response_code_502", "proxy_response_code_500"] if k in d.metrics), None)
                     code_name = code_key.replace("proxy_response_code_", "") if code_key else "5xx"
                     val = d.metrics.get(code_key) if code_key else "N/A (no telemetry captured)"
                     during_val = f"{val} req" if isinstance(val, (int, float)) else str(val)
