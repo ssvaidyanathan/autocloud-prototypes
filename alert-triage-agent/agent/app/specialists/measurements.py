@@ -3,7 +3,7 @@
 The ticket's problem statement, the HTML "Operational Impact" column and the HTML
 "Alternative Hypotheses" rows each state whether a component's HTTP errors were measured.
 They read these helpers, so the ticket and the HTML cannot disagree (S4 INC0010362: the
-ticket said "HTTP 5xx rate not measured on ata-inventory-v1" while the HTML said
+ticket said the inventory proxy's "HTTP 5xx rate not measured" while the HTML said
 "no HTTP 4xx/5xx responses recorded" for the same proxy).
 """
 
