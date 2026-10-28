@@ -4,6 +4,7 @@ Analyzes Cloud Run and Apigee revision history over the past 2 hours
 and correlates deployment timestamps with alert onset curves.
 """
 
+import asyncio
 import dataclasses
 from datetime import datetime, timezone, timedelta
 import logging
@@ -317,6 +318,9 @@ def previous_serving_revision(
 
 
 REQUEST_LATENCIES_METRIC = "run.googleapis.com/request_latencies"
+# Per-call deadline of the healthy-period Cloud Monitoring reads. A timeout is a failed read:
+# the healthy period is "unavailable" and only the onset-window rule applies, stated.
+MONITORING_READ_TIMEOUT_SECONDS = 30.0
 
 
 def _point_minute(pt: Any) -> datetime:
@@ -337,22 +341,25 @@ def _point_minute(pt: Any) -> datetime:
     return (dt.astimezone(timezone.utc) - timedelta(minutes=1)).replace(second=0, microsecond=0)
 
 
-def _latency_series(metric_client: Any, project_id: str, region: str, service: str, start: datetime, end: datetime) -> Any:
-    """request_latencies time series (full view) of `service` in `region` over [start, end]."""
+def _latency_series(
+    metric_client: Any, project_id: str, region: str, service: str, revision: str, start: datetime, end: datetime
+) -> Any:
+    """request_latencies time series (full view) of `revision` of `service` in `region` over [start, end]."""
     from google.cloud import monitoring_v3
 
     req = monitoring_v3.ListTimeSeriesRequest(
         name=f"projects/{project_id}",
         filter=(
             f'metric.type = "{REQUEST_LATENCIES_METRIC}" AND resource.type = "cloud_run_revision" '
-            f'AND resource.labels.location = "{region}" AND resource.labels.service_name = "{service}"'
+            f'AND resource.labels.location = "{region}" AND resource.labels.service_name = "{service}" '
+            f'AND resource.labels.revision_name = "{revision}"'
         ),
         interval=monitoring_v3.TimeInterval(
             start_time={"seconds": int(start.timestamp())}, end_time={"seconds": int(end.timestamp())}
         ),
         view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
     )
-    return metric_client.list_time_series(request=req)
+    return metric_client.list_time_series(request=req, timeout=MONITORING_READ_TIMEOUT_SECONDS)
 
 
 def healthy_period(
@@ -366,6 +373,7 @@ def healthy_period(
     min_minutes: int,
     max_5xx_share: float = 0.05,
     max_latency_ms: float = 2000.0,
+    min_active_minutes: int = 3,
 ) -> dict[str, Any]:
     """Whether `revision` had a healthy period between its deploy and the alert onset.
 
@@ -376,14 +384,21 @@ def healthy_period(
     or over its threshold. These are heuristics, not the alert-policy conditions. A minute with
     requests but no latency point is judged on the 5xx share alone, and the evidence states how
     many minutes that was. A healthy period is a span of at least `min_minutes` (first to last
-    healthy minute, both counted) with no unhealthy minute inside. Minutes without requests
-    neither count nor break.
+    healthy minute, both counted) with no unhealthy minute inside and requests in at least
+    `min_active_minutes` of its minutes (CHANGE_HEALTHY_MIN_ACTIVE_MINUTES). Minutes without
+    requests neither count toward that floor nor break the span.
 
     Returns {"status": "healthy" | "no_healthy_period" | "unavailable", "evidence": str, ...}.
     "unavailable" means the test could not be applied: a read failed, no request reached the
     revision, or request_latencies returned no point for it (the evidence is incomplete, so no
-    verdict is drawn from the 5xx share alone). The caller falls back to the onset-window rule
-    and says so.
+    verdict is drawn from the 5xx share alone). It is also "unavailable", with reason
+    "insufficient_traffic", when there was too little traffic to tell: a long enough span of
+    normal traffic with requests in fewer than `min_active_minutes` minutes, or fewer than
+    `min_active_minutes` minutes with requests at all. Sparse traffic never yields
+    "no_healthy_period". The caller falls back to the onset-window rule and says so.
+
+    Both reads are filtered to the revision and bounded by MONITORING_READ_TIMEOUT_SECONDS; a
+    timeout is a failed read ("unavailable").
     """
     deploy_dt = _parse_ts(deploy_timestamp)
     if deploy_dt is None:
@@ -391,7 +406,11 @@ def healthy_period(
     window = f"between {_iso(deploy_dt)} (deploy) and {_iso(onset)} (alert onset)"
     try:
         per_minute: dict[datetime, list[int]] = {}
-        for ts in request_count_series(metric_client, project_id, region, service, deploy_dt.timestamp(), onset.timestamp()):
+        for ts in request_count_series(
+            metric_client, project_id, region, service, deploy_dt.timestamp(), onset.timestamp(),
+            revision=revision, timeout=MONITORING_READ_TIMEOUT_SECONDS,
+        ):
+            # The filter already selects the revision; this guards against a series of another.
             if ts.resource.labels.get("revision_name", "") != revision:
                 continue
             labels = getattr(getattr(ts, "metric", None), "labels", None) or {}
@@ -410,7 +429,7 @@ def healthy_period(
                 "evidence": f"Cloud Monitoring {REQUEST_COUNT_METRIC} recorded no requests on {revision} {window}",
             }
         latency: dict[datetime, list[float]] = {}
-        for ts in _latency_series(metric_client, project_id, region, service, deploy_dt, onset):
+        for ts in _latency_series(metric_client, project_id, region, service, revision, deploy_dt, onset):
             if ts.resource.labels.get("revision_name", "") != revision:
                 continue
             for pt in ts.points:
@@ -436,19 +455,18 @@ def healthy_period(
             "evidence": f"the Cloud Monitoring query for {revision} {window} failed ({type(exc).__name__})",
         }
 
-    best: Optional[tuple[datetime, datetime, int]] = None
+    # Runs of healthy minutes: [start, end, requests, minutes with requests].
+    runs: list[tuple[datetime, datetime, int, int]] = []
     run_start: Optional[datetime] = None
     run_end: Optional[datetime] = None
     run_requests = 0
+    run_active = 0
     first_bad: Optional[tuple[datetime, str]] = None
     no_latency = 0
 
     def close_run() -> None:
-        nonlocal best
         if run_start is not None and run_end is not None:
-            span = int((run_end - run_start).total_seconds() // 60) + 1
-            if best is None or span > int((best[1] - best[0]).total_seconds() // 60) + 1:
-                best = (run_start, run_end, run_requests)
+            runs.append((run_start, run_end, run_requests, run_active))
 
     for minute in sorted(per_minute):
         total, errors = per_minute[minute]
@@ -467,12 +485,20 @@ def healthy_period(
                 first_bad = (minute, ", ".join(breach))
             close_run()
             run_start = run_end = None
-            run_requests = 0
+            run_requests = run_active = 0
         else:
             run_start = run_start or minute
             run_end = minute
             run_requests += total
+            run_active += 1
     close_run()
+
+    def span_of(run: tuple[datetime, datetime, int, int]) -> int:
+        return int((run[1] - run[0]).total_seconds() // 60) + 1
+
+    def shown(run: tuple[datetime, datetime, int, int]) -> tuple[str, str]:
+        # The first minute can start before the deploy; the stated span starts no earlier than it.
+        return _iso(max(run[0], deploy_dt)), _iso(run[1] + timedelta(minutes=1))
 
     thresholds = (
         f"HTTP 5xx under {max_5xx_share * 100:g}% of requests and mean latency under {max_latency_ms:g} ms "
@@ -485,35 +511,61 @@ def healthy_period(
             f"; {REQUEST_LATENCIES_METRIC} had no point for {no_latency} of {len(per_minute)} minutes with requests, "
             "judged on the 5xx share alone"
         )
+    floor = f"CHANGE_HEALTHY_MIN_ACTIVE_MINUTES {min_active_minutes}"
     result: dict[str, Any] = {"window_start": _iso(deploy_dt), "window_end": _iso(onset)}
-    span = int((best[1] - best[0]).total_seconds() // 60) + 1 if best else 0
-    # The first minute can start before the deploy; the stated span starts no earlier than it.
-    shown_start = _iso(max(best[0], deploy_dt)) if best else ""
-    if best is not None and span >= min_minutes:
+    long_runs = [r for r in runs if span_of(r) >= min_minutes]
+    healthy_runs = [r for r in long_runs if r[3] >= min_active_minutes]
+    if healthy_runs:
+        best = max(healthy_runs, key=span_of)
+        span, (start, end) = span_of(best), shown(best)
         result.update(
-            status="healthy",
-            start=shown_start, end=_iso(best[1] + timedelta(minutes=1)), minutes=span, requests=best[2],
+            status="healthy", start=start, end=end, minutes=span, requests=best[2], active_minutes=best[3],
             evidence=(
                 f"healthy period: Cloud Monitoring shows {revision} served {best[2]} requests from "
-                f"{shown_start} to {_iso(best[1] + timedelta(minutes=1))} ({span} one-minute intervals, at least "
-                f"{min_minutes}) with {thresholds} "
+                f"{start} to {end} ({span} one-minute intervals, at least {min_minutes}; {best[3]} of them with "
+                f"requests, at least {min_active_minutes}) with {thresholds} "
                 f"in every minute with requests, before the alert onset at {_iso(onset)}{gaps}"
             ),
         )
-    else:
-        longest = (
-            f"its longest span of normal traffic was {span} one-minute intervals ({shown_start} to "
-            f"{_iso(best[1] + timedelta(minutes=1))}), under {min_minutes}"
-            if best is not None else "it had no minute of normal traffic (every minute with requests was over a threshold)"
-        )
-        bad = f"; first minute over the thresholds {_iso(first_bad[0])} ({first_bad[1]})" if first_bad else ""
+        return result
+    # Too little traffic is not evidence of an unhealthy revision: never "no healthy period"
+    # from sparse traffic. A long enough span with too few minutes with requests, or too few
+    # minutes with requests at all, leaves the healthy period undetermined (rule (a) only).
+    if long_runs or len(per_minute) < min_active_minutes:
+        if long_runs:
+            sparse = max(long_runs, key=lambda r: (r[3], span_of(r)))
+            k = sparse[3]
+            start, end = shown(sparse)
+            detail = (
+                f"its span of normal traffic from {start} to {end} ({span_of(sparse)} one-minute intervals) "
+                f"had requests in only {k} of them"
+            )
+        else:
+            k = len(per_minute)
+            detail = f"it had requests in only {k} minutes"
         result.update(
-            status="no_healthy_period", minutes=span,
+            status="unavailable", reason="insufficient_traffic", minutes=0, active_minutes=k,
             evidence=(
-                f"no healthy period: Cloud Monitoring shows {revision} {window}: {longest} "
-                f"({thresholds}){bad}{gaps}"
+                f"insufficient traffic to establish a healthy period ({k} active minutes < {min_active_minutes}, "
+                f"{floor}): Cloud Monitoring shows {revision} {window}: {detail} ({thresholds}){gaps}"
             ),
         )
+        return result
+    best = max(runs, key=span_of) if runs else None
+    span = span_of(best) if best else 0
+    if best is not None:
+        start, end = shown(best)
+        longest = f"its longest span of normal traffic was {span} one-minute intervals ({start} to {end}), under {min_minutes}"
+    else:
+        longest = "it had no minute of normal traffic (every minute with requests was over a threshold)"
+    bad = f"; first minute over the thresholds {_iso(first_bad[0])} ({first_bad[1]})" if first_bad else ""
+    result.update(
+        status="no_healthy_period", minutes=span,
+        evidence=(
+            f"no healthy period: Cloud Monitoring shows {revision} {window}: {longest} "
+            f"({thresholds}){bad}{gaps}"
+        ),
+    )
     return result
 
 
@@ -554,7 +606,12 @@ def assess_deploy_causation(chg: dict[str, Any], onset: datetime, config: AgentC
             onset, config.change_healthy_period_minutes,
             max_5xx_share=config.change_healthy_max_5xx_share,
             max_latency_ms=config.change_healthy_max_latency_ms,
+            min_active_minutes=config.change_healthy_min_active_minutes,
         )
+    if hp.get("reason") == "insufficient_traffic":
+        evidence = f"{beyond}; {hp['evidence']}, so only the onset-window rule was applied"
+        logger.warning("Change attribution for %s on %s: %s", revision, service, evidence)
+        return {"causal": False, "rule": None, "evidence": evidence, "healthy_period": hp}
     if hp["status"] == "unavailable":
         evidence = (
             f"{beyond}; healthy-period data unavailable ({hp['evidence']}), so only the onset-window "
@@ -648,7 +705,7 @@ class ChangeSpecialist(BaseSpecialist):
             hp = c["causation"].get("healthy_period")
             if hp and hp.get("window_start"):
                 queries_executed.setdefault("cloud_monitoring", []).append(
-                    f'{request_count_filter(config.region, c.get("service") or "")} and '
+                    f'{request_count_filter(config.region, c.get("service") or "", c.get("revision") or "")} and '
                     f'{REQUEST_LATENCIES_METRIC} of revision {c.get("revision")} per minute, '
                     f'{hp["window_start"]} to {hp["window_end"]}'
                 )
@@ -884,7 +941,8 @@ class ChangeSpecialist(BaseSpecialist):
         # A deploy in the window is the cause only by the onset-window or no-healthy-period rule
         # (assess_deploy_causation); the others are listed as likely unrelated, with evidence.
         # The verdict is kept on the change record, so every reader of all_changes sees it.
-        self._assess(genuine_changes, now, config, queries_executed)
+        # In a worker thread: the healthy-period reads are blocking Cloud Monitoring calls.
+        await asyncio.to_thread(self._assess, genuine_changes, now, config, queries_executed)
         relevant_changes = [c for c in genuine_changes if c["causation"]["causal"]]
         unrelated_changes = [c for c in genuine_changes if not c["causation"]["causal"]]
         _list_unrelated(metrics, findings, evidence_items, unrelated_changes)

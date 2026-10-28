@@ -83,6 +83,10 @@ class AgentConfig(BaseSettings):
     # under the old any-deploy-in-window rule.
     change_onset_window_minutes: int = Field(default=15, alias="CHANGE_ONSET_WINDOW_MINUTES", ge=1, le=120)
     change_healthy_period_minutes: int = Field(default=10, alias="CHANGE_HEALTHY_PERIOD_MINUTES", ge=1, le=120)
+    # A healthy period also needs requests in at least this many of its minutes ("a sustained
+    # period of normal traffic"): two requests 40 min apart are not one. Too little traffic is
+    # insufficient evidence, not an unhealthy revision: only rule (a) applies, and the ticket says so.
+    change_healthy_min_active_minutes: int = Field(default=3, alias="CHANGE_HEALTHY_MIN_ACTIVE_MINUTES", ge=1, le=120)
     # Healthy minute (rule b): HTTP 5xx share of the revision's requests under this fraction and
     # its mean request latency under CHANGE_HEALTHY_MAX_LATENCY_MS. These are agent heuristics,
     # NOT the alert policies (infra/terraform/observability: 5xx rate > 0.05/s, p99 latency >

@@ -550,8 +550,10 @@ class SynthesizerAgent:
         # notes may name one as a "Deployment regression" alternative.
         if selection is not None and selection.is_multi_service and dossier_map.get("ChangeSpecialist") is not None:
             before = dossier_map["ChangeSpecialist"]
-            assessed = self.change_specialist.assess_group_changes(
-                before, set(selection.degraded_services) | {origin}, alert, config
+            # In a worker thread: the healthy-period reads are blocking Cloud Monitoring calls.
+            assessed = await asyncio.to_thread(
+                self.change_specialist.assess_group_changes,
+                before, set(selection.degraded_services) | {origin}, alert, config,
             )
             if assessed is not before:
                 dossier_map["ChangeSpecialist"] = assessed

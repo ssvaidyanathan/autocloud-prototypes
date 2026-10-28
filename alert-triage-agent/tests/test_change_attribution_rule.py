@@ -177,7 +177,7 @@ def test_inc0010343_deploy_then_healthy_period_then_fault_is_not_change_induced(
         f"revision {PIN_REV} on ata-inventory-api deployed {INC0010343_DEPLOY}: deployed 59m before the alert onset, "
         "beyond the 15-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES); healthy period: Cloud Monitoring "
         f"shows {PIN_REV} served 41 requests from {INC0010343_DEPLOY} to {_minute(-6):%Y-%m-%dT%H:%M:%SZ} "
-        "(53 one-minute intervals, at least 10) with HTTP 5xx under 5% of requests and mean latency under 2000 ms "
+        "(53 one-minute intervals, at least 10; 10 of them with requests, at least 3) with HTTP 5xx under 5% of requests and mean latency under 2000 ms "
         f"({THRESHOLDS_NOTE}) in every minute with requests, "
         f"before the alert onset at {ONSET}"
     )
@@ -315,7 +315,7 @@ def test_healthy_period_boundary_at_m(span, status):
 
 def test_unhealthy_minute_splits_the_period_and_empty_minutes_do_not():
     rows = (
-        [(_minute(-50), 5, 0, 80.0), (_minute(-44), 5, 0, 80.0)]  # 7-min span, gap inside
+        [(_minute(-50), 5, 0, 80.0), (_minute(-47), 5, 0, 80.0), (_minute(-44), 5, 0, 80.0)]  # 7-min span, gaps inside
         + [(_minute(-43), 1, 5, 80.0)]  # 5xx 83 %
         + [(_minute(-42), 5, 0, 80.0), (_minute(-38), 5, 0, 2500.0)]  # latency breach
     )
@@ -652,8 +652,160 @@ def test_configuration_md_documents_the_settings_with_their_defaults():
     agent_section = (root / "CONFIGURATION.md").read_text().split("### 1.2", 1)[1].split("### 1.3", 1)[0]
     assert "| `CHANGE_ONSET_WINDOW_MINUTES` | `15` |" in agent_section
     assert "| `CHANGE_HEALTHY_PERIOD_MINUTES` | `10` |" in agent_section
+    assert "| `CHANGE_HEALTHY_MIN_ACTIVE_MINUTES` | `3` |" in agent_section
     assert "| `CHANGE_HEALTHY_MAX_5XX_SHARE` | `0.05` |" in agent_section
     assert "| `CHANGE_HEALTHY_MAX_LATENCY_MS` | `2000` |" in agent_section
     assert "These are the alert-policy thresholds" not in agent_section
     readme = (root / "README.md").read_text()
     assert "Recent changes (likely unrelated)" in readme and "CHANGE_HEALTHY_PERIOD_MINUTES" in readme
+    assert "CHANGE_HEALTHY_MIN_ACTIVE_MINUTES" in readme
+
+
+# ---------------------------------------------------------------------------------------
+# Traffic floor (CHANGE_HEALTHY_MIN_ACTIVE_MINUTES): sparse traffic is insufficient evidence
+# ---------------------------------------------------------------------------------------
+
+
+def test_two_requests_40_minutes_apart_are_insufficient_traffic_so_rule_a_only():
+    """A 41-minute span with requests in 2 minutes is not "a sustained period of normal traffic"."""
+    client = FakeTrafficHistory({"ata-inventory-api": {PIN_REV: [(_minute(-44), 1, 0, 80.0), (_minute(-4), 1, 0, 80.0)]}})
+    result = assess_deploy_causation(_deploy(45), ONSET_DT, _config(), client)
+    assert result["causal"] is False and result["rule"] is None
+    hp = result["healthy_period"]
+    assert (hp["status"], hp["reason"], hp["active_minutes"]) == ("unavailable", "insufficient_traffic", 2)
+    assert (
+        "deployed 45m before the alert onset, beyond the 15-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES); "
+        "insufficient traffic to establish a healthy period (2 active minutes < 3, CHANGE_HEALTHY_MIN_ACTIVE_MINUTES 3): "
+        f"Cloud Monitoring shows {PIN_REV} between {_deploy(45)['timestamp']} (deploy) and {ONSET} (alert onset): "
+        f"its span of normal traffic from {_minute(-44):%Y-%m-%dT%H:%M:%SZ} to {_minute(-3):%Y-%m-%dT%H:%M:%SZ} "
+        "(41 one-minute intervals) had requests in only 2 of them"
+    ) in result["evidence"]
+    assert result["evidence"].endswith(", so only the onset-window rule was applied")
+    assert "no healthy period" not in result["evidence"]
+
+
+def test_few_healthy_minutes_in_total_are_insufficient_not_no_healthy_period():
+    """Two error-free minutes 5 min apart: too short a span, but too little traffic to blame the deploy."""
+    client = FakeTrafficHistory({"ata-inventory-api": {PIN_REV: [(_minute(-30), 1, 0, 80.0), (_minute(-25), 2, 0, 80.0)]}})
+    result = assess_deploy_causation(_deploy(40), ONSET_DT, _config(), client)
+    assert result["causal"] is False
+    assert result["healthy_period"]["reason"] == "insufficient_traffic"
+    assert "insufficient traffic to establish a healthy period (2 active minutes < 3" in result["evidence"]
+    assert "it had requests in only 2 minutes" in result["evidence"]
+    assert "no healthy period" not in result["evidence"]
+
+
+@pytest.mark.parametrize("active,status", [(2, "unavailable"), (3, "healthy")])
+def test_traffic_floor_boundary(active, status):
+    rows = [(_minute(-40), 5, 0, 80.0), (_minute(-30), 5, 0, 80.0)] + ([(_minute(-28), 5, 0, 80.0)] if active == 3 else [])
+    result = _hp(FakeTrafficHistory({"ata-inventory-api": {PIN_REV: rows}}))
+    assert result["status"] == status
+    if status == "healthy":
+        assert (result["minutes"], result["active_minutes"]) == (13, 3)
+        assert "(13 one-minute intervals, at least 10; 3 of them with requests, at least 3)" in result["evidence"]
+
+
+def test_traffic_floor_follows_config(monkeypatch):
+    monkeypatch.delenv("CHANGE_HEALTHY_MIN_ACTIVE_MINUTES", raising=False)
+    assert _config().change_healthy_min_active_minutes == 3
+    client = FakeTrafficHistory({"ata-inventory-api": {PIN_REV: [(_minute(-40 + 5 * i), 5, 0, 80.0) for i in range(4)]}})
+    assert assess_deploy_causation(_deploy(41), ONSET_DT, _config(), client)["healthy_period"]["status"] == "healthy"
+    strict = assess_deploy_causation(_deploy(41), ONSET_DT, _config(change_healthy_min_active_minutes=5), client)
+    assert strict["causal"] is False
+    assert "(4 active minutes < 5, CHANGE_HEALTHY_MIN_ACTIVE_MINUTES 5)" in strict["evidence"]
+    monkeypatch.setenv("CHANGE_HEALTHY_MIN_ACTIVE_MINUTES", "7")
+    assert _config().change_healthy_min_active_minutes == 7
+    for bad in ("0", "121", "abc", "2.5"):
+        monkeypatch.setenv("CHANGE_HEALTHY_MIN_ACTIVE_MINUTES", bad)
+        with pytest.raises(ValidationError):
+            _config()
+
+
+def test_sparse_failing_revision_with_enough_minutes_is_still_no_healthy_period():
+    """The floor does not hide failures: S5 at low traffic (failing from its first request) stays causal."""
+    client = FakeTrafficHistory({"ata-inventory-api": {PIN_REV: [(_minute(-24 + 6 * i), 1, 3, 150.0) for i in range(4)]}})
+    result = assess_deploy_causation(_deploy(25), ONSET_DT, _config(), client)
+    assert result["causal"] is True and result["rule"] == "b"
+    assert "it had no minute of normal traffic" in result["evidence"]
+
+
+def test_inc0010343_shape_meets_the_traffic_floor():
+    result = _hp(FakeTrafficHistory(INC0010343_TRAFFIC), deploy_mins=60)
+    assert (result["status"], result["minutes"], result["active_minutes"]) == ("healthy", 53, 10)
+
+
+def test_sparse_healthy_span_then_fault_in_a_ticket_is_not_change_induced(agent_cfg, telemetry, monkeypatch):
+    _use_traffic(monkeypatch, FakeTrafficHistory({"ata-inventory-api": {
+        PIN_REV: [(_minute(-50), 1, 0, 80.0), (_minute(-10), 1, 0, 80.0), (_minute(-6), 16, 58, 300.0), (_minute(-5), 16, 98, 250.0)],
+    }}))
+    report = _investigate(_inventory_5xx(telemetry, INC0010343_DEPLOY), agent_cfg)
+    assert report.change_induced.startswith("No (recent changes likely unrelated: ")
+    assert "insufficient traffic to establish a healthy period (2 active minutes < 3" in report.change_induced
+    assert "so only the onset-window rule was applied" in report.change_induced
+    assert report.infer_issue_type() != "change_induced"
+    assert "update-traffic" not in _all_action_text(report)
+    assert "Deployment regression" not in _desc(report)
+
+
+# ---------------------------------------------------------------------------------------
+# Bounded Monitoring reads: per-revision filter, explicit timeout, off the event loop
+# ---------------------------------------------------------------------------------------
+
+
+class RecordingTraffic(FakeTrafficHistory):
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.kwargs: list[dict[str, Any]] = []
+        self.threads: list[str] = []
+
+    def list_time_series(self, request: Any = None, **kwargs: Any) -> list[Any]:
+        import threading
+
+        self.kwargs.append(kwargs)
+        self.threads.append(threading.current_thread().name)
+        return super().list_time_series(request=request, **kwargs)
+
+
+def test_healthy_period_reads_are_filtered_to_the_revision_and_have_a_timeout():
+    from agent.app.specialists.change import MONITORING_READ_TIMEOUT_SECONDS
+
+    client = RecordingTraffic(INC0010343_TRAFFIC)
+    _hp(client, deploy_mins=60)
+    assert len(client.calls) == 2
+    assert {("request_latencies" in r.filter) for r in client.calls} == {True, False}
+    for request in client.calls:
+        assert f'resource.labels.revision_name = "{PIN_REV}"' in request.filter
+        assert 'resource.labels.service_name = "ata-inventory-api"' in request.filter
+    assert client.kwargs == [{"timeout": MONITORING_READ_TIMEOUT_SECONDS}] * 2
+    assert MONITORING_READ_TIMEOUT_SECONDS == 30.0
+
+
+def test_request_count_helper_without_revision_or_timeout_is_unchanged():
+    """The rollback-target lookup and recovery note still read every revision, as before."""
+    from agent.app.request_count import request_count_filter, request_count_series
+
+    assert "revision_name" not in request_count_filter("us-west1", "svc")
+    client = RecordingTraffic({})
+    request_count_series(client, "p", "us-west1", "svc", 0, 60)
+    assert client.kwargs == [{}] and "revision_name" not in client.calls[0].filter
+
+
+def test_monitoring_timeout_falls_back_to_onset_window_and_says_so():
+    from google.api_core.exceptions import DeadlineExceeded
+
+    client = FakeTrafficHistory(error=DeadlineExceeded("deadline 30s exceeded"))
+    result = assess_deploy_causation(_deploy(40), ONSET_DT, _config(), client)
+    assert result["causal"] is False and result["healthy_period"]["status"] == "unavailable"
+    assert "failed (DeadlineExceeded)), so only the onset-window rule was applied" in result["evidence"]
+    # Inside the onset window a timeout changes nothing: rule (a) needs no read.
+    assert assess_deploy_causation(_deploy(5), ONSET_DT, _config(), client)["causal"] is True
+
+
+def test_healthy_period_reads_run_off_the_event_loop_thread(agent_cfg, telemetry, monkeypatch):
+    import threading
+
+    client = _use_traffic(monkeypatch, RecordingTraffic(INC0010343_TRAFFIC))
+    report = _investigate(_inventory_5xx(telemetry, INC0010343_DEPLOY), agent_cfg)
+    assert report.change_induced.startswith("No (recent changes likely unrelated: ")
+    latency_reads = [t for t, r in zip(client.threads, client.calls) if "request_latencies" in r.filter]
+    assert latency_reads and threading.main_thread().name not in latency_reads
