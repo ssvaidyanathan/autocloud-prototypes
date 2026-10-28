@@ -454,15 +454,21 @@ def apply_correlation_note(report: InvestigationReport, correlation: Optional[di
     report.observations = " | ".join(items)
 
 
+# Change-proximity buckets: (max minutes before the alert onset, score, label). Shared by the
+# Cloud Run deploy and the Apigee proxy revision branches of the confidence calculation.
+CHANGE_PROXIMITY_BUCKETS: tuple[tuple[int, float, str], ...] = (
+    (15, 0.15, "high temporal proximity"),
+    (30, 0.10, "moderate proximity"),
+    (60, 0.05, "extended window"),
+)
+CHANGE_PROXIMITY_OUTSIDE = (0.00, "outside causality window")
+
+
 def _proximity_score(mins: int) -> tuple[float, str]:
     """Change-proximity score and label for a change ``mins`` minutes before the alert onset."""
-    if mins <= 15:
-        return 0.15, "high temporal proximity"
-    if mins <= 30:
-        return 0.10, "moderate proximity"
-    if mins <= 60:
-        return 0.05, "extended window"
-    return 0.00, "outside causality window"
+    bucket = next(((score, label) for limit, score, label in CHANGE_PROXIMITY_BUCKETS if mins <= limit),
+                  CHANGE_PROXIMITY_OUTSIDE)
+    return bucket
 
 
 def priority_rank(priority: Optional[str]) -> int:
