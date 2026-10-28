@@ -67,6 +67,30 @@ logger = logging.getLogger(__name__)
 
 _DB_AUTH_PHRASE = "database authentication"
 
+
+def _parse_iso_utc(value: Any) -> Optional[datetime]:
+    """An ISO-8601 timestamp as an aware UTC datetime, or None when absent or unparseable."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _measured_pct(value: Any) -> bool:
+    """True for a measured, non-zero percentage ("85.1%"); N/A and 0% are not signals."""
+    if isinstance(value, (int, float)):
+        return value > 0
+    if not isinstance(value, str) or "%" not in value:
+        return False
+    try:
+        return float(value.replace("%", "").strip()) > 0
+    except ValueError:
+        return False
+
+
 # Sentinel: _determine_probable_origin computes the change verdict itself when none is passed.
 _VERDICT_NOT_COMPUTED: Any = object()
 
@@ -1516,7 +1540,8 @@ class SynthesizerAgent:
         for d in dossiers:
             if d.specialist_name == "CloudRunSpecialist":
                 err_rate = d.metrics.get("error_rate_5xx")
-                if err_rate and err_rate != "0.1%":
+                # Only a measured, non-trivial rate corroborates; N/A is not a signal.
+                if _measured_pct(err_rate) and err_rate != "0.1%":
                     signal_items.append(f"HTTP 5xx rate {err_rate} on {d.target_resource}")
                 restarts = d.metrics.get("container_restarts")
                 if isinstance(restarts, (int, float)) and restarts > 0:
@@ -1568,6 +1593,28 @@ class SynthesizerAgent:
             else:
                 score_change = 0.00
                 detail_change = f"{rev_label} deployed {mins}m prior to alert onset (outside causality window)"
+        elif (proxy_chg := self._proxy_change_evidence(dossiers, origin)) is not None:
+            # An attributed Apigee proxy revision change is a change too (same proximity buckets).
+            rev_label = (
+                f"Apigee proxy `{proxy_chg['proxy']}` revision {proxy_chg['new_revision']} "
+                f"(replacing {proxy_chg['previous_revision']}) first served {proxy_chg.get('new_first_served_at') or 'at an unknown time'}"
+            )
+            first = _parse_iso_utc(proxy_chg.get("new_first_served_at"))
+            onset = _parse_iso_utc(alert.started_at)
+            if first is None or onset is None:
+                score_change = 0.00
+                detail_change = f"{rev_label}; proximity to alert onset not determined (timestamp unknown)"
+            else:
+                mins = max(0, int((onset - first).total_seconds() // 60))
+                if mins <= 15:
+                    score_change, window = 0.15, "high temporal proximity"
+                elif mins <= 30:
+                    score_change, window = 0.10, "moderate proximity"
+                elif mins <= 60:
+                    score_change, window = 0.05, "extended window"
+                else:
+                    score_change, window = 0.00, "outside causality window"
+                detail_change = f"{rev_label}, {mins}m prior to alert onset ({window})"
         else:
             score_change = 0.00
             detail_change = "Zero recent deployments detected within lookback window"
