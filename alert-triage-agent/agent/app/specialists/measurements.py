@@ -16,6 +16,37 @@ from .telemetry_reads import UNAVAILABLE_KEY
 # Source name ApigeeSpecialist records when proxy/response_count cannot be read.
 APIGEE_RESPONSE_COUNT_SOURCE = "Cloud Monitoring apigee.googleapis.com/proxy/response_count"
 _RESPONSE_COUNT_QUERY = "apigee.googleapis.com/proxy/response_count"
+# Every count statement names its source: the metric and the access log count the same requests
+# separately and are never added together.
+METRIC_SOURCE = "the proxy/response_count metric"
+# Dossier metric key of the access-log 5xx fallback (set only when the metric has no such responses).
+ACCESS_LOG_5XX_KEY = "access_log_5xx"
+
+
+def is_5xx_code(code: str) -> bool:
+    """A 5xx response code ("500".."599" or the "5xx" class), for the metric and the access log alike."""
+    return len(code) == 3 and code.startswith("5") and (code[1:].isdigit() or code == "5xx")
+
+
+def access_log_clause(code: str, n: int) -> str:
+    """'access log shows N <code> responses (log-based, may be partial)'."""
+    return f"access log shows {n} {code} {'response' if n == 1 else 'responses'} (log-based, may be partial)"
+
+
+def response_count_unavailable(metrics: dict[str, Any]) -> bool:
+    """True when ApigeeSpecialist recorded proxy/response_count as unreadable."""
+    return any(
+        isinstance(g, dict) and g.get("source") == APIGEE_RESPONSE_COUNT_SOURCE
+        for g in metrics.get(UNAVAILABLE_KEY) or []
+    )
+
+
+def access_log_5xx_statement(code: str, n: int, *, metric_unavailable: bool = False) -> str:
+    """The fallback line: "HTTP 5xx: not in metric; access log shows 3 5xx responses (...)".
+
+    "metric unavailable" instead of "not in metric" when proxy/response_count could not be read."""
+    metric = "metric unavailable" if metric_unavailable else "not in metric"
+    return f"HTTP {code}: {metric}; {access_log_clause(code, n)}"
 
 
 def cloud_run_5xx_rate(d: EvidenceDossier) -> Optional[str]:
@@ -48,6 +79,9 @@ class ApigeeResponses:
 
     proxy: str
     codes: dict[str, int]
+    # Access-log fallback: responses with ``log_code`` the log shows while the metric has none.
+    log_5xx: int = 0
+    log_code: str = "5xx"
 
     @property
     def total(self) -> int:
@@ -62,23 +96,39 @@ class ApigeeResponses:
         """Non-zero 4xx/5xx counts per code."""
         return {c: n for c, n in sorted(self.codes.items()) if c[:1] in ("4", "5") and n > 0}
 
+    @property
+    def log_statement(self) -> str:
+        """"access log shows N 5xx responses (log-based, may be partial)", or "" without a fallback."""
+        return access_log_clause(self.log_code, self.log_5xx) if self.log_5xx else ""
+
+    @property
+    def log_suffix(self) -> str:
+        """", while the access log shows N 5xx responses (...)", or ""."""
+        return f", while the {self.log_statement}" if self.log_5xx else ""
+
     def statement(self) -> str:
-        """No-error statement: "0 HTTP 4xx/5xx responses (of N requests)" or "no traffic recorded"."""
+        """No-error statement, naming the metric: "0 HTTP 4xx/5xx responses in the
+        proxy/response_count metric (of N requests)" or "no responses in the proxy/response_count
+        metric", plus the access-log 5xx count when the log shows some."""
         if not self.total:
-            return "no traffic recorded"
-        return f"0 HTTP 4xx/5xx responses (of {self.total} requests)"
+            return f"no responses in {METRIC_SOURCE}{self.log_suffix}"
+        return f"0 HTTP 4xx/5xx responses in {METRIC_SOURCE} (of {self.total} requests){self.log_suffix}"
 
     def no_5xx_statement(self) -> str:
-        """Statement for a proxy with no 5xx: ``statement()``, or "0 HTTP 5xx responses (of N
-        requests)" when it returned 4xx responses (listed by the Operational Impact column)."""
+        """Statement for a proxy with no 5xx in the metric: ``statement()``, or "0 HTTP 5xx
+        responses in the proxy/response_count metric (of N requests)" when it returned 4xx
+        responses (listed by the Operational Impact column)."""
         if not self.errors:
             return self.statement()
-        return f"0 HTTP 5xx responses (of {self.total} requests)"
+        return f"0 HTTP 5xx responses in {METRIC_SOURCE} (of {self.total} requests){self.log_suffix}"
 
     def five_xx_statement(self) -> Optional[str]:
-        """Non-zero 5xx count as "N HTTP 5xx responses (of T requests)", else None."""
+        """Non-zero 5xx count as "N HTTP 5xx responses in the proxy/response_count metric (of T
+        requests)", else None."""
         n = self.count("5")
-        return f"{n} HTTP 5xx responses (of {self.total} requests)" if n else None
+        if not n:
+            return None
+        return f"{n} HTTP 5xx responses in {METRIC_SOURCE} (of {self.total} requests){self.log_suffix}"
 
 
 def apigee_responses(d: EvidenceDossier) -> Optional[ApigeeResponses]:
@@ -87,20 +137,24 @@ def apigee_responses(d: EvidenceDossier) -> Optional[ApigeeResponses]:
 
     ``metrics["response_codes"]`` holds the proxy/response_count metric counts only; access-log
     status codes are a separate count of the same requests (``access_log_status_codes``) and are
-    never added in, so N in "of N requests" is the metric total."""
+    never added in, so N in "of N requests" is the metric total. The access-log 5xx fallback
+    (``metrics["access_log_5xx"]``) is carried alongside, so every statement on the proxy states it."""
     if d.specialist_name != "ApigeeSpecialist":
         return None
     m: dict[str, Any] = d.metrics or {}
     queried = any(_RESPONSE_COUNT_QUERY in q for q in (d.queries_executed or {}).get("cloud_monitoring", []))
-    unavailable = any(
-        isinstance(g, dict) and g.get("source") == APIGEE_RESPONSE_COUNT_SOURCE for g in m.get(UNAVAILABLE_KEY) or []
-    )
     codes = m.get("response_codes")
-    if not queried or unavailable or not isinstance(codes, dict):
+    if not queried or response_count_unavailable(m) or not isinstance(codes, dict):
         return None
     clean = {
         str(c): int(n) for c, n in codes.items() if isinstance(n, int) and not isinstance(n, bool) and n >= 0
     }
+    log = m.get(ACCESS_LOG_5XX_KEY)
+    log_n = log.get("count") if isinstance(log, dict) else None
+    if isinstance(log_n, int) and not isinstance(log_n, bool) and log_n > 0:
+        return ApigeeResponses(
+            proxy=d.target_resource, codes=clean, log_5xx=log_n, log_code=str(log.get("code") or "5xx"),
+        )
     return ApigeeResponses(proxy=d.target_resource, codes=clean)
 
 

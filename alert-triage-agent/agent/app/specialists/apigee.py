@@ -15,7 +15,13 @@ from ..config import AgentConfig, get_agent_settings
 from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
 from .base import BaseSpecialist, EvidenceDossier
-from .measurements import APIGEE_RESPONSE_COUNT_SOURCE
+from .measurements import (
+    ACCESS_LOG_5XX_KEY,
+    APIGEE_RESPONSE_COUNT_SOURCE,
+    access_log_5xx_statement,
+    is_5xx_code,
+    response_count_unavailable,
+)
 from .telemetry_reads import (
     UNAVAILABLE_KEY,
     failure_reason,
@@ -623,10 +629,7 @@ class ApigeeSpecialist(BaseSpecialist):
             findings.append(f"Gateway errors detected on Apigee proxy `{target_proxy}` originating from upstream target.")
             # Every 5xx status counts (a passed-through 500/502 as well as 503/504);
             # a 504 policy keeps its own 504 count.
-            five_xx = {
-                c: n for c, n in status_counts.items()
-                if n and len(c) == 3 and c.startswith("5") and (c[1:].isdigit() or c == "5xx")
-            }
+            five_xx = {c: n for c, n in status_counts.items() if n and is_5xx_code(c)}
             err_code = "504" if "504" in alert.policy_name else "5xx"
             if err_code == "504":
                 err_count = status_counts.get("504")
@@ -649,17 +652,19 @@ class ApigeeSpecialist(BaseSpecialist):
                 # The metric has no such responses. The access log is a separate, partial count
                 # (status_code is empty on the fault path; reads can be capped): state it as
                 # log-based, never as the metric count and never added to it.
+                # measurements.ApigeeResponses reads this key, so the proxy's metric statement
+                # in the ticket and the HTML states the log count too.
                 log_errs = {
                     c: n for c, n in log_status_counts.items()
-                    if n and (c == "504" if err_code == "504" else (len(c) == 3 and c.startswith("5")))
+                    if n and (c == "504" if err_code == "504" else is_5xx_code(c))
                 }
                 if log_errs:
                     log_n = sum(log_errs.values())
-                    statement = (
-                        f"HTTP {err_code}: not in metric; access log shows {log_n} {err_code} responses "
-                        "(log-based, may be partial)"
+                    statement = access_log_5xx_statement(
+                        err_code, log_n, metric_unavailable=response_count_unavailable(metrics),
                     )
-                    metrics["access_log_5xx"] = {
+                    metrics[ACCESS_LOG_5XX_KEY] = {
+                        "code": err_code,
                         "count": log_n,
                         "codes": dict(sorted(log_errs.items())),
                         "count_source": f"{access_log_id()} log entries",

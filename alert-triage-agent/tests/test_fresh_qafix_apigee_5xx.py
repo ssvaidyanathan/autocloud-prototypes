@@ -108,7 +108,7 @@ async def test_504_policy_log_fallback_counts_only_504(cfg):
     d = await _run(cfg, "ata-orders-504", [], [_log("504"), _log("500")])
     assert d.metrics["proxy_response_code_504"] == "N/A (not captured)"
     assert d.metrics["access_log_5xx"]["codes"] == {"504": 1}
-    assert "HTTP 504: not in metric; access log shows 1 504 responses (log-based, may be partial)." in d.findings
+    assert "HTTP 504: not in metric; access log shows 1 504 response (log-based, may be partial)." in d.findings
 
 
 @pytest.mark.asyncio
@@ -129,3 +129,51 @@ async def test_metrics_table_shows_5xx_count(cfg):
     rows = SynthesizerAgent()._build_metrics_comparison([d], "ata-inventory-v1")
     apigee = [r for r in rows if r["layer"] == "Apigee"]
     assert apigee and apigee[0]["during_value"] == "40 req"
+
+
+class _Unreadable:
+    """A series iterable whose read fails (proxy/response_count unavailable)."""
+
+    def __iter__(self):
+        raise RuntimeError("response_count read failed")
+
+
+@pytest.mark.asyncio
+async def test_log_fallback_says_metric_unavailable_when_the_metric_read_failed(cfg):
+    """fresh-rev-n5 O1: an unreadable metric is not "not in metric" (that implies it had none)."""
+    d = await _run(cfg, "ata-inventory-5xx", _Unreadable(), [_log("500"), _log("500")])
+    assert d.metrics["access_log_5xx"]["statement"] == (
+        "HTTP 5xx: metric unavailable; access log shows 2 5xx responses (log-based, may be partial)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_log_fallback_carries_its_code_into_the_proxy_measurement(cfg):
+    """fresh-rev-n5 R1': measurements.ApigeeResponses states the fallback with the metric statement."""
+    from agent.app.specialists.measurements import apigee_responses
+
+    d = await _run(cfg, "ata-orders-504", [_ts("200", 10)], [_log("504")])
+    resp = apigee_responses(d)
+    assert (resp.log_5xx, resp.log_code) == (1, "504")
+    assert resp.statement() == (
+        "0 HTTP 4xx/5xx responses in the proxy/response_count metric (of 10 requests), "
+        "while the access log shows 1 504 response (log-based, may be partial)"
+    )
+
+
+def test_one_5xx_predicate_for_the_metric_and_the_log():
+    """fresh-rev-n5 N2: the metric and access-log 5xx filters are one predicate."""
+    from agent.app.specialists.measurements import is_5xx_code
+
+    assert [c for c in ("500", "503", "5xx", "504", "200", "429", "5", "50x", "5000") if is_5xx_code(c)] == [
+        "500", "503", "5xx", "504",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_impact_column_states_the_log_fallback_beside_metric_errors(cfg):
+    """A 504 policy whose metric has 500s but no 504: the impact lists the metric codes and the log 504s."""
+    d = await _run(cfg, "ata-orders-504", [_ts("500", 5), _ts("200", 10)], [_log("504"), _log("504")])
+    assert SynthesizerAgent._node_impact("ata-inventory-v1", [d]) == (
+        "HTTP 500: 5; access log shows 2 504 responses (log-based, may be partial)"
+    )

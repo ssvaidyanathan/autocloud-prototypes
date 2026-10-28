@@ -183,8 +183,10 @@ async def build_outputs(name: str, history_line=ticket_history_line, scenario: d
     # The ticket problem statement as the synthesizer builds it (it names per-component 5xx state).
     problem = synth._synthesize_problem(alert, dossiers, s["origin"], blast)
     rca = synth._build_root_cause_analysis("rc", 0.7, dossiers, s["origin"], alert)
+    # The observations the synthesizer writes (they reach the ticket body and the HTML).
+    observations = synth._synthesize_observations(dossiers, alert)
     common = dict(
-        group_id=f"grp-{name}", summary=problem, observations="obs", origin=s["origin"],
+        group_id=f"grp-{name}", summary=problem, observations=observations, origin=s["origin"],
         blast_radius=blast, priority="P1", project_id="cloud-assist-fde-2", region="us-west1",
         change_induced="No (checked: ata-tools change timeline (Apigee deployment history))",
         apigee_history=line,
@@ -198,6 +200,7 @@ async def build_outputs(name: str, history_line=ticket_history_line, scenario: d
     agent_desc = AgentReport(**common).build_structured_description(project_id="cloud-assist-fde-2", incidents_bucket="b")
     return {
         "problem": problem,
+        "observations": observations,
         "alternatives": {a["alternative"]: a["reason"] for a in rca.get("alternatives_ruled_out", [])},
         "dossiers": dossiers,
         "blast": blast,
@@ -332,7 +335,7 @@ IMPACT = {
                      "ata-orders-api": NM, "ata-orders-v1": NM},
     "S3-orders-429": {"ata-orders-v1": "HTTP 429: 512 (SpikeArrestViolation)"},
     "S4": {"ata-inventory-db": "24 of 25 connections active", "ata-inventory-api": "HTTP 5xx error rate 0.0%",
-           "ata-inventory-v1": "0 HTTP 4xx/5xx responses (of 632 requests)", "ata-orders-api": "HTTP 5xx error rate 0.0%",
+           "ata-inventory-v1": "0 HTTP 4xx/5xx responses in the proxy/response_count metric (of 632 requests)", "ata-orders-api": "HTTP 5xx error rate 0.0%",
            "ata-orders-v1": NM},
     "S5": {"ata-inventory-api": "HTTP 5xx error rate 98.8%", "ata-inventory-v1": "HTTP 500: 553",
            "ata-orders-api": "HTTP 5xx error rate 99.0%", "ata-orders-v1": NM},
@@ -440,7 +443,8 @@ def test_execute_investigation_puts_the_scoped_line_on_the_ticket(tmp_path):
 S4_PROBLEM = (
     "Database connection pool saturation (connections at 24/25) on ata-inventory-db since 2026-10-28T05:40:22Z "
     "(no HTTP 5xx errors measured on ata-inventory-api, ata-orders-api; "
-    "0 HTTP 4xx/5xx responses (of 632 requests) on ata-inventory-v1; HTTP 5xx rate not measured on ata-orders-v1)"
+    "0 HTTP 4xx/5xx responses in the proxy/response_count metric (of 632 requests) on ata-inventory-v1; "
+    "HTTP 5xx rate not measured on ata-orders-v1)"
 )
 
 
@@ -448,11 +452,12 @@ def test_s4_ticket_and_html_agree_on_the_proxy_measurement():
     out = _out("S4")
     assert out["problem"] == S4_PROBLEM
     assert S4_PROBLEM in out["desc"] and S4_PROBLEM in out["agent_desc"]
-    assert out["impact"]["ata-inventory-v1"] == "0 HTTP 4xx/5xx responses (of 632 requests)"
+    assert out["impact"]["ata-inventory-v1"] == "0 HTTP 4xx/5xx responses in the proxy/response_count metric (of 632 requests)"
     assert "not measured on ata-inventory-v1" not in out["desc"]
     assert "no HTTP 4xx/5xx responses recorded" not in out["html"]
     assert out["alternatives"]["Upstream API Gateway Rate-Limiting"] == (
-        "Apigee proxy metrics queried on ata-inventory-v1 (429: 0 of 632 requests), ruling out SpikeArrest throttling."
+        "Apigee proxy/response_count queried on ata-inventory-v1 (429: 0 of 632 requests in the metric), "
+        "ruling out SpikeArrest throttling."
     )
     # The proxy nobody queried stays "not measured" in both.
     assert out["impact"]["ata-orders-v1"] == NM
@@ -472,7 +477,7 @@ def _problem_states(problem: str) -> tuple[set[str], set[str]]:
     measured: set[str] = set()
     for m in re.finditer(r"no HTTP 5xx errors measured on ([^;)]+)", problem):
         measured |= _names(m.group(1))
-    for m in re.finditer(r"(?:requests\)|recorded) on ([\w-]+)", problem):
+    for m in re.finditer(r"(?:requests\)|metric|partial\)) on ([\w-]+)", problem):
         measured.add(m.group(1))
     for m in re.finditer(r"HTTP 5xx (?:rate on dependent services|responses on dependent proxies): ([^;]+)", problem):
         measured |= {part.split()[0] for part in m.group(1).split(", ")}
@@ -486,8 +491,24 @@ def _variant(base: str, **changes) -> dict:
     return dict(SCENARIOS[base], **changes)
 
 
+def _log_entry(status: str, ts: str) -> MagicMock:
+    from datetime import datetime
+
+    e = MagicMock()
+    e.payload = {"status_code": status, "proxy": "ata-inventory-v1", "revision": "152",
+                 "environment": "prod", "client_ip": "10.0.0.1", "target_latency_ms": "16"}
+    e.timestamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return e
+
+
+# Three backend 500s logged by the access log while proxy/response_count has no 5xx yet (the
+# metric lags 1-3 min at alert onset): the access-log 5xx fallback fires (fresh-rev-n5 R1').
+S1_LOG_500S = [_log_entry("500", "2026-10-28T04:30:00Z") for _ in range(3)]
+
 # Shapes besides S1-S5 that each take a different branch of the measurement statement.
 VARIANTS = {
+    "S1-log-only-5xx": _variant("S1", codes=[], log_entries=S1_LOG_500S),
+    "S1-log-only-5xx-metric-200": _variant("S1", codes=[("200", 10, None)], log_entries=S1_LOG_500S),
     "S4-proxy-no-traffic": _variant("S4", codes=[], lat=[]),
     "S4-proxy-unavailable": _variant("S4", codes_error=True),
     "S4-proxy-4xx-only": _variant("S4", codes=[("200", 600, None), ("404", 7, None)]),
@@ -530,9 +551,13 @@ def test_ticket_and_html_measurement_statements_agree_for_every_component(name):
 
 def test_variant_statements():
     no_traffic = _out_any("S4-proxy-no-traffic")
-    assert no_traffic["impact"]["ata-inventory-v1"] == "no traffic recorded"
-    assert "; no traffic recorded on ata-inventory-v1;" in no_traffic["problem"]
-    assert "(no traffic recorded), ruling out" in no_traffic["alternatives"]["Upstream API Gateway Rate-Limiting"]
+    assert no_traffic["impact"]["ata-inventory-v1"] == "no responses in the proxy/response_count metric"
+    assert "; no responses in the proxy/response_count metric on ata-inventory-v1;" in no_traffic["problem"]
+    # A metric with no responses rules nothing out (fresh-rev-n5 R1', earlier O1).
+    assert no_traffic["alternatives"]["Upstream API Gateway Rate-Limiting"] == (
+        "Apigee 429 count on ata-inventory-v1: no responses in the proxy/response_count metric; "
+        "SpikeArrest throttling not ruled out."
+    )
 
     unavailable = _out_any("S4-proxy-unavailable")
     assert unavailable["impact"]["ata-inventory-v1"] == NM
@@ -541,11 +566,12 @@ def test_variant_statements():
 
     four = _out_any("S4-proxy-4xx-only")
     assert four["impact"]["ata-inventory-v1"] == "HTTP 404: 7"
-    assert "0 HTTP 5xx responses (of 607 requests) on ata-inventory-v1" in four["problem"]
+    assert "0 HTTP 5xx responses in the proxy/response_count metric (of 607 requests) on ata-inventory-v1" in four["problem"]
 
     five = _out_any("S4-proxy-5xx")
     assert five["impact"]["ata-inventory-v1"] == "HTTP 503: 9"
-    assert five["problem"].endswith("; HTTP 5xx responses on dependent proxies: ata-inventory-v1 9 HTTP 5xx responses (of 609 requests)")
+    assert five["problem"].endswith("; HTTP 5xx responses on dependent proxies: ata-inventory-v1 9 HTTP 5xx responses "
+                                  "in the proxy/response_count metric (of 609 requests)")
 
     tenth = _out_any("S4-cloud-run-0.1%")
     assert tenth["impact"]["ata-inventory-api"] == "HTTP 5xx error rate 0.1%"
@@ -559,16 +585,6 @@ def test_variant_statements():
 # responses and both were added into one dict, so the ticket said "of 570 requests" for ~299 sent.
 # The harness stubbed the access log empty, so this path was never exercised.
 
-def _log_entry(status: str, ts: str) -> MagicMock:
-    from datetime import datetime
-
-    e = MagicMock()
-    e.payload = {"status_code": status, "proxy": "ata-inventory-v1", "revision": "152",
-                 "environment": "prod", "client_ip": "10.0.0.1", "target_latency_ms": "16"}
-    e.timestamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    return e
-
-
 def test_s4_n_is_the_metric_total_when_the_access_log_logs_the_same_requests():
     import asyncio
 
@@ -580,9 +596,10 @@ def test_s4_n_is_the_metric_total_when_the_access_log_logs_the_same_requests():
     assert apigee.metrics["access_log_status_codes"] == {"200": 632}
     assert apigee.metrics["response_codes"] == {"200": 632}
     assert out["problem"] == S4_PROBLEM
-    assert out["impact"]["ata-inventory-v1"] == "0 HTTP 4xx/5xx responses (of 632 requests)"
+    assert out["impact"]["ata-inventory-v1"] == "0 HTTP 4xx/5xx responses in the proxy/response_count metric (of 632 requests)"
     assert out["alternatives"]["Upstream API Gateway Rate-Limiting"] == (
-        "Apigee proxy metrics queried on ata-inventory-v1 (429: 0 of 632 requests), ruling out SpikeArrest throttling."
+        "Apigee proxy/response_count queried on ata-inventory-v1 (429: 0 of 632 requests in the metric), "
+        "ruling out SpikeArrest throttling."
     )
     assert "1264" not in out["desc"] and "1264" not in out["html"]
     assert "Observed response codes in window: HTTP 200: 632." in apigee.findings
@@ -608,3 +625,73 @@ def test_fault_counts_use_the_metric_only_when_the_access_log_has_status_codes()
     assert a3.metrics["response_codes"] == {"429": 512}
     assert a3.metrics["proxy_response_code_429"] == 512
     assert a3.metrics["access_log_status_codes"] == {"429": 30}
+
+
+# --- R1' (fresh-rev-n5): the access-log 5xx fallback and the metric statement never contradict --
+#
+# When proxy/response_count has no 5xx but the access log does, the report states the log count
+# ("access log shows 3 5xx responses (log-based, may be partial)"). Before, the same proxy's
+# metric statement said "no traffic recorded" / "0 HTTP 4xx/5xx responses (of N requests)" with
+# no source, and the 429 alternative said "ruling out" on a metric with no responses at all.
+
+LOG_3 = "access log shows 3 5xx responses (log-based, may be partial)"
+METRIC = "the proxy/response_count metric"
+LOG_ONLY = {
+    "S1-log-only-5xx": f"no responses in {METRIC}, while the {LOG_3}",
+    "S1-log-only-5xx-metric-200": f"0 HTTP 4xx/5xx responses in {METRIC} (of 10 requests), while the {LOG_3}",
+}
+
+
+def _html_lines(html: str) -> list[str]:
+    import html as html_lib
+    import re
+
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S)
+    text = html_lib.unescape(re.sub(r"<[^>]+>", "\n", text))
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+
+@pytest.mark.parametrize("name", list(LOG_ONLY))
+def test_log_only_5xx_ticket_and_html_do_not_contradict_the_log(name):
+    out = _out_any(name)
+    apigee = next(d for d in out["dossiers"] if d.specialist_name == "ApigeeSpecialist")
+    assert apigee.metrics["access_log_5xx"]["count"] == 3
+    statement = LOG_ONLY[name]
+    # One statement for the proxy, from measurements.ApigeeResponses, in the impact column.
+    assert out["impact"]["ata-inventory-v1"] == statement
+    assert f"Apigee proxy ata-inventory-v1: HTTP 5xx: not in metric; {LOG_3}" in out["observations"]
+    ticket = out["desc"].splitlines()
+    html = _html_lines(out["html"])
+    assert out["desc"] == out["agent_desc"]
+    for where, lines in (("ticket", ticket), ("html", html)):
+        text = "\n".join(lines)
+        assert LOG_3 in text, where  # the log count reaches both
+        assert "no traffic recorded" not in text, where
+        assert "0 HTTP 4xx/5xx responses (of" not in text, where  # never without its source
+        for ln in lines:
+            if "0 HTTP 4xx/5xx" in ln or "no responses in" in ln:
+                assert METRIC in ln and LOG_3 in ln, (where, ln)
+    assert statement in "\n".join(html)
+    alt = out["alternatives"]["Upstream API Gateway Rate-Limiting"]
+    if name == "S1-log-only-5xx":
+        # proxy/response_count total 0: nothing is ruled out on it.
+        assert "ruling out" not in alt and "not ruled out" in alt, alt
+        assert alt == f"Apigee 429 count on ata-inventory-v1: {statement}; SpikeArrest throttling not ruled out."
+    else:
+        assert alt == (
+            "Apigee proxy/response_count queried on ata-inventory-v1 (429: 0 of 10 requests in the metric), "
+            "ruling out SpikeArrest throttling."
+        )
+    assert alt in "\n".join(html)
+
+
+def test_log_only_5xx_names_the_metric_in_the_problem_of_a_cloud_sql_origin():
+    """The ticket problem line for a dependent proxy of a Cloud SQL origin (S4 shape)."""
+    import asyncio
+
+    s = _variant("S4", codes=[("200", 10, None)], policy="ata-cloudsql-connections-critical",
+                 log_entries=[_log_entry("500", "2026-10-28T05:38:00Z") for _ in range(3)])
+    out = asyncio.run(build_outputs("S4-log", scenario=s))
+    # A non-5xx policy: the fallback does not fire, so the statement has no log clause.
+    assert f"0 HTTP 4xx/5xx responses in {METRIC} (of 10 requests) on ata-inventory-v1" in out["problem"]
+    assert "access log shows" not in out["problem"]

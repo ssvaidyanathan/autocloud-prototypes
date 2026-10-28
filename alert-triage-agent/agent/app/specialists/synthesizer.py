@@ -2721,6 +2721,8 @@ class SynthesizerAgent:
                     facts.append(f"HTTP {code}: {n}{fault}")
                 if not resp.errors:
                     facts.append(resp.statement())
+                elif resp.log_statement:
+                    facts.append(resp.log_statement)
             elif d.specialist_name == "CloudSQLSpecialist":
                 conns, max_conns = m.get("active_connections"), m.get("max_connections")
                 if isinstance(conns, (int, float)) and not isinstance(conns, bool):
@@ -3034,15 +3036,20 @@ class SynthesizerAgent:
                 resp = apigee_responses(apigee_dossier)
                 if resp is not None and resp.count("429"):
                     reason = (
-                        f"Apigee proxy metrics queried on {apigee_dossier.target_resource} "
-                        f"({resp.count('429')} HTTP 429 responses of {resp.total} requests); "
+                        f"Apigee proxy/response_count queried on {apigee_dossier.target_resource} "
+                        f"({resp.count('429')} HTTP 429 responses of {resp.total} requests in the metric); "
                         "SpikeArrest throttling not ruled out."
                     )
-                elif resp is not None:
-                    counted = f"429: 0 of {resp.total} requests" if resp.total else "no traffic recorded"
+                elif resp is not None and resp.total:
                     reason = (
-                        f"Apigee proxy metrics queried on {apigee_dossier.target_resource} ({counted}), "
-                        "ruling out SpikeArrest throttling."
+                        f"Apigee proxy/response_count queried on {apigee_dossier.target_resource} "
+                        f"(429: 0 of {resp.total} requests in the metric), ruling out SpikeArrest throttling."
+                    )
+                elif resp is not None:
+                    # No responses in the metric (it lags at alert onset): nothing is ruled out on it.
+                    reason = (
+                        f"Apigee 429 count on {apigee_dossier.target_resource}: {resp.statement()}; "
+                        "SpikeArrest throttling not ruled out."
                     )
                 elif rate_429 is None or (isinstance(rate_429, str) and rate_429.startswith("N/A")):
                     reason = (
