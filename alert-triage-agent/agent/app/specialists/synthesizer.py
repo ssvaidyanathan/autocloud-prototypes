@@ -34,6 +34,7 @@ from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches, not_applicable_component_type
 from .apigee import SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_id, access_log_name
 from .cloud_sql import DB_POOL_NEAR_SATURATION_RATIO, CloudSQLSpecialist
+from .measurements import apigee_responses, cloud_run_5xx_rate, component_responses, rate_pct
 from .change import (
     APIGEE_HISTORY,
     NO_CLOUD_RUN_DEPLOYMENTS_FINDING,
@@ -1013,8 +1014,8 @@ class SynthesizerAgent:
         A database alert's investigation reads only the database, so the impact on the services
         that call it (HTTP 5xx rate) was never measured (S4). For a Cloud SQL origin every Cloud
         Run service in its blast radius is investigated here, so the report states their
-        measured rate. Apigee proxies are not Cloud Run services; the report states that their
-        rate was not measured.
+        measured rate. Apigee proxies are not Cloud Run services; the report states their
+        proxy/response_count counts when ApigeeSpecialist read them, else "not measured".
         """
         if not self._is_cloud_sql(origin):
             return []
@@ -1432,18 +1433,14 @@ class SynthesizerAgent:
                 elif c_num is not None and not m_num:
                     metric_details.append(f"{int(c_num)} active connections (max_connections not captured)")
             elif d.specialist_name == "CloudRunSpecialist":
-                raw_err = d.metrics.get("error_rate_5xx")
-                if raw_err and raw_err != "0.1%" and raw_err != "N/A (not captured)":
+                # Same classification as the HTML Operational Impact column (measurements.py).
+                raw_err = cloud_run_5xx_rate(d)
+                if raw_err:
                     err_5xx_rate = raw_err
-                    this_pct: Optional[float] = None
-                    try:
-                        this_pct = float(str(raw_err).replace("%", ""))
-                    except ValueError:
-                        logger.warning("Unparseable 5xx rate %r on %s", raw_err, d.target_resource)
-                    if this_pct is not None:
-                        err_5xx_pct = this_pct
-                        if d.target_resource in upstream:
-                            dependent_5xx[d.target_resource] = (str(raw_err), this_pct)
+                    this_pct = rate_pct(raw_err)
+                    err_5xx_pct = this_pct
+                    if d.target_resource in upstream:
+                        dependent_5xx[d.target_resource] = (raw_err, this_pct)
                     if d.target_resource == origin:
                         origin_5xx_rate = str(raw_err)
                 # Latency of the origin only: the root cause states the origin's value, and a
@@ -1473,6 +1470,11 @@ class SynthesizerAgent:
 
         # Each 5xx rate is stated with its own service: the origin's in the rate parenthesis,
         # measured non-zero rates of dependents after it.
+        if not origin_5xx_rate:
+            # An Apigee origin's counts are measured by proxy/response_count, not Cloud Run.
+            origin_resp = component_responses(origin, dossiers)
+            if origin_resp is not None:
+                origin_5xx_rate = origin_resp.five_xx_statement() or origin_resp.no_5xx_statement()
         origin_rate_disp = f" ({origin_5xx_rate})" if origin_5xx_rate else ""
         origin_rate_gap = "" if origin_5xx_rate else f" (HTTP 5xx rate not measured on {origin})"
         erroring_dependents = {svc: v for svc, v in dependent_5xx.items() if v[1] > 0}
@@ -1510,13 +1512,28 @@ class SynthesizerAgent:
         if is_sql and ("db" in origin or "sql" in origin):
             metric_str = f" ({', '.join(metric_details)})" if metric_details else ""
             head = f"Database connection pool saturation{metric_str} on {origin} since {started_at}"
-            if erroring_dependents:
-                # Only measured rates on topology dependents are stated, each with its value.
-                return f"{head}{dependent_rates}"
-            unmeasured = [svc for svc in upstream if svc not in dependent_5xx]
+            # Apigee proxies measured by proxy/response_count (the HTML Operational Impact
+            # column reads the same counts): never "not measured" when they were read.
+            proxies = {
+                svc: r for svc in upstream if svc not in dependent_5xx
+                if (r := component_responses(svc, dossiers)) is not None
+            }
+            erroring_proxies = {svc: r for svc, r in proxies.items() if r.count("5")}
+            if erroring_dependents or erroring_proxies:
+                # Only measured rates and counts on topology dependents are stated, each with its value.
+                proxy_counts = (
+                    "; HTTP 5xx responses on dependent proxies: "
+                    + ", ".join(f"{svc} {r.five_xx_statement()}" for svc, r in sorted(erroring_proxies.items()))
+                    if erroring_proxies
+                    else ""
+                )
+                return f"{head}{dependent_rates}{proxy_counts}"
+            unmeasured = [svc for svc in upstream if svc not in dependent_5xx and svc not in proxies]
             parts = []
             if dependent_5xx:
                 parts.append(f"no HTTP 5xx errors measured on {', '.join(sorted(dependent_5xx))}")
+            for svc, r in sorted(proxies.items()):
+                parts.append(f"{r.no_5xx_statement()} on {svc}")
             if unmeasured:
                 parts.append(f"HTTP 5xx rate not measured on {', '.join(unmeasured)}")
             return f"{head} ({'; '.join(parts)})" if parts else head
@@ -2663,29 +2680,28 @@ class SynthesizerAgent:
             m = d.metrics or {}
             if d.specialist_name == "CloudRunSpecialist":
                 # A not-applicable dossier (Apigee proxy, Cloud SQL) records no rate or latency.
-                rate = m.get("error_rate_5xx")
-                if (isinstance(rate, (int, float)) and not isinstance(rate, bool)) or (
-                    isinstance(rate, str) and rate.strip().endswith("%")
-                ):
-                    facts.append(f"HTTP 5xx error rate {rate if isinstance(rate, str) else f'{rate}%'}")
+                rate = cloud_run_5xx_rate(d)
+                if rate:
+                    facts.append(f"HTTP 5xx error rate {rate}")
                 lat = m.get("latency_p95_ms")
                 if isinstance(lat, (int, float)) and not isinstance(lat, bool):
                     facts.append(f"{latency_label(m)} {lat:g}ms")
             elif d.specialist_name == "ApigeeSpecialist":
-                codes = m.get("response_codes") if isinstance(m.get("response_codes"), dict) else {}
+                # Same counts as the ticket problem statement (measurements.py); None = not measured.
+                resp = apigee_responses(d)
+                if resp is None:
+                    continue
                 gt = m.get("gateway_timeout") if isinstance(m.get("gateway_timeout"), dict) else {}
                 sa = m.get("spike_arrest") if isinstance(m.get("spike_arrest"), dict) else {}
-                for code, n in sorted(codes.items()):
-                    if not (isinstance(n, int) and n > 0 and str(code)[:1] in ("4", "5")):
-                        continue
+                for code, n in resp.errors.items():
                     fault = (
                         " (GatewayTimeout)" if gt and str(gt.get("response_code")) == str(code)
                         else " (SpikeArrestViolation)" if sa and str(sa.get("response_code")) == str(code)
                         else ""
                     )
                     facts.append(f"HTTP {code}: {n}{fault}")
-                if codes and not facts:
-                    facts.append("no HTTP 4xx/5xx responses recorded")
+                if not resp.errors:
+                    facts.append(resp.statement())
             elif d.specialist_name == "CloudSQLSpecialist":
                 conns, max_conns = m.get("active_connections"), m.get("max_connections")
                 if isinstance(conns, (int, float)) and not isinstance(conns, bool):
@@ -2991,7 +3007,21 @@ class SynthesizerAgent:
             has_apigee_check = bool(apigee_dossier.queries_executed) or bool(apigee_dossier.metrics)
             if has_apigee_check and not apigee_dossier.anomaly_detected:
                 rate_429 = apigee_dossier.metrics.get("status_429_rate") or apigee_dossier.metrics.get("proxy_response_code_429")
-                if rate_429 is None or (isinstance(rate_429, str) and rate_429.startswith("N/A")):
+                # The counts the Operational Impact column states for this proxy.
+                resp = apigee_responses(apigee_dossier)
+                if resp is not None and resp.count("429"):
+                    reason = (
+                        f"Apigee proxy metrics queried on {apigee_dossier.target_resource} "
+                        f"({resp.count('429')} HTTP 429 responses of {resp.total} requests); "
+                        "SpikeArrest throttling not ruled out."
+                    )
+                elif resp is not None:
+                    counted = f"429: 0 of {resp.total} requests" if resp.total else "no traffic recorded"
+                    reason = (
+                        f"Apigee proxy metrics queried on {apigee_dossier.target_resource} ({counted}), "
+                        "ruling out SpikeArrest throttling."
+                    )
+                elif rate_429 is None or (isinstance(rate_429, str) and rate_429.startswith("N/A")):
                     reason = (
                         f"Apigee 429 count on {apigee_dossier.target_resource}: not available; "
                         "SpikeArrest throttling not ruled out."

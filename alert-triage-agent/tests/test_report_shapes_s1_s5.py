@@ -57,11 +57,11 @@ def _cr(service: str, err: str, slowest_ms: float | None = None) -> EvidenceDoss
     )
 
 
-def _sql(conns: int, cpu: float) -> EvidenceDossier:
+def _sql(conns: int, cpu: float, anomalous: bool = False) -> EvidenceDossier:
     return EvidenceDossier(
         specialist_name="CloudSQLSpecialist", target_resource="ata-inventory-db", findings=[],
         metrics={"active_connections": conns, "cpu_utilization_pct": cpu, "max_connections": 25},
-        evidence_items=[], queries_executed={}, anomaly_detected=False,
+        evidence_items=[], queries_executed={}, anomaly_detected=anomalous,
     )
 
 
@@ -100,7 +100,7 @@ SCENARIOS = {
         origin="ata-inventory-db", codes=[("200", 632, None)],
         lat=[(60, 16.0)] * 5 + [(60, 17.0)] * 4 + [(60, 19.0)],
         others=lambda: [
-            not_applicable_dossier("CloudRunSpecialist", "ata-inventory-db", "Cloud SQL"), _sql(24, 13.7),
+            not_applicable_dossier("CloudRunSpecialist", "ata-inventory-db", "Cloud SQL"), _sql(24, 13.7, anomalous=True),
             _cr("ata-inventory-api", "0.0%"), _cr("ata-orders-api", "0.0%"),
         ],
         history=_deployed(R187, 13),
@@ -141,10 +141,14 @@ async def _apigee_dossier(s: dict, alert: AlertEvent) -> EvidenceDossier:
     cfg = AgentConfig(project_id="cloud-assist-fde-2", name_prefix="ata", region="us-west1", is_local=True)
     with patch("google.cloud.monitoring_v3.MetricServiceClient") as mon_cls, \
          patch("google.cloud.logging.Client") as log_cls:
-        mon_cls.return_value.list_time_series.side_effect = lambda request: (
-            ([_lat_ts(s["lat"])] if s["lat"] else []) if "latencies" in request.filter
-            else [_code_ts(*c) for c in s["codes"]]
-        )
+        def series(request):
+            if "latencies" in request.filter:
+                return [_lat_ts(s["lat"])] if s["lat"] else []
+            if s.get("codes_error"):
+                raise RuntimeError("response_count read failed")
+            return [_code_ts(*c) for c in s["codes"]]
+
+        mon_cls.return_value.list_time_series.side_effect = series
         log_cls.return_value.list_entries.return_value = []
         return await ApigeeSpecialist().investigate(alert, cfg)
 
@@ -156,8 +160,8 @@ def ticket_history_line(dossiers, origin: str, alert: AlertEvent):
     )
 
 
-async def build_outputs(name: str, history_line=ticket_history_line) -> dict:
-    s = SCENARIOS[name]
+async def build_outputs(name: str, history_line=ticket_history_line, scenario: dict | None = None) -> dict:
+    s = scenario or SCENARIOS[name]
     alert = AlertEvent(
         incident_id=f"0.{name}", policy_name=s["policy"], resource_name=s["resource"],
         state="open", started_at=s["started"],
@@ -176,19 +180,27 @@ async def build_outputs(name: str, history_line=ticket_history_line) -> dict:
     nodes = synth._build_topology_nodes(s["origin"], blast, dossiers)
     analytics = synth._build_apigee_analytics(dossiers, [s["origin"]])
     line = history_line(dossiers, s["origin"], alert)
+    # The ticket problem statement as the synthesizer builds it (it names per-component 5xx state).
+    problem = synth._synthesize_problem(alert, dossiers, s["origin"], blast)
+    rca = synth._build_root_cause_analysis("rc", 0.7, dossiers, s["origin"], alert)
     common = dict(
-        group_id=f"grp-{name}", summary=f"{name} summary", observations="obs", origin=s["origin"],
+        group_id=f"grp-{name}", summary=problem, observations="obs", origin=s["origin"],
         blast_radius=blast, priority="P1", project_id="cloud-assist-fde-2", region="us-west1",
         change_induced="No (checked: ata-tools change timeline (Apigee deployment history))",
         apigee_history=line,
     )
     bridge = BridgeReport(
         **common, metrics_comparison=rows, apigee_analytics=analytics, topology_nodes=nodes,
+        root_cause_analysis=rca,
         evidence_by_area={"change": [EvidenceItem(headline="Apigee Deployment History", content=full)]},
     )
     desc = bridge.build_structured_description(project_id="cloud-assist-fde-2", incidents_bucket="b")
     agent_desc = AgentReport(**common).build_structured_description(project_id="cloud-assist-fde-2", incidents_bucket="b")
     return {
+        "problem": problem,
+        "alternatives": {a["alternative"]: a["reason"] for a in rca.get("alternatives_ruled_out", [])},
+        "dossiers": dossiers,
+        "blast": blast,
         "impact": {n["resource"]: n["impact"] for n in nodes},
         "rows": [(r["layer"], r["metric_name"], r["resource"], r["during_value"]) for r in rows],
         "analytics": {k: analytics.get(k) for k in ("target_latency_p50", "target_latency_p95", "target_latency_p99",
@@ -320,7 +332,7 @@ IMPACT = {
                      "ata-orders-api": NM, "ata-orders-v1": NM},
     "S3-orders-429": {"ata-orders-v1": "HTTP 429: 512 (SpikeArrestViolation)"},
     "S4": {"ata-inventory-db": "24 of 25 connections active", "ata-inventory-api": "HTTP 5xx error rate 0.0%",
-           "ata-inventory-v1": "no HTTP 4xx/5xx responses recorded", "ata-orders-api": "HTTP 5xx error rate 0.0%",
+           "ata-inventory-v1": "0 HTTP 4xx/5xx responses (of 632 requests)", "ata-orders-api": "HTTP 5xx error rate 0.0%",
            "ata-orders-v1": NM},
     "S5": {"ata-inventory-api": "HTTP 5xx error rate 98.8%", "ata-inventory-v1": "HTTP 500: 553",
            "ata-orders-api": "HTTP 5xx error rate 99.0%", "ata-orders-v1": NM},
@@ -414,3 +426,128 @@ def test_execute_investigation_puts_the_scoped_line_on_the_ticket(tmp_path):
         "no deployments of these proxies in the 2-hour window prior to alert onset "
         "(1 other proxy changed in window, see report)."
     )
+
+
+# --- N4: the ticket and the HTML state the same measurement for every component ---------------
+#
+# S4 live (INC0010362): the ticket said "HTTP 5xx rate not measured on ata-inventory-v1" while the
+# HTML Operational Impact row said "no HTTP 4xx/5xx responses recorded" for the same proxy, and
+# the HTML 429 alternative said "Apigee 429 count ... not available". proxy/response_count was
+# queried and returned only HTTP 200, so all three now state "0 ... of N requests".
+# Output change per scenario (fresh-n4-report.md): S1, S2, S3-inventory, S5: HTML 429 alternative
+# row only. S4: ticket problem statement, HTML impact row, HTML 429 alternative. S3-orders-429: none.
+
+S4_PROBLEM = (
+    "Database connection pool saturation (connections at 24/25) on ata-inventory-db since 2026-10-28T05:40:22Z "
+    "(no HTTP 5xx errors measured on ata-inventory-api, ata-orders-api; "
+    "0 HTTP 4xx/5xx responses (of 632 requests) on ata-inventory-v1; HTTP 5xx rate not measured on ata-orders-v1)"
+)
+
+
+def test_s4_ticket_and_html_agree_on_the_proxy_measurement():
+    out = _out("S4")
+    assert out["problem"] == S4_PROBLEM
+    assert S4_PROBLEM in out["desc"] and S4_PROBLEM in out["agent_desc"]
+    assert out["impact"]["ata-inventory-v1"] == "0 HTTP 4xx/5xx responses (of 632 requests)"
+    assert "not measured on ata-inventory-v1" not in out["desc"]
+    assert "no HTTP 4xx/5xx responses recorded" not in out["html"]
+    assert out["alternatives"]["Upstream API Gateway Rate-Limiting"] == (
+        "Apigee proxy metrics queried on ata-inventory-v1 (429: 0 of 632 requests), ruling out SpikeArrest throttling."
+    )
+    # The proxy nobody queried stays "not measured" in both.
+    assert out["impact"]["ata-orders-v1"] == NM
+
+
+def _names(text: str) -> set[str]:
+    return {n.strip() for n in text.split(",") if n.strip()}
+
+
+def _problem_states(problem: str) -> tuple[set[str], set[str]]:
+    """(components the problem statement says were not measured, components it states a value for)."""
+    import re
+
+    not_measured: set[str] = set()
+    for m in re.finditer(r"not measured on ([^;)]+)", problem):
+        not_measured |= _names(m.group(1))
+    measured: set[str] = set()
+    for m in re.finditer(r"no HTTP 5xx errors measured on ([^;)]+)", problem):
+        measured |= _names(m.group(1))
+    for m in re.finditer(r"(?:requests\)|recorded) on ([\w-]+)", problem):
+        measured.add(m.group(1))
+    for m in re.finditer(r"HTTP 5xx (?:rate on dependent services|responses on dependent proxies): ([^;]+)", problem):
+        measured |= {part.split()[0] for part in m.group(1).split(", ")}
+    m = re.search(r"\(([^()]*%|[^()]*requests\))\) on ([\w-]+)", problem)
+    if m:
+        measured.add(m.group(2))
+    return not_measured, measured
+
+
+def _variant(base: str, **changes) -> dict:
+    return dict(SCENARIOS[base], **changes)
+
+
+# Shapes besides S1-S5 that each take a different branch of the measurement statement.
+VARIANTS = {
+    "S4-proxy-no-traffic": _variant("S4", codes=[], lat=[]),
+    "S4-proxy-unavailable": _variant("S4", codes_error=True),
+    "S4-proxy-4xx-only": _variant("S4", codes=[("200", 600, None), ("404", 7, None)]),
+    "S4-proxy-5xx": _variant("S4", codes=[("200", 600, None), ("503", 9, None)]),
+    "S4-cloud-run-0.1%": _variant("S4", others=lambda: [
+        not_applicable_dossier("CloudRunSpecialist", "ata-inventory-db", "Cloud SQL"), _sql(24, 13.7, anomalous=True),
+        _cr("ata-inventory-api", "0.1%"), _cr("ata-orders-api", "0.0%"),
+    ]),
+}
+
+
+def _out_any(name: str) -> dict:
+    import asyncio
+
+    return asyncio.run(build_outputs(name, scenario=VARIANTS.get(name)))
+
+
+@pytest.mark.parametrize("name", list(SCENARIOS) + list(VARIANTS))
+def test_ticket_and_html_measurement_statements_agree_for_every_component(name):
+    out = _out_any(name)
+    not_measured, measured = _problem_states(out["problem"])
+    assert not (not_measured & measured), out["problem"]
+    for component in out["blast"]:
+        impact = out["impact"].get(component)
+        if impact is None:
+            continue
+        assert out["problem"] in out["desc"]  # the ticket carries this statement
+        if component in not_measured:
+            assert impact == NM, (component, impact, out["problem"])
+        if component in measured:
+            assert impact != NM, (component, impact, out["problem"])
+        if impact == NM:
+            assert component not in measured
+    # The HTML 429 alternative reads the same proxy counts as the impact column.
+    alt = out["alternatives"].get("Upstream API Gateway Rate-Limiting")
+    proxy = next((d.target_resource for d in out["dossiers"] if d.specialist_name == "ApigeeSpecialist"), None)
+    if alt and proxy:
+        assert ("not available" in alt) == (out["impact"].get(proxy, NM) == NM), (alt, out["impact"].get(proxy))
+
+
+def test_variant_statements():
+    no_traffic = _out_any("S4-proxy-no-traffic")
+    assert no_traffic["impact"]["ata-inventory-v1"] == "no traffic recorded"
+    assert "; no traffic recorded on ata-inventory-v1;" in no_traffic["problem"]
+    assert "(no traffic recorded), ruling out" in no_traffic["alternatives"]["Upstream API Gateway Rate-Limiting"]
+
+    unavailable = _out_any("S4-proxy-unavailable")
+    assert unavailable["impact"]["ata-inventory-v1"] == NM
+    assert "HTTP 5xx rate not measured on ata-inventory-v1, ata-orders-v1" in unavailable["problem"]
+    assert "not available" in unavailable["alternatives"]["Upstream API Gateway Rate-Limiting"]
+
+    four = _out_any("S4-proxy-4xx-only")
+    assert four["impact"]["ata-inventory-v1"] == "HTTP 404: 7"
+    assert "0 HTTP 5xx responses (of 607 requests) on ata-inventory-v1" in four["problem"]
+
+    five = _out_any("S4-proxy-5xx")
+    assert five["impact"]["ata-inventory-v1"] == "HTTP 503: 9"
+    assert five["problem"].endswith("; HTTP 5xx responses on dependent proxies: ata-inventory-v1 9 HTTP 5xx responses (of 609 requests)")
+
+    tenth = _out_any("S4-cloud-run-0.1%")
+    assert tenth["impact"]["ata-inventory-api"] == "HTTP 5xx error rate 0.1%"
+    assert "not measured on ata-inventory-api" not in tenth["problem"]
+    assert "HTTP 5xx rate on dependent services: ata-inventory-api 0.1%" in tenth["problem"]

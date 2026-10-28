@@ -15,6 +15,7 @@ from ..config import AgentConfig, get_agent_settings
 from ..contracts.alert import AlertEvent
 from ..contracts.report import EvidenceItem
 from .base import BaseSpecialist, EvidenceDossier
+from .measurements import APIGEE_RESPONSE_COUNT_SOURCE
 from .telemetry_reads import (
     UNAVAILABLE_KEY,
     failure_reason,
@@ -316,7 +317,7 @@ class ApigeeSpecialist(BaseSpecialist):
         except Exception as exc:
             logger.warning("Cloud Monitoring proxy/response_count query error: %s", exc)
             record_unavailable(
-                metrics, source="Cloud Monitoring apigee.googleapis.com/proxy/response_count",
+                metrics, source=APIGEE_RESPONSE_COUNT_SOURCE,
                 target=target_proxy, reason=failure_reason(exc, "Cloud Monitoring"),
             )
 
