@@ -538,6 +538,18 @@ class CloudRunSpecialist(BaseSpecialist):
             latest_ready = service_describe_info.get("latestReadyRevision", "")
             if latest_ready:
                 metrics["latest_ready_revision"] = latest_ready.split("/")[-1]
+            # The serving revision(s) as Cloud Run reports the traffic split; a LATEST target
+            # carries no revision name and resolves to latestReadyRevision.
+            serving: dict[str, int] = {}
+            for t in service_describe_info.get("trafficStatuses") or []:
+                pct = int(t.get("percent") or 0)
+                rev = (t.get("revision") or "").split("/")[-1]
+                if not rev and str(t.get("type", "")).endswith("LATEST"):
+                    rev = metrics.get("latest_ready_revision", "")
+                if rev and pct > 0:
+                    serving[rev] = serving.get(rev, 0) + pct
+            if serving:
+                metrics["serving_revisions"] = serving
 
         # Evaluate anomaly condition
         rate_val = 0.0
