@@ -240,7 +240,12 @@ class ApigeeSpecialist(BaseSpecialist):
             window_start = window_end - timedelta(minutes=5)
 
         # Real telemetry containers
+        # Two sources, never summed: both count the same requests (an access-log entry per
+        # request, and the proxy/response_count metric), so adding them double-counts.
+        # status_counts: apigee.googleapis.com/proxy/response_count per response_code, the only
+        # source of the published response counts. log_status_counts: access-log status_code.
         status_counts: dict[str, int] = {}
+        log_status_counts: dict[str, int] = {}
         # Kept apart: per-minute distribution means and per-request access-log latencies.
         minute_means_ms: list[float] = []
         logged_latencies_ms: list[float] = []
@@ -398,7 +403,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 payload = entry.payload if isinstance(entry.payload, dict) else {}
                 sc = str(payload.get("status_code") or "")
                 if sc:
-                    status_counts[sc] = status_counts.get(sc, 0) + 1
+                    log_status_counts[sc] = log_status_counts.get(sc, 0) + 1
                 cip = payload.get("client_ip")
                 if cip:
                     client_counter[cip] += 1
@@ -561,7 +566,11 @@ class ApigeeSpecialist(BaseSpecialist):
                 f"Apigee proxy `{target_proxy}` returned {metrics['gateway_timeout']['count']} "
                 f"{GATEWAY_TIMEOUT_FAULT} faults in the window [{window_start.isoformat()}, {window_end.isoformat()}]."
             )
+        # apigee.googleapis.com/proxy/response_count, per response_code (metric only).
         metrics["response_codes"] = status_counts if status_counts else {}
+        if log_status_counts:
+            # Access-log entries per status_code; a separate count of the same requests.
+            metrics["access_log_status_codes"] = dict(sorted(log_status_counts.items()))
 
         # Log WARNING for genuinely absent data per Quality Gates
         if p50_ms is None or p95_ms is None:
@@ -661,17 +670,17 @@ class ApigeeSpecialist(BaseSpecialist):
             if status_counts:
                 codes_summary = ", ".join(f"HTTP {c}: {cnt}" for c, cnt in sorted(status_counts.items()))
                 findings.append(f"Observed response codes in window: {codes_summary}.")
-                content_str = f"Access log metrics for `{target_proxy}`: {codes_summary}."
+                content_str = f"Apigee proxy/response_count for `{target_proxy}`: {codes_summary}."
             elif metrics.get(UNAVAILABLE_KEY):
                 # Empty because reads failed: not evidence that nothing happened.
                 findings.append(
                     "Error spike and policy breach not assessed: "
                     + "; ".join(gap_text(g) for g in metrics[UNAVAILABLE_KEY]) + "."
                 )
-                content_str = f"Access log metrics for `{target_proxy}`: not assessed (telemetry unavailable)."
+                content_str = f"Apigee proxy/response_count for `{target_proxy}`: not assessed (telemetry unavailable)."
             else:
                 findings.append("No anomalous error spike or policy breach detected in query window.")
-                content_str = f"Access log metrics for `{target_proxy}`: N/A (not captured)."
+                content_str = f"Apigee proxy/response_count for `{target_proxy}`: N/A (not captured)."
 
             evidence_items.append(
                 EvidenceItem(

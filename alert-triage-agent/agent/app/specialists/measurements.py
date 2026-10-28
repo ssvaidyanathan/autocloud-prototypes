@@ -83,7 +83,11 @@ class ApigeeResponses:
 
 def apigee_responses(d: EvidenceDossier) -> Optional[ApigeeResponses]:
     """Response counts of an ApigeeSpecialist dossier, or None when proxy/response_count was
-    not queried or could not be read (the report then says "not measured")."""
+    not queried or could not be read (the report then says "not measured").
+
+    ``metrics["response_codes"]`` holds the proxy/response_count metric counts only; access-log
+    status codes are a separate count of the same requests (``access_log_status_codes``) and are
+    never added in, so N in "of N requests" is the metric total."""
     if d.specialist_name != "ApigeeSpecialist":
         return None
     m: dict[str, Any] = d.metrics or {}

@@ -149,7 +149,7 @@ async def _apigee_dossier(s: dict, alert: AlertEvent) -> EvidenceDossier:
             return [_code_ts(*c) for c in s["codes"]]
 
         mon_cls.return_value.list_time_series.side_effect = series
-        log_cls.return_value.list_entries.return_value = []
+        log_cls.return_value.list_entries.return_value = list(s.get("log_entries", []))
         return await ApigeeSpecialist().investigate(alert, cfg)
 
 
@@ -551,3 +551,60 @@ def test_variant_statements():
     assert tenth["impact"]["ata-inventory-api"] == "HTTP 5xx error rate 0.1%"
     assert "not measured on ata-inventory-api" not in tenth["problem"]
     assert "HTTP 5xx rate on dependent services: ata-inventory-api 0.1%" in tenth["problem"]
+
+
+# --- R1 (fresh-rev-n4): N in "of N requests" is the proxy/response_count total only -------------
+#
+# Live S4 (final-qa3): the access log and proxy/response_count each counted the same ~285 HTTP 200
+# responses and both were added into one dict, so the ticket said "of 570 requests" for ~299 sent.
+# The harness stubbed the access log empty, so this path was never exercised.
+
+def _log_entry(status: str, ts: str) -> MagicMock:
+    from datetime import datetime
+
+    e = MagicMock()
+    e.payload = {"status_code": status, "proxy": "ata-inventory-v1", "revision": "152",
+                 "environment": "prod", "client_ip": "10.0.0.1", "target_latency_ms": "16"}
+    e.timestamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return e
+
+
+def test_s4_n_is_the_metric_total_when_the_access_log_logs_the_same_requests():
+    import asyncio
+
+    # One access-log entry per request the metric counted (632 HTTP 200), as live.
+    entries = [_log_entry("200", "2026-10-28T05:35:00Z") for _ in range(632)]
+    out = asyncio.run(build_outputs("S4", scenario=dict(SCENARIOS["S4"], log_entries=entries)))
+    apigee = next(d for d in out["dossiers"] if d.specialist_name == "ApigeeSpecialist")
+    # The log was read and its counts kept apart, labelled as such.
+    assert apigee.metrics["access_log_status_codes"] == {"200": 632}
+    assert apigee.metrics["response_codes"] == {"200": 632}
+    assert out["problem"] == S4_PROBLEM
+    assert out["impact"]["ata-inventory-v1"] == "0 HTTP 4xx/5xx responses (of 632 requests)"
+    assert out["alternatives"]["Upstream API Gateway Rate-Limiting"] == (
+        "Apigee proxy metrics queried on ata-inventory-v1 (429: 0 of 632 requests), ruling out SpikeArrest throttling."
+    )
+    assert "1264" not in out["desc"] and "1264" not in out["html"]
+    assert "Observed response codes in window: HTTP 200: 632." in apigee.findings
+    assert any(e.content == "Apigee proxy/response_count for `ata-inventory-v1`: HTTP 200: 632."
+               for e in apigee.evidence_items)
+
+
+def test_fault_counts_use_the_metric_only_when_the_access_log_has_status_codes():
+    """5xx (S1 shape) and 429 (S3-orders shape) counts come from proxy/response_count only."""
+    import asyncio
+
+    s1_log = [_log_entry("500", "2026-10-28T04:30:00Z") for _ in range(40)] + \
+             [_log_entry("200", "2026-10-28T04:30:00Z") for _ in range(116)]
+    s1 = asyncio.run(build_outputs("S1", scenario=dict(SCENARIOS["S1"], log_entries=s1_log)))
+    a1 = next(d for d in s1["dossiers"] if d.specialist_name == "ApigeeSpecialist")
+    assert a1.metrics["response_codes"] == {"500": 629, "200": 116}
+    assert a1.metrics["proxy_response_code_5xx"] == 629
+    assert a1.metrics["proxy_response_codes_5xx"] == {"500": 629}
+
+    s3_log = [_log_entry("429", "2026-10-28T05:17:00Z") for _ in range(30)]
+    s3 = asyncio.run(build_outputs("S3-orders-429", scenario=dict(SCENARIOS["S3-orders-429"], log_entries=s3_log)))
+    a3 = next(d for d in s3["dossiers"] if d.specialist_name == "ApigeeSpecialist")
+    assert a3.metrics["response_codes"] == {"429": 512}
+    assert a3.metrics["proxy_response_code_429"] == 512
+    assert a3.metrics["access_log_status_codes"] == {"429": 30}
