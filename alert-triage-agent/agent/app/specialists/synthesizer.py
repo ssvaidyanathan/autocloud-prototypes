@@ -35,12 +35,12 @@ from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches, not
 from .apigee import SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_id, access_log_name
 from .cloud_sql import DB_POOL_NEAR_SATURATION_RATIO, CloudSQLSpecialist
 from .measurements import (
+    METRIC_SOURCE,
     access_log_only_statement,
     apigee_responses,
     cloud_run_5xx_rate,
     component_access_log_only,
     component_responses,
-    METRIC_SOURCE,
     rate_pct,
 )
 from .change import (
@@ -1485,8 +1485,9 @@ class SynthesizerAgent:
                 origin_5xx_rate = origin_resp.five_xx_statement() or origin_resp.no_5xx_statement()
             else:
                 # proxy/response_count unreadable but the access log shows 5xx: the log count,
-                # stated as such, never "not measured" (fresh-rev-n6 O1).
-                origin_5xx_rate = component_access_log_only(origin, dossiers)
+                # stated as such, never "not measured" (fresh-rev-n6 O1). No "HTTP 5xx: " prefix:
+                # the line already says "HTTP 5xx error rate (...)" (fresh-rev-n7 N-a).
+                origin_5xx_rate = component_access_log_only(origin, dossiers, code_prefix=False)
         origin_rate_disp = f" ({origin_5xx_rate})" if origin_5xx_rate else ""
         origin_rate_gap = "" if origin_5xx_rate else f" (HTTP 5xx rate not measured on {origin})"
         erroring_dependents = {svc: v for svc, v in dependent_5xx.items() if v[1] > 0}
@@ -1499,9 +1500,14 @@ class SynthesizerAgent:
 
         # Distinguish 5xx-dominant vs latency-dominant failure mode
         is_policy_5xx = "5xx" in alert.policy_name.lower() or "500" in (alert.condition_name or "")
+        # An Apigee origin under a 5xx policy is 5xx-dominant even with no rate read: the line then
+        # carries origin_rate_gap ("HTTP 5xx rate not measured on X"), fresh-rev-n7 O-a.
+        origin_is_apigee = any(
+            d.specialist_name == "ApigeeSpecialist" and d.target_resource == origin for d in dossiers
+        )
         is_5xx_dominant = (
             (err_5xx_pct is not None and err_5xx_pct >= 5.0)
-            or (is_policy_5xx and (err_5xx_rate is not None or origin_5xx_rate is not None))
+            or (is_policy_5xx and (err_5xx_rate is not None or origin_5xx_rate is not None or origin_is_apigee))
         )
 
         if origin != alert.resource_name:

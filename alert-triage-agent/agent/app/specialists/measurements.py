@@ -42,13 +42,17 @@ def response_count_unavailable(metrics: dict[str, Any]) -> bool:
     )
 
 
-def access_log_5xx_statement(code: str, n: int, *, metric_unavailable: bool = False) -> str:
+def access_log_5xx_statement(
+    code: str, n: int, *, metric_unavailable: bool = False, code_prefix: bool = True
+) -> str:
     """The fallback line: "HTTP 5xx: not in proxy/response_count; access log shows 3 5xx responses (...)".
 
     "proxy/response_count unavailable" instead of "not in proxy/response_count" when the metric
-    could not be read."""
+    could not be read. ``code_prefix=False`` drops the leading "HTTP 5xx: " for text that already
+    names the code (the problem line's "Elevated HTTP 5xx error rate (...)", fresh-rev-n7 N-a)."""
     metric = f"{METRIC_NAME} unavailable" if metric_unavailable else f"not in {METRIC_NAME}"
-    return f"HTTP {code}: {metric}; {access_log_clause(code, n)}"
+    prefix = f"HTTP {code}: " if code_prefix else ""
+    return f"{prefix}{metric}; {access_log_clause(code, n)}"
 
 
 def cloud_run_5xx_rate(d: EvidenceDossier) -> Optional[str]:
@@ -160,27 +164,31 @@ def apigee_responses(d: EvidenceDossier) -> Optional[ApigeeResponses]:
     return ApigeeResponses(proxy=d.target_resource, codes=clean)
 
 
-def access_log_only_statement(d: EvidenceDossier) -> Optional[str]:
+def access_log_only_statement(d: EvidenceDossier, *, code_prefix: bool = True) -> Optional[str]:
     """The access-log 5xx count of an ApigeeSpecialist dossier whose proxy/response_count could
     not be used (``apigee_responses`` is None): "HTTP 5xx: proxy/response_count unavailable;
     access log shows 3 5xx responses (log-based, may be partial)". None otherwise.
 
     The report states this instead of "not measured" (fresh-rev-n6 O1): the HTML metrics row
-    shows the same log count for the proxy."""
+    shows the same log count for the proxy. ``code_prefix`` as in ``access_log_5xx_statement``."""
     if d.specialist_name != "ApigeeSpecialist" or apigee_responses(d) is not None:
         return None
     log = (d.metrics or {}).get(ACCESS_LOG_5XX_KEY)
     log_n = log.get("count") if isinstance(log, dict) else None
     if not isinstance(log_n, int) or isinstance(log_n, bool) or log_n <= 0:
         return None
-    return access_log_5xx_statement(str(log.get("code") or "5xx"), log_n, metric_unavailable=True)
+    return access_log_5xx_statement(
+        str(log.get("code") or "5xx"), log_n, metric_unavailable=True, code_prefix=code_prefix
+    )
 
 
-def component_access_log_only(resource: str, dossiers: list[EvidenceDossier]) -> Optional[str]:
+def component_access_log_only(
+    resource: str, dossiers: list[EvidenceDossier], *, code_prefix: bool = True
+) -> Optional[str]:
     """``access_log_only_statement`` of the first dossier on ``resource`` that has one."""
     for d in dossiers:
         if d.target_resource == resource:
-            s = access_log_only_statement(d)
+            s = access_log_only_statement(d, code_prefix=code_prefix)
             if s is not None:
                 return s
     return None

@@ -762,7 +762,9 @@ def _proxy_origin(**changes) -> dict:
         (dict(codes=[("500", 5, None), ("200", 10, None)]), f"5 HTTP 5xx responses in {METRIC} (of 15 requests)"),
         (dict(codes=[("200", 10, None)], log_entries=S1_LOG_500S),
          f"0 HTTP 4xx/5xx responses in {METRIC} (of 10 requests), while the {LOG_3}"),
-        (dict(codes_error=True, log_entries=S1_LOG_500S, others=lambda: [_sql(3, 10.2)]), LOG_3_UNAVAILABLE),
+        # N-a: no nested "HTTP 5xx: " inside "Elevated HTTP 5xx error rate (...)".
+        (dict(codes_error=True, log_entries=S1_LOG_500S, others=lambda: [_sql(3, 10.2)]),
+         f"proxy/response_count unavailable; {LOG_3}"),
     ],
     ids=["metric-5xx", "log-only", "metric-unreadable-no-cloud-run"],
 )
@@ -773,7 +775,40 @@ def test_proxy_origin_5xx_problem_is_not_a_spike_arrest_violation_without_429s(c
     out = asyncio.run(build_outputs("D", scenario=_proxy_origin(**changes)))
     assert "SpikeArrest" not in out["problem"], out["problem"]
     assert out["problem"].startswith(f"Elevated HTTP 5xx error rate ({rate}) on ata-inventory-v1 "), out["problem"]
+    assert "(HTTP 5xx: " not in out["problem"], out["problem"]  # fresh-rev-n7 N-a
     assert out["desc"] == out["agent_desc"]
+
+
+def test_log_only_rate_keeps_the_code_prefix_outside_the_problem_line():
+    """N-a only drops the prefix in the problem line: the impact cell and the metrics row keep
+    "HTTP 5xx: proxy/response_count unavailable; ..." (the same text as each other)."""
+    import asyncio
+
+    out = asyncio.run(build_outputs("D-na", scenario=_proxy_origin(
+        codes_error=True, log_entries=S1_LOG_500S, others=lambda: [_sql(3, 10.2)])))
+    assert out["impact"]["ata-inventory-v1"] == LOG_3_UNAVAILABLE
+    row = next(r for r in out["rows"] if r[0] == "Apigee" and r[2] == "ata-inventory-v1")
+    assert row[3] == LOG_3_UNAVAILABLE
+    assert f"Elevated HTTP 5xx error rate (proxy/response_count unavailable; {LOG_3}) " in out["problem"]
+
+
+def test_unmeasured_proxy_origin_under_a_5xx_policy_states_the_rate_gap():
+    """fresh-rev-n7 O-a: the deployed ata-apigee-orders-5xx alert (proxy origin), proxy/response_count
+    unreadable and no 5xx in the access log. The problem line is the 5xx line with the gap note, not
+    "Operational threshold breach" and not SpikeArrest."""
+    import asyncio
+
+    s = _variant("S3-orders-429", policy="ata-apigee-orders-5xx", codes_error=True, log_entries=[])
+    out = asyncio.run(build_outputs("O-a", scenario=s))
+    apigee = next(d for d in out["dossiers"] if d.specialist_name == "ApigeeSpecialist")
+    assert apigee.target_resource == "ata-orders-v1"
+    assert not apigee.metrics.get("access_log_5xx")  # no log fallback
+    problem = out["problem"]
+    assert problem.startswith(
+        "Elevated HTTP 5xx error rate on ata-orders-v1 (HTTP 5xx rate not measured on ata-orders-v1) "
+    ), problem
+    assert "Operational threshold breach" not in problem and "SpikeArrest" not in problem, problem
+    assert problem in out["desc"] and out["desc"] == out["agent_desc"]
 
 
 def test_proxy_origin_with_429s_is_still_a_spike_arrest_violation():
