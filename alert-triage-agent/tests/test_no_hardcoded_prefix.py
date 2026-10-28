@@ -37,16 +37,18 @@ EXCLUDED_PARTS = {"tests", "__pycache__", ".terraform", "skills", "node_modules"
 
 # The live project/number/hash are banned in every form (env defaults, URLs, examples).
 LIVE_IDS = ("cloud-assist-fde-2", "185099261133", "4klvlqnmpa")
+# GCP region literal (us-west1, europe-north2, ...).
+REGION_RX = re.compile(
+    r"\b(?:us|europe|asia|northamerica|southamerica|australia|me|africa)-"
+    r"(?:north|south|east|west|central|northeast|southeast|northwest|southwest)[0-9]{1,2}\b"
+)
 VIOLATIONS = [
     re.compile(r"(?<![A-Za-z0-9_])ata-[a-z]"),
     re.compile(r"/ata/"),
     re.compile(r"""(?<![A-Za-z0-9])["'=]ata(?=["'\s]|$)"""),
     re.compile(r""":-ata[}"]"""),
     re.compile("|".join(re.escape(x) for x in LIVE_IDS)),
-    re.compile(
-        r"\b(?:us|europe|asia|northamerica|southamerica|australia|me|africa)-"
-        r"(?:north|south|east|west|central|northeast|southeast|northwest|southwest)[0-9]{1,2}\b"
-    ),
+    REGION_RX,
 ]
 ALLOWED = [
     re.compile(r"\bATA_[A-Z0-9_]+\b"),
@@ -248,7 +250,7 @@ EXAMPLE_LIVE_IDS = LIVE_IDS + (
 )
 EXAMPLE_VIOLATIONS = [
     re.compile("|".join(re.escape(x) for x in EXAMPLE_LIVE_IDS)),
-    VIOLATIONS[-1],  # GCP region literal
+    REGION_RX,
 ]
 
 
@@ -287,6 +289,9 @@ def test_example_configs_carry_no_live_identifiers():
         ('deployer_members = ["user:ssvaidyanathan@google.com"]', True),
         ("APIGEE_HOST=8.233.247.52.nip.io", True),
         ("SA=deploy-demo-test@x.iam.gserviceaccount.com", True),
+        ("SA=scion-fde-ops@x.iam.gserviceaccount.com", True),
+        ("PROJECT_NUMBER=185099261133", True),
+        ("AGENT_URL=https://ata-agent-4klvlqnmpa-uw.a.run.app", True),
         ("PROJECT_ID=your-project-id", False),
         ("REGION=your-region", False),
         ("SERVICENOW_INSTANCE_URL=https://your-instance.service-now.com", False),
@@ -294,3 +299,23 @@ def test_example_configs_carry_no_live_identifiers():
 )
 def test_example_guard_patterns(line, flagged):
     assert any(rx.search(line) for rx in EXAMPLE_VIOLATIONS) is flagged
+
+
+def _env_example_value(path: Path, key: str) -> str | None:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"{key}="):
+            return line.split("=", 1)[1]
+    return None
+
+
+@pytest.mark.parametrize("rel", ["agent/.env.example", "bridge/.env.example"])
+def test_example_incidents_bucket_follows_name_prefix(rel):
+    # The bucket must track NAME_PREFIX (interpolated by pydantic-settings), never repeat a literal prefix.
+    path = ROOT / rel
+    prefix = _env_example_value(path, "NAME_PREFIX")
+    bucket = _env_example_value(path, "INCIDENTS_BUCKET")
+    if bucket is None:
+        return
+    assert "${NAME_PREFIX}" in bucket, f"{rel}: INCIDENTS_BUCKET={bucket} must use ${{NAME_PREFIX}}"
+    if prefix:
+        assert f"-{prefix}-" not in bucket.replace("${NAME_PREFIX}", ""), f"{rel}: literal prefix in INCIDENTS_BUCKET={bucket}"
