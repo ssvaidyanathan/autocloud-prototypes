@@ -84,6 +84,10 @@ class AgentConfig(BaseSettings):
     # (not attributed: healthy period undetermined)".
     # Live INC0010343: a re-pin 59 min before an S1 fault, healthy 21:52-22:44Z, was blamed
     # under the old any-deploy-in-window rule.
+    # The change window: deploys created at most this many minutes before the alert onset are
+    # evaluated by the attribution rule above; older ones are not changes of this alert. The
+    # ata-tools timeline is read for the whole hours covering it (window_hours = ceil(min / 60)).
+    change_window_minutes: int = Field(default=120, alias="CHANGE_WINDOW_MINUTES", ge=1, le=1440)
     change_onset_window_minutes: int = Field(default=15, alias="CHANGE_ONSET_WINDOW_MINUTES", ge=1, le=120)
     change_healthy_period_minutes: int = Field(default=10, alias="CHANGE_HEALTHY_PERIOD_MINUTES", ge=1, le=120)
     # A healthy period also needs requests in at least this many of its minutes ("a sustained

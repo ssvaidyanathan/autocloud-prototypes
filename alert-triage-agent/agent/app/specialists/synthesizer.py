@@ -1686,7 +1686,7 @@ class SynthesizerAgent:
         else:
             value = (
                 f"No (no deployment or configuration change on {chg.target_resource} or its upstream "
-                f"dependencies in the 2 h before the alert; checked: {checked})"
+                f"dependencies in the {chg.metrics.get('change_window_text') or '2 h'} before the alert; checked: {checked})"
             )
         logger.info("Change-Induced: %s", value)
         return value

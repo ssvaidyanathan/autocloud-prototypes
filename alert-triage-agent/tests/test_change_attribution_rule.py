@@ -685,6 +685,7 @@ def test_configuration_md_documents_the_settings_with_their_defaults():
 
     root = Path(__file__).resolve().parent.parent
     agent_section = (root / "CONFIGURATION.md").read_text().split("### 1.2", 1)[1].split("### 1.3", 1)[0]
+    assert "| `CHANGE_WINDOW_MINUTES` | `120` |" in agent_section
     assert "| `CHANGE_ONSET_WINDOW_MINUTES` | `15` |" in agent_section
     assert "| `CHANGE_HEALTHY_PERIOD_MINUTES` | `10` |" in agent_section
     assert "| `CHANGE_HEALTHY_MIN_ACTIVE_MINUTES` | `3` |" in agent_section
@@ -694,6 +695,9 @@ def test_configuration_md_documents_the_settings_with_their_defaults():
     readme = (root / "README.md").read_text()
     assert "Recent changes (likely unrelated)" in readme and "CHANGE_HEALTHY_PERIOD_MINUTES" in readme
     assert "CHANGE_HEALTHY_MIN_ACTIVE_MINUTES" in readme
+    assert "CHANGE_WINDOW_MINUTES" in (root / "agent" / "scripts" / "deploy.sh").read_text()
+    assert "CHANGE_WINDOW_MINUTES" in (root / "DEPLOY.md").read_text()
+    assert "CHANGE_WINDOW_MINUTES" in (root / "DEMO.md").read_text()
 
 
 # ---------------------------------------------------------------------------------------
@@ -1011,3 +1015,95 @@ def test_adding_a_healthy_minute_never_makes_blame_more_likely():
     assert violations == []
     # Blamed exactly when there is no healthy minute and at least one failing one.
     assert all(blamed == ("h" not in cells and "f" in cells) for cells, blamed in verdict.items())
+
+
+# ---------------------------------------------------------------------------------------
+# The change window (CHANGE_WINDOW_MINUTES, default 120): which deploys the rule evaluates
+# ---------------------------------------------------------------------------------------
+
+
+def test_change_window_config_default_and_validation(monkeypatch):
+    monkeypatch.delenv("CHANGE_WINDOW_MINUTES", raising=False)
+    assert _config().change_window_minutes == 120
+    monkeypatch.setenv("CHANGE_WINDOW_MINUTES", "90")
+    assert _config().change_window_minutes == 90
+    for bad in ("0", "1441", "abc", "1.5"):
+        monkeypatch.setenv("CHANGE_WINDOW_MINUTES", bad)
+        with pytest.raises(ValidationError):
+            _config()
+
+
+def test_is_genuine_change_applies_the_window_argument_then_the_record_then_120():
+    from agent.app.specialists.change import change_window_hours, change_window_label, is_genuine_change
+
+    chg = {"deployed_minutes_ago": 100}
+    assert is_genuine_change(chg)  # default 120
+    assert not is_genuine_change(chg, 90)
+    assert not is_genuine_change({**chg, "change_window_minutes": 90})
+    assert is_genuine_change({**chg, "change_window_minutes": 90}, 100)
+    assert not is_genuine_change({"deployed_minutes_ago": 121})
+    assert (change_window_hours(120), change_window_hours(90), change_window_hours(30)) == (2, 2, 1)
+    assert (change_window_label(120), change_window_label(90)) == ("2-hour", "90-minute")
+
+
+def _record_window_hours(monkeypatch) -> list[int]:
+    from agent.app.specialists import change as change_module
+
+    seen: list[int] = []
+    inner = change_module.fetch_change_timeline
+
+    async def fetch(config, window_hours=2, **kwargs):
+        seen.append(window_hours)
+        return await inner(config, window_hours=window_hours, **kwargs)
+
+    monkeypatch.setattr(change_module, "fetch_change_timeline", fetch)
+    return seen
+
+
+def test_deploy_beyond_a_shorter_change_window_is_not_evaluated(agent_cfg, telemetry, monkeypatch):
+    """CHANGE_WINDOW_MINUTES 30: the INC0010343 re-pin (59 min before onset) is outside the window."""
+    _use_traffic(monkeypatch, FakeTrafficHistory(INC0010343_TRAFFIC))
+    seen = _record_window_hours(monkeypatch)
+    cfg30 = agent_cfg.model_copy(update={"change_window_minutes": 30})
+    report = _investigate(_inventory_5xx(telemetry, INC0010343_DEPLOY), cfg30)
+
+    assert seen == [1]
+    assert report.change_induced.startswith(
+        "No (no deployment or configuration change on ata-inventory-api or its upstream dependencies in the "
+        "30 min before the alert; checked: "
+    )
+    assert PIN_REV not in report.change_induced
+    findings = [f for d in report.evidence_by_area.values() for i in d for f in [i.content or ""]]
+    assert any("No recent Cloud Run deployments detected" in f for f in findings)
+    assert not any(i.headline.startswith("Recent changes") for i in report.evidence_by_area["change"])
+    assert "2 h before the alert" not in _desc(report)
+
+
+def test_default_change_window_evaluates_the_same_deploy(agent_cfg, telemetry, monkeypatch):
+    _use_traffic(monkeypatch, FakeTrafficHistory(INC0010343_TRAFFIC))
+    seen = _record_window_hours(monkeypatch)
+    report = _investigate(_inventory_5xx(telemetry, INC0010343_DEPLOY), agent_cfg)
+    assert seen == [2]
+    assert report.change_induced.startswith(f"No (recent changes likely unrelated: revision {PIN_REV} ")
+
+
+def test_no_change_finding_and_apigee_history_state_the_window():
+    from agent.app.specialists.change import (
+        NO_CLOUD_RUN_CHANGES_FINDING,
+        apigee_history_text,
+        no_cloud_run_changes_finding,
+        timeline_apigee_deployments,
+    )
+
+    assert NO_CLOUD_RUN_CHANGES_FINDING == no_cloud_run_changes_finding(120) == (
+        "No Cloud Run revision deployments detected in the 2-hour window prior to alert onset."
+    )
+    assert "in the 90-minute window" in no_cloud_run_changes_finding(90)
+    timeline = {"changes": [{
+        "source": "apigee_deployment", "api_name": "ata-orders-v1", "revision": "169",
+        "environment": "prod", "timestamp": (ONSET_DT - timedelta(minutes=100)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }], "apigee": {"org": "cloud-assist-fde-2", "environment": "prod", "proxy_prefix": "ata-", "deployments": []}}
+    assert len(timeline_apigee_deployments(timeline, ONSET_DT)["in_window"]) == 1
+    history = timeline_apigee_deployments(timeline, ONSET_DT, 90)
+    assert history["in_window"] == []
+    assert "no proxy deployments in the 90-minute window prior to alert onset" in apigee_history_text(history)

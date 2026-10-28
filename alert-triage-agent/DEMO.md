@@ -61,6 +61,8 @@ Follow this section to execute scenarios directly from your laptop.
 
 Run scenarios sequentially. Always run `./scripts/reset-scenarios.sh` between scenarios to clear faults and allow metric lag windows to settle.
 
+**Deploys before a scenario count as changes.** A Cloud Run deploy of a monitored service (for example a re-pin of `ata-inventory-api`, or an earlier S5 run and its revert) within `CHANGE_WINDOW_MINUTES` (default 120) before the alert onset is evaluated by the change attribution rule: it is the cause (Change-Induced "Yes", rollback) when the onset is within `CHANGE_ONSET_WINDOW_MINUTES` (default 15) of it, or when the new revision had no healthy minute before the onset. A deploy with an established healthy period is listed as "Recent changes (likely unrelated)"; one whose healthy period is undetermined (too little traffic) is listed as "Recent changes (not attributed: healthy period undetermined)". To see a ticket with no recent change, leave that much time after a deploy, or send traffic for at least `CHANGE_HEALTHY_PERIOD_MINUTES` (default 10) before injecting the fault. See [CONFIGURATION.md §1.2](CONFIGURATION.md#12-multi-agent-adk-runtime-ata-agent).
+
 ```
 Scenario Workflow:
 [Inject & Sustained Traffic] ---> [Wait for Hold Window] ---> [check-result.sh] ---> [Verify ServiceNow] ---> [reset-scenarios.sh]

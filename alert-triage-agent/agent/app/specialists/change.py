@@ -1,6 +1,6 @@
 """ChangeSpecialist Agent for Alert Triage Runtime.
 
-Analyzes Cloud Run and Apigee revision history over the past 2 hours
+Analyzes Cloud Run and Apigee revision history over the change window (CHANGE_WINDOW_MINUTES, default 2 hours)
 and correlates deployment timestamps with alert onset curves.
 """
 
@@ -8,6 +8,7 @@ import asyncio
 import dataclasses
 from datetime import datetime, timezone, timedelta
 import logging
+import math
 from typing import Any, Optional
 
 from ..config import AgentConfig
@@ -30,17 +31,32 @@ logger = logging.getLogger(__name__)
 
 # Cloud Run audit-log entries read per investigation (one page).
 AUDIT_LOG_MAX_ENTRIES = 20
-# Look-back of the change timeline before the alert.
-CHANGE_WINDOW_HOURS = 2
+# Default change window before the alert onset (CHANGE_WINDOW_MINUTES, AgentConfig.change_window_minutes).
+DEFAULT_CHANGE_WINDOW_MINUTES = 120
+
+
+def change_window_hours(window_minutes: int) -> int:
+    """The whole hours of ata-tools change timeline that cover a change window (window_hours)."""
+    return max(1, math.ceil(window_minutes / 60))
+
+
+def change_window_label(window_minutes: int) -> str:
+    """The change window in ticket text: "2-hour" for 120, "90-minute" for 90."""
+    return f"{window_minutes // 60}-hour" if window_minutes % 60 == 0 else f"{window_minutes}-minute"
+
+
+def no_cloud_run_changes_finding(window_minutes: int = DEFAULT_CHANGE_WINDOW_MINUTES) -> str:
+    """The finding when no Cloud Run deploy is in the change window."""
+    return f"No Cloud Run revision deployments detected in the {change_window_label(window_minutes)} window prior to alert onset."
+
+
 # Change source / gap labels. The synthesizer lists change sources in Change-Induced.
 def timeline_source(config: AgentConfig) -> str:
     """Name of the change timeline source in tickets and gap records: <NAME_PREFIX>-tools."""
     return f"{config.name_prefix}-tools change timeline"
 CLOUD_RUN_HISTORY = "Cloud Run revision history"
 APIGEE_HISTORY = "Apigee deployment history"
-NO_CLOUD_RUN_CHANGES_FINDING = (
-    "No Cloud Run revision deployments detected in the 2-hour window prior to alert onset."
-)
+NO_CLOUD_RUN_CHANGES_FINDING = no_cloud_run_changes_finding()
 # Finding of a dossier whose change sources covered Cloud Run only. The ChangeSpecialist no
 # longer emits it (the ata-tools timeline covers Apigee deployments, or its failure is stated);
 # the synthesizer still rewrites it from the Apigee access log (see _reconcile_change_history).
@@ -137,10 +153,13 @@ def timeline_cloud_run_changes(timeline: dict[str, Any], now: datetime) -> list[
     return changes
 
 
-def timeline_apigee_deployments(timeline: dict[str, Any], now: datetime) -> Optional[dict[str, Any]]:
+def timeline_apigee_deployments(
+    timeline: dict[str, Any], now: datetime, window_minutes: Optional[int] = None
+) -> Optional[dict[str, Any]]:
     """Apigee deployment history of a get_change_timeline result, or None if that source failed.
 
-    "in_window": deployments of the stack's proxies started in the window (newest first);
+    "in_window": deployments of the stack's proxies started in the window (newest first), and at
+    most `window_minutes` before `now` when it is given (the timeline is read in whole hours);
     "current": every deployed revision of the stack's proxies with its deploy time;
     "scope": the Apigee org/environment/proxies ata-tools queried.
     """
@@ -149,12 +168,15 @@ def timeline_apigee_deployments(timeline: dict[str, Any], now: datetime) -> Opti
     in_window = []
     for chg in timeline.get("changes", []):
         if isinstance(chg, dict) and chg.get("source") == "apigee_deployment" and not chg.get("error"):
+            mins = _minutes_before(chg.get("timestamp"), now)
+            if window_minutes is not None and mins > window_minutes:
+                continue
             in_window.append({
                 "proxy": chg.get("api_name"),
                 "revision": str(chg.get("revision", "")),
                 "environment": chg.get("environment"),
                 "timestamp": chg.get("timestamp"),
-                "deployed_minutes_ago": _minutes_before(chg.get("timestamp"), now),
+                "deployed_minutes_ago": mins,
             })
     apigee = timeline.get("apigee") if isinstance(timeline.get("apigee"), dict) else {}
     current = [
@@ -169,7 +191,10 @@ def timeline_apigee_deployments(timeline: dict[str, Any], now: datetime) -> Opti
         scope_parts.append(f"environment {apigee['environment']}")
     if apigee.get("proxy_prefix"):
         scope_parts.append(f"proxies {apigee['proxy_prefix']}*")
-    return {"in_window": in_window, "current": current, "scope": ", ".join(scope_parts)}
+    return {
+        "in_window": in_window, "current": current, "scope": ", ".join(scope_parts),
+        "window_minutes": window_minutes or DEFAULT_CHANGE_WINDOW_MINUTES,
+    }
 
 
 def apigee_history_text(history: dict[str, Any]) -> str:
@@ -184,16 +209,22 @@ def apigee_history_text(history: dict[str, Any]) -> str:
         return f"Apigee deployment history{scope}: {deployed}."
     current = ", ".join(f"{d['proxy']} revision {d['revision']} since {d['timestamp']}" for d in history["current"])
     tail = f"; deployed: {current}" if current else ""
-    return f"Apigee deployment history{scope}: no proxy deployments in the 2-hour window prior to alert onset{tail}."
+    window = change_window_label(history.get("window_minutes") or DEFAULT_CHANGE_WINDOW_MINUTES)
+    return f"Apigee deployment history{scope}: no proxy deployments in the {window} window prior to alert onset{tail}."
 
 
-# Evaluate genuine changes within the 2-hour window:
+# Evaluate genuine changes within the change window (CHANGE_WINDOW_MINUTES, default 120):
 # A revision is a genuine change ONLY when:
-# 1. Created within lookback window (<= 120m) before anomaly onset.
+# 1. Created within the change window before anomaly onset.
 # 2. Image digest or env/config differs from the previously created revision.
 # 3. Traffic shifts to older revisions or without digest/env diff are NOT changes (is_traffic_shift: True).
-def is_genuine_change(c: dict[str, Any]) -> bool:
-    """True when a change record is a genuine deployment within the lookback window."""
+def is_genuine_change(c: dict[str, Any], window_minutes: Optional[int] = None) -> bool:
+    """True when a change record is a genuine deployment within the change window.
+
+    The window is `window_minutes`, else the record's "change_window_minutes" (set by the
+    ChangeSpecialist from CHANGE_WINDOW_MINUTES, so later readers of all_changes apply the
+    same window), else DEFAULT_CHANGE_WINDOW_MINUTES.
+    """
     # 1. Discard explicit traffic shifts
     if (
         c.get("action") == "traffic_shift"
@@ -202,9 +233,10 @@ def is_genuine_change(c: dict[str, Any]) -> bool:
     ):
         return False
 
-    # 2. Time window check: creation / deploy time must be within 120 minutes and before/at anomaly onset
+    # 2. Time window check: creation / deploy time must be within the change window and before/at anomaly onset
+    window = window_minutes or c.get("change_window_minutes") or DEFAULT_CHANGE_WINDOW_MINUTES
     mins = c.get("deployed_minutes_ago", 999)
-    if mins > 120 or mins < 0:
+    if mins > window or mins < 0:
         return False
 
     # 3. Must be serving (if serving status known)
@@ -761,7 +793,8 @@ class ChangeSpecialist(BaseSpecialist):
         changes = dossier.metrics.get("all_changes") or []
         pending = [
             c for c in changes
-            if isinstance(c, dict) and c.get("service") in services and "causation" not in c and is_genuine_change(c)
+            if isinstance(c, dict) and c.get("service") in services and "causation" not in c
+            and is_genuine_change(c, config.change_window_minutes)
         ]
         if not pending:
             return dossier
@@ -774,7 +807,8 @@ class ChangeSpecialist(BaseSpecialist):
         # The listing is rebuilt; a "no deployments" statement would now contradict it.
         findings = [
             f for f in dossier.findings
-            if not f.startswith(tuple(f"{h}:" for h in NONCAUSAL_HEADLINES)) and f != NO_CLOUD_RUN_CHANGES_FINDING
+            if not f.startswith(tuple(f"{h}:" for h in NONCAUSAL_HEADLINES))
+            and f != no_cloud_run_changes_finding(config.change_window_minutes)
         ]
         items = [
             i for i in dossier.evidence_items
@@ -845,7 +879,7 @@ class ChangeSpecialist(BaseSpecialist):
     ) -> Optional[dict[str, Any]]:
         """The ata-tools change timeline, or None when it was not read (failure stated)."""
         try:
-            timeline = await fetch_change_timeline(config, window_hours=CHANGE_WINDOW_HOURS)
+            timeline = await fetch_change_timeline(config, window_hours=change_window_hours(config.change_window_minutes))
         except ToolsNotConfigured as exc:
             if config.is_local:
                 logger.info("TOOLS_URL not set (local mode): %s not queried", timeline_source(config))
@@ -886,7 +920,7 @@ class ChangeSpecialist(BaseSpecialist):
         metrics: dict[str, Any] = {}
         queries_executed: dict[str, list[str]] = {
             "ata_tools": [
-                f"MCP tools/call get_change_timeline(window_hours={CHANGE_WINDOW_HOURS}, "
+                f"MCP tools/call get_change_timeline(window_hours={change_window_hours(config.change_window_minutes)}, "
                 f"project_id={config.project_id}, region={config.region}) on {config.tools_url or f'{config.name_prefix}-tools (TOOLS_URL not set)'}"
             ],
         }
@@ -898,7 +932,15 @@ class ChangeSpecialist(BaseSpecialist):
         # says so and change attribution is not assessed.
         timeline = await self._read_change_timeline(alert, config, metrics, findings, evidence_items)
         recent_changes = timeline_cloud_run_changes(timeline, now) if timeline else []
-        apigee_deployments = timeline_apigee_deployments(timeline, now) if timeline else None
+        for c in recent_changes:
+            c["change_window_minutes"] = config.change_window_minutes
+        metrics["change_window_minutes"] = config.change_window_minutes
+        # Change-Induced "No (... in the 2 h before the alert ...)" states the window used.
+        w = config.change_window_minutes
+        metrics["change_window_text"] = f"{w // 60} h" if w % 60 == 0 else f"{w} min"
+        apigee_deployments = (
+            timeline_apigee_deployments(timeline, now, config.change_window_minutes) if timeline else None
+        )
         if apigee_deployments is not None:
             metrics["apigee_deployments_in_window"] = apigee_deployments["in_window"]
             metrics["apigee_deployments_current"] = apigee_deployments["current"]
@@ -974,7 +1016,7 @@ class ChangeSpecialist(BaseSpecialist):
             pass
 
         genuine_changes = [
-            c for c in recent_changes if c.get("service") in candidate_services and is_genuine_change(c)
+            c for c in recent_changes if c.get("service") in candidate_services and is_genuine_change(c, config.change_window_minutes)
         ]
         # A deploy in the window is the cause only by the onset-window or no-healthy-period rule
         # (assess_deploy_causation); the others are listed as likely unrelated (healthy period
@@ -1047,7 +1089,7 @@ class ChangeSpecialist(BaseSpecialist):
             findings.append(content)
             evidence_items.append(EvidenceItem(headline="Deployment History Analysis (not queried)", content=content))
         elif not unrelated_changes:
-            findings.append(NO_CLOUD_RUN_CHANGES_FINDING)
+            findings.append(no_cloud_run_changes_finding(config.change_window_minutes))
             evidence_items.append(EvidenceItem(
                 headline="Deployment History Analysis",
                 content=f"No recent Cloud Run deployments detected ({timeline_source(config)}: {CLOUD_RUN_HISTORY}).",
