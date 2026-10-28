@@ -315,6 +315,11 @@ If the reset times out on a group that will never become terminal (for example a
 ./scripts/reset-scenarios.sh --ignore-group incident-<group-id>.md
 ```
 
+**Stale OPEN alerts from earlier revisions (troubleshooting).** The Alerts API and the console can list old `ata-inventory-latency` / `ata-orders-latency` alerts that are still OPEN on revisions that no longer serve traffic (final QA, 2026-10-27/28: 16 such alerts, opened 2026-10-23/24, on the current policy IDs). They do not block anything:
+- the reset ignores them and lists them once at its first poll: `Ignored 16 stale/non-serving open alert(s):`, one line each with the policy, the revision and the reason (`Non-serving revision (...)`, or `Opened > 60m before reset started`; the age limit is `--max-alert-age`, default 1 h);
+- Cloud Monitoring sends no new notification for an alert that stays open, so the agent does nothing with them (none led to a ticket in the final QA).
+They are clutter only. The policies' `alert_strategy.auto_close` is `alert_auto_close_secs` (default 1800 s), yet these alerts stayed open for days; why is not established (they may predate that setting, whose Cloud Monitoring default is 7 days). To clear them, close them in the console (Monitoring > Alerting > the alert > Close), with no scenario running. Do not change the reset's ignore rules for them: an alert on a serving revision, opened within the age limit, is still waited for.
+
 ### Reset Execution Sequence & Metric Lag Safeguards
 
 This script:
