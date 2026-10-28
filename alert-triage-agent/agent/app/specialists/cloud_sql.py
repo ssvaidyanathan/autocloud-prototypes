@@ -16,6 +16,10 @@ from .telemetry_reads import UNAVAILABLE_KEY, failure_reason, gap_text, read_log
 
 logger = logging.getLogger(__name__)
 
+# Connections / max_connections at or above this ratio is "saturated or near it": the
+# specialist's saturation signal and the report's longer-term pool fixes use the same value.
+DB_POOL_NEAR_SATURATION_RATIO = 0.8
+
 # Lock-wait / deadlock log entries read per investigation (one page).
 CLOUD_SQL_LOCK_LOG_MAX_ENTRIES = 20
 
@@ -320,7 +324,7 @@ class CloudSQLSpecialist(BaseSpecialist):
             active_connections_val >= 20 or (
                 isinstance(max_connections_val, (int, float))
                 and max_connections_val > 0
-                and active_connections_val / max_connections_val >= 0.8
+                and active_connections_val / max_connections_val >= DB_POOL_NEAR_SATURATION_RATIO
             )
         )
         has_locks = isinstance(active_lock_waits_val, (int, float)) and active_lock_waits_val > 0

@@ -33,7 +33,7 @@ from ..grouping.store import OKFStore, get_canonical_blob_name, resolve_local_ta
 from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches
 from .apigee import SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_id, access_log_name
-from .cloud_sql import CloudSQLSpecialist
+from .cloud_sql import DB_POOL_NEAR_SATURATION_RATIO, CloudSQLSpecialist
 from .change import NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_candidate_cause
 from .origin_selection import (
     OriginSelection,
@@ -66,9 +66,6 @@ logger = logging.getLogger(__name__)
 
 
 _DB_AUTH_PHRASE = "database authentication"
-# Connections / max_connections at or above this ratio count as "saturated or near it"
-# for the longer-term pool recommendations.
-DB_POOL_NEAR_SATURATION_RATIO = float(os.environ.get("DB_POOL_NEAR_SATURATION_RATIO", "0.8"))
 
 # Sentinel: _determine_probable_origin computes the change verdict itself when none is passed.
 _VERDICT_NOT_COMPUTED: Any = object()
