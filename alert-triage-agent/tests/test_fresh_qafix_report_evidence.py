@@ -88,3 +88,13 @@ def test_deployment_alternative_states_why_revision_unknown():
     assert "serving revision not known" in reason and "N/A" not in reason
     reason = _alts([chg])["Recent Application Deployment Regression"]
     assert "no Cloud Run read of ata-inventory-api" in reason
+
+
+def test_pool_fixes_at_exact_near_saturation_ratio():
+    """N1: 20/25 is exactly DB_POOL_NEAR_SATURATION_RATIO (0.8): the pool fixes apply (>=)."""
+    synth = SynthesizerAgent()
+    d = [_sql(20, anomaly=True), _cr("ata-inventory-api")]
+    fixes = synth._build_longer_term_fixes("ata-inventory-db", _alert("ata-cloudsql-connections-critical", "ata-inventory-db"), d)
+    assert len(fixes) == 2 and all("20/25" in f for f in fixes)
+    d = [_sql(19, anomaly=True), _cr("ata-inventory-api")]
+    assert synth._build_longer_term_fixes("ata-inventory-db", _alert("ata-cloudsql-connections-critical", "ata-inventory-db"), d) == []

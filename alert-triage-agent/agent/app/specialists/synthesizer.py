@@ -31,7 +31,7 @@ from ..contracts.links import ConsoleLinkBuilder
 from ..grouping.models import OKFDocument, format_okf_alert_entry
 from ..grouping.store import OKFStore, get_canonical_blob_name, resolve_local_target_file
 from .base import EvidenceDossier
-from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches
+from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches, not_applicable_component_type
 from .apigee import SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_id, access_log_name
 from .cloud_sql import DB_POOL_NEAR_SATURATION_RATIO, CloudSQLSpecialist
 from .change import APIGEE_HISTORY, NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_candidate_cause
@@ -2956,7 +2956,12 @@ class SynthesizerAgent:
                 })
 
         # 4. Container Crash Loop Check
-        cr_dossier = next((d for d in dossiers if d.specialist_name == "CloudRunSpecialist"), None)
+        # A not-applicable dossier (Cloud SQL instance, Apigee proxy) has no containers: skip it.
+        cr_dossier = next(
+            (d for d in dossiers
+             if d.specialist_name == "CloudRunSpecialist" and not_applicable_component_type(d) is None),
+            None,
+        )
         if cr_dossier:
             has_cr_check = bool(cr_dossier.queries_executed) or bool(cr_dossier.metrics)
             restarts = cr_dossier.metrics.get("container_restarts")
@@ -3038,6 +3043,10 @@ class SynthesizerAgent:
         )
         if cr is None:
             return f"serving revision not known: no Cloud Run read of {service} in this investigation"
+        component_type = not_applicable_component_type(cr)
+        if component_type is not None:
+            # No describe ran: CloudRunSpecialist skips components that are not Cloud Run services.
+            return f"not a Cloud Run service ({component_type or 'other component type'}); no serving revision"
         serving = cr.metrics.get("serving_revisions")
         if isinstance(serving, dict) and serving:
             return "serving revision: " + ", ".join(

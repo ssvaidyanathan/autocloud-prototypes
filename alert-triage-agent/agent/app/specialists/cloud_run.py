@@ -241,6 +241,18 @@ def not_applicable_dossier(specialist: str, target: str, component_type: str) ->
     )
 
 
+def not_applicable_component_type(dossier: EvidenceDossier) -> Optional[str]:
+    """The component type of a not-applicable Cloud Run dossier ("Cloud SQL", ...), else None.
+
+    Returns "" for a not-applicable dossier whose text does not name the type.
+    """
+    text = (dossier.metrics or {}).get(NOT_APPLICABLE_KEY)
+    if not text:
+        return None
+    m = re.search(r"\(([^()]+), not a Cloud Run service\)", str(text))
+    return m.group(1) if m else ""
+
+
 class CloudRunSpecialist(BaseSpecialist):
     """Specialist agent diagnosing Cloud Run container service degradation."""
 
