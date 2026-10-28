@@ -64,7 +64,7 @@ def _log(status):
     return e
 
 
-LOG_ONLY_5XX = "HTTP 5xx: not in metric; access log shows 3 5xx responses (log-based, may be partial)"
+LOG_ONLY_5XX = "HTTP 5xx: not in proxy/response_count; access log shows 3 5xx responses (log-based, may be partial)"
 
 
 @pytest.mark.asyncio
@@ -108,7 +108,7 @@ async def test_504_policy_log_fallback_counts_only_504(cfg):
     d = await _run(cfg, "ata-orders-504", [], [_log("504"), _log("500")])
     assert d.metrics["proxy_response_code_504"] == "N/A (not captured)"
     assert d.metrics["access_log_5xx"]["codes"] == {"504": 1}
-    assert "HTTP 504: not in metric; access log shows 1 504 response (log-based, may be partial)." in d.findings
+    assert "HTTP 504: not in proxy/response_count; access log shows 1 504 response (log-based, may be partial)." in d.findings
 
 
 @pytest.mark.asyncio
@@ -143,7 +143,7 @@ async def test_log_fallback_says_metric_unavailable_when_the_metric_read_failed(
     """fresh-rev-n5 O1: an unreadable metric is not "not in metric" (that implies it had none)."""
     d = await _run(cfg, "ata-inventory-5xx", _Unreadable(), [_log("500"), _log("500")])
     assert d.metrics["access_log_5xx"]["statement"] == (
-        "HTTP 5xx: metric unavailable; access log shows 2 5xx responses (log-based, may be partial)"
+        "HTTP 5xx: proxy/response_count unavailable; access log shows 2 5xx responses (log-based, may be partial)"
     )
 
 
@@ -177,3 +177,55 @@ async def test_impact_column_states_the_log_fallback_beside_metric_errors(cfg):
     assert SynthesizerAgent._node_impact("ata-inventory-v1", [d]) == (
         "HTTP 500: 5; access log shows 2 504 responses (log-based, may be partial)"
     )
+
+
+@pytest.mark.asyncio
+async def test_impact_column_states_the_log_count_when_the_metric_read_failed(cfg):
+    """fresh-rev-n6 O1: never "not measured in this investigation" next to a log count."""
+    from agent.app.specialists.measurements import access_log_only_statement, apigee_responses
+
+    d = await _run(cfg, "ata-inventory-5xx", _Unreadable(), [_log("500"), _log("502")])
+    assert apigee_responses(d) is None
+    stated = "HTTP 5xx: proxy/response_count unavailable; access log shows 2 5xx responses (log-based, may be partial)"
+    assert access_log_only_statement(d) == stated
+    assert SynthesizerAgent._node_impact("ata-inventory-v1", [d]) == stated
+
+
+@pytest.mark.asyncio
+async def test_no_log_only_statement_when_the_metric_was_read(cfg):
+    from agent.app.specialists.measurements import access_log_only_statement
+
+    d = await _run(cfg, "ata-inventory-5xx", [_ts("200", 10)], [_log("500")])
+    assert access_log_only_statement(d) is None  # ApigeeResponses carries the log clause instead
+    d = await _run(cfg, "ata-inventory-5xx", _Unreadable(), [_log("200")])
+    assert access_log_only_statement(d) is None
+    assert SynthesizerAgent._node_impact("ata-inventory-v1", [d]) == "not measured in this investigation"
+
+
+def _legacy_apigee(metrics):
+    from agent.app.specialists.base import EvidenceDossier
+
+    return EvidenceDossier(
+        specialist_name="ApigeeSpecialist", target_resource="ata-orders-v1", findings=[], metrics=metrics,
+        evidence_items=[], queries_executed={}, anomaly_detected=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "metrics, stated",
+    [
+        ({"status_429_rate": "0.0%"},
+         "Apigee 429 figure on ata-orders-v1: 0.0% (status_429_rate, source not recorded; request total not "
+         "available); SpikeArrest throttling not ruled out."),
+        ({"proxy_response_code_429": 0},
+         "Apigee 429 figure on ata-orders-v1: 0 (proxy/response_count; request total not available); "
+         "SpikeArrest throttling not ruled out."),
+    ],
+)
+def test_legacy_429_figure_without_a_metric_total_rules_nothing_out(metrics, stated):
+    """fresh-rev-n6 O2: no "ruling out" without a known proxy/response_count total; the source is named."""
+    alert = AlertEvent(incident_id="0.l", policy_name="ata-orders-5xx", resource_name="ata-orders-api",
+                       state="open", started_at="2026-10-28T01:40:00Z")
+    rca = SynthesizerAgent()._build_root_cause_analysis("rc", 0.7, [_legacy_apigee(metrics)], "ata-orders-api", alert)
+    alts = {a["alternative"]: a["reason"] for a in rca["alternatives_ruled_out"]}
+    assert alts["Upstream API Gateway Rate-Limiting"] == stated

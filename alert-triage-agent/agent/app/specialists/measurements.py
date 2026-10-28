@@ -18,7 +18,8 @@ APIGEE_RESPONSE_COUNT_SOURCE = "Cloud Monitoring apigee.googleapis.com/proxy/res
 _RESPONSE_COUNT_QUERY = "apigee.googleapis.com/proxy/response_count"
 # Every count statement names its source: the metric and the access log count the same requests
 # separately and are never added together.
-METRIC_SOURCE = "the proxy/response_count metric"
+METRIC_NAME = "proxy/response_count"
+METRIC_SOURCE = f"the {METRIC_NAME} metric"
 # Dossier metric key of the access-log 5xx fallback (set only when the metric has no such responses).
 ACCESS_LOG_5XX_KEY = "access_log_5xx"
 
@@ -42,10 +43,11 @@ def response_count_unavailable(metrics: dict[str, Any]) -> bool:
 
 
 def access_log_5xx_statement(code: str, n: int, *, metric_unavailable: bool = False) -> str:
-    """The fallback line: "HTTP 5xx: not in metric; access log shows 3 5xx responses (...)".
+    """The fallback line: "HTTP 5xx: not in proxy/response_count; access log shows 3 5xx responses (...)".
 
-    "metric unavailable" instead of "not in metric" when proxy/response_count could not be read."""
-    metric = "metric unavailable" if metric_unavailable else "not in metric"
+    "proxy/response_count unavailable" instead of "not in proxy/response_count" when the metric
+    could not be read."""
+    metric = f"{METRIC_NAME} unavailable" if metric_unavailable else f"not in {METRIC_NAME}"
     return f"HTTP {code}: {metric}; {access_log_clause(code, n)}"
 
 
@@ -156,6 +158,32 @@ def apigee_responses(d: EvidenceDossier) -> Optional[ApigeeResponses]:
             proxy=d.target_resource, codes=clean, log_5xx=log_n, log_code=str(log.get("code") or "5xx"),
         )
     return ApigeeResponses(proxy=d.target_resource, codes=clean)
+
+
+def access_log_only_statement(d: EvidenceDossier) -> Optional[str]:
+    """The access-log 5xx count of an ApigeeSpecialist dossier whose proxy/response_count could
+    not be used (``apigee_responses`` is None): "HTTP 5xx: proxy/response_count unavailable;
+    access log shows 3 5xx responses (log-based, may be partial)". None otherwise.
+
+    The report states this instead of "not measured" (fresh-rev-n6 O1): the HTML metrics row
+    shows the same log count for the proxy."""
+    if d.specialist_name != "ApigeeSpecialist" or apigee_responses(d) is not None:
+        return None
+    log = (d.metrics or {}).get(ACCESS_LOG_5XX_KEY)
+    log_n = log.get("count") if isinstance(log, dict) else None
+    if not isinstance(log_n, int) or isinstance(log_n, bool) or log_n <= 0:
+        return None
+    return access_log_5xx_statement(str(log.get("code") or "5xx"), log_n, metric_unavailable=True)
+
+
+def component_access_log_only(resource: str, dossiers: list[EvidenceDossier]) -> Optional[str]:
+    """``access_log_only_statement`` of the first dossier on ``resource`` that has one."""
+    for d in dossiers:
+        if d.target_resource == resource:
+            s = access_log_only_statement(d)
+            if s is not None:
+                return s
+    return None
 
 
 def component_responses(resource: str, dossiers: list[EvidenceDossier]) -> Optional[ApigeeResponses]:

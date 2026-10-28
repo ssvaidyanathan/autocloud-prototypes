@@ -509,6 +509,7 @@ S1_LOG_500S = [_log_entry("500", "2026-10-28T04:30:00Z") for _ in range(3)]
 VARIANTS = {
     "S1-log-only-5xx": _variant("S1", codes=[], log_entries=S1_LOG_500S),
     "S1-log-only-5xx-metric-200": _variant("S1", codes=[("200", 10, None)], log_entries=S1_LOG_500S),
+    "S1-log-only-5xx-metric-unreadable": _variant("S1", codes_error=True, log_entries=S1_LOG_500S),
     "S4-proxy-no-traffic": _variant("S4", codes=[], lat=[]),
     "S4-proxy-unavailable": _variant("S4", codes_error=True),
     "S4-proxy-4xx-only": _variant("S4", codes=[("200", 600, None), ("404", 7, None)]),
@@ -546,7 +547,10 @@ def test_ticket_and_html_measurement_statements_agree_for_every_component(name):
     alt = out["alternatives"].get("Upstream API Gateway Rate-Limiting")
     proxy = next((d.target_resource for d in out["dossiers"] if d.specialist_name == "ApigeeSpecialist"), None)
     if alt and proxy:
-        assert ("not available" in alt) == (out["impact"].get(proxy, NM) == NM), (alt, out["impact"].get(proxy))
+        # No metric counts: "not measured", or only the access-log count with the metric unavailable (O1).
+        impact = out["impact"].get(proxy, NM)
+        no_metric = impact == NM or "proxy/response_count unavailable" in impact
+        assert ("not available" in alt) == no_metric, (alt, impact)
 
 
 def test_variant_statements():
@@ -659,7 +663,7 @@ def test_log_only_5xx_ticket_and_html_do_not_contradict_the_log(name):
     statement = LOG_ONLY[name]
     # One statement for the proxy, from measurements.ApigeeResponses, in the impact column.
     assert out["impact"]["ata-inventory-v1"] == statement
-    assert f"Apigee proxy ata-inventory-v1: HTTP 5xx: not in metric; {LOG_3}" in out["observations"]
+    assert f"Apigee proxy ata-inventory-v1: HTTP 5xx: not in proxy/response_count; {LOG_3}" in out["observations"]
     ticket = out["desc"].splitlines()
     html = _html_lines(out["html"])
     assert out["desc"] == out["agent_desc"]
@@ -695,3 +699,85 @@ def test_log_only_5xx_names_the_metric_in_the_problem_of_a_cloud_sql_origin():
     # A non-5xx policy: the fallback does not fire, so the statement has no log clause.
     assert f"0 HTTP 4xx/5xx responses in {METRIC} (of 10 requests) on ata-inventory-v1" in out["problem"]
     assert "access log shows" not in out["problem"]
+
+
+# --- fresh-rev-n6 O1 / N1 / case D -------------------------------------------------------------
+
+LOG_3_UNAVAILABLE = f"HTTP 5xx: proxy/response_count unavailable; {LOG_3}"
+
+
+def test_unreadable_metric_with_log_5xx_states_the_log_in_the_impact_column():
+    """O1 (probe case C): S1 shape, proxy/response_count read fails, the access log shows 3 500s.
+    The impact cell states the log count as the metrics row does, never "not measured"."""
+    out = _out_any("S1-log-only-5xx-metric-unreadable")
+    assert out["impact"]["ata-inventory-v1"] == LOG_3_UNAVAILABLE
+    row = next(r for r in out["rows"] if r[0] == "Apigee" and r[2] == "ata-inventory-v1")
+    assert row[3] == LOG_3_UNAVAILABLE
+    assert out["desc"] == out["agent_desc"]
+    html = "\n".join(_html_lines(out["html"]))
+    assert LOG_3_UNAVAILABLE in html
+    # The 429 alternative has no metric total to rule anything out with.
+    alt = out["alternatives"]["Upstream API Gateway Rate-Limiting"]
+    assert "ruling out" not in alt and "not ruled out" in alt, alt
+
+
+def _sql_origin_5xx_policy(policy: str, codes, logs) -> dict:
+    return _variant("S4", policy=policy, codes=codes, log_entries=logs)
+
+
+@pytest.mark.parametrize(
+    "policy, codes, logs, stated",
+    [
+        # Metric without 5xx: no_5xx_statement() with the log suffix (_synthesize_problem, proxies branch).
+        ("ata-inventory-db-5xx", [("200", 10, None)], [_log_entry("500", "2026-10-28T05:38:00Z")] * 3,
+         f"0 HTTP 4xx/5xx responses in {METRIC} (of 10 requests), while the {LOG_3} on ata-inventory-v1"),
+        # 504 policy, metric 500s but no 504: five_xx_statement() with the log 504 suffix (erroring proxies).
+        ("ata-inventory-db-504", [("500", 5, None), ("200", 10, None)], [_log_entry("504", "2026-10-28T05:38:00Z")] * 2,
+         f"ata-inventory-v1 5 HTTP 5xx responses in {METRIC} (of 15 requests), "
+         "while the access log shows 2 504 responses (log-based, may be partial)"),
+    ],
+)
+def test_problem_line_states_the_log_fallback_end_to_end(policy, codes, logs, stated):
+    """N1: the fallback fires in ApigeeSpecialist and its log suffix reaches the ticket problem line."""
+    import asyncio
+
+    out = asyncio.run(build_outputs("S4-log-5xx", scenario=_sql_origin_5xx_policy(policy, codes, logs)))
+    apigee = next(d for d in out["dossiers"] if d.specialist_name == "ApigeeSpecialist")
+    assert apigee.metrics["access_log_5xx"]["count"] == len(logs)  # the fallback fired
+    assert stated in out["problem"], out["problem"]
+    assert out["problem"] in out["desc"] and out["desc"] == out["agent_desc"]
+
+
+def _proxy_origin(**changes) -> dict:
+    """A 5xx alert on the proxy itself (origin = proxy), fresh-rev-n6 probe case D."""
+    return _variant("S1", policy="ata-apigee-inventory-5xx", resource="ata-inventory-v1",
+                    origin="ata-inventory-v1", **changes)
+
+
+@pytest.mark.parametrize(
+    "changes, rate",
+    [
+        (dict(codes=[("500", 5, None), ("200", 10, None)]), f"5 HTTP 5xx responses in {METRIC} (of 15 requests)"),
+        (dict(codes=[("200", 10, None)], log_entries=S1_LOG_500S),
+         f"0 HTTP 4xx/5xx responses in {METRIC} (of 10 requests), while the {LOG_3}"),
+        (dict(codes_error=True, log_entries=S1_LOG_500S, others=lambda: [_sql(3, 10.2)]), LOG_3_UNAVAILABLE),
+    ],
+    ids=["metric-5xx", "log-only", "metric-unreadable-no-cloud-run"],
+)
+def test_proxy_origin_5xx_problem_is_not_a_spike_arrest_violation_without_429s(changes, rate):
+    """Case D: with 0 429s observed the problem line states the proxy's 5xx count, not SpikeArrest."""
+    import asyncio
+
+    out = asyncio.run(build_outputs("D", scenario=_proxy_origin(**changes)))
+    assert "SpikeArrest" not in out["problem"], out["problem"]
+    assert out["problem"].startswith(f"Elevated HTTP 5xx error rate ({rate}) on ata-inventory-v1 "), out["problem"]
+    assert out["desc"] == out["agent_desc"]
+
+
+def test_proxy_origin_with_429s_is_still_a_spike_arrest_violation():
+    """429s observed on a proxy origin under a non-429 policy: SpikeArrest stays the problem."""
+    import asyncio
+
+    out = asyncio.run(build_outputs("D429", scenario=_proxy_origin(
+        codes=[("429", 40, "policies.ratelimit.SpikeArrestViolation"), ("200", 10, None)])))
+    assert out["problem"].startswith("SpikeArrest rate-limit violation"), out["problem"]

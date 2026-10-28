@@ -34,7 +34,14 @@ from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches, not_applicable_component_type
 from .apigee import SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_id, access_log_name
 from .cloud_sql import DB_POOL_NEAR_SATURATION_RATIO, CloudSQLSpecialist
-from .measurements import apigee_responses, cloud_run_5xx_rate, component_responses, rate_pct
+from .measurements import (
+    access_log_only_statement,
+    apigee_responses,
+    cloud_run_5xx_rate,
+    component_access_log_only,
+    component_responses,
+    rate_pct,
+)
 from .change import (
     APIGEE_HISTORY,
     NO_CLOUD_RUN_DEPLOYMENTS_FINDING,
@@ -1475,6 +1482,10 @@ class SynthesizerAgent:
             origin_resp = component_responses(origin, dossiers)
             if origin_resp is not None:
                 origin_5xx_rate = origin_resp.five_xx_statement() or origin_resp.no_5xx_statement()
+            else:
+                # proxy/response_count unreadable but the access log shows 5xx: the log count,
+                # stated as such, never "not measured" (fresh-rev-n6 O1).
+                origin_5xx_rate = component_access_log_only(origin, dossiers)
         origin_rate_disp = f" ({origin_5xx_rate})" if origin_5xx_rate else ""
         origin_rate_gap = "" if origin_5xx_rate else f" (HTTP 5xx rate not measured on {origin})"
         erroring_dependents = {svc: v for svc, v in dependent_5xx.items() if v[1] > 0}
@@ -1487,7 +1498,10 @@ class SynthesizerAgent:
 
         # Distinguish 5xx-dominant vs latency-dominant failure mode
         is_policy_5xx = "5xx" in alert.policy_name.lower() or "500" in (alert.condition_name or "")
-        is_5xx_dominant = (err_5xx_pct is not None and err_5xx_pct >= 5.0) or (is_policy_5xx and err_5xx_rate is not None)
+        is_5xx_dominant = (
+            (err_5xx_pct is not None and err_5xx_pct >= 5.0)
+            or (is_policy_5xx and (err_5xx_rate is not None or origin_5xx_rate is not None))
+        )
 
         if origin != alert.resource_name:
             if is_5xx_dominant:
@@ -1537,7 +1551,8 @@ class SynthesizerAgent:
             if unmeasured:
                 parts.append(f"HTTP 5xx rate not measured on {', '.join(unmeasured)}")
             return f"{head} ({'; '.join(parts)})" if parts else head
-        elif is_apigee:
+        elif is_apigee and self._spike_arrest_observed(dossiers, alert):
+            # Only when 429s were observed (fresh-rev-n6 case D: a 5xx alert on the proxy, 0 429s).
             metric_str = f" ({', '.join(metric_details)})" if metric_details else ""
             return (
                 f"SpikeArrest rate-limit violation{metric_str} on {origin} "
@@ -1562,6 +1577,27 @@ class SynthesizerAgent:
                 f"Operational threshold breach on policy '{alert.policy_name}' for {origin} "
                 f"impacting {upstream_str} since {started_at}"
             )
+
+    @staticmethod
+    def _spike_arrest_observed(dossiers: list[EvidenceDossier], alert: AlertEvent) -> bool:
+        """True when the evidence shows SpikeArrest 429s: an alert on a 429 / SpikeArrest policy,
+        a recorded SpikeArrest fault, or a non-zero 429 count on an Apigee proxy."""
+        policy = alert.policy_name.lower()
+        if "429" in policy or "spikearrest" in policy:
+            return True
+        for d in dossiers:
+            if d.specialist_name != "ApigeeSpecialist":
+                continue
+            m = d.metrics or {}
+            if isinstance(m.get("spike_arrest"), dict):
+                return True
+            c429 = m.get("proxy_response_code_429")
+            if isinstance(c429, int) and not isinstance(c429, bool) and c429 > 0:
+                return True
+            resp = apigee_responses(d)
+            if resp is not None and resp.count("429"):
+                return True
+        return False
 
     def calculate_confidence(
         self,
@@ -2709,6 +2745,10 @@ class SynthesizerAgent:
                 # Same counts as the ticket problem statement (measurements.py); None = not measured.
                 resp = apigee_responses(d)
                 if resp is None:
+                    # Metric unreadable: the access-log 5xx count, as the metrics row states it.
+                    log_only = access_log_only_statement(d)
+                    if log_only:
+                        facts.append(log_only)
                     continue
                 gt = m.get("gateway_timeout") if isinstance(m.get("gateway_timeout"), dict) else {}
                 sa = m.get("spike_arrest") if isinstance(m.get("spike_arrest"), dict) else {}
@@ -3057,9 +3097,14 @@ class SynthesizerAgent:
                         "SpikeArrest throttling not ruled out."
                     )
                 else:
+                    # No usable proxy/response_count total: nothing is ruled out on this figure.
+                    src = (
+                        "status_429_rate, source not recorded" if apigee_dossier.metrics.get("status_429_rate")
+                        else "proxy/response_count"
+                    )
                     reason = (
-                        f"Apigee proxy metrics queried on {apigee_dossier.target_resource} (429: {rate_429}), "
-                        "ruling out SpikeArrest throttling."
+                        f"Apigee 429 figure on {apigee_dossier.target_resource}: {rate_429} ({src}; "
+                        "request total not available); SpikeArrest throttling not ruled out."
                     )
                 alternatives.append({"alternative": "Upstream API Gateway Rate-Limiting", "reason": reason})
 

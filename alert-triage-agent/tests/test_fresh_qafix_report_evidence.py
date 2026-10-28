@@ -68,10 +68,13 @@ def test_na_never_rules_out():
         assert not ("N/A" in reason and "ruling out" in reason)
 
 
-def test_measured_429_still_rules_out():
+def test_429_figure_without_a_metric_total_is_not_ruled_out():
+    """fresh-rev-n6 O2: a 429 figure with no proxy/response_count total rules nothing out."""
     apigee = EvidenceDossier("ApigeeSpecialist", "ata-inventory-v1",
                              metrics={"proxy_response_code_429": 0}, queries_executed={"q": ["q"]})
-    assert "ruling out" in _alts([apigee])["Upstream API Gateway Rate-Limiting"]
+    reason = _alts([apigee])["Upstream API Gateway Rate-Limiting"]
+    assert "ruling out" not in reason and "not ruled out" in reason
+    assert "(proxy/response_count; request total not available)" in reason
 
 
 def test_deployment_alternative_uses_serving_revision():
