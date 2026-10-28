@@ -299,3 +299,31 @@ async def test_logged_timeouts_without_latency_are_excluded(test_config):
     assert dossier.metrics["target_latency_p95_ms"] == (
         "not available: 2 of 3 requests were GatewayTimeout faults, which record no target latency"
     )
+
+
+# --- Not-applicable Cloud Run rows (final-qa2 S3, INC0010353: proxy origin ata-orders-v1) ---
+
+def test_not_applicable_cloud_run_is_one_row_not_na_metric_rows():
+    from agent.app.specialists.cloud_run import not_applicable_dossier
+
+    cr = not_applicable_dossier("CloudRunSpecialist", "ata-orders-v1", "Apigee proxy")
+    rows = SynthesizerAgent()._build_metrics_comparison([cr], "ata-orders-v1")
+    cloud_run = [r for r in rows if r["layer"] == "Cloud Run"]
+    assert cloud_run == [{
+        "layer": "Cloud Run",
+        "metric_name": "Cloud Run service metrics",
+        "resource": "ata-orders-v1",
+        "before_value": "not applicable",
+        "during_value": "not applicable (Apigee proxy)",
+        "variance": "not applicable",
+    }]
+    assert not any("restart_count" in r["metric_name"] or "request_count" in r["metric_name"] for r in rows)
+
+
+def test_applicable_cloud_run_keeps_its_metric_rows():
+    cr = EvidenceDossier(
+        specialist_name="CloudRunSpecialist", target_resource="ata-inventory-api", findings=[],
+        metrics={"error_rate_5xx": "82.7%"}, evidence_items=[], queries_executed={}, anomaly_detected=True,
+    )
+    names = [r["metric_name"] for r in SynthesizerAgent()._build_metrics_comparison([cr], "ata-inventory-api")]
+    assert names == ["run.googleapis.com/request_count (5xx)", "container/restart_count"]

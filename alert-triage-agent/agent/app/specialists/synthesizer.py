@@ -2733,6 +2733,18 @@ class SynthesizerAgent:
                     "during_value": f"{cpu_val}%" if isinstance(cpu_val, (int, float)) else str(cpu_val),
                     "variance": "N/A (no baseline captured)",
                 })
+            elif d.specialist_name == "CloudRunSpecialist" and not_applicable_component_type(d) is not None:
+                # Not a Cloud Run service (e.g. an Apigee proxy origin): nothing was queried, so
+                # one row says so instead of Cloud Run metric rows with N/A values.
+                kind = not_applicable_component_type(d) or "not a Cloud Run service"
+                metrics.append({
+                    "layer": "Cloud Run",
+                    "metric_name": "Cloud Run service metrics",
+                    "resource": d.target_resource,
+                    "before_value": "not applicable",
+                    "during_value": f"not applicable ({kind})",
+                    "variance": "not applicable",
+                })
             elif d.specialist_name == "CloudRunSpecialist":
                 err_val = d.metrics.get("error_rate_5xx", "N/A (no telemetry captured)")
                 rst_val = d.metrics.get("container_restarts", "N/A (no telemetry captured)")
