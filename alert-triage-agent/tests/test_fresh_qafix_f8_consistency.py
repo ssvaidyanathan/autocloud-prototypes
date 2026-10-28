@@ -122,3 +122,11 @@ def test_proxy_revision_first_served_after_onset_scores_zero():
     assert "4m after the alert onset" in detail
     assert "prior to alert onset" not in detail and "proximity)" not in detail
     assert factors["change_proximity"]["score"] == 0.0
+
+
+@pytest.mark.parametrize("mins,score", [(0, 0.15), (15, 0.15), (16, 0.10), (30, 0.10), (31, 0.05),
+                                        (60, 0.05), (61, 0.0)])
+def test_change_proximity_bucket_boundaries(mins, score):
+    """N6: one bucket table for the Cloud Run and proxy branches; boundaries are inclusive."""
+    from agent.app.specialists.synthesizer import _proximity_score
+    assert _proximity_score(mins)[0] == score
