@@ -301,7 +301,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 {{ node.role or 'Dependency' }}
               </span>
             </td>
-            <td style="padding: 8px 12px; border: 1px solid #d0d7de;">{{ node.impact or node.impact_status or 'Impacted downstream consumer' }}</td>
+            <td style="padding: 8px 12px; border: 1px solid #d0d7de;">{{ node.impact or node.impact_status or 'not measured in this investigation' }}</td>
           </tr>
           {% else %}
           {% for r in report.blast_radius %}
@@ -316,7 +316,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               </span>
             </td>
             <td style="padding: 8px 12px; border: 1px solid #d0d7de;">
-              {% if r == report.origin %}Root defect / anomaly detected{% else %}Cascading error propagation{% endif %}
+              not measured in this investigation
             </td>
           </tr>
           {% endfor %}

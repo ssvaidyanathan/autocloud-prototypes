@@ -13,6 +13,8 @@ What N3 changes, per scenario (asserted below):
 - S3 orders 429: HTML Cloud Run N/A rows -> one "not applicable (Apigee proxy)" row; ticket unchanged.
 - S4: HTML Cloud Run N/A rows -> one "not applicable (Cloud SQL)" row; ticket counts orders-v1 r187.
 - S5: ticket counts orders-v1 r187 (restored after S3) instead of naming it.
+- All: the HTML "Operational Impact" column (N1) shows what was measured on each node, or
+  "not measured in this investigation"; before, it was fixed template text per node type.
 """
 
 from unittest.mock import MagicMock, patch
@@ -28,6 +30,7 @@ from agent.app.specialists.cloud_run import not_applicable_dossier
 from agent.app.specialists.synthesizer import SynthesizerAgent
 from bridge.app.contracts.report import EvidenceItem, InvestigationReport as BridgeReport
 from bridge.app.templates.renderer import render_standalone_html
+from topology.topology_graph import get_blast_radius
 
 GT = "messaging.adaptors.http.flow.GatewayTimeout"
 SCOPE = "org cloud-assist-fde-2, environment prod, proxies ata-*"
@@ -45,10 +48,11 @@ def _deployed(d: dict, mins: int) -> tuple[str, list[dict]]:
     return line, [dict(d, deployed_minutes_ago=mins)]
 
 
-def _cr(service: str, err: str) -> EvidenceDossier:
+def _cr(service: str, err: str, slowest_ms: float | None = None) -> EvidenceDossier:
+    lat = {"latency_p95_ms": slowest_ms, "latency_statistic": "slowest logged request latency"} if slowest_ms else {}
     return EvidenceDossier(
         specialist_name="CloudRunSpecialist", target_resource=service, findings=[],
-        metrics={"error_rate_5xx": err, "container_restarts": "N/A (not captured)"},
+        metrics={"error_rate_5xx": err, "container_restarts": "N/A (not captured)", **lat},
         evidence_items=[], queries_executed={}, anomaly_detected=True,
     )
 
@@ -74,7 +78,9 @@ SCENARIOS = {
     "S2": dict(
         policy="ata-inventory-latency", resource="ata-inventory-api", started="2026-10-28T04:55:11Z",
         origin="ata-inventory-api", codes=[("504", 394, GT), ("200", 2, None)], lat=[(2, 16.0)],
-        others=lambda: [_cr("ata-inventory-api", "0.0%"), _sql(4, 10.5), _cr("ata-orders-api", "0.0%")],
+        others=lambda: [
+            _cr("ata-inventory-api", "0.0%", 6518.03), _sql(4, 10.5), _cr("ata-orders-api", "0.0%", 6603.14),
+        ],
         history=(NO_DEPLOYS, []),
     ),
     "S3-inventory": dict(
@@ -166,21 +172,24 @@ async def build_outputs(name: str, history_line=ticket_history_line) -> dict:
     dossiers = s["others"]() + [apigee, change]
     synth = SynthesizerAgent()
     rows = synth._build_metrics_comparison(dossiers, s["origin"])
+    blast = [s["origin"]] + [b for b in get_blast_radius(s["origin"]) if b != s["origin"]]
+    nodes = synth._build_topology_nodes(s["origin"], blast, dossiers)
     analytics = synth._build_apigee_analytics(dossiers, [s["origin"]])
     line = history_line(dossiers, s["origin"], alert)
     common = dict(
         group_id=f"grp-{name}", summary=f"{name} summary", observations="obs", origin=s["origin"],
-        blast_radius=[s["origin"]], priority="P1", project_id="cloud-assist-fde-2", region="us-west1",
+        blast_radius=blast, priority="P1", project_id="cloud-assist-fde-2", region="us-west1",
         change_induced="No (checked: ata-tools change timeline (Apigee deployment history))",
         apigee_history=line,
     )
     bridge = BridgeReport(
-        **common, metrics_comparison=rows, apigee_analytics=analytics,
+        **common, metrics_comparison=rows, apigee_analytics=analytics, topology_nodes=nodes,
         evidence_by_area={"change": [EvidenceItem(headline="Apigee Deployment History", content=full)]},
     )
     desc = bridge.build_structured_description(project_id="cloud-assist-fde-2", incidents_bucket="b")
     agent_desc = AgentReport(**common).build_structured_description(project_id="cloud-assist-fde-2", incidents_bucket="b")
     return {
+        "impact": {n["resource"]: n["impact"] for n in nodes},
         "rows": [(r["layer"], r["metric_name"], r["resource"], r["during_value"]) for r in rows],
         "analytics": {k: analytics.get(k) for k in ("target_latency_p50", "target_latency_p95", "target_latency_p99",
                                                     "target_latency_basis")},
@@ -291,3 +300,72 @@ def test_s5_outputs():
         "to alert onset (1 other proxy changed in window, see report)."
     )
     assert "revision 187" not in out["ticket_history"]
+
+
+# --- N1: Operational Impact is measured values, never template text ---------------------------
+
+NM = "not measured in this investigation"
+TEMPLATE = ("Internal application 5xx exceptions", "Cascading 5xx failure propagation",
+            "Cascading HTTP 504 gateway timeout", "SpikeArrest 429 throttling",
+            "Connection pool saturation & transaction lock wait contention", "Upstream dependent")
+
+IMPACT = {
+    "S1": {"ata-inventory-api": "HTTP 5xx error rate 83.4%", "ata-inventory-v1": "HTTP 500: 629",
+           "ata-orders-api": "HTTP 5xx error rate 82.7%", "ata-orders-v1": NM},
+    "S2": {"ata-inventory-api": "HTTP 5xx error rate 0.0%; slowest logged request latency 6518.03ms",
+           "ata-inventory-v1": "HTTP 504: 394 (GatewayTimeout)",
+           "ata-orders-api": "HTTP 5xx error rate 0.0%; slowest logged request latency 6603.14ms",
+           "ata-orders-v1": NM},
+    "S3-inventory": {"ata-inventory-api": "HTTP 5xx error rate 82.7%", "ata-inventory-v1": "HTTP 500: 360",
+                     "ata-orders-api": NM, "ata-orders-v1": NM},
+    "S3-orders-429": {"ata-orders-v1": "HTTP 429: 512 (SpikeArrestViolation)"},
+    "S4": {"ata-inventory-db": "24 of 25 connections active", "ata-inventory-api": "HTTP 5xx error rate 0.0%",
+           "ata-inventory-v1": "no HTTP 4xx/5xx responses recorded", "ata-orders-api": "HTTP 5xx error rate 0.0%",
+           "ata-orders-v1": NM},
+    "S5": {"ata-inventory-api": "HTTP 5xx error rate 98.8%", "ata-inventory-v1": "HTTP 500: 553",
+           "ata-orders-api": "HTTP 5xx error rate 99.0%", "ata-orders-v1": NM},
+}
+
+
+@pytest.mark.parametrize("name", list(SCENARIOS))
+def test_operational_impact_is_measured_or_not_measured(name):
+    out = _out(name)
+    assert out["impact"] == IMPACT[name]
+    for phrase in TEMPLATE:
+        assert phrase not in out["html"]
+    for value in IMPACT[name].values():
+        assert value in out["html"]
+
+
+def test_degraded_report_claims_no_impact(tmp_path):
+    from agent.app.config import reset_agent_settings
+    from agent.app.triage import generate_investigation_report, write_preanalysis_lock
+
+    cfg = AgentConfig(
+        project_id="cloud-assist-fde-2", name_prefix="ata", region="us-west1", is_local=True,
+        incident_store_path=str(tmp_path / "knowledge/incident-manager"), fallback_store_path=str(tmp_path / "fb"),
+    )
+    reset_agent_settings(cfg)
+    try:
+        alert = AlertEvent(incident_id="0.deg", policy_name="ata-inventory-5xx", resource_name="ata-inventory-api",
+                           resource_type="cloud_run_revision", state="open", started_at="2026-10-28T04:32:27Z")
+        _, group_id, fname = write_preanalysis_lock(alert, cfg)
+        report = generate_investigation_report(alert, group_id, fname, cfg, degraded_reason="test")
+    finally:
+        reset_agent_settings(None)
+    assert report.topology_nodes and {n["impact"] for n in report.topology_nodes} == {NM}
+
+
+def test_bridge_fallback_rows_claim_no_impact():
+    report = BridgeReport(group_id="g", summary="s", observations="o", origin="ata-inventory-api",
+                          blast_radius=["ata-inventory-api", "ata-inventory-v1"], priority="P1",
+                          project_id="cloud-assist-fde-2", region="us-west1")
+    html = render_standalone_html(report)
+    assert html.count(NM) == 2
+    assert "Root defect" not in html and "Cascading error propagation" not in html
+    with_node = render_standalone_html(BridgeReport(
+        group_id="g", summary="s", observations="o", origin="ata-inventory-api", blast_radius=["ata-inventory-api"],
+        priority="P1", project_id="cloud-assist-fde-2", region="us-west1",
+        topology_nodes=[{"resource": "ata-inventory-api", "type": "Cloud Run Service", "role": "Origin"}],
+    ))
+    assert NM in with_node and "Impacted downstream consumer" not in with_node

@@ -703,7 +703,7 @@ class SynthesizerAgent:
 
         alerts_list = self._build_alerts(alert, config)
         triage_decision = self._build_triage_decision(alert, origin, blast_radius, dossiers, confidence=confidence)
-        topology_nodes = self._build_topology_nodes(origin, blast_radius)
+        topology_nodes = self._build_topology_nodes(origin, blast_radius, dossiers)
         timeline = self._build_timeline(alert, dossiers)
         metrics_comparison = self._build_metrics_comparison(dossiers, origin)
         top_log_signatures = self._build_top_log_signatures(dossiers)
@@ -2649,22 +2649,69 @@ class SynthesizerAgent:
             "duplicate_status": "Active (0 duplicate alerts suppressed into group)",
         }
 
-    def _build_topology_nodes(self, origin: str, blast_radius: list[str]) -> list[dict[str, Any]]:
+    @staticmethod
+    def _node_impact(resource: str, dossiers: list[EvidenceDossier]) -> str:
+        """What this investigation measured on `resource`, or "not measured in this investigation".
+
+        Only recorded values: Cloud Run 5xx rate and latency, Apigee non-2xx response counts
+        (with the GatewayTimeout / SpikeArrest fault when recorded), Cloud SQL connections.
+        """
+        facts: list[str] = []
+        for d in dossiers:
+            if d.target_resource != resource:
+                continue
+            m = d.metrics or {}
+            if d.specialist_name == "CloudRunSpecialist" and not_applicable_component_type(d) is None:
+                rate = m.get("error_rate_5xx")
+                if (isinstance(rate, (int, float)) and not isinstance(rate, bool)) or (
+                    isinstance(rate, str) and rate.strip().endswith("%")
+                ):
+                    facts.append(f"HTTP 5xx error rate {rate if isinstance(rate, str) else f'{rate}%'}")
+                lat = m.get("latency_p95_ms")
+                if isinstance(lat, (int, float)) and not isinstance(lat, bool):
+                    facts.append(f"{latency_label(m)} {lat:g}ms")
+            elif d.specialist_name == "ApigeeSpecialist":
+                codes = m.get("response_codes") if isinstance(m.get("response_codes"), dict) else {}
+                gt = m.get("gateway_timeout") if isinstance(m.get("gateway_timeout"), dict) else {}
+                sa = m.get("spike_arrest") if isinstance(m.get("spike_arrest"), dict) else {}
+                for code, n in sorted(codes.items()):
+                    if not (isinstance(n, int) and n > 0 and str(code)[:1] in ("4", "5")):
+                        continue
+                    fault = (
+                        " (GatewayTimeout)" if gt and str(gt.get("response_code")) == str(code)
+                        else " (SpikeArrestViolation)" if sa and str(sa.get("response_code")) == str(code)
+                        else ""
+                    )
+                    facts.append(f"HTTP {code}: {n}{fault}")
+                if codes and not facts:
+                    facts.append("no HTTP 4xx/5xx responses recorded")
+            elif d.specialist_name == "CloudSQLSpecialist":
+                conns, max_conns = m.get("active_connections"), m.get("max_connections")
+                if isinstance(conns, (int, float)) and not isinstance(conns, bool):
+                    facts.append(
+                        f"{conns:g} of {max_conns:g} connections active"
+                        if isinstance(max_conns, (int, float)) and not isinstance(max_conns, bool)
+                        else f"{conns:g} active connections"
+                    )
+        return "; ".join(facts) if facts else "not measured in this investigation"
+
+    def _build_topology_nodes(
+        self, origin: str, blast_radius: list[str], dossiers: Optional[list[EvidenceDossier]] = None,
+    ) -> list[dict[str, Any]]:
         nodes = []
         for r in blast_radius:
             is_orig = (r == origin)
+            # The impact is what was measured on the node, never a template phrase.
+            impact = self._node_impact(r, dossiers or [])
             if "db" in r:
                 res_type = "Cloud SQL PostgreSQL"
                 role = "Origin (Root Callee)" if is_orig else "Downstream Database"
-                impact = "Connection pool saturation & transaction lock wait contention" if is_orig else "Upstream dependent"
             elif "apigee" in r or "v1" in r:
                 res_type = "Apigee API Proxy"
                 role = "Origin (Ingress Breach)" if is_orig else "Ingress API Gateway"
-                impact = "SpikeArrest 429 throttling" if is_orig else "Cascading HTTP 504 gateway timeout"
             else:
                 res_type = "Cloud Run Service"
                 role = "Origin (Root Service)" if is_orig else "Intermediate Callee / Dependent"
-                impact = "Internal application 5xx exceptions" if is_orig else "Cascading 5xx failure propagation"
             nodes.append({
                 "resource": r,
                 "name": r,

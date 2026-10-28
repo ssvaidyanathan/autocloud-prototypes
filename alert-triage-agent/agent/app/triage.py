@@ -376,7 +376,8 @@ def generate_investigation_report(
                 "name": r,
                 "type": "Cloud SQL PostgreSQL" if "db" in r else ("Apigee API Proxy" if "v1" in r or "apigee" in r else "Cloud Run Service"),
                 "role": "Origin (Root Callee)" if r == origin else "Downstream Dependent",
-                "impact": "Root anomaly breach" if r == origin else "Cascading dependent impact",
+                # Degraded report: no specialist measured anything, so no impact is claimed.
+                "impact": "not measured in this investigation",
             }
             for r in blast_radius
         ],
