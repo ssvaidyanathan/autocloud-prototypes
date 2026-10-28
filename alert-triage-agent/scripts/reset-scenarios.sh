@@ -21,6 +21,7 @@
 #    --restock-only runs just the pinned-baseline checks and the restock.
 # 5c. Verify on the database side (Cloud SQL num_backends gauge, read-only) that no leaked
 #    connections remain: the fault reset frees only the Cloud Run instance it reaches.
+#    Runs in the background alongside step 6; nothing is archived until it succeeded.
 # 6. Wait for open ATA alerts to close, then, concurrently, for the quiet period (Apigee
 #    metric lag), for every incident group to reach a terminal state (recovery note posted)
 #    and for the alert window to pass
@@ -36,6 +37,13 @@
 # (the agent still tickets it while the latency policy has a 60s retest window) is waited
 # for like any other before archiving: it must close and its incident group must become
 # terminal. Only the Terraform retest window (latency_duration_secs) stops the ticket itself.
+# Since that retest window is live (240s), a slow request with a non-5xx response arms the
+# window only provisionally: after step 5b the reset reads the live latency policies
+# (read-only) and releases it when the burst of slow requests is too short to keep p99 above
+# the threshold for the retest window (latency_retest.py), printing the risk that remains.
+# QA 2026-10-28: each post-scenario reset's cold start (fault reset ~3.5 s, restock ~3.8 s)
+# armed the 600s window, making resets 645-662 s instead of ~4 min. --thorough restores the
+# full wait; a 5xx, failed or unmeasured request and --alert-window-from-start always keep it.
 # ==============================================================================
 
 set -euo pipefail
@@ -93,6 +101,18 @@ ALERT_LAG_SECS="$(parse_duration "${ATA_RESET_ALERT_LAG:-600}")"
 ALERT_WINDOW_FROM_START="${ATA_RESET_ALERT_WINDOW_FROM_START:-false}"
 # Epoch until which step 6 keeps watching for alerts (0 = no window armed).
 ALERT_WINDOW_UNTIL=0
+# true once a request the latency retest window does not cover armed the window (HTTP 5xx,
+# no response, unknown duration, --alert-window-from-start): it is then always waited out.
+ALERT_WINDOW_FULL="false"
+# Slow (>= SLOW_REQUEST_MS) requests with a non-5xx response: first start / last end (epoch)
+# and labels. After step 5b, settle_alert_window releases the window they armed when the
+# live latency policies' retest window outlasts them (latency_retest.py), unless --thorough.
+SLOW_FIRST_EPOCH=0
+SLOW_LAST_END_EPOCH=0
+SLOW_REQUESTS=""
+# --thorough: wait the full --alert-lag window after any slow request (the pre-2026-10-28
+# behaviour, ~11 min resets after a cold start).
+THOROUGH="${ATA_RESET_THOROUGH:-false}"
 RESET_START_TIME="$(date +%s)"
 
 # Usage error for an option given without its value ($1 = option, $2 = args left incl. it),
@@ -177,6 +197,10 @@ while [[ $# -gt 0 ]]; do
             ALERT_WINDOW_FROM_START="true"
             shift
             ;;
+        --thorough)
+            THOROUGH="true"
+            shift
+            ;;
         --serving-revisions)
             require_option_value "$1" "$#"
             ATA_SERVING_REVISIONS="$2"
@@ -226,6 +250,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --alert-window-from-start  Watch for alerts for --alert-lag from the reset start even if no request of the"
             echo "                             reset was slow: for slow requests made just before it (verify-demo-infra.sh"
             echo "                             says when; env ATA_RESET_ALERT_WINDOW_FROM_START=true)"
+            echo "  --thorough                 Wait the full --alert-lag after any slow demo request, even one the live latency"
+            echo "                             policies' retest window (240s) cannot turn into an alert (env ATA_RESET_THOROUGH=true)."
+            echo "                             Default: a slow non-5xx request (e.g. a cold start) arms the window only when the"
+            echo "                             retest window read from Cloud Monitoring does not outlast it (~11 min vs ~4 min reset)"
             echo "  --serving-revisions <list> Comma or space separated list of active Cloud Run revisions"
             echo "  --monitoring-token-source <adc|gcloud>"
             echo "                             Token for the alert check: adc = 'gcloud auth application-default print-access-token',"
@@ -262,6 +290,13 @@ validate_alert_window_settings() {
     case "${ALERT_LAG_SECS}" in
         ""|*[!0-9]*)
             log_error "Invalid --alert-lag / ATA_RESET_ALERT_LAG '${ALERT_LAG_SECS}' (expected e.g. 600, 600s or 10m)." >&2
+            return 1
+            ;;
+    esac
+    case "${THOROUGH}" in
+        true|false) ;;
+        *)
+            log_error "Invalid ATA_RESET_THOROUGH '${THOROUGH}' (expected true or false)." >&2
             return 1
             ;;
     esac
@@ -327,6 +362,7 @@ for t in (json.load(sys.stdin).get("status") or {}).get("traffic") or []:
 # Cloud Monitoring query helper (CA bundle resolution, scoping, fail-loud errors).
 OPEN_ALERTS_PY="${SCRIPT_DIR}/scenarios/open_alerts.py"
 DB_BACKENDS_PY="${SCRIPT_DIR}/scenarios/db_backends.py"
+LATENCY_RETEST_PY="${SCRIPT_DIR}/scenarios/latency_retest.py"
 
 # Step 5c: confirm on the database side that the fault reset released S4's leaked
 # connections. POST /admin/fault/reset frees only the connections of the Cloud Run instance
@@ -504,6 +540,40 @@ summarize_lines() {
     printf '%s\n' "$1" | awk 'NR <= 5 { out = out (NR > 1 ? ", " : "") $0 } END { if (NR > 5) out = out ", ...+" (NR - 5) " more"; print out }'
 }
 
+# Background step-5c check (pid; empty when none is running or it already succeeded).
+DB_CHECK_PID=""
+
+# Step 6 calls this every poll: once the background step-5c check has finished, collect its
+# status; a failure stops the reset at once (its FATAL lines are already printed).
+poll_db_backends_check() {
+    if [ -z "${DB_CHECK_PID}" ] || kill -0 "${DB_CHECK_PID}" 2>/dev/null; then
+        return 0
+    fi
+    finish_db_backends_check
+}
+
+# On exit (e.g. a step-6 timeout): stop a background step-5c check that is still polling,
+# so it does not outlive the reset.
+stop_db_backends_check() {
+    if [ -n "${DB_CHECK_PID}" ]; then
+        kill "${DB_CHECK_PID}" 2>/dev/null || true
+    fi
+}
+
+# Wait for the background step-5c check; exit 1 if it failed. Called before archiving.
+finish_db_backends_check() {
+    local pid="${DB_CHECK_PID}"
+    [ -n "${pid}" ] || return 0
+    DB_CHECK_PID=""
+    if kill -0 "${pid}" 2>/dev/null; then
+        log_info "    Waiting for step 5c (${DB_INSTANCE} num_backends) to finish before archiving..."
+    fi
+    if ! wait "${pid}"; then
+        log_error "FATAL: step 5c failed (above): the release of leaked connections on ${DB_INSTANCE} is not confirmed. Incident files were NOT archived." >&2
+        exit 1
+    fi
+}
+
 wait_for_open_alerts() {
     log_info "--> 6. Checking Cloud Monitoring Alerts API for open ATA alerts and incident group states..."
     if [ "${NO_WAIT}" = "true" ]; then
@@ -541,7 +611,7 @@ wait_for_open_alerts() {
     local query_err_file
     query_err_file="$(mktemp)"
     # shellcheck disable=SC2064  # expand the path now; the local is gone at EXIT.
-    trap "rm -f '${query_err_file}'" EXIT
+    trap "rm -f '${query_err_file}'; stop_db_backends_check" EXIT
 
     local serving_revs
     serving_revs="$(get_serving_revisions)"
@@ -556,6 +626,7 @@ wait_for_open_alerts() {
     fi
 
     while true; do
+        poll_db_backends_check
         local now
         now=$(date +%s)
         local elapsed=$((now - start_time))
@@ -801,18 +872,99 @@ verify_no_active_incident_groups() {
 
 # --- Steps 1 and 5b: timed demo requests ---------------------------------------
 
-# Arm or extend the step-6 alert window for a request sent at epoch $1 (reason $2).
+# Arm or extend the step-6 alert window for a request sent at epoch $1 (reason $2). $3 =
+# "slow" for a slow non-5xx request (settle_alert_window may release the window it armed
+# after step 5b); anything else arms a window that is always waited out.
 extend_alert_window() {
-    local at="$1" reason="$2" deadline
+    local at="$1" reason="$2" kind="${3:-full}" deadline
     deadline=$((at + ALERT_LAG_SECS))
     if [ "${deadline}" -gt "${ALERT_WINDOW_UNTIL}" ]; then
         ALERT_WINDOW_UNTIL="${deadline}"
+    fi
+    if [ "${kind}" != "slow" ]; then
+        ALERT_WINDOW_FULL="true"
     fi
     if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
         log_warn "    [MOCK/DRY-RUN] ${reason}. A live reset would keep watching for alerts for ${ALERT_LAG_SECS}s in step 6 (simulated here)."
         return 0
     fi
+    if [ "${kind}" = "slow" ] && [ "${THOROUGH}" != "true" ]; then
+        log_warn "    ${reason}. A latency alert from it can open up to ${ALERT_LAG_SECS}s later unless the latency policies' retest window outlasts it; checked against the live policies after step 5b."
+        return 0
+    fi
     log_warn "    ${reason}. A latency or 5xx alert from it can open up to ${ALERT_LAG_SECS}s later; step 6 keeps watching for alerts until then before archiving."
+}
+
+# Record a slow non-5xx request: started at epoch $1, took $2 ms, label $3.
+record_slow_request() {
+    local at="$1" ms="$2" label="$3" end
+    end=$((at + (ms + 999) / 1000))
+    if [ "${SLOW_FIRST_EPOCH}" -eq 0 ] || [ "${at}" -lt "${SLOW_FIRST_EPOCH}" ]; then
+        SLOW_FIRST_EPOCH="${at}"
+    fi
+    if [ "${end}" -gt "${SLOW_LAST_END_EPOCH}" ]; then
+        SLOW_LAST_END_EPOCH="${end}"
+    fi
+    SLOW_REQUESTS="${SLOW_REQUESTS:+${SLOW_REQUESTS}; }${label} (${ms} ms)"
+}
+
+# After the last demo request (step 5b): decide whether the window armed only by slow
+# non-5xx requests must be waited out. QA 2026-10-28: every post-scenario reset armed the
+# 600s window (645-662 s resets) with the cold start of the scaled-to-zero services
+# (POST /admin/fault/reset, ~3.5 s) and the first database call on the new instance
+# (POST /admin/restock, ~3.8 s), ~30 s apart. The latency policies open an alert only after
+# p99 > threshold for their retest window (240s live), which such a burst cannot sustain.
+# The window is released only when latency_retest.py, reading the live policies, says so;
+# otherwise (policy missing or changed, query failed, longer burst, --thorough, or a 5xx /
+# failed request / --alert-window-from-start) it stays. What remains is always printed.
+settle_alert_window() {
+    local now span token json rc=0 err_file verdict
+    now="$(date +%s)"
+    if [ "${ALERT_WINDOW_UNTIL}" -le "${now}" ] || [ "${SLOW_FIRST_EPOCH}" -eq 0 ]; then
+        return 0
+    fi
+    if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
+        return 0
+    fi
+    if [ "${ALERT_WINDOW_FULL}" = "true" ]; then
+        log_info "    Alert window kept: a 5xx, failed or unmeasured request (or --alert-window-from-start) armed it, which the latency retest window does not cover."
+        return 0
+    fi
+    if [ "${THOROUGH}" = "true" ]; then
+        log_info "    --thorough: waiting the full alert window for the slow request(s): ${SLOW_REQUESTS}."
+        return 0
+    fi
+    span=$((SLOW_LAST_END_EPOCH - SLOW_FIRST_EPOCH))
+    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-latency-retest.XXXXXX")"
+    if ! token="$(resolve_monitoring_token 2>"${err_file}")" || [ -z "${token}" ]; then
+        log_warn "    Alert window kept ($((ALERT_WINDOW_UNTIL - now))s): no Cloud Monitoring token from '${ATA_MONITORING_TOKEN_SOURCE}' to read the latency policies' retest window ($(tail -n 1 "${err_file}"))."
+        rm -f "${err_file}"
+        return 0
+    fi
+    json="$(python3 "${LATENCY_RETEST_PY}" "${PROJECT_ID}" "${token}" "${NAME_PREFIX}" "${span}" "${SLOW_REQUEST_MS}" 2>"${err_file}")" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        log_warn "    Alert window kept ($((ALERT_WINDOW_UNTIL - now))s): could not read the latency alert policies: $(tail -n 2 "${err_file}" | tr '\n' ' ')"
+        rm -f "${err_file}"
+        return 0
+    fi
+    rm -f "${err_file}"
+    if ! verdict="$(printf '%s' "${json}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(("safe" if d["safe"] is True else "unsafe") + "\t" + d["reason"] + "\t" + "; ".join(d.get("policies") or []))
+')"; then
+        log_warn "    Alert window kept ($((ALERT_WINDOW_UNTIL - now))s): unparseable latency_retest.py output: ${json:0:200}"
+        return 0
+    fi
+    local decision="${verdict%%	*}" rest="${verdict#*	}"
+    local reason="${rest%%	*}" policies="${rest#*	}"
+    if [ "${decision}" != "safe" ]; then
+        log_warn "    Alert window kept ($((ALERT_WINDOW_UNTIL - now))s): ${reason}."
+        return 0
+    fi
+    ALERT_WINDOW_UNTIL=0
+    log_success "    Alert window released: the slow request(s) of this reset (${SLOW_REQUESTS}) cannot open a latency alert: ${reason} [${policies}]."
+    log_warn "    Remaining risk (not waited for): a latency alert can still open up to ${ALERT_LAG_SECS}s after them if other slow traffic hit the same service in the same minutes (a scenario still running, or verify-demo-infra.sh just before: use --alert-window-from-start), or if the latency policies change before then. --thorough waits the full ${ALERT_LAG_SECS}s instead."
 }
 
 # demo_request <label> <curl args...>: send one timed request to a demo service. Sets
@@ -826,7 +978,7 @@ demo_request() {
 
 # demo_request_to <body file> <label> <curl args...>: demo_request, keeping the response body.
 demo_request_to() {
-    local body_file="$1" label="$2" out status secs="" ms at reason=""
+    local body_file="$1" label="$2" out status secs="" ms at reason="" kind="full"
     shift 2
     at="$(date +%s)"
     # LC_ALL=C: time_total and awk's number parsing use a '.' decimal point.
@@ -849,11 +1001,13 @@ demo_request_to() {
                 reason="${label}: curl reported no request duration ('${out}')"
             elif [ "${ms}" -ge "${SLOW_REQUEST_MS}" ]; then
                 reason="${label} took ${ms} ms (>= ${SLOW_REQUEST_MS} ms, the latency alert threshold; a cold start?)"
+                kind="slow"
+                record_slow_request "${at}" "${ms}" "${label}"
             fi
             ;;
     esac
     if [ -n "${reason}" ]; then
-        extend_alert_window "${at}" "${reason}"
+        extend_alert_window "${at}" "${reason}" "${kind}"
     fi
 }
 
@@ -1171,6 +1325,7 @@ else
     log_info "    [MOCK/DRY-RUN] Simulating warm-up, health and admin endpoint checks."
     log_info "    [MOCK/DRY-RUN] Would restock ${INVENTORY_RESTOCK_BASELINE} via POST /admin/restock and verify with GET /items."
 fi
+settle_alert_window
 if [ "${ALERT_WINDOW_UNTIL}" -gt "$(date +%s)" ]; then
     if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
         log_warn "    [MOCK/DRY-RUN] Alert window armed ($((ALERT_WINDOW_UNTIL - $(date +%s)))s); step 6 is simulated and does not wait."
@@ -1178,21 +1333,33 @@ if [ "${ALERT_WINDOW_UNTIL}" -gt "$(date +%s)" ]; then
         log_warn "    Alert window armed: step 6 watches for alerts for another $((ALERT_WINDOW_UNTIL - $(date +%s)))s before archiving."
     fi
 else
-    log_info "    No slow, 5xx or failed demo request: no alert window needed."
+    if [ "${SLOW_FIRST_EPOCH}" -eq 0 ]; then
+        log_info "    No slow, 5xx or failed demo request: no alert window needed."
+    else
+        log_info "    No alert window needed: the latency policies' retest window covers the slow request(s) above."
+    fi
 fi
 
 # 5c. The fault reset clears only the instance it reached: confirm on the database side.
+# It runs in the background, alongside step 6: waiting for a num_backends sample taken after
+# the fault reset (Cloud SQL samples every 60 s, visible up to 210 s later) took 50-100 s
+# in QA before the 180s quiet period could even start. Step 6 stops at once if it fails,
+# and nothing is archived until it has succeeded (finish_db_backends_check).
 log_info "--> 5c. Verifying on ${NAME_PREFIX}-inventory-db (num_backends gauge) that no leaked connections remain..."
 if [ "${DRY_RUN}" = "true" ] || [ "${MOCK_MODE}" = "true" ]; then
     log_info "    [MOCK/DRY-RUN] Simulating the num_backends check."
 elif [ "${NO_WAIT}" = "true" ]; then
     log_warn "    --no-wait: the release of leaked DB connections is NOT verified."
 else
-    verify_db_backends_released "${FAULT_RESET_EPOCH}" || exit 1
+    verify_db_backends_released "${FAULT_RESET_EPOCH}" &
+    DB_CHECK_PID=$!
+    trap stop_db_backends_check EXIT
+    log_info "    Running alongside step 6 (its progress lines name ${DB_INSTANCE}); nothing is archived until it succeeds."
 fi
 
 # 6. Wait for Open ATA Alerts to Close, Terminal Incident Groups & Quiet Period
 wait_for_open_alerts
+finish_db_backends_check
 
 # 7. Archive Active Incident Files & Clean Leftover Root Storage
 log_info "--> 7. Archiving OKF incident files from knowledge/incident-manager/ to archive/..."

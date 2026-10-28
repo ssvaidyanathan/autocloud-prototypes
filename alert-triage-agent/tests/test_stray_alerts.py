@@ -185,7 +185,12 @@ def test_slow_5xx_or_failed_demo_request_arms_the_alert_window(tmp_path, statuse
                         statuses=statuses + "\n")
     assert res.returncode == 0, out(res)
     assert reason in res.stdout
-    assert "can open up to 600s later; step 6 keeps watching for alerts until then before archiving" in res.stdout
+    if "took" in reason:
+        # Slow, non-5xx: armed provisionally; settle_alert_window decides after step 5b
+        # from the live latency retest window (tests/test_fresh_reset.py).
+        assert "can open up to 600s later unless the latency policies' retest window outlasts it" in res.stdout
+    else:
+        assert "can open up to 600s later; step 6 keeps watching for alerts until then before archiving" in res.stdout
     assert 570 <= _window_left(res) <= 600
 
 
