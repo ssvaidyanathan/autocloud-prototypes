@@ -60,33 +60,43 @@ def test_unknown_or_unprovided_service_gets_no_runbook_and_no_error() -> None:
     # 1. Unprovided service (service_name=None)
     toolset_none = get_skill_toolset_for_target("logs", service_name=None)
     names_none = [s.name for s in toolset_none.skills]
-    assert names_none == ["cloud-logging-queries"]
+    assert set(names_none) == {"cloud-logging-queries", "gke-troubleshooting"}
     assert not any(s.startswith("service-") for s in names_none)
 
     # 2. Empty service string (service_name="")
     toolset_empty = get_skill_toolset_for_target("logs", service_name="")
     names_empty = [s.name for s in toolset_empty.skills]
-    assert names_empty == ["cloud-logging-queries"]
+    assert set(names_empty) == {"cloud-logging-queries", "gke-troubleshooting"}
     assert not any(s.startswith("service-") for s in names_empty)
 
     # 3. Unknown service (service_name="unknown-svc")
     toolset_unknown = get_skill_toolset_for_target("logs", service_name="unknown-service-xyz")
     names_unknown = [s.name for s in toolset_unknown.skills]
-    assert names_unknown == ["cloud-logging-queries"]
+    assert set(names_unknown) == {"cloud-logging-queries", "gke-troubleshooting"}
     assert not any(s.startswith("service-") for s in names_unknown)
 
     # 4. Known service gets dynamically attached
     toolset_known = get_skill_toolset_for_target("logs", service_name="shop-api")
     names_known = [s.name for s in toolset_known.skills]
-    assert set(names_known) == {"cloud-logging-queries", "service-shop-api"}
+    assert set(names_known) == {
+        "cloud-logging-queries",
+        "gke-troubleshooting",
+        "service-shop-api",
+    }
 
     # 5. SkillsLoader direct calls behave equivalently
     loader = SkillsLoader()
     skills_none = loader.get_skills_for_target("logs", service_name=None)
-    assert [s.name for s in skills_none] == ["cloud-logging-queries"]
+    assert set(s.name for s in skills_none) == {
+        "cloud-logging-queries",
+        "gke-troubleshooting",
+    }
 
     skills_unknown = loader.get_skills_for_target("logs", service_name="unknown-service-xyz")
-    assert [s.name for s in skills_unknown] == ["cloud-logging-queries"]
+    assert set(s.name for s in skills_unknown) == {
+        "cloud-logging-queries",
+        "gke-troubleshooting",
+    }
 
 
 def test_skills_loader_rejects_scripts_directory(tmp_path: Path) -> None:

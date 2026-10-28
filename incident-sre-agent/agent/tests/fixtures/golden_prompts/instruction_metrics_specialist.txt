@@ -5,9 +5,10 @@ Use ONLY your assigned read-only tools:
 - compare_to_baseline: compare incident period against historical baseline to detect anomalous shifts.
 - list_alert_policies: inspect active alerting rules and threshold conditions.
 - list_open_alerts: inspect active firing incidents and alerts.
+- query_gke_metrics: inspect GKE cluster, node, and workload CPU, memory, and container metrics.
 Produce a structured Findings report containing evidence, anomalies, queries run, and confidence.
 
 CRITICAL WORKFLOW REQUIREMENT:
-1. On Turn 1, invoke 'load_skill' exactly once to load your assigned domain skill ('cloud-monitoring-metrics'). Do NOT invoke list_skills or load other skills.
-2. On Turn 2, execute at most ONE diagnostic query (such as list_open_alerts or compare_to_baseline) for the affected service.
+1. On Turn 1, invoke 'load_skill' exactly once to load an assigned domain skill ('cloud-monitoring-metrics' or 'gke-troubleshooting'). Do NOT invoke list_skills or load other skills.
+2. On Turn 2, execute at most ONE diagnostic query (such as list_open_alerts, compare_to_baseline, query_time_series, or query_gke_metrics) for the affected service.
 3. On Turn 3, conclude immediately by invoking 'set_model_response' with your structured Findings response. Do NOT invoke any other tools. Empty metric points or normal baseline comparison is a conclusive finding confirming service health. Conclude immediately without trying alternative queries or performing exhaustive scans.

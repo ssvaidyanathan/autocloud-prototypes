@@ -1,4 +1,5 @@
 import math
+import re
 import urllib.parse
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
@@ -558,3 +559,224 @@ def list_open_alerts(
                     }
                 )
     return alerts
+
+
+GKE_METRIC_MAP = {
+    "restart_count": "kubernetes.io/container/restart_count",
+    "memory_limit_utilization": "kubernetes.io/container/memory/limit_utilization",
+    "memory_used_bytes": "kubernetes.io/container/memory/used_bytes",
+    "cpu_core_usage": "kubernetes.io/container/cpu/core_usage_time",
+    "cpu_limit_utilization": "kubernetes.io/container/cpu/limit_utilization",
+    "autoscaler_pending_pods": "kubernetes.io/autoscaler/cluster_pending_pods_per_ccc",
+    "autoscaler_failures": (
+        "kubernetes.io/autoscaler/cluster_node_provisioning_failed_attempts_count_per_ccc"
+    ),
+}
+
+
+@readonly_tool(
+    name="query_gke_metrics",
+    description=(
+        "Query Cloud Monitoring metrics for GKE workloads (restart_count, "
+        "memory_limit_utilization, cpu_core_usage, cpu_limit_utilization, "
+        "autoscaler_pending_pods, autoscaler_failures)."
+    ),
+)
+def query_gke_metrics(
+    metric_type: str = "restart_count",
+    cluster_name: Optional[str] = None,
+    namespace: Optional[str] = None,
+    container_name: Optional[str] = None,
+    pod_name: Optional[str] = None,
+    start_time: Optional[Union[datetime, str]] = None,
+    end_time: Optional[Union[datetime, str]] = None,
+    lookback_minutes: Optional[int] = None,
+    max_series: int = 50,
+    project_id: Optional[str] = None,
+    client: Any = None,
+) -> Dict[str, Any]:
+    """Query Cloud Monitoring metric time series for GKE containers and cluster autoscalers."""
+    from datetime import timedelta, timezone
+
+    from google.protobuf import timestamp_pb2  # type: ignore[import-untyped]
+
+    from .common import normalize_datetime, validate_k8s_identifier
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+    if not metric_type or not re.match(r"^[a-zA-Z0-9_\-\./]+$", metric_type.strip()):
+        raise ValueError(f"Invalid metric_type '{metric_type}'.")
+    clean_metric_type = metric_type.strip()
+    gcp_metric = GKE_METRIC_MAP.get(clean_metric_type, clean_metric_type)
+
+    validated_cluster = (
+        validate_k8s_identifier(cluster_name, "cluster_name") if cluster_name else None
+    )
+    validated_namespace = validate_k8s_identifier(namespace, "namespace") if namespace else None
+    validated_container = (
+        validate_k8s_identifier(container_name, "container_name") if container_name else None
+    )
+    validated_pod = validate_k8s_identifier(pod_name, "pod_name") if pod_name else None
+
+    start_time_dt = normalize_datetime(start_time)
+    end_time_dt = normalize_datetime(end_time)
+
+    if lookback_minutes is not None:
+        clamped_lb = max(1, min(1440, int(lookback_minutes)))
+        now_utc = datetime.now(timezone.utc)
+        if not end_time_dt:
+            end_time_dt = now_utc
+        start_time_dt = end_time_dt - timedelta(minutes=clamped_lb)
+
+    if not end_time_dt:
+        end_time_dt = datetime.now(timezone.utc)
+    if not start_time_dt:
+        start_time_dt = end_time_dt - timedelta(minutes=30)
+
+    clamped_max_series = max(1, min(200, int(max_series or 50)))
+
+    is_autoscaler = "autoscaler" in gcp_metric
+    filter_parts = [f'metric.type = "{gcp_metric}"']
+    if is_autoscaler:
+        filter_parts.append('resource.type = "k8s_entity"')
+    else:
+        filter_parts.append('resource.type = "k8s_container"')
+
+    if validated_cluster:
+        filter_parts.append(f'resource.labels.cluster_name = "{validated_cluster}"')
+    if validated_namespace and not is_autoscaler:
+        filter_parts.append(f'resource.labels.namespace_name = "{validated_namespace}"')
+    if validated_container and not is_autoscaler:
+        filter_parts.append(f'resource.labels.container_name = "{validated_container}"')
+    if validated_pod and not is_autoscaler:
+        filter_parts.append(f'resource.labels.pod_name = "{validated_pod}"')
+
+    filter_str = " AND ".join(filter_parts)
+    console_url = (
+        f"https://console.cloud.google.com/monitoring/metrics-explorer"
+        f"?project={pinned_project}&pageState={urllib.parse.quote(filter_str)}"
+    )
+
+    if client is None and is_local_mode():
+        return {
+            "metric_type": clean_metric_type,
+            "gcp_metric": gcp_metric,
+            "cluster_name": validated_cluster,
+            "namespace": validated_namespace,
+            "total_series": 0,
+            "series": [],
+            "truncated": False,
+            "query_filter": filter_str,
+            "console_url": console_url,
+        }
+
+    if client is None:
+        client = get_monitoring_metric_client()
+
+    if client is None and not is_local_mode():
+        raise RuntimeError("GCP Monitoring client unavailable in production environment")
+
+    series_data: List[Dict[str, Any]] = []
+    error_message: Optional[str] = None
+    if client is not None:
+        try:
+            import google.cloud.monitoring_v3 as monitoring_v3
+
+            interval = monitoring_v3.TimeInterval(
+                start_time=timestamp_pb2.Timestamp(seconds=int(start_time_dt.timestamp())),
+                end_time=timestamp_pb2.Timestamp(seconds=int(end_time_dt.timestamp())),
+            )
+            raw_series = client.list_time_series(
+                name=f"projects/{pinned_project}",
+                filter=filter_str,
+                interval=interval,
+                view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+            )
+        except Exception as exc:
+            error_message = str(exc)
+            raw_series = []
+
+        for ts in raw_series:
+            rsc_labels = getattr(ts, "resource", None)
+            labels_dict: Dict[str, str] = {}
+            if rsc_labels and hasattr(rsc_labels, "labels"):
+                labels_dict = dict(rsc_labels.labels)
+            elif isinstance(ts, dict):
+                labels_dict = ts.get("resource", {}).get("labels", {})
+
+            pts = getattr(ts, "points", []) or (
+                ts.get("points", []) if isinstance(ts, dict) else []
+            )
+            point_vals: List[Dict[str, Any]] = []
+            vals: List[float] = []
+            for pt in pts:
+                val = getattr(pt, "value", None) or (
+                    pt.get("value") if isinstance(pt, dict) else None
+                )
+                num = None
+                if val is not None:
+                    dv = getattr(val, "double_value", None)
+                    iv = getattr(val, "int64_value", None)
+                    if isinstance(dv, (int, float)) and not hasattr(dv, "_mock_name"):
+                        num = float(dv)
+                    elif isinstance(iv, (int, float)) and not hasattr(iv, "_mock_name"):
+                        num = float(iv)
+                    elif hasattr(val, "double_value") and not hasattr(
+                        getattr(val, "double_value"), "_mock_name"
+                    ):
+                        num = float(val.double_value)
+                    elif hasattr(val, "int64_value") and not hasattr(
+                        getattr(val, "int64_value"), "_mock_name"
+                    ):
+                        num = float(val.int64_value)
+                    elif isinstance(val, (int, float)) and not hasattr(val, "_mock_name"):
+                        num = float(val)
+                elif isinstance(pt, (int, float)) and not hasattr(pt, "_mock_name"):
+                    num = float(pt)
+
+                pt_interval = getattr(pt, "interval", None) or (
+                    pt.get("interval") if isinstance(pt, dict) else None
+                )
+                end_t = getattr(pt_interval, "end_time", None) or (
+                    pt_interval.get("end_time") if isinstance(pt_interval, dict) else None
+                )
+                end_str = (
+                    str(end_t.isoformat())
+                    if (end_t and hasattr(end_t, "isoformat"))
+                    else str(end_t or "")
+                )
+
+                if num is not None:
+                    vals.append(num)
+                    point_vals.append({"timestamp": end_str, "value": num})
+
+            series_data.append(
+                {
+                    "cluster_name": labels_dict.get("cluster_name", validated_cluster or ""),
+                    "namespace_name": labels_dict.get("namespace_name", validated_namespace or ""),
+                    "pod_name": labels_dict.get("pod_name", ""),
+                    "container_name": labels_dict.get("container_name", ""),
+                    "points_count": len(point_vals),
+                    "latest_value": point_vals[0]["value"] if point_vals else None,
+                    "max_value": max(vals) if vals else None,
+                    "mean_value": _calculate_mean(vals) if vals else None,
+                    "points": point_vals[:20],
+                }
+            )
+
+    truncated = len(series_data) > clamped_max_series
+    capped_series = series_data[:clamped_max_series]
+    result: Dict[str, Any] = {
+        "metric_type": clean_metric_type,
+        "gcp_metric": gcp_metric,
+        "cluster_name": validated_cluster,
+        "namespace": validated_namespace,
+        "total_series": len(capped_series),
+        "series": capped_series,
+        "truncated": truncated,
+        "query_filter": filter_str,
+        "console_url": console_url,
+    }
+    if error_message:
+        result["error"] = error_message
+    return result

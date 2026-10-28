@@ -6,6 +6,6 @@ Time Window: 2026-10-22T23:00:00+00:00 to 2026-10-23T00:00:00+00:00
 
 CRITICAL INSTRUCTIONS:
 1. Turn 1: Invoke load_skill exactly once with an assigned domain skill ('cloud-run-troubleshooting', 'gke-troubleshooting', or 'cloud-sql-troubleshooting'). Do NOT call list_skills.
-2. Turn 2: Formulate at most ONE targeted diagnostic query (e.g. describe_cloud_run_service for a Cloud Run service hint).
+2. Turn 2: Formulate at most ONE targeted diagnostic query (e.g. describe_cloud_run_service for a Cloud Run service hint, or resolve_endpoint_to_gke / query_gke_workload_status for GKE endpoints or workloads).
 3. Turn 3: Conclude immediately by invoking 'set_model_response' with your structured Findings report. Receiving 'status': 'NOT_FOUND', 'conclusive': True, or finding 0 resources is definitive diagnostic proof that zero infrastructure defects exist. Do NOT invoke any further tools. Your ONLY valid action on Turn 3 is to invoke 'set_model_response'.
 4. STRICT PROHIBITION ON CROSS-PLATFORM HUNTING: If investigating a Cloud Run service, you are strictly forbidden from searching GKE clusters, Compute Engine instances, or Cloud SQL instances.

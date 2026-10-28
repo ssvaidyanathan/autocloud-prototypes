@@ -155,6 +155,17 @@ Configure the following alerting policies in Google Cloud Monitoring:
   - Switch model configuration to fallback or increase quota via GCP Console.
   - SRE Agent built-in heuristic fallback will output raw specialist findings even when synthesis is degraded.
 
+### Runbook 6: GKE Workload Status Returns UNREACHABLE or FORBIDDEN
+- **Symptoms**: Agent log or report indicates `query_gke_workload_status` returned `status: "UNREACHABLE"` or `status: "FORBIDDEN"`.
+- **Diagnostic Steps**:
+  1. Inspect status details in report dossier or Cloud Logging:
+     - `UNREACHABLE`: Connection timed out to GKE master. Check if the cluster enforces Master Authorized Networks or is a private cluster without VPC routing.
+     - `FORBIDDEN`: HTTP 403 Forbidden from GKE master. Agent service account lacks Kubernetes RBAC permissions.
+- **Resolution**:
+  - For `UNREACHABLE`: Add the agent egress IP or CIDR to the cluster's authorized networks: `gcloud container clusters update <CLUSTER> --enable-master-authorized-networks --master-authorized-networks=<AGENT_CIDR>`.
+  - For `FORBIDDEN`: Bind the Kubernetes `view` ClusterRole to the agent service account: `kubectl create clusterrolebinding isa-agent-view --clusterrole=view --user="agent-sa@<PROJECT_ID>.iam.gserviceaccount.com"`.
+  - For complete operational diagnostics across all GKE tools, see the [GKE Investigation Guide](GKE_INVESTIGATION.md).
+
 ---
 
 ## 4. Authoring and Extending SRE Runbook Skills

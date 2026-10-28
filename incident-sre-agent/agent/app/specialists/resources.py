@@ -26,6 +26,8 @@ from ..tools.resources import (
     describe_compute_instances,
     describe_gke_clusters,
     get_platform_events,
+    query_gke_workload_status,
+    resolve_endpoint_to_gke,
 )
 from .base import BaseSpecialist, SkillTracker, run_sync
 
@@ -62,6 +64,8 @@ class ResourcesSpecialist(BaseSpecialist):
             FunctionTool(describe_gke_clusters),
             FunctionTool(describe_compute_instances),
             FunctionTool(describe_cloud_sql_instances),
+            FunctionTool(query_gke_workload_status),
+            FunctionTool(resolve_endpoint_to_gke),
         ]
         self.adk_tools = adk_tools
 
@@ -148,6 +152,18 @@ class ResourcesSpecialist(BaseSpecialist):
                 kwargs["client"] = self.client
             return describe_cloud_sql_instances(**kwargs)
 
+        @functools.wraps(query_gke_workload_status)
+        def _bound_query_gke_workload_status(**kwargs: Any) -> Any:
+            if "client" not in kwargs and self.client is not None:
+                kwargs["client"] = self.client
+            return query_gke_workload_status(**kwargs)
+
+        @functools.wraps(resolve_endpoint_to_gke)
+        def _bound_resolve_endpoint_to_gke(**kwargs: Any) -> Any:
+            if "client" not in kwargs and self.client is not None:
+                kwargs["client"] = self.client
+            return resolve_endpoint_to_gke(**kwargs)
+
         tools: list[Any] = [
             skill_toolset,
             FunctionTool(_bound_describe_cloud_run_service),
@@ -155,6 +171,8 @@ class ResourcesSpecialist(BaseSpecialist):
             FunctionTool(_bound_describe_gke_clusters),
             FunctionTool(_bound_describe_compute_instances),
             FunctionTool(_bound_describe_cloud_sql_instances),
+            FunctionTool(_bound_query_gke_workload_status),
+            FunctionTool(_bound_resolve_endpoint_to_gke),
         ]
 
         instruction = get_agent_yaml_config().get_instruction("resources_specialist")

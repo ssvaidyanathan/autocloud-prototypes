@@ -1014,3 +1014,283 @@ def aggregate_requests(
         max_entries=max_entries,
         client=client,
     )
+
+
+@readonly_tool(
+    name="get_gke_workload_events",
+    description=(
+        "Retrieve structured Kubernetes events (Warning/Killing/OOM/FailedScheduling/BackOff) "
+        "and k8s.io audit activity (scale/patch/update on deployments) for a GKE cluster."
+    ),
+)
+def get_gke_workload_events(
+    cluster_name: str,
+    namespace: Optional[str] = None,
+    workload_name: Optional[str] = None,
+    start_time: Optional[Union[datetime, str]] = None,
+    end_time: Optional[Union[datetime, str]] = None,
+    lookback_minutes: Optional[int] = None,
+    include_normal_events: bool = False,
+    max_events: int = 50,
+    project_id: Optional[str] = None,
+    client: Any = None,
+) -> Dict[str, Any]:
+    """Query Cloud Logging for Kubernetes events (logs/events) and audit activity."""
+    from .common import normalize_datetime, validate_k8s_identifier
+    from .registry import get_pinned_project_id
+
+    pinned_project = get_pinned_project_id(project_id)
+
+    validated_cluster = validate_k8s_identifier(cluster_name, "cluster_name")
+    if not validated_cluster:
+        raise ValueError("cluster_name is required and must be a valid identifier.")
+    validated_namespace = validate_k8s_identifier(namespace, "namespace") if namespace else None
+    validated_workload = (
+        validate_k8s_identifier(workload_name, "workload_name") if workload_name else None
+    )
+
+    start_time_dt = normalize_datetime(start_time)
+    end_time_dt = normalize_datetime(end_time)
+
+    if lookback_minutes is not None:
+        clamped_lb = max(1, min(1440, int(lookback_minutes)))
+        now_utc = datetime.now(timezone.utc)
+        if not end_time_dt:
+            end_time_dt = now_utc
+        start_time_dt = end_time_dt - timedelta(minutes=clamped_lb)
+
+    if not end_time_dt:
+        end_time_dt = datetime.now(timezone.utc)
+    if not start_time_dt:
+        start_time_dt = end_time_dt - timedelta(minutes=60)
+
+    clamped_limit = max(1, min(200, int(max_events or 50)))
+
+    filter_parts = [
+        f'timestamp >= "{start_time_dt.isoformat()}"',
+        f'timestamp <= "{end_time_dt.isoformat()}"',
+        f'resource.labels.cluster_name = "{validated_cluster}"',
+    ]
+    if validated_namespace:
+        filter_parts.append(
+            f'(resource.labels.namespace_name = "{validated_namespace}" '
+            f'OR protoPayload.resourceName =~ "namespaces/{validated_namespace}/")'
+        )
+
+    audit_cond = (
+        '(logName =~ "cloudaudit.googleapis.com%2Factivity" '
+        'AND protoPayload.serviceName = "k8s.io" '
+        'AND NOT protoPayload.methodName =~ "leases")'
+    )
+    if include_normal_events:
+        event_subclause = f'(logName =~ "/logs/events" OR {audit_cond})'
+    else:
+        warn_reasons = (
+            '("Killing" OR "OOMKilling" OR "OOMKilled" OR "FailedScheduling" '
+            'OR "Unhealthy" OR "BackOff" OR "FailedMount" OR "FailedSync" '
+            'OR "CrashLoopBackOff" OR "Evicted" OR "NetworkNotReady" OR "Scheduled")'
+        )
+        warn_cond = (
+            f'((logName =~ "/logs/events" AND (jsonPayload.type = "Warning" '
+            f"OR jsonPayload.reason = {warn_reasons}))"
+        )
+        event_subclause = f"{warn_cond} OR {audit_cond})"
+    filter_parts.append(event_subclause)
+    final_filter = " AND ".join(filter_parts)
+
+    console_url = (
+        f"https://console.cloud.google.com/logs/query;query="
+        f"{urllib.parse.quote(final_filter)};project={pinned_project}"
+    )
+
+    if client is None and is_local_mode():
+        return {
+            "cluster_name": validated_cluster,
+            "namespace": validated_namespace,
+            "workload_name": validated_workload,
+            "total_events": 0,
+            "events": [],
+            "truncated": False,
+            "query_filter": final_filter,
+            "console_url": console_url,
+        }
+
+    if client is None:
+        client = get_logging_client(pinned_project)
+
+    if client is None and not is_local_mode():
+        raise RuntimeError("GCP Logging client unavailable in production environment")
+
+    raw_entries: List[Any] = []
+    if client is not None:
+        try:
+            entries_iter = client.list_entries(
+                resource_names=[f"projects/{pinned_project}"],
+                filter_=final_filter,
+                page_size=clamped_limit,
+                max_results=clamped_limit,
+            )
+            for entry in entries_iter:
+                raw_entries.append(entry)
+                if len(raw_entries) >= clamped_limit:
+                    break
+        except TypeError:
+            try:
+                entries_iter = client.list_entries(
+                    resource_names=[f"projects/{pinned_project}"],
+                    filter_=final_filter,
+                    page_size=clamped_limit,
+                )
+                for entry in entries_iter:
+                    raw_entries.append(entry)
+                    if len(raw_entries) >= clamped_limit:
+                        break
+            except Exception:
+                raw_entries = []
+        except Exception:
+            raw_entries = []
+
+    events: List[Dict[str, Any]] = []
+    for entry in raw_entries:
+        ts = getattr(entry, "timestamp", None)
+        ts_str = (
+            str(ts.isoformat()) if (ts is not None and hasattr(ts, "isoformat")) else str(ts or "")
+        )
+        log_name = getattr(entry, "log_name", "") or (
+            entry.get("log_name", "") if isinstance(entry, dict) else ""
+        )
+
+        if "cloudaudit" in log_name:
+            proto = (
+                getattr(entry, "proto_payload", None)
+                or getattr(entry, "payload", None)
+                or getattr(entry, "protoPayload", None)
+                or (entry.get("protoPayload") if isinstance(entry, dict) else {})
+                or (entry.get("payload") if isinstance(entry, dict) else {})
+                or (entry.get("proto_payload") if isinstance(entry, dict) else {})
+                or {}
+            )
+            method_name = (
+                proto.get("methodName", "")
+                if isinstance(proto, dict)
+                else getattr(proto, "method_name", "")
+            )
+            resource_name = (
+                proto.get("resourceName", "")
+                if isinstance(proto, dict)
+                else getattr(proto, "resource_name", "")
+            )
+            auth_info = (
+                proto.get("authenticationInfo", {})
+                if isinstance(proto, dict)
+                else getattr(proto, "authentication_info", {})
+            )
+            principal_email = (
+                auth_info.get("principalEmail", "")
+                if isinstance(auth_info, dict)
+                else getattr(auth_info, "principal_email", "")
+            )
+
+            action = (
+                "scale"
+                if "scale" in method_name
+                else (
+                    "patch"
+                    if "patch" in method_name
+                    else (
+                        "update"
+                        if "update" in method_name
+                        else (
+                            "delete"
+                            if "delete" in method_name
+                            else ("create" if "create" in method_name else "audit")
+                        )
+                    )
+                )
+            )
+
+            if workload_name and workload_name not in resource_name:
+                continue
+
+            events.append(
+                {
+                    "timestamp": ts_str,
+                    "event_type": "audit_activity",
+                    "action": action,
+                    "method_name": method_name,
+                    "resource_name": resource_name,
+                    "principal_email": principal_email,
+                    "message": f"{principal_email} executed {method_name} on {resource_name}",
+                }
+            )
+        else:
+            raw_payload = getattr(entry, "payload", None)
+            if hasattr(raw_payload, "_mock_name"):
+                raw_payload = None
+            if raw_payload is None and isinstance(entry, dict):
+                raw_payload = entry.get("payload")
+
+            jp = (
+                raw_payload
+                or getattr(entry, "json_payload", None)
+                or getattr(entry, "jsonPayload", None)
+                or (entry.get("payload") if isinstance(entry, dict) else {})
+                or (entry.get("jsonPayload") if isinstance(entry, dict) else {})
+                or (entry.get("json_payload") if isinstance(entry, dict) else {})
+                or {}
+            )
+            reason = (
+                jp.get("reason", "unknown")
+                if isinstance(jp, dict)
+                else getattr(jp, "reason", "unknown")
+            )
+            message = jp.get("message", "") if isinstance(jp, dict) else getattr(jp, "message", "")
+            involved = (
+                jp.get("involvedObject", {})
+                if isinstance(jp, dict)
+                else getattr(jp, "involved_object", {})
+            )
+            involved_name = (
+                involved.get("name", "")
+                if isinstance(involved, dict)
+                else getattr(involved, "name", "")
+            )
+            involved_kind = (
+                involved.get("kind", "")
+                if isinstance(involved, dict)
+                else getattr(involved, "kind", "")
+            )
+            k8s_type = (
+                jp.get("type", "Normal") if isinstance(jp, dict) else getattr(jp, "type", "Normal")
+            )
+
+            if (
+                workload_name
+                and workload_name not in involved_name
+                and workload_name not in message
+            ):
+                continue
+
+            events.append(
+                {
+                    "timestamp": ts_str,
+                    "event_type": "k8s_event",
+                    "severity": "WARNING" if k8s_type == "Warning" else "INFO",
+                    "reason": reason,
+                    "involved_object": involved_name,
+                    "involved_kind": involved_kind,
+                    "message": message,
+                }
+            )
+
+    truncated = len(raw_entries) >= clamped_limit or len(events) > clamped_limit
+    return {
+        "cluster_name": validated_cluster,
+        "namespace": validated_namespace,
+        "workload_name": validated_workload,
+        "total_events": len(events),
+        "events": events[:clamped_limit],
+        "truncated": truncated,
+        "query_filter": final_filter,
+        "console_url": console_url,
+    }

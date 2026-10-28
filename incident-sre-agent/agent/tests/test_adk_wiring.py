@@ -77,6 +77,7 @@ def test_specialists_tool_segregation_and_readonly_allowlist() -> None:
     logs_tool_names = [t.name for t in logs_spec.get_tools()]
     assert set(logs_tool_names) == {
         "query_logs",
+        "get_gke_workload_events",
         "query_request_logs",
         "aggregate_requests",
         "summarize_error_groups",
@@ -85,14 +86,15 @@ def test_specialists_tool_segregation_and_readonly_allowlist() -> None:
     for t in logs_spec.get_tools():
         assert isinstance(t, FunctionTool)
 
-    # 2. Metrics Specialist: ONLY query_time_series, compare_to_baseline,
-    #    list_alert_policies, list_open_alerts
+    # 2. Metrics Specialist: query_time_series, compare_to_baseline,
+    #    list_alert_policies, list_open_alerts, query_gke_metrics
     metrics_tool_names = [t.name for t in metrics_spec.get_tools()]
     assert set(metrics_tool_names) == {
         "query_time_series",
         "compare_to_baseline",
         "list_alert_policies",
         "list_open_alerts",
+        "query_gke_metrics",
     }
 
     # 3. Changes Specialist: query_audit_logs, diff_revisions, list_cloud_run_revisions,
@@ -106,7 +108,8 @@ def test_specialists_tool_segregation_and_readonly_allowlist() -> None:
     }
 
     # 4. Resources Specialist: describe_cloud_run_service, get_platform_events,
-    #    describe_gke_clusters, describe_compute_instances, describe_cloud_sql_instances
+    #    describe_gke_clusters, describe_compute_instances, describe_cloud_sql_instances,
+    #    query_gke_workload_status, resolve_endpoint_to_gke
     resources_tool_names = [t.name for t in resources_spec.get_tools()]
     assert set(resources_tool_names) == {
         "describe_cloud_run_service",
@@ -114,6 +117,8 @@ def test_specialists_tool_segregation_and_readonly_allowlist() -> None:
         "describe_gke_clusters",
         "describe_compute_instances",
         "describe_cloud_sql_instances",
+        "query_gke_workload_status",
+        "resolve_endpoint_to_gke",
     }
 
 
@@ -146,7 +151,10 @@ def test_skill_toolset_integration_and_filtering() -> None:
     assert "service-shop-api" not in disp_skill_names
 
     logs_base = get_skill_toolset_for_target("logs")
-    assert [s.name for s in logs_base.skills] == ["cloud-logging-queries"]
+    assert set(s.name for s in logs_base.skills) == {
+        "cloud-logging-queries",
+        "gke-troubleshooting",
+    }
 
     # 2. Verify dynamic runtime resolution with service_name="shop-api"
     disp_toolset_svc = get_skill_toolset_for_target("dispatcher", service_name="shop-api")
@@ -158,19 +166,31 @@ def test_skill_toolset_integration_and_filtering() -> None:
     logs_toolset = get_skill_toolset_for_target("logs", service_name="shop-api")
     assert isinstance(logs_toolset, SkillToolset)
     logs_skill_names = [s.name for s in logs_toolset.skills]
-    assert set(logs_skill_names) == {"cloud-logging-queries", "service-shop-api"}
+    assert set(logs_skill_names) == {
+        "cloud-logging-queries",
+        "gke-troubleshooting",
+        "service-shop-api",
+    }
 
     # Verify metrics specialist skill toolset with dynamic resolution
     metrics_toolset = get_skill_toolset_for_target("metrics", service_name="shop-api")
     assert isinstance(metrics_toolset, SkillToolset)
     metrics_skill_names = [s.name for s in metrics_toolset.skills]
-    assert set(metrics_skill_names) == {"cloud-monitoring-metrics", "service-shop-api"}
+    assert set(metrics_skill_names) == {
+        "cloud-monitoring-metrics",
+        "gke-troubleshooting",
+        "service-shop-api",
+    }
 
     # Verify changes specialist skill toolset with dynamic resolution
     changes_toolset = get_skill_toolset_for_target("changes", service_name="shop-api")
     assert isinstance(changes_toolset, SkillToolset)
     changes_skill_names = [s.name for s in changes_toolset.skills]
-    assert set(changes_skill_names) == {"change-correlation", "service-shop-api"}
+    assert set(changes_skill_names) == {
+        "change-correlation",
+        "k8s-change-correlation",
+        "service-shop-api",
+    }
 
     # Verify synthesizer skill toolset with dynamic resolution
     synth_toolset = get_skill_toolset_for_target("synthesizer", service_name="shop-api")

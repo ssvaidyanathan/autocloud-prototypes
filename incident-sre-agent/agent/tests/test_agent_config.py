@@ -37,19 +37,19 @@ from agent.app.triage import TriageAgent
 EXPECTED_INSTRUCTION_HASHES: Dict[str, str] = {
     "triage": "8406f1bdc06a9251d2211954446d8b905ac2f2bf9848f4d1b9b65b633a42f959",
     "synthesizer": "c915b3e0a2a184a0096eaea5cabbc88cd6d9fbf1ddc8ea155facb48dc4b6765d",
-    "changes_specialist": "58bcafc4cf67704e0f8a443ee7d0083c1d9dc2139d9ba6c1c5543107441e2eff",
-    "logs_specialist": "3622c753910b367def5fc77ece1d6cf77e4e92f90d7bb2453a0af0d7cfaf1c0b",
-    "metrics_specialist": "dc83ec50ed0e3d8b2a745bc720ece540d73c4ce369e5e6e6cad4e82e089ce318",
-    "resources_specialist": "a98a669b76d6819dd296f42b5f96d7fce1e4d16e684865969b4370b1495b6095",
+    "changes_specialist": "e59b7ba6410645ce8c3aceb9efacad8f08cd704fc79903a844ab309db7e43081",
+    "logs_specialist": "1c6b10a3554defb9071103d8914ab249057f5d5cc476bc0a0eb1baa14f4dbf9b",
+    "metrics_specialist": "a32edb36b3111fdc4cb0f402c92e2310f833ed2a1417de4d4a16aca884661c8e",
+    "resources_specialist": "79e097a49b924d08a79d57a0a18ddfd07f265a0b78d8d04346b6746b9ac37a04",
 }
 
 EXPECTED_INSTRUCTION_LENGTHS: Dict[str, int] = {
     "triage": 706,
     "synthesizer": 6919,
-    "changes_specialist": 2008,
-    "logs_specialist": 1301,
-    "metrics_specialist": 1287,
-    "resources_specialist": 2037,
+    "changes_specialist": 2083,
+    "logs_specialist": 1457,
+    "metrics_specialist": 1446,
+    "resources_specialist": 2364,
 }
 
 

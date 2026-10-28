@@ -203,6 +203,8 @@ When `/investigate` is invoked, the Dispatcher initializes the investigation con
    - If the incident title or CMDB CI matches a known service, the skill's specific SLOs, diagnostic queries, and failure mode playbooks are injected into specialist prompts.
 3. **Specialist Selection**:
    - By default, all 4 specialists (`logs`, `metrics`, `changes`, `resources`) are dispatched in parallel. If the incident description explicitly indicates a pure metric alert or isolated deploy issue, the Dispatcher can focus specialist selection accordingly.
+4. **Pre-Fanout Endpoint Resolution**:
+   - If the incident refers to an external IP or Uptime Check endpoint, triage resolves it to the backing GKE cluster, namespace, and workload using `resolve_endpoint_to_gke` prior to specialist dispatch, populating full GKE context for all parallel sub-agents (see [GKE Investigation Guide](GKE_INVESTIGATION.md)).
 
 ### 3.5 Specialist Sub-Agents & Execution Model
 
@@ -210,10 +212,10 @@ Each specialist operates as an independent ADK `LlmAgent` endowed with domain-sp
 
 | Specialist | Target Telemetry | Tool Modules | Assigned Skills | Typical Queries / Responsibilities |
 |---|---|---|---|---|
-| **Logs Specialist** | Google Cloud Logging | `tools/logs.py` | `cloud-logging-queries`, `service-<name>` | Query `severity>=ERROR`, parse stack traces, count error frequency, extract HTTP 5xx log entries, identify first/last occurrence, query request logs via `query_request_logs` (and `aggregate_requests` alias) for status breakdown and latency percentiles. |
-| **Metrics Specialist** | Google Cloud Monitoring | `tools/metrics.py` | `cloud-monitoring-metrics`, `service-<name>` | Fetch time-series for Cloud Run request latencies (p50, p95, p99), container CPU/memory utilization, instance auto-scaling counts. |
-| **Changes Specialist** | Cloud Audit Logs | `tools/changes.py` | `change-correlation`, `service-<name>` | Query `cloudaudit.googleapis.com` for service updates, new Cloud Run revisions, IAM policy modifications, deployment rollout timestamps, and compute configuration diffs via `diff_revisions` (with zero secret leakage). |
-| **Resources Specialist** | Cloud Asset / Run API | `tools/resources.py` | `cloud-run-troubleshooting`, `gke-troubleshooting`, `cloud-sql-troubleshooting`, `service-<name>` | Inspect service specifications, ingress settings, env var names (with automated secret redaction), scaling limits, dependency URLs, and inspect container restarts / OOM kills / probe failures via `get_platform_events`. |
+| **Logs Specialist** | Google Cloud Logging | `tools/logs.py` | `cloud-logging-queries`, `gke-troubleshooting`, `service-<name>` | Query `severity>=ERROR`, parse stack traces, count error frequency, extract HTTP 5xx log entries, identify first/last occurrence, query request logs via `query_request_logs` (and `aggregate_requests` alias), and retrieve structured Kubernetes lifecycle events via `get_gke_workload_events`. |
+| **Metrics Specialist** | Google Cloud Monitoring | `tools/metrics.py` | `cloud-monitoring-metrics`, `gke-troubleshooting`, `service-<name>` | Fetch time-series for Cloud Run request latencies (p50, p95, p99), container CPU/memory utilization, instance auto-scaling counts, and query GKE container/autoscaler metrics via `query_gke_metrics`. |
+| **Changes Specialist** | Cloud Audit Logs | `tools/changes.py` | `change-correlation`, `k8s-change-correlation`, `service-<name>` | Query `cloudaudit.googleapis.com` for service updates, new Cloud Run revisions, IAM policy modifications, deployment rollout timestamps, `k8s.io` administrative mutations (scale patches, updates), and compute configuration diffs via `diff_revisions` (with zero secret leakage). |
+| **Resources Specialist** | Cloud Asset / Run / GKE / Compute APIs | `tools/resources.py` | `cloud-run-troubleshooting`, `gke-troubleshooting`, `cloud-sql-troubleshooting`, `service-<name>` | Inspect service specifications, ingress settings, env var names (with automated secret redaction), scaling limits, discover multi-region GKE clusters (`describe_gke_clusters`), resolve external IP endpoints (`resolve_endpoint_to_gke`), inspect live GKE workload status and probes (`query_gke_workload_status`), and inspect platform events via `get_platform_events`. |
 
 Key architectural execution characteristics:
 - **Skill-First Progressive Loading**: Each specialist loads its assigned skills first via ADK `SkillToolset` (`skill_first=True`) before executing diagnostic investigations.

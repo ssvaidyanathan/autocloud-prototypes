@@ -105,7 +105,17 @@ class SkillTracker:
             }
 
         # 1b. Prevent further tool calls after conclusive diagnostic query on single-service target
-        if self.queries_run and self.single_service_target and tool_name != "set_model_response":
+        # Exception: resolving an endpoint to GKE is discovery; allow following up with
+        # query_gke_workload_status
+        is_endpoint_resolution = any(
+            call[0] == "resolve_endpoint_to_gke" for call in self.executed_calls
+        )
+        if (
+            self.queries_run
+            and self.single_service_target
+            and tool_name != "set_model_response"
+            and not (is_endpoint_resolution and tool_name == "query_gke_workload_status")
+        ):
             ctx = tool_context or kwargs.get("tool_context")
             if ctx is not None:
                 if hasattr(ctx, "actions"):

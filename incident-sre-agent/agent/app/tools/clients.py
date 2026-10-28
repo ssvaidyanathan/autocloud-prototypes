@@ -195,6 +195,106 @@ def get_compute_instances_client() -> Optional[Any]:
         return None
 
 
+def get_compute_forwarding_rules_client() -> Optional[Any]:
+    """Factory for google.cloud.compute_v1.ForwardingRulesClient."""
+    if is_local_mode():
+        return None
+
+    cache_key = "compute_forwarding_rules_client"
+    if cache_key in _client_cache:
+        return _client_cache[cache_key]
+
+    try:
+        import google.cloud.compute_v1
+
+        client = google.cloud.compute_v1.ForwardingRulesClient()
+        _client_cache[cache_key] = client
+        return client
+    except Exception as exc:
+        _handle_factory_error("Compute Engine ForwardingRulesClient", exc)
+        return None
+
+
+def get_compute_target_pools_client() -> Optional[Any]:
+    """Factory for google.cloud.compute_v1.TargetPoolsClient."""
+    if is_local_mode():
+        return None
+
+    cache_key = "compute_target_pools_client"
+    if cache_key in _client_cache:
+        return _client_cache[cache_key]
+
+    try:
+        import google.cloud.compute_v1
+
+        client = google.cloud.compute_v1.TargetPoolsClient()
+        _client_cache[cache_key] = client
+        return client
+    except Exception as exc:
+        _handle_factory_error("Compute Engine TargetPoolsClient", exc)
+        return None
+
+
+def get_compute_backend_services_client() -> Optional[Any]:
+    """Factory for google.cloud.compute_v1.BackendServicesClient."""
+    if is_local_mode():
+        return None
+
+    cache_key = "compute_backend_services_client"
+    if cache_key in _client_cache:
+        return _client_cache[cache_key]
+
+    try:
+        import google.cloud.compute_v1
+
+        client = google.cloud.compute_v1.BackendServicesClient()
+        _client_cache[cache_key] = client
+        return client
+    except Exception as exc:
+        _handle_factory_error("Compute Engine BackendServicesClient", exc)
+        return None
+
+
+def get_compute_region_backend_services_client() -> Optional[Any]:
+    """Factory for google.cloud.compute_v1.RegionBackendServicesClient."""
+    if is_local_mode():
+        return None
+
+    cache_key = "compute_region_backend_services_client"
+    if cache_key in _client_cache:
+        return _client_cache[cache_key]
+
+    try:
+        import google.cloud.compute_v1
+
+        client = google.cloud.compute_v1.RegionBackendServicesClient()
+        _client_cache[cache_key] = client
+        return client
+    except Exception as exc:
+        _handle_factory_error("Compute Engine RegionBackendServicesClient", exc)
+        return None
+
+
+def get_compute_network_endpoint_groups_client() -> Optional[Any]:
+    """Factory for google.cloud.compute_v1.NetworkEndpointGroupsClient."""
+    if is_local_mode():
+        return None
+
+    cache_key = "compute_network_endpoint_groups_client"
+    if cache_key in _client_cache:
+        return _client_cache[cache_key]
+
+    try:
+        import google.cloud.compute_v1
+
+        client = google.cloud.compute_v1.NetworkEndpointGroupsClient()
+        _client_cache[cache_key] = client
+        return client
+    except Exception as exc:
+        _handle_factory_error("Compute Engine NetworkEndpointGroupsClient", exc)
+        return None
+
+
 def get_gke_cluster_client() -> Optional[Any]:
     """Factory for google.cloud.container_v1.ClusterManagerClient."""
     if is_local_mode():

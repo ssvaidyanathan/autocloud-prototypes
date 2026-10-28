@@ -7,6 +7,6 @@ Observed Symptoms: HTTP 500 spike, Latency P99 > 4000ms
 Triage Hypotheses: Redis cache connection pool exhausted, CPU throttling on checkout workers
 
 CRITICAL INSTRUCTIONS:
-1. Turn 1: Invoke load_skill exactly once with skill_name='cloud-logging-queries'. Do NOT call list_skills.
-2. Turn 2: Execute at most ONE diagnostic query using query_logs or summarize_error_groups focusing on the affected service.
+1. Turn 1: Invoke load_skill exactly once with skill_name='cloud-logging-queries' (or 'gke-troubleshooting' if investigating Kubernetes or GKE workloads). Do NOT call list_skills.
+2. Turn 2: Execute at most ONE diagnostic query using query_logs, summarize_error_groups, or get_gke_workload_events focusing on the affected service.
 3. Turn 3: Conclude immediately by invoking 'set_model_response' with your structured Findings report. Do NOT invoke any other tools. Zero log entries or empty results is a conclusive finding confirming service health. Do not loop or try alternative queries.

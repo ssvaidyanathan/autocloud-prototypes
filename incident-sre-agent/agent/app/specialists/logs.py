@@ -22,6 +22,7 @@ from ..skills_loader import get_skill_toolset_for_target
 from ..tools.common import normalize_datetime
 from ..tools.logs import (
     aggregate_requests,
+    get_gke_workload_events,
     list_log_names,
     query_logs,
     query_request_logs,
@@ -59,6 +60,7 @@ class LogsSpecialist(BaseSpecialist):
         # Static tool definitions for inspection and ToolRegistry checks
         adk_tools: list[Any] = [
             FunctionTool(query_logs),
+            FunctionTool(get_gke_workload_events),
             FunctionTool(query_request_logs),
             FunctionTool(aggregate_requests),
             FunctionTool(summarize_error_groups),
@@ -135,6 +137,12 @@ class LogsSpecialist(BaseSpecialist):
                     return query_logs(**kwargs)
                 raise
 
+        @functools.wraps(get_gke_workload_events)
+        def _bound_get_gke_workload_events(**kwargs: Any) -> Any:
+            if "client" not in kwargs and self.client is not None:
+                kwargs["client"] = self.client
+            return get_gke_workload_events(**kwargs)
+
         @functools.wraps(query_request_logs)
         def _bound_query_request_logs(**kwargs: Any) -> Any:
             if "client" not in kwargs and self.client is not None:
@@ -162,6 +170,7 @@ class LogsSpecialist(BaseSpecialist):
         tools: list[Any] = [
             skill_toolset,
             FunctionTool(_bound_query_logs),
+            FunctionTool(_bound_get_gke_workload_events),
             FunctionTool(_bound_query_request_logs),
             FunctionTool(_bound_aggregate_requests),
             FunctionTool(_bound_summarize_error_groups),
