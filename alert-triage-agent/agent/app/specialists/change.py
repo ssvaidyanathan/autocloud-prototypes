@@ -383,19 +383,25 @@ def healthy_period(
     under `max_latency_ms` (CHANGE_HEALTHY_MAX_LATENCY_MS); it is unhealthy when either is at
     or over its threshold. These are heuristics, not the alert-policy conditions. A minute with
     requests but no latency point is judged on the 5xx share alone, and the evidence states how
-    many minutes that was. A healthy period is a span of at least `min_minutes` (first to last
-    healthy minute, both counted) with no unhealthy minute inside and requests in at least
-    `min_active_minutes` of its minutes (CHANGE_HEALTHY_MIN_ACTIVE_MINUTES). Minutes without
-    requests neither count toward that floor nor break the span.
+    many minutes that was. Minutes without requests neither count nor break a span.
+
+    Verdicts, counting only HEALTHY minutes with requests (failing minutes, including the
+    fault's own lead-in before the onset, never count toward health):
+      - "healthy": a span of at least `min_minutes` (first to last healthy minute, both
+        counted) with no unhealthy minute inside and requests in at least
+        `min_active_minutes` of its minutes (CHANGE_HEALTHY_MIN_ACTIVE_MINUTES);
+      - "no_healthy_period": not one healthy minute, and at least one failing minute (S5);
+      - "unavailable" with reason "insufficient_traffic": 1 to `min_active_minutes` - 1
+        healthy minutes and no qualifying span;
+      - "unavailable" with reason "inconclusive": at least `min_active_minutes` healthy
+        minutes but no qualifying span.
+    The verdict is monotone: adding a healthy minute never makes "no_healthy_period" more likely.
 
     Returns {"status": "healthy" | "no_healthy_period" | "unavailable", "evidence": str, ...}.
-    "unavailable" means the test could not be applied: a read failed, no request reached the
-    revision, or request_latencies returned no point for it (the evidence is incomplete, so no
-    verdict is drawn from the 5xx share alone). It is also "unavailable", with reason
-    "insufficient_traffic", when there was too little traffic to tell: a long enough span of
-    normal traffic with requests in fewer than `min_active_minutes` minutes, or fewer than
-    `min_active_minutes` minutes with requests at all. Sparse traffic never yields
-    "no_healthy_period". The caller falls back to the onset-window rule and says so.
+    "unavailable" also means the test could not be applied: a read failed, no request reached
+    the revision, or request_latencies returned no point for it (the evidence is incomplete, so
+    no verdict is drawn from the 5xx share alone). The caller falls back to the onset-window
+    rule and says so.
 
     Both reads are filtered to the revision and bounded by MONITORING_READ_TIMEOUT_SECONDS; a
     timeout is a failed read ("unavailable").
@@ -528,43 +534,48 @@ def healthy_period(
             ),
         )
         return result
-    # Too little traffic is not evidence of an unhealthy revision: never "no healthy period"
-    # from sparse traffic. A long enough span with too few minutes with requests, or too few
-    # minutes with requests at all, leaves the healthy period undetermined (rule (a) only).
-    if long_runs or len(per_minute) < min_active_minutes:
-        if long_runs:
-            sparse = max(long_runs, key=lambda r: (r[3], span_of(r)))
-            k = sparse[3]
-            start, end = shown(sparse)
-            detail = (
-                f"its span of normal traffic from {start} to {end} ({span_of(sparse)} one-minute intervals) "
-                f"had requests in only {k} of them"
-            )
-        else:
-            k = len(per_minute)
-            detail = f"it had requests in only {k} minutes"
+    # The floor counts HEALTHY minutes with requests only. Failing minutes (the fault's own
+    # lead-in before the onset included) never count toward health, so the verdict is monotone:
+    # adding a healthy minute can only move it from "no healthy period" towards "healthy".
+    healthy_active = sum(r[3] for r in runs)
+    unhealthy_active = len(per_minute) - healthy_active
+    bad = f"; first minute over the thresholds {_iso(first_bad[0])} ({first_bad[1]})" if first_bad else ""
+    if healthy_active == 0:
+        # Not one healthy minute from the deploy to the onset, and at least one failing minute
+        # (per_minute is not empty): the revision failed from its first request (S5).
         result.update(
-            status="unavailable", reason="insufficient_traffic", minutes=0, active_minutes=k,
+            status="no_healthy_period", minutes=0, active_minutes=0, unhealthy_minutes=unhealthy_active,
             evidence=(
-                f"insufficient traffic to establish a healthy period ({k} active minutes < {min_active_minutes}, "
-                f"{floor}): Cloud Monitoring shows {revision} {window}: {detail} ({thresholds}){gaps}"
+                f"no healthy period: Cloud Monitoring shows {revision} {window}: it had no minute of normal "
+                f"traffic (all {unhealthy_active} minutes with requests were over a threshold) ({thresholds}){bad}{gaps}"
             ),
         )
         return result
-    best = max(runs, key=span_of) if runs else None
-    span = span_of(best) if best else 0
-    if best is not None:
-        start, end = shown(best)
-        longest = f"its longest span of normal traffic was {span} one-minute intervals ({start} to {end}), under {min_minutes}"
+    # Some healthy minutes but no qualifying span: neither a healthy period nor its absence is
+    # established, so the healthy period is undetermined and only rule (a) applies.
+    best = max(runs, key=lambda r: (span_of(r), r[3]))
+    start, end = shown(best)
+    detail = (
+        f"{healthy_active} of its {len(per_minute)} minutes with requests were healthy; its longest span of "
+        f"normal traffic was {span_of(best)} one-minute intervals ({start} to {end}) with requests in {best[3]} of them"
+    )
+    if healthy_active < min_active_minutes:
+        reason = "insufficient_traffic"
+        head = (
+            f"insufficient traffic to establish a healthy period ({healthy_active} healthy active minutes < "
+            f"{min_active_minutes}, {floor})"
+        )
     else:
-        longest = "it had no minute of normal traffic (every minute with requests was over a threshold)"
-    bad = f"; first minute over the thresholds {_iso(first_bad[0])} ({first_bad[1]})" if first_bad else ""
+        reason = "inconclusive"
+        head = (
+            f"healthy period inconclusive ({healthy_active} healthy active minutes, but no span of at least "
+            f"{min_minutes} one-minute intervals with requests in at least {min_active_minutes} of them, all healthy; "
+            f"CHANGE_HEALTHY_PERIOD_MINUTES {min_minutes}, {floor})"
+        )
     result.update(
-        status="no_healthy_period", minutes=span,
-        evidence=(
-            f"no healthy period: Cloud Monitoring shows {revision} {window}: {longest} "
-            f"({thresholds}){bad}{gaps}"
-        ),
+        status="unavailable", reason=reason, minutes=0, active_minutes=healthy_active,
+        unhealthy_minutes=unhealthy_active,
+        evidence=f"{head}: Cloud Monitoring shows {revision} {window}: {detail} ({thresholds}){bad}{gaps}",
     )
     return result
 
@@ -608,7 +619,7 @@ def assess_deploy_causation(chg: dict[str, Any], onset: datetime, config: AgentC
             max_latency_ms=config.change_healthy_max_latency_ms,
             min_active_minutes=config.change_healthy_min_active_minutes,
         )
-    if hp.get("reason") == "insufficient_traffic":
+    if hp.get("reason") in ("insufficient_traffic", "inconclusive"):
         evidence = f"{beyond}; {hp['evidence']}, so only the onset-window rule was applied"
         logger.warning("Change attribution for %s on %s: %s", revision, service, evidence)
         return {"causal": False, "rule": None, "evidence": evidence, "healthy_period": hp}

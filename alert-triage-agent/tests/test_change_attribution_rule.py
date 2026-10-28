@@ -300,8 +300,9 @@ def test_onset_window_boundary_follows_config(mins, causal):
     assert result["causal"] is causal
 
 
-@pytest.mark.parametrize("span,status", [(9, "no_healthy_period"), (10, "healthy")])
+@pytest.mark.parametrize("span,status", [(9, "unavailable"), (10, "healthy")])
 def test_healthy_period_boundary_at_m(span, status):
+    """9 healthy minutes then the fault: too short a span, but 9 healthy minutes are not "no healthy period"."""
     client = FakeTrafficHistory({"ata-inventory-api": {PIN_REV: (
         [(_minute(-40 + i), 5, 0, 80.0) for i in range(span)] + [(_minute(-5), 2, 9, 90.0)]
     )}})
@@ -310,7 +311,11 @@ def test_healthy_period_boundary_at_m(span, status):
         (ONSET_DT - timedelta(minutes=41)).strftime("%Y-%m-%dT%H:%M:%SZ"), ONSET_DT, 10,
     )
     assert result["status"] == status
-    assert result["minutes"] == span
+    if status == "healthy":
+        assert result["minutes"] == span
+    else:
+        assert result["reason"] == "inconclusive"
+        assert f"its longest span of normal traffic was {span} one-minute intervals" in result["evidence"]
 
 
 def test_unhealthy_minute_splits_the_period_and_empty_minutes_do_not():
@@ -329,7 +334,8 @@ def test_unhealthy_minute_splits_the_period_and_empty_minutes_do_not():
         client, "p", "us-west1", "ata-inventory-api", PIN_REV,
         (ONSET_DT - timedelta(minutes=51)).strftime("%Y-%m-%dT%H:%M:%SZ"), ONSET_DT, 8,
     )
-    assert strict["status"] == "no_healthy_period"
+    assert (strict["status"], strict["reason"], strict["active_minutes"]) == ("unavailable", "inconclusive", 4)
+    assert "no healthy period" not in strict["evidence"]
     assert f"first minute over the thresholds {_minute(-43):%Y-%m-%dT%H:%M:%SZ} (HTTP 5xx 83.3% of 6 requests)" in strict["evidence"]
 
 
@@ -506,7 +512,8 @@ def test_minutes_missing_a_latency_point_are_judged_on_5xx_alone_and_counted():
     failing = [(m, 1, 4, None) for m, *_ in rows]
     failing[0] = (failing[0][0], 5, 0, 80.0)
     bad = _hp(FakeTrafficHistory({"ata-inventory-api": {PIN_REV: failing}}))
-    assert bad["status"] == "no_healthy_period"
+    assert (bad["status"], bad["reason"]) == ("unavailable", "insufficient_traffic")
+    assert "1 of its 30 minutes with requests were healthy" in bad["evidence"]
     assert "had no point for 29 of 30 minutes" in bad["evidence"]
 
 
@@ -675,10 +682,10 @@ def test_two_requests_40_minutes_apart_are_insufficient_traffic_so_rule_a_only()
     assert (hp["status"], hp["reason"], hp["active_minutes"]) == ("unavailable", "insufficient_traffic", 2)
     assert (
         "deployed 45m before the alert onset, beyond the 15-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES); "
-        "insufficient traffic to establish a healthy period (2 active minutes < 3, CHANGE_HEALTHY_MIN_ACTIVE_MINUTES 3): "
+        "insufficient traffic to establish a healthy period (2 healthy active minutes < 3, CHANGE_HEALTHY_MIN_ACTIVE_MINUTES 3): "
         f"Cloud Monitoring shows {PIN_REV} between {_deploy(45)['timestamp']} (deploy) and {ONSET} (alert onset): "
-        f"its span of normal traffic from {_minute(-44):%Y-%m-%dT%H:%M:%SZ} to {_minute(-3):%Y-%m-%dT%H:%M:%SZ} "
-        "(41 one-minute intervals) had requests in only 2 of them"
+        "2 of its 2 minutes with requests were healthy; its longest span of normal traffic was 41 one-minute intervals "
+        f"({_minute(-44):%Y-%m-%dT%H:%M:%SZ} to {_minute(-3):%Y-%m-%dT%H:%M:%SZ}) with requests in 2 of them"
     ) in result["evidence"]
     assert result["evidence"].endswith(", so only the onset-window rule was applied")
     assert "no healthy period" not in result["evidence"]
@@ -690,8 +697,8 @@ def test_few_healthy_minutes_in_total_are_insufficient_not_no_healthy_period():
     result = assess_deploy_causation(_deploy(40), ONSET_DT, _config(), client)
     assert result["causal"] is False
     assert result["healthy_period"]["reason"] == "insufficient_traffic"
-    assert "insufficient traffic to establish a healthy period (2 active minutes < 3" in result["evidence"]
-    assert "it had requests in only 2 minutes" in result["evidence"]
+    assert "insufficient traffic to establish a healthy period (2 healthy active minutes < 3" in result["evidence"]
+    assert "2 of its 2 minutes with requests were healthy; its longest span of normal traffic was 6 one-minute" in result["evidence"]
     assert "no healthy period" not in result["evidence"]
 
 
@@ -712,7 +719,7 @@ def test_traffic_floor_follows_config(monkeypatch):
     assert assess_deploy_causation(_deploy(41), ONSET_DT, _config(), client)["healthy_period"]["status"] == "healthy"
     strict = assess_deploy_causation(_deploy(41), ONSET_DT, _config(change_healthy_min_active_minutes=5), client)
     assert strict["causal"] is False
-    assert "(4 active minutes < 5, CHANGE_HEALTHY_MIN_ACTIVE_MINUTES 5)" in strict["evidence"]
+    assert "(4 healthy active minutes < 5, CHANGE_HEALTHY_MIN_ACTIVE_MINUTES 5)" in strict["evidence"]
     monkeypatch.setenv("CHANGE_HEALTHY_MIN_ACTIVE_MINUTES", "7")
     assert _config().change_healthy_min_active_minutes == 7
     for bad in ("0", "121", "abc", "2.5"):
@@ -740,7 +747,7 @@ def test_sparse_healthy_span_then_fault_in_a_ticket_is_not_change_induced(agent_
     }}))
     report = _investigate(_inventory_5xx(telemetry, INC0010343_DEPLOY), agent_cfg)
     assert report.change_induced.startswith("No (recent changes likely unrelated: ")
-    assert "insufficient traffic to establish a healthy period (2 active minutes < 3" in report.change_induced
+    assert "insufficient traffic to establish a healthy period (2 healthy active minutes < 3" in report.change_induced
     assert "so only the onset-window rule was applied" in report.change_induced
     assert report.infer_issue_type() != "change_induced"
     assert "update-traffic" not in _all_action_text(report)
@@ -809,3 +816,117 @@ def test_healthy_period_reads_run_off_the_event_loop_thread(agent_cfg, telemetry
     assert report.change_induced.startswith("No (recent changes likely unrelated: ")
     latency_reads = [t for t, r in zip(client.threads, client.calls) if "request_latencies" in r.filter]
     assert latency_reads and threading.main_thread().name not in latency_reads
+
+
+# ---------------------------------------------------------------------------------------
+# The floor counts HEALTHY active minutes (reviewer probes at c18b7b6)
+#
+#   healthy minutes  qualifying span  verdict                     causal beyond window
+#   0 (>= 1 failing) -                no_healthy_period            yes, rule (b) (S5)
+#   1 .. floor-1     no               unavailable/insufficient     no, rule (a) only
+#   >= floor         no               unavailable/inconclusive     no, rule (a) only
+#   any              yes              healthy                      no
+#
+# A qualifying span: >= CHANGE_HEALTHY_PERIOD_MINUTES long, >= CHANGE_HEALTHY_MIN_ACTIVE_MINUTES
+# healthy minutes with requests, no failing minute inside. Failing minutes (the fault's lead-in
+# included) never count toward health.
+# ---------------------------------------------------------------------------------------
+
+LEAD_IN = [(_minute(-2), 2, 9, 300.0), (_minute(-1), 3, 12, 300.0)]
+
+
+def test_probe1_idle_then_fails_from_its_first_request_is_causal():
+    """Idle for 25 min after the deploy, then 1-2 failing minutes: S5 at zero traffic, rule (b)."""
+    for rows in (LEAD_IN[:1], LEAD_IN):
+        result = assess_deploy_causation(_deploy(30), ONSET_DT, _config(), FakeTrafficHistory({"ata-inventory-api": {PIN_REV: rows}}))
+        assert (result["causal"], result["rule"]) == (True, "b")
+        hp = result["healthy_period"]
+        assert (hp["status"], hp["active_minutes"], hp["unhealthy_minutes"]) == ("no_healthy_period", 0, len(rows))
+        assert f"it had no minute of normal traffic (all {len(rows)} minutes with requests were over a threshold)" in result["evidence"]
+        assert "insufficient traffic" not in result["evidence"]
+
+
+def test_probe2_lead_in_does_not_turn_two_healthy_minutes_into_rule_b():
+    """2 healthy minutes, with and without the fault's lead-in: the same verdict, rule (a) only."""
+    healthy = [(_minute(-30), 5, 0, 80.0), (_minute(-28), 5, 0, 80.0)]
+    verdicts = []
+    for rows in (healthy, healthy + LEAD_IN):
+        result = assess_deploy_causation(_deploy(31), ONSET_DT, _config(), FakeTrafficHistory({"ata-inventory-api": {PIN_REV: rows}}))
+        assert (result["causal"], result["rule"]) == (False, None)
+        assert result["healthy_period"]["reason"] == "insufficient_traffic"
+        assert "(2 healthy active minutes < 3, CHANGE_HEALTHY_MIN_ACTIVE_MINUTES 3)" in result["evidence"]
+        assert "no healthy period" not in result["evidence"]
+        verdicts.append((result["causal"], result["healthy_period"]["status"], result["healthy_period"]["reason"]))
+    assert verdicts[0] == verdicts[1]
+
+
+@pytest.mark.parametrize("healthy", [1, 2, 3, 4, 9])
+def test_probe3_more_healthy_minutes_then_idle_then_fault_is_never_blamed(healthy):
+    """k consecutive healthy minutes (span < 10), idle, then the fault: 3 is not blamed where 2 is not."""
+    rows = [(_minute(-40 + i), 5, 0, 80.0) for i in range(healthy)] + LEAD_IN
+    result = assess_deploy_causation(_deploy(41), ONSET_DT, _config(), FakeTrafficHistory({"ata-inventory-api": {PIN_REV: rows}}))
+    assert (result["causal"], result["rule"]) == (False, None)
+    expected = "insufficient_traffic" if healthy < 3 else "inconclusive"
+    assert result["healthy_period"]["reason"] == expected
+    assert result["evidence"].endswith(", so only the onset-window rule was applied")
+    if expected == "inconclusive":
+        assert f"healthy period inconclusive ({healthy} healthy active minutes, but no span of at least 10" in result["evidence"]
+
+
+def test_inc0010343_is_healthy_so_not_causal():
+    result = assess_deploy_causation(_deploy(59), ONSET_DT, _config(), FakeTrafficHistory(INC0010343_TRAFFIC))
+    assert (result["causal"], result["rule"]) == (False, None)
+    assert (result["healthy_period"]["status"], result["healthy_period"]["active_minutes"]) == ("healthy", 10)
+
+
+def test_s5_failing_from_its_first_request_is_causal():
+    rows = [(_minute(-30 + i), 1, 9, 400.0) for i in range(30)]
+    result = assess_deploy_causation(_deploy(31), ONSET_DT, _config(), FakeTrafficHistory({"ata-inventory-api": {PIN_REV: rows}}))
+    assert (result["causal"], result["rule"]) == (True, "b")
+    assert "all 30 minutes with requests were over a threshold" in result["evidence"]
+
+
+def test_missing_data_is_never_blamed():
+    failing = {"ata-inventory-api": {PIN_REV: [(_minute(-30 + i), 1, 9, 400.0) for i in range(30)]}}
+    for client in (
+        FakeTrafficHistory(failing, latency=False),
+        FakeTrafficHistory(failing, requests=False),
+        FakeTrafficHistory(error=TimeoutError("deadline exceeded")),
+        None,
+    ):
+        result = assess_deploy_causation(_deploy(31), ONSET_DT, _config(), client)
+        assert (result["causal"], result["healthy_period"]["status"]) == (False, "unavailable")
+        assert "healthy-period data unavailable (" in result["evidence"]
+
+
+def _blamed(cells: tuple[str, ...], min_minutes: int, floor: int) -> bool:
+    """Rule (b) verdict for a minute sequence: '.' idle, 'h' healthy, 'f' failing (ending at the onset)."""
+    n = len(cells)
+    rows = [
+        (_minute(-n + i), 5 if c == "h" else 1, 0 if c == "h" else 9, 80.0)
+        for i, c in enumerate(cells) if c != "."
+    ]
+    result = healthy_period(
+        FakeTrafficHistory({"ata-inventory-api": {PIN_REV: rows}}), "p", "us-west1", "ata-inventory-api", PIN_REV,
+        (ONSET_DT - timedelta(minutes=n)).strftime("%Y-%m-%dT%H:%M:%SZ"), ONSET_DT, min_minutes,
+        min_active_minutes=floor,
+    )
+    return result["status"] == "no_healthy_period"
+
+
+def test_adding_a_healthy_minute_never_makes_blame_more_likely():
+    """Exhaustive over every 7-minute sequence of idle/healthy/failing minutes (period 4, floor 2):
+    turning any idle or failing minute healthy never turns "not blamed" into "blamed"."""
+    from itertools import product
+
+    n, period, floor = 7, 4, 2
+    verdict = {cells: _blamed(cells, period, floor) for cells in product(".hf", repeat=n)}
+    assert any(verdict.values()) and not all(verdict.values())
+    violations = [
+        (cells, i)
+        for cells, blamed in verdict.items() if not blamed
+        for i, c in enumerate(cells) if c != "h" and verdict[cells[:i] + ("h",) + cells[i + 1:]]
+    ]
+    assert violations == []
+    # Blamed exactly when there is no healthy minute and at least one failing one.
+    assert all(blamed == ("h" not in cells and "f" in cells) for cells, blamed in verdict.items())

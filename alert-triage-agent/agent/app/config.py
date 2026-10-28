@@ -75,17 +75,18 @@ class AgentConfig(BaseSettings):
     rollback_traffic_lookback_minutes: int = Field(default=30, alias="ROLLBACK_TRAFFIC_LOOKBACK_MINUTES", ge=1)
     # Change attribution: a Cloud Run deploy in the change window is the cause (change_induced,
     # rollback) only if (a) the alert onset is at most CHANGE_ONSET_WINDOW_MINUTES after it, or
-    # (b) the new revision had no healthy period before the onset: no span of at least
-    # CHANGE_HEALTHY_PERIOD_MINUTES in which every minute with requests on it was healthy
-    # (Cloud Monitoring per revision, per minute). Without that data only (a) applies, and the
+    # (b) the new revision had no healthy period before the onset: not one healthy minute with
+    # requests and at least one failing one (Cloud Monitoring per revision, per minute). A span of
+    # at least CHANGE_HEALTHY_PERIOD_MINUTES with every minute with requests healthy is a healthy period. Without that data only (a) applies, and the
     # ticket says so. Otherwise the deploy is listed under "Recent changes (likely unrelated)".
     # Live INC0010343: a re-pin 59 min before an S1 fault, healthy 21:52-22:44Z, was blamed
     # under the old any-deploy-in-window rule.
     change_onset_window_minutes: int = Field(default=15, alias="CHANGE_ONSET_WINDOW_MINUTES", ge=1, le=120)
     change_healthy_period_minutes: int = Field(default=10, alias="CHANGE_HEALTHY_PERIOD_MINUTES", ge=1, le=120)
     # A healthy period also needs requests in at least this many of its minutes ("a sustained
-    # period of normal traffic"): two requests 40 min apart are not one. Too little traffic is
-    # insufficient evidence, not an unhealthy revision: only rule (a) applies, and the ticket says so.
+    # period of normal traffic"): two requests 40 min apart are not one. Only healthy minutes count:
+    # rule (b) needs zero healthy minutes (and a failing one); 1+ healthy minutes without a
+    # qualifying span leave the period undetermined, so only rule (a) applies, stated in the ticket.
     change_healthy_min_active_minutes: int = Field(default=3, alias="CHANGE_HEALTHY_MIN_ACTIVE_MINUTES", ge=1, le=120)
     # Healthy minute (rule b): HTTP 5xx share of the revision's requests under this fraction and
     # its mean request latency under CHANGE_HEALTHY_MAX_LATENCY_MS. These are agent heuristics,
