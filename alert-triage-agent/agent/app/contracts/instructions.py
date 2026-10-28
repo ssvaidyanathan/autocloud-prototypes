@@ -1,7 +1,11 @@
+import logging
+import re
 from typing import Optional
 from pydantic import BaseModel, Field
 
 from .report import InvestigationReport
+
+logger = logging.getLogger(__name__)
 
 # Ticket priority -> ServiceNow (urgency, impact). Chosen so that ServiceNow's default
 # priority matrix (dl_u_priority, verified read-only on the PDI 2026-10-28) shows the same
@@ -15,12 +19,30 @@ SERVICENOW_URGENCY_IMPACT: dict[str, tuple[str, str]] = {
 }
 
 
+# Used when the priority cannot be parsed at all; the same as InvestigationReport's default.
+SERVICENOW_FALLBACK_PRIORITY = "P2"
+
+
 def servicenow_urgency_impact(priority: Optional[str]) -> tuple[str, str]:
-    """(urgency, impact) for a ticket priority. An unknown priority raises (never guessed)."""
+    """(urgency, impact) for a ticket priority; never raises, so a ticket is never lost over it.
+
+    A priority outside P1..P4 is clamped and logged at WARNING: P0 (or any rank above P1) maps
+    to P1 so the most severe label is never de-escalated, and P5+ maps to P4. A value that is not
+    'P<n>' at all maps to SERVICENOW_FALLBACK_PRIORITY.
+    """
     key = str(priority or "").strip().upper()
-    if key not in SERVICENOW_URGENCY_IMPACT:
-        raise ValueError(f"no ServiceNow urgency/impact mapping for priority {priority!r}")
-    return SERVICENOW_URGENCY_IMPACT[key]
+    if key in SERVICENOW_URGENCY_IMPACT:
+        return SERVICENOW_URGENCY_IMPACT[key]
+    m = re.fullmatch(r"P(\d+)", key)
+    if m:
+        rank = int(m.group(1))
+        clamped = "P1" if rank < 1 else "P4"
+    else:
+        clamped = SERVICENOW_FALLBACK_PRIORITY
+    logger.warning(
+        "Priority %r is outside the ServiceNow mapping (P1..P4); using %s urgency/impact", priority, clamped
+    )
+    return SERVICENOW_URGENCY_IMPACT[clamped]
 
 
 class CreateTicketRequest(BaseModel):
