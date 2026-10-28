@@ -5,8 +5,9 @@ that works under dash can still break on the macOS CI job (fresh-rev-macos: an e
 a double-quoted ${...} default kept its backslash there). So write_stub() runs every sh stub
 under the test bash in sh mode, as on macOS: it points the shebang at an `sh` symlink to
 ATA_TEST_BASH. bash enters POSIX mode when its argv[0] is `sh`, and an absolute shebang does not
-depend on PATH, so stubs work wherever they live. With ATA_TEST_BASH=<bash 3.2> the Linux lanes run the stubs under bash 3.2 as `sh`, like
-the macOS job; by default they run under the system bash as `sh` instead of dash.
+depend on PATH, so stubs work wherever they live. With ATA_TEST_BASH=<bash 3.2> the Linux lanes
+run the stubs under bash 3.2 as `sh`, like the macOS job; by default they run under the system
+bash as `sh` instead of dash.
 
 Stub authors: write stubs with `#!/bin/sh` (write_stub rewrites it) and prefer
 `printf '%s\\n' ...` over `echo` for anything that is not a fixed word: Apple's /bin/sh has
