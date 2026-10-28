@@ -1674,11 +1674,14 @@ class SynthesizerAgent:
 
         checked = ", ".join(change_sources_checked(dossiers))
         # Deploys in the window that fail the attribution rule are listed with their evidence.
+        # "likely unrelated" only with an established healthy period; else "not attributed".
         unrelated = chg.metrics.get("unrelated_changes_text")
+        unattributed = chg.metrics.get("unattributed_changes_text")
         unrelated_part = f"recent changes likely unrelated: {unrelated}; " if unrelated else ""
+        unrelated_part += f"not attributed: {unattributed}; " if unattributed else ""
         if verdict is not None:
             value = f"No ({verdict['reason']}; {unrelated_part}checked: {checked})"
-        elif unrelated:
+        elif unrelated_part:
             value = f"No ({unrelated_part}checked: {checked})"
         else:
             value = (
@@ -2855,7 +2858,11 @@ class SynthesizerAgent:
             not_implicated = chg_dossier.metrics.get("change_not_implicated_reason")
             proxy_changed = self._proxy_change_evidence(dossiers, origin) is not None
             unrelated = chg_dossier.metrics.get("unrelated_changes_text")
-            if has_chg_check and not chg_dossier.anomaly_detected and not not_implicated and not proxy_changed and unrelated:
+            # A deploy whose healthy period is undetermined is not attributed, but not ruled out either.
+            unattributed = chg_dossier.metrics.get("unattributed_changes_text")
+            if unattributed:
+                pass
+            elif has_chg_check and not chg_dossier.anomaly_detected and not not_implicated and not proxy_changed and unrelated:
                 alternatives.append({
                     "alternative": "Recent Application Deployment Regression",
                     "reason": f"Recent changes (likely unrelated): {unrelated}.",

@@ -164,6 +164,26 @@ def _config(**kw) -> AgentConfig:
     return AgentConfig(project_id="p", name_prefix="ata", region="us-west1", is_local=True, **kw)
 
 
+NOT_ATTRIBUTED_HEADLINE = "Recent changes (not attributed: healthy period undetermined)"
+
+
+def _assert_not_attributed(report) -> None:
+    """A deploy whose healthy period is undetermined is "not attributed", never "likely unrelated"."""
+    assert report.change_induced.startswith("No (not attributed: revision ")
+    assert "so only the onset-window rule was applied; checked: " in report.change_induced
+    assert "likely unrelated" not in report.change_induced
+    desc = _desc(report)
+    assert "likely unrelated" not in desc
+    items = report.evidence_by_area["change"]
+    assert any(i.headline == NOT_ATTRIBUTED_HEADLINE and PIN_REV in i.content for i in items)
+    assert not any(i.headline == "Recent changes (likely unrelated)" for i in items)
+    # Not attributed is not ruled out: no "deployment regression" alternative is listed as ruled out.
+    alts = report.root_cause_analysis["alternatives_ruled_out"]
+    assert not any(a["alternative"] == "Recent Application Deployment Regression" for a in alts)
+    assert report.infer_issue_type() != "change_induced"
+    assert "update-traffic" not in _all_action_text(report)
+
+
 # ---------------------------------------------------------------------------------------
 # INC0010343-shaped: deploy, 59 min healthy, then the fault => not change-induced
 # ---------------------------------------------------------------------------------------
@@ -336,6 +356,12 @@ def test_unhealthy_minute_splits_the_period_and_empty_minutes_do_not():
     )
     assert (strict["status"], strict["reason"], strict["active_minutes"]) == ("unavailable", "inconclusive", 4)
     assert "no healthy period" not in strict["evidence"]
+    # The longest of the two runs is stated (7 min with 3 active, ending at the end of minute -44),
+    # not the 1-minute run at -42 (mutant max->min would state that one).
+    assert (
+        f"4 of its 6 minutes with requests were healthy; its longest span of normal traffic was 7 one-minute "
+        f"intervals ({_minute(-50):%Y-%m-%dT%H:%M:%SZ} to {_minute(-43):%Y-%m-%dT%H:%M:%SZ}) with requests in 3 of them"
+    ) in strict["evidence"]
     assert f"first minute over the thresholds {_minute(-43):%Y-%m-%dT%H:%M:%SZ} (HTTP 5xx 83.3% of 6 requests)" in strict["evidence"]
 
 
@@ -471,7 +497,8 @@ def test_inc0010343_with_an_empty_latency_series_falls_back_to_the_onset_window(
     _use_traffic(monkeypatch, FakeTrafficHistory(INC0010343_TRAFFIC, latency=False))
     report = _investigate(_inventory_5xx(telemetry, INC0010343_DEPLOY), agent_cfg)
 
-    assert report.change_induced.startswith("No (recent changes likely unrelated: ")
+    assert report.change_induced.startswith("No (not attributed: ")
+    _assert_not_attributed(report)
     assert (
         "deployed 59m before the alert onset, beyond the 15-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES); "
         f"healthy-period data unavailable (Cloud Monitoring run.googleapis.com/request_latencies returned no data for {PIN_REV} "
@@ -536,13 +563,14 @@ def test_monitoring_failure_falls_back_to_onset_window_and_says_so(agent_cfg, te
     _use_traffic(monkeypatch, FakeTrafficHistory(error=RuntimeError("503 backend unavailable")))
     report = _investigate(_inventory_5xx(telemetry, INC0010343_DEPLOY), agent_cfg)
 
-    assert report.change_induced.startswith("No (recent changes likely unrelated: ")
+    assert report.change_induced.startswith("No (not attributed: ")
+    _assert_not_attributed(report)
     assert (
         "deployed 59m before the alert onset, beyond the 15-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES); "
         f"healthy-period data unavailable (the Cloud Monitoring query for {PIN_REV} between {INC0010343_DEPLOY} (deploy) "
         f"and {ONSET} (alert onset) failed (RuntimeError)), so only the onset-window rule was applied"
     ) in report.change_induced
-    assert "Change-Induced: No (recent changes likely unrelated:" in _desc(report)
+    assert "Change-Induced: No (not attributed:" in _desc(report)
     assert "update-traffic" not in _all_action_text(report)
 
 
@@ -746,12 +774,63 @@ def test_sparse_healthy_span_then_fault_in_a_ticket_is_not_change_induced(agent_
         PIN_REV: [(_minute(-50), 1, 0, 80.0), (_minute(-10), 1, 0, 80.0), (_minute(-6), 16, 58, 300.0), (_minute(-5), 16, 98, 250.0)],
     }}))
     report = _investigate(_inventory_5xx(telemetry, INC0010343_DEPLOY), agent_cfg)
-    assert report.change_induced.startswith("No (recent changes likely unrelated: ")
+    assert report.change_induced.startswith("No (not attributed: ")
+    _assert_not_attributed(report)
     assert "insufficient traffic to establish a healthy period (2 healthy active minutes < 3" in report.change_induced
     assert "so only the onset-window rule was applied" in report.change_induced
     assert report.infer_issue_type() != "change_induced"
     assert "update-traffic" not in _all_action_text(report)
     assert "Deployment regression" not in _desc(report)
+
+
+INCONCLUSIVE_ROWS = (
+    [(_minute(-50), 5, 0, 80.0), (_minute(-48), 5, 0, 80.0), (_minute(-46), 5, 0, 80.0)]  # 5-min run, 3 active
+    + [(_minute(-44), 1, 5, 80.0)]  # 5xx 83 %
+    + [(_minute(-42), 5, 0, 80.0), (_minute(-40), 5, 0, 80.0)]  # 3-min run, 2 active
+    + [(_minute(-6), 16, 58, 300.0), (_minute(-5), 16, 98, 250.0)]  # the fault
+)
+
+
+def test_inconclusive_healthy_period_in_a_ticket_is_not_attributed(agent_cfg, telemetry, monkeypatch):
+    """O2: 5 healthy minutes but no 10-minute span: undetermined, so "not attributed", not "likely unrelated"."""
+    _use_traffic(monkeypatch, FakeTrafficHistory({"ata-inventory-api": {PIN_REV: INCONCLUSIVE_ROWS}}))
+    report = _investigate(_inventory_5xx(telemetry, INC0010343_DEPLOY), agent_cfg)
+    _assert_not_attributed(report)
+    assert "healthy period inconclusive (5 healthy active minutes, but no span of at least 10" in report.change_induced
+    assert (
+        f"its longest span of normal traffic was 5 one-minute intervals ({_minute(-50):%Y-%m-%dT%H:%M:%SZ} to "
+        f"{_minute(-45):%Y-%m-%dT%H:%M:%SZ}) with requests in 3 of them"
+    ) in report.change_induced
+    assert f"Change-Induced: No (not attributed: revision {PIN_REV} on ata-inventory-api" in _desc(report)
+
+
+def test_healthy_and_undetermined_deploys_are_listed_under_separate_headings(agent_cfg, telemetry, monkeypatch):
+    """O2: only the deploy with an established healthy period is "likely unrelated"."""
+    _use_traffic(monkeypatch, FakeTrafficHistory({"ata-inventory-api": {
+        PIN_PREV: [(_minute(-90 + i), 8, 0, 90.0) for i in range(30)],
+        INVENTORY_BAD_REV: INCONCLUSIVE_ROWS,
+    }}))
+    telemetry["degraded"] = {"ata-inventory-api": "5xx"}
+    telemetry["changes"] = [
+        _change("ata-inventory-api", PIN_PREV, "ata-inventory-api-00072-xxx", (ONSET_DT - timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        _change("ata-inventory-api", INVENTORY_BAD_REV, PIN_PREV, (ONSET_DT - timedelta(minutes=51)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+    ]
+    report = _investigate(_event(_entry("0.cr-inv", "ata-inventory-5xx", "ata-inventory-api", "5xx")), agent_cfg)
+
+    ci = report.change_induced
+    assert ci.startswith(f"No (recent changes likely unrelated: revision {PIN_PREV} on ata-inventory-api ")
+    assert f"; not attributed: revision {INVENTORY_BAD_REV} on ata-inventory-api " in ci
+    assert ci.index(INVENTORY_BAD_REV) > ci.index("; not attributed: ")
+    assert "so only the onset-window rule was applied; checked: " in ci
+    items = {i.headline: i.content for i in report.evidence_by_area["change"]}
+    assert PIN_PREV in items["Recent changes (likely unrelated)"]
+    assert INVENTORY_BAD_REV not in items["Recent changes (likely unrelated)"]
+    assert INVENTORY_BAD_REV in items[NOT_ATTRIBUTED_HEADLINE]
+    assert PIN_PREV not in items[NOT_ATTRIBUTED_HEADLINE]
+    alts = report.root_cause_analysis["alternatives_ruled_out"]
+    assert not any(a["alternative"] == "Recent Application Deployment Regression" for a in alts)
+    assert report.infer_issue_type() != "change_induced"
+    assert "update-traffic" not in _all_action_text(report)
 
 
 # ---------------------------------------------------------------------------------------

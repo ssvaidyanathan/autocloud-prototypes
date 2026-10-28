@@ -647,37 +647,58 @@ def is_candidate_cause(c: dict[str, Any]) -> bool:
 
 
 def unrelated_change_text(c: dict[str, Any]) -> str:
-    """One deploy listed under "Recent changes (likely unrelated)", with its evidence."""
+    """One non-causal deploy as listed in the ticket, with its evidence."""
     causation = c.get("causation") or {}
     return f"revision {c.get('revision')} on {c.get('service')} deployed {c.get('timestamp')}: {causation.get('evidence', '')}"
 
 
+# A non-causal deploy is "likely unrelated" only when a healthy period was positively
+# established. Otherwise (insufficient traffic, inconclusive, data unavailable) the period is
+# undetermined: the deploy is "not attributed", and only the onset-window rule was applied.
 UNRELATED_HEADLINE = "Recent changes (likely unrelated)"
+UNATTRIBUTED_HEADLINE = "Recent changes (not attributed: healthy period undetermined)"
+NONCAUSAL_HEADLINES = (UNRELATED_HEADLINE, UNATTRIBUTED_HEADLINE)
+NONCAUSAL_METRIC_KEYS = ("unrelated_changes", "unrelated_changes_text", "unattributed_changes", "unattributed_changes_text")
+
+
+def has_healthy_period(c: dict[str, Any]) -> bool:
+    """True when the attribution rule positively established a healthy period for the deploy."""
+    hp = (c.get("causation") or {}).get("healthy_period")
+    return isinstance(hp, dict) and hp.get("status") == "healthy"
 
 
 def _list_unrelated(
     metrics: dict[str, Any], findings: list[str], evidence_items: list[EvidenceItem], changes: list[dict[str, Any]]
 ) -> None:
-    """State the deploys that failed the attribution rule under "Recent changes (likely unrelated)"."""
-    if not changes:
-        return
-    listed = "; ".join(unrelated_change_text(c) for c in changes)
-    metrics["unrelated_changes"] = [
-        {
-            "service": c.get("service"),
-            "revision": c.get("revision"),
-            "timestamp": c.get("timestamp"),
-            "deployed_minutes_ago": c.get("deployed_minutes_ago"),
-            "evidence": c["causation"]["evidence"],
-        }
-        for c in changes
-    ]
-    metrics["unrelated_changes_text"] = listed
-    findings.append(f"{UNRELATED_HEADLINE}: {listed}.")
-    evidence_items.append(EvidenceItem(
-        headline=UNRELATED_HEADLINE,
-        content="\n".join(f"- {unrelated_change_text(c)}" for c in changes),
-    ))
+    """State the deploys that failed the attribution rule, with their evidence.
+
+    Under UNRELATED_HEADLINE when a healthy period was established (metrics "unrelated_changes"),
+    else under UNATTRIBUTED_HEADLINE (metrics "unattributed_changes").
+    """
+    groups = (
+        ("unrelated", UNRELATED_HEADLINE, [c for c in changes if has_healthy_period(c)]),
+        ("unattributed", UNATTRIBUTED_HEADLINE, [c for c in changes if not has_healthy_period(c)]),
+    )
+    for key, headline, group in groups:
+        if not group:
+            continue
+        listed = "; ".join(unrelated_change_text(c) for c in group)
+        metrics[f"{key}_changes"] = [
+            {
+                "service": c.get("service"),
+                "revision": c.get("revision"),
+                "timestamp": c.get("timestamp"),
+                "deployed_minutes_ago": c.get("deployed_minutes_ago"),
+                "evidence": c["causation"]["evidence"],
+            }
+            for c in group
+        ]
+        metrics[f"{key}_changes_text"] = listed
+        findings.append(f"{headline}: {listed}.")
+        evidence_items.append(EvidenceItem(
+            headline=headline,
+            content="\n".join(f"- {unrelated_change_text(c)}" for c in group),
+        ))
 
 
 def _alert_onset(alert: AlertEvent) -> datetime:
@@ -732,7 +753,8 @@ class ChangeSpecialist(BaseSpecialist):
         A multi-service group also names other candidates (atat INC0010341: orders-api under an
         inventory-api origin); their deploys must not be named as a "Deployment regression"
         alternative without the same rule. Returns the dossier with any newly unrelated changes
-        listed under "Recent changes (likely unrelated)" (the same dossier when nothing changed).
+        listed under "Recent changes (likely unrelated)" or "Recent changes (not attributed: ...)"
+        (the same dossier when nothing changed).
         The assessed change records are shared with the input dossier's all_changes: their
         "causation" key is set in place, so the input dossier sees it too.
         """
@@ -748,19 +770,22 @@ class ChangeSpecialist(BaseSpecialist):
         unrelated = [c for c in changes if isinstance(c.get("causation"), dict) and not c["causation"]["causal"]]
         if not any(c in unrelated for c in pending):
             return dataclasses.replace(dossier, queries_executed=queries)
-        metrics = dict(dossier.metrics)
+        metrics = {k: v for k, v in dossier.metrics.items() if k not in NONCAUSAL_METRIC_KEYS}
         # The listing is rebuilt; a "no deployments" statement would now contradict it.
         findings = [
             f for f in dossier.findings
-            if not f.startswith(f"{UNRELATED_HEADLINE}:") and f != NO_CLOUD_RUN_CHANGES_FINDING
+            if not f.startswith(tuple(f"{h}:" for h in NONCAUSAL_HEADLINES)) and f != NO_CLOUD_RUN_CHANGES_FINDING
         ]
         items = [
             i for i in dossier.evidence_items
-            if i.headline != UNRELATED_HEADLINE
+            if i.headline not in NONCAUSAL_HEADLINES
             and not (i.headline == "Deployment History Analysis" and "No recent Cloud Run deployments" in (i.content or ""))
         ]
         _list_unrelated(metrics, findings, items, unrelated)
-        logger.info("Change attribution for group services %s: %s", sorted(services), metrics["unrelated_changes_text"])
+        logger.info(
+            "Change attribution for group services %s: %s", sorted(services),
+            "; ".join(metrics[k] for k in ("unrelated_changes_text", "unattributed_changes_text") if k in metrics),
+        )
         return dataclasses.replace(dossier, metrics=metrics, findings=findings, evidence_items=items, queries_executed=queries)
 
     def _metric_client_or_none(self, config: AgentConfig) -> Any:
@@ -952,7 +977,8 @@ class ChangeSpecialist(BaseSpecialist):
             c for c in recent_changes if c.get("service") in candidate_services and is_genuine_change(c)
         ]
         # A deploy in the window is the cause only by the onset-window or no-healthy-period rule
-        # (assess_deploy_causation); the others are listed as likely unrelated, with evidence.
+        # (assess_deploy_causation); the others are listed as likely unrelated (healthy period
+        # established) or not attributed (healthy period undetermined), with evidence.
         # The verdict is kept on the change record, so every reader of all_changes sees it.
         # In a worker thread: the healthy-period reads are blocking Cloud Monitoring calls.
         await asyncio.to_thread(self._assess, genuine_changes, now, config, queries_executed)
