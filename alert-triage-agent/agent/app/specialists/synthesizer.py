@@ -2661,7 +2661,8 @@ class SynthesizerAgent:
             if d.target_resource != resource:
                 continue
             m = d.metrics or {}
-            if d.specialist_name == "CloudRunSpecialist" and not_applicable_component_type(d) is None:
+            if d.specialist_name == "CloudRunSpecialist":
+                # A not-applicable dossier (Apigee proxy, Cloud SQL) records no rate or latency.
                 rate = m.get("error_rate_5xx")
                 if (isinstance(rate, (int, float)) and not isinstance(rate, bool)) or (
                     isinstance(rate, str) and rate.strip().endswith("%")

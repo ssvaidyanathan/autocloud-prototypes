@@ -369,3 +369,48 @@ def test_bridge_fallback_rows_claim_no_impact():
         topology_nodes=[{"resource": "ata-inventory-api", "type": "Cloud Run Service", "role": "Origin"}],
     ))
     assert NM in with_node and "Impacted downstream consumer" not in with_node
+
+
+def test_execute_investigation_puts_the_scoped_line_on_the_ticket(tmp_path):
+    """The synthesizer's own call site scopes the history (S3 inventory), not only the helper."""
+    import asyncio
+
+    from agent.app.config import reset_agent_settings
+    from agent.app.triage import write_preanalysis_lock
+
+    cfg = AgentConfig(
+        project_id="cloud-assist-fde-2", name_prefix="ata", region="us-west1", is_local=True,
+        incident_store_path=str(tmp_path / "knowledge/incident-manager"), fallback_store_path=str(tmp_path / "fb"),
+    )
+    full, in_window = SCENARIOS["S3-inventory"]["history"]
+    change = EvidenceDossier(
+        specialist_name="ChangeSpecialist", target_resource="ata-inventory-api", findings=[full],
+        metrics={"apigee_deployments_in_window": in_window, "apigee_deployment_scope": SCOPE,
+                 "apigee_deployment_window_minutes": 120},
+    )
+
+    async def cloud_run(alert, config, target_service=None):
+        return _cr(target_service or "ata-inventory-api", "82.7%")
+
+    reset_agent_settings(cfg)
+    try:
+        alert = AlertEvent(incident_id="0.oecf31rr5hv4", policy_name="ata-inventory-5xx",
+                           resource_name="ata-inventory-api", resource_type="cloud_run_revision",
+                           state="open", started_at="2026-10-28T05:16:16Z")
+        _, group_id, fname = write_preanalysis_lock(alert, cfg)
+        synth = SynthesizerAgent()
+        apigee = EvidenceDossier(specialist_name="ApigeeSpecialist", target_resource="ata-inventory-v1",
+                                 metrics={"response_codes": {"500": 360}})
+        with patch.object(synth.cloud_run_specialist, "investigate", side_effect=cloud_run), \
+             patch.object(synth.apigee_specialist, "investigate", return_value=apigee), \
+             patch.object(synth.cloud_sql_specialist, "investigate", return_value=_sql(3, 10.2)), \
+             patch.object(synth.change_specialist, "investigate", return_value=change):
+            report = asyncio.run(synth.execute_investigation(alert, group_id, fname, cfg))
+    finally:
+        reset_agent_settings(None)
+    assert report.apigee_history == (
+        "Apigee deployment history (org cloud-assist-fde-2, environment prod, proxies with prefix ata-; "
+        "group components and proxies routing directly to ata-inventory-api: ata-inventory-api, ata-inventory-v1): "
+        "no deployments of these proxies in the 2-hour window prior to alert onset "
+        "(1 other proxy changed in window, see report)."
+    )

@@ -68,8 +68,9 @@ def target_latency_summary(logged_ms: list[float], minute_means_ms: list[float])
     }
 
 
-# Nearest-rank quantiles reported for Apigee target latency.
-_LATENCY_QUANTILES = (("p50", 0.50), ("p95", 0.95), ("p99", 0.99))
+# Nearest-rank quantiles reported for Apigee target latency, in integer percent (no float
+# rounding at the boundary: 1.0 - 0.95 is 0.05000000000000004).
+_LATENCY_QUANTILES = (("p50", 50), ("p95", 95), ("p99", 99))
 
 
 def apply_gateway_timeout_gap(
@@ -86,14 +87,14 @@ def apply_gateway_timeout_gap(
     if timeouts_without_latency <= 0:
         return summary
     total = timeouts_without_latency + max(requests_with_latency, 0)
-    share = timeouts_without_latency / total
     out = dict(summary)
     reason = (
         f"not available: {timeouts_without_latency} of {total} requests were {GATEWAY_TIMEOUT_FAULT} "
         "faults, which record no target latency"
     )
-    for key, q in _LATENCY_QUANTILES:
-        if share > 1.0 - q:
+    for key, pct in _LATENCY_QUANTILES:
+        # Faults above (100 - pct)% of requests: the pct-th percentile lies among them.
+        if timeouts_without_latency * 100 > total * (100 - pct):
             out[f"{key}_ms"] = reason
     out["basis"] = (
         f"{summary['basis']}; excludes {timeouts_without_latency} {GATEWAY_TIMEOUT_FAULT} "
