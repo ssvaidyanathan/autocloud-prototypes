@@ -175,7 +175,7 @@ async def test_impact_column_states_the_log_fallback_beside_metric_errors(cfg):
     """A 504 policy whose metric has 500s but no 504: the impact lists the metric codes and the log 504s."""
     d = await _run(cfg, "ata-orders-504", [_ts("500", 5), _ts("200", 10)], [_log("504"), _log("504")])
     assert SynthesizerAgent._node_impact("ata-inventory-v1", [d]) == (
-        "HTTP 500: 5; access log shows 2 504 responses (log-based, may be partial)"
+        "HTTP 500: 5 in the proxy/response_count metric; access log shows 2 504 responses (log-based, may be partial)"
     )
 
 
@@ -229,3 +229,31 @@ def test_legacy_429_figure_without_a_metric_total_rules_nothing_out(metrics, sta
     rca = SynthesizerAgent()._build_root_cause_analysis("rc", 0.7, [_legacy_apigee(metrics)], "ata-orders-api", alert)
     alts = {a["alternative"]: a["reason"] for a in rca["alternatives_ruled_out"]}
     assert alts["Upstream API Gateway Rate-Limiting"] == stated
+
+
+@pytest.mark.asyncio
+async def test_impact_column_names_the_metric_once_for_several_codes(cfg):
+    """fresh-rev-n6 O2: the per-code facts name their source."""
+    d = await _run(cfg, "ata-inventory-5xx", [_ts("404", 7), _ts("503", 9), _ts("200", 10)])
+    assert SynthesizerAgent._node_impact("ata-inventory-v1", [d]) == (
+        "HTTP 404: 7, HTTP 503: 9 in the proxy/response_count metric"
+    )
+
+
+@pytest.mark.asyncio
+async def test_observed_5xx_count_names_the_metric(cfg):
+    d = await _run(cfg, "ata-inventory-5xx", [_ts("500", 40)])
+    alert = AlertEvent(incident_id="0.f5", policy_name="ata-inventory-5xx", resource_name="ata-inventory-v1",
+                       state="open", started_at="2026-10-28T01:40:00Z")
+    obs = SynthesizerAgent()._synthesize_observations([d], alert)
+    assert "Apigee proxy ata-inventory-v1 recorded 40 HTTP 5xx responses in the proxy/response_count metric" in obs
+
+
+@pytest.mark.asyncio
+async def test_observed_504_count_names_the_metric(cfg):
+    d = await _run(cfg, "ata-orders-504", [_ts("504", 3)])
+    alert = AlertEvent(incident_id="0.f5", policy_name="ata-orders-504", resource_name="ata-inventory-v1",
+                       state="open", started_at="2026-10-28T01:40:00Z")
+    obs = SynthesizerAgent()._synthesize_observations([d], alert)
+    assert ("Apigee proxy ata-inventory-v1 recorded 3 HTTP 504 gateway timeout responses in the "
+            "proxy/response_count metric") in obs

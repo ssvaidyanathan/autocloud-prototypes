@@ -320,24 +320,26 @@ def test_s5_outputs():
 # --- N1: Operational Impact is measured values, never template text ---------------------------
 
 NM = "not measured in this investigation"
+# Every proxy count names its source (fresh-rev-n6 O2).
+IN_METRIC = " in the proxy/response_count metric"
 TEMPLATE = ("Internal application 5xx exceptions", "Cascading 5xx failure propagation",
             "Cascading HTTP 504 gateway timeout", "SpikeArrest 429 throttling",
             "Connection pool saturation & transaction lock wait contention", "Upstream dependent")
 
 IMPACT = {
-    "S1": {"ata-inventory-api": "HTTP 5xx error rate 83.4%", "ata-inventory-v1": "HTTP 500: 629",
+    "S1": {"ata-inventory-api": "HTTP 5xx error rate 83.4%", "ata-inventory-v1": "HTTP 500: 629" + IN_METRIC,
            "ata-orders-api": "HTTP 5xx error rate 82.7%", "ata-orders-v1": NM},
     "S2": {"ata-inventory-api": "HTTP 5xx error rate 0.0%; slowest logged request latency 6518.03ms",
-           "ata-inventory-v1": "HTTP 504: 394 (GatewayTimeout)",
+           "ata-inventory-v1": "HTTP 504: 394 (GatewayTimeout)" + IN_METRIC,
            "ata-orders-api": "HTTP 5xx error rate 0.0%; slowest logged request latency 6603.14ms",
            "ata-orders-v1": NM},
-    "S3-inventory": {"ata-inventory-api": "HTTP 5xx error rate 82.7%", "ata-inventory-v1": "HTTP 500: 360",
+    "S3-inventory": {"ata-inventory-api": "HTTP 5xx error rate 82.7%", "ata-inventory-v1": "HTTP 500: 360" + IN_METRIC,
                      "ata-orders-api": NM, "ata-orders-v1": NM},
-    "S3-orders-429": {"ata-orders-v1": "HTTP 429: 512 (SpikeArrestViolation)"},
+    "S3-orders-429": {"ata-orders-v1": "HTTP 429: 512 (SpikeArrestViolation)" + IN_METRIC},
     "S4": {"ata-inventory-db": "24 of 25 connections active", "ata-inventory-api": "HTTP 5xx error rate 0.0%",
            "ata-inventory-v1": "0 HTTP 4xx/5xx responses in the proxy/response_count metric (of 632 requests)", "ata-orders-api": "HTTP 5xx error rate 0.0%",
            "ata-orders-v1": NM},
-    "S5": {"ata-inventory-api": "HTTP 5xx error rate 98.8%", "ata-inventory-v1": "HTTP 500: 553",
+    "S5": {"ata-inventory-api": "HTTP 5xx error rate 98.8%", "ata-inventory-v1": "HTTP 500: 553" + IN_METRIC,
            "ata-orders-api": "HTTP 5xx error rate 99.0%", "ata-orders-v1": NM},
 }
 
@@ -569,11 +571,11 @@ def test_variant_statements():
     assert "not available" in unavailable["alternatives"]["Upstream API Gateway Rate-Limiting"]
 
     four = _out_any("S4-proxy-4xx-only")
-    assert four["impact"]["ata-inventory-v1"] == "HTTP 404: 7"
+    assert four["impact"]["ata-inventory-v1"] == "HTTP 404: 7" + IN_METRIC
     assert "0 HTTP 5xx responses in the proxy/response_count metric (of 607 requests) on ata-inventory-v1" in four["problem"]
 
     five = _out_any("S4-proxy-5xx")
-    assert five["impact"]["ata-inventory-v1"] == "HTTP 503: 9"
+    assert five["impact"]["ata-inventory-v1"] == "HTTP 503: 9" + IN_METRIC
     assert five["problem"].endswith("; HTTP 5xx responses on dependent proxies: ata-inventory-v1 9 HTTP 5xx responses "
                                   "in the proxy/response_count metric (of 609 requests)")
 
@@ -781,3 +783,41 @@ def test_proxy_origin_with_429s_is_still_a_spike_arrest_violation():
     out = asyncio.run(build_outputs("D429", scenario=_proxy_origin(
         codes=[("429", 40, "policies.ratelimit.SpikeArrestViolation"), ("200", 10, None)])))
     assert out["problem"].startswith("SpikeArrest rate-limit violation"), out["problem"]
+
+
+# --- fresh-rev-n6 O2: every proxy count line names its source ------------------------------------
+
+OBSERVED_COUNT = {
+    "S1": "Apigee proxy ata-inventory-v1 recorded 629 HTTP 5xx responses in the proxy/response_count metric",
+    "S3-inventory": "Apigee proxy ata-inventory-v1 recorded 360 HTTP 5xx responses in the proxy/response_count metric",
+    "S3-orders-429": "Apigee proxy ata-orders-v1 recorded 512 HTTP 429 rate limit responses in the proxy/response_count metric",
+    "S5": "Apigee proxy ata-inventory-v1 recorded 553 HTTP 5xx responses in the proxy/response_count metric",
+}
+
+
+@pytest.mark.parametrize("name", list(OBSERVED_COUNT))
+def test_observed_proxy_count_names_the_metric(name):
+    out = _out(name)
+    assert OBSERVED_COUNT[name] in out["observations"]
+    assert OBSERVED_COUNT[name] in out["desc"] and out["desc"] == out["agent_desc"]
+    assert OBSERVED_COUNT[name] in "\n".join(_html_lines(out["html"]))
+
+
+@pytest.mark.parametrize("name", list(SCENARIOS) + list(VARIANTS))
+def test_every_proxy_count_line_in_the_ticket_and_html_names_its_source(name):
+    """Observation counts, impact per-code facts and the fallback line each name proxy/response_count."""
+    import re
+
+    out = _out_any(name)
+    for where, lines in (("ticket", out["desc"].splitlines()), ("html", _html_lines(out["html"]))):
+        for ln in lines:
+            for part in ln.split(" | "):
+                if re.search(r"Apigee proxy \S+ recorded \d+ HTTP", part):
+                    assert "in the proxy/response_count metric" in part, (where, part)
+                if re.search(r"HTTP [0-9x]{3}: (\d+|not in|metric)", part):
+                    assert "proxy/response_count" in part, (where, part)
+                if "ruling out SpikeArrest" in part:  # only with a known proxy/response_count total
+                    assert "requests in the metric)" in part, (where, part)
+    for component, impact in out["impact"].items():
+        if re.search(r"HTTP [0-9]{3}: \d+", impact):
+            assert "in the proxy/response_count metric" in impact, (component, impact)

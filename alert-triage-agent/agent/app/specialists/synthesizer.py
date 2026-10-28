@@ -40,6 +40,7 @@ from .measurements import (
     cloud_run_5xx_rate,
     component_access_log_only,
     component_responses,
+    METRIC_SOURCE,
     rate_pct,
 )
 from .change import (
@@ -2428,16 +2429,30 @@ class SynthesizerAgent:
                         f"[{cap.get('window_start')}, {cap.get('window_end')}]; log-derived counts are lower bounds "
                         "and no proxy revision switch was evaluated"
                     )
+                # proxy_response_code_* are proxy/response_count counts (ApigeeSpecialist); each
+                # count names its source (fresh-rev-n6 O2).
                 if "proxy_response_code_429" in d.metrics and d.metrics["proxy_response_code_429"] != "N/A (not captured)":
-                    obs_items.append(f"Apigee proxy {d.target_resource} recorded {d.metrics['proxy_response_code_429']} HTTP 429 rate limit responses")
+                    obs_items.append(
+                        f"Apigee proxy {d.target_resource} recorded {d.metrics['proxy_response_code_429']} "
+                        f"HTTP 429 rate limit responses in {METRIC_SOURCE}"
+                    )
                 elif "status_429_rate" in d.metrics:
-                    obs_items.append(f"Apigee proxy {d.target_resource} recorded {d.metrics['status_429_rate']} HTTP 429 response rate")
+                    obs_items.append(
+                        f"Apigee proxy {d.target_resource} recorded {d.metrics['status_429_rate']} HTTP 429 response rate "
+                        "(status_429_rate, source not recorded)"
+                    )
                 elif "proxy_response_code_504" in d.metrics and d.metrics["proxy_response_code_504"] != "N/A (not captured)":
-                    obs_items.append(f"Apigee proxy {d.target_resource} recorded {d.metrics['proxy_response_code_504']} HTTP 504 gateway timeout responses")
+                    obs_items.append(
+                        f"Apigee proxy {d.target_resource} recorded {d.metrics['proxy_response_code_504']} "
+                        f"HTTP 504 gateway timeout responses in {METRIC_SOURCE}"
+                    )
                 elif any(k.startswith("proxy_response_code_5") for k in d.metrics):
                     code_5xx = next(k for k in d.metrics if k.startswith("proxy_response_code_5"))
                     if d.metrics[code_5xx] != "N/A (not captured)":
-                        obs_items.append(f"Apigee proxy {d.target_resource} recorded {d.metrics[code_5xx]} {code_5xx.replace('proxy_response_code_', 'HTTP ')} responses")
+                        obs_items.append(
+                            f"Apigee proxy {d.target_resource} recorded {d.metrics[code_5xx]} "
+                            f"{code_5xx.replace('proxy_response_code_', 'HTTP ')} responses in {METRIC_SOURCE}"
+                        )
                 log_5xx = d.metrics.get("access_log_5xx")
                 if isinstance(log_5xx, dict) and log_5xx.get("statement"):
                     # Log-based count, stated as such (the metric had none).
@@ -2752,13 +2767,17 @@ class SynthesizerAgent:
                     continue
                 gt = m.get("gateway_timeout") if isinstance(m.get("gateway_timeout"), dict) else {}
                 sa = m.get("spike_arrest") if isinstance(m.get("spike_arrest"), dict) else {}
+                codes = []
                 for code, n in resp.errors.items():
                     fault = (
                         " (GatewayTimeout)" if gt and str(gt.get("response_code")) == str(code)
                         else " (SpikeArrestViolation)" if sa and str(sa.get("response_code")) == str(code)
                         else ""
                     )
-                    facts.append(f"HTTP {code}: {n}{fault}")
+                    codes.append(f"HTTP {code}: {n}{fault}")
+                if codes:
+                    # One source name for the proxy's codes (fresh-rev-n6 O2).
+                    facts.append(f"{', '.join(codes)} in {METRIC_SOURCE}")
                 if not resp.errors:
                     facts.append(resp.statement())
                 elif resp.log_statement:
