@@ -22,7 +22,7 @@ from .contracts.report import (
 from .contracts.links import ConsoleLinkBuilder
 from .grouping.models import format_okf_alert_entry
 from .specialists.apigee import access_log_name
-from .specialists.synthesizer import SynthesizerAgent, db_caller_actions, dependency_path_for
+from .specialists.synthesizer import SynthesizerAgent, db_caller_actions, db_pool_actions, dependency_path_for
 
 try:
     from topology.topology_graph import get_blast_radius, get_upstream_dependencies
@@ -274,23 +274,9 @@ def generate_investigation_report(
     )
 
     if is_sql:
-        recommended_actions = [
-            ActionItem(
-                title="Terminate idle database sessions via SQL client",
-                command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
-                verification="Confirm active connections drop below 80% capacity via Cloud Monitoring",
-            ),
-            *db_caller_actions(canonical_res, config.project_id),
-            ActionItem(
-                title=(
-                    f"Review the tier and database flags of {canonical_res} before any max_connections change "
-                    "(gcloud sql instances patch --database-flags replaces the whole flag set, so every "
-                    "existing flag must be repeated)"
-                ),
-                command=f'gcloud sql instances describe {canonical_res} --format="yaml(settings.tier,settings.databaseFlags)"',
-                verification="List the current flags and tier; any change must keep all existing flags",
-            ),
-        ]
+        recommended_actions = db_pool_actions(
+            canonical_res, config.project_id, db_caller_actions(canonical_res, config.project_id)
+        )
     elif is_apigee:
         # Single-pass report: no Apigee telemetry was gathered, so only a read-only look at the
         # proxy's access log is suggested (no change against unverified resources).

@@ -209,7 +209,7 @@ Simulates a database connection leak exhausting Cloud SQL PostgreSQL backend con
   - **Origin Attribution:** `ata-inventory-db` (Cloud SQL instance identified by earliest onset timestamp).
   - **Work Notes & Links:**
     - Problem: connection pool saturation with the measured connection count. A 5xx cascade to dependents is stated only when a dependent's 5xx rate was measured; in QA no 5xx occurred, and the ticket says so.
-    - Actions: review the connection release in `ata-inventory-api` (the Cloud Run caller in TOPOLOGY.md) and a read-only `gcloud sql instances describe` of tier and flags (no flag patch)
+    - Actions: (1) review the connection release in `ata-inventory-api` (the Cloud Run caller in TOPOLOGY.md, read-only log read); (2) `pg_terminate_backend` of idle sessions, labelled "Mutating, operator judgement required" and only after the review shows leaked connections; (3) a read-only `gcloud sql instances describe` of tier and flags (no flag patch)
     - Attached diagnostic HTML investigation report
   - **Order traffic** uses the in-stock item with the most stock (`GET /items`); the script stops with an error if no item is in stock, because every order would return HTTP 400.
 - **Reset Command (run it right after the hold; the alert does not close before it):**

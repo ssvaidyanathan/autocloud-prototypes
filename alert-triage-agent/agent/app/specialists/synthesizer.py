@@ -139,6 +139,39 @@ def dependency_path_for(origin: str) -> Optional[str]:
     return path
 
 
+def db_pool_actions(origin: str, project_id: str, caller_actions: list[ActionItem]) -> list[ActionItem]:
+    """Actions for a Cloud SQL connection-pool incident: read-only review first.
+
+    Order: the connection-release review on each caller (read-only), then the session
+    termination, labelled as mutating and left to operator judgement, then the read-only
+    describe of tier and flags. With no known caller the describe comes first, so the
+    mutating step never leads.
+    """
+    terminate = ActionItem(
+        title=(
+            f"Mutating, operator judgement required: terminate idle database sessions on {origin} via a SQL "
+            "client, only after the review above shows they are leaked connections (this ends those sessions)"
+        ),
+        command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
+        verification=(
+            f"Confirm active connections drop below {int(DB_POOL_NEAR_SATURATION_RATIO * 100)}% of max_connections "
+            "via Cloud Monitoring"
+        ),
+    )
+    describe = ActionItem(
+        title=(
+            f"Review the tier and database flags of {origin} before any max_connections change "
+            "(gcloud sql instances patch --database-flags replaces the whole flag set, so every "
+            "existing flag must be repeated)"
+        ),
+        command=f'gcloud sql instances describe {origin} --format="yaml(settings.tier,settings.databaseFlags)"',
+        verification="List the current flags and tier; any change must keep all existing flags",
+    )
+    if caller_actions:
+        return [*caller_actions, terminate, describe]
+    return [describe, terminate]
+
+
 def db_caller_actions(origin: str, project_id: str) -> list[ActionItem]:
     """Connection-release review on the Cloud Run services that call the database directly.
 
@@ -2514,23 +2547,7 @@ class SynthesizerAgent:
         # 3. Database Failure (Cloud SQL)
         is_sql = ((sql_dossier and sql_dossier.anomaly_detected) or "db" in origin) and not (cr_dossier and cr_dossier.metrics.get("has_db_auth_error"))
         if is_sql:
-            return [
-                ActionItem(
-                    title="Terminate idle database sessions via SQL client",
-                    command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle' AND state_change < current_timestamp - INTERVAL '5 minutes';",
-                    verification="Confirm active connections drop below 80% capacity via Cloud Monitoring",
-                ),
-                *self._db_caller_actions(origin, project_id),
-                ActionItem(
-                    title=(
-                        f"Review the tier and database flags of {origin} before any max_connections change "
-                        "(gcloud sql instances patch --database-flags replaces the whole flag set, so every "
-                        "existing flag must be repeated)"
-                    ),
-                    command=f'gcloud sql instances describe {origin} --format="yaml(settings.tier,settings.databaseFlags)"',
-                    verification="List the current flags and tier; any change must keep all existing flags",
-                ),
-            ]
+            return db_pool_actions(origin, project_id, self._db_caller_actions(origin, project_id))
 
         # 4. Generic Service Failure: no change on the origin is implicated, so no traffic change
         # is recommended; confirm which named revision serves traffic first.
