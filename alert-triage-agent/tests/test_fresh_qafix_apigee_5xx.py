@@ -58,12 +58,17 @@ async def test_all_5xx_codes_are_summed(cfg):
 
 
 @pytest.mark.asyncio
-async def test_500_from_access_log_counts(cfg):
+async def test_500_in_access_log_only_is_kept_apart_from_the_metric_count(cfg):
+    """fresh-rev-n4 R1: the 5xx count is proxy/response_count only. The access log counts the same
+    requests (and live leaves status_code empty on the fault path), so its counts are published
+    separately under access_log_status_codes and never stand in for, or add to, the metric."""
     e = MagicMock()
     e.payload = {"status_code": "500"}
     e.timestamp = datetime(2026, 10, 28, 1, 40, 10, tzinfo=timezone.utc)
     d = await _run(cfg, "ata-inventory-5xx", [], [e])
-    assert d.metrics["proxy_response_code_5xx"] == 1
+    assert d.metrics["proxy_response_code_5xx"] == "N/A (not captured)"
+    assert d.metrics["response_codes"] == {}
+    assert d.metrics["access_log_status_codes"] == {"500": 1}
 
 
 @pytest.mark.asyncio
