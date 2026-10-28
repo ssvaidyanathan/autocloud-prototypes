@@ -3,6 +3,25 @@ from pydantic import BaseModel, Field
 
 from .report import InvestigationReport
 
+# Ticket priority -> ServiceNow (urgency, impact). Chosen so that ServiceNow's default
+# priority matrix (dl_u_priority, verified read-only on the PDI 2026-10-28) shows the same
+# number as the ticket title: 1/1 -> 1 Critical, 1/2 -> 2 High, 2/2 -> 3 Moderate, 2/3 -> 4 Low.
+# An instance with a customised matrix must review this table (see CONFIGURATION.md).
+SERVICENOW_URGENCY_IMPACT: dict[str, tuple[str, str]] = {
+    "P1": ("1", "1"),
+    "P2": ("1", "2"),
+    "P3": ("2", "2"),
+    "P4": ("2", "3"),
+}
+
+
+def servicenow_urgency_impact(priority: Optional[str]) -> tuple[str, str]:
+    """(urgency, impact) for a ticket priority. An unknown priority raises (never guessed)."""
+    key = str(priority or "").strip().upper()
+    if key not in SERVICENOW_URGENCY_IMPACT:
+        raise ValueError(f"no ServiceNow urgency/impact mapping for priority {priority!r}")
+    return SERVICENOW_URGENCY_IMPACT[key]
+
 
 class CreateTicketRequest(BaseModel):
     """Payload to mint a ServiceNow incident at settle/max-wait deadline."""

@@ -25,7 +25,7 @@ import re
 from typing import Any, Optional
 
 from ..contracts.alert import AlertEvent
-from ..contracts.instructions import UpdateTicketFieldsRequest
+from ..contracts.instructions import UpdateTicketFieldsRequest, servicenow_urgency_impact
 from ..contracts.report import InvestigationReport, title_problem_for_signal
 from ..correlation.scoring import classify_anomaly_category
 from .models import OKFDocument, parse_iso_timestamp
@@ -175,7 +175,8 @@ def _work_note(plan: TicketRefresh, new_entries: list[dict[str, Any]]) -> str:
     n = len(new_entries)
     prev_label = "Previous short description (reconstructed from the group file)" if plan.previous_title_reconstructed else "Previous short description"
     if plan.escalated:
-        level = "1" if plan.priority.upper() == "P1" else "2"
+        urgency, impact = servicenow_urgency_impact(plan.priority)
+        level = f"urgency {urgency}, impact {impact}"
         if plan.escalating_alert_is_new:
             why = f"new alert <code>{e(str(plan.escalating_alert))}</code> is more severe than the ticket"
         else:
@@ -186,7 +187,7 @@ def _work_note(plan: TicketRefresh, new_entries: list[dict[str, Any]]) -> str:
             )
         prio = (
             f"<b>Priority escalated:</b> {e(plan.previous_priority)} -&gt; {e(plan.priority)} "
-            f"({why}); urgency/impact set to {level}."
+            f"({why}); {level} set."
         )
     else:
         prio = (

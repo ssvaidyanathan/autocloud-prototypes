@@ -5,6 +5,7 @@ import httpx
 
 from ..config import BridgeConfig, get_settings
 from ..contracts.links import ConsoleLinkBuilder
+from ..contracts.instructions import servicenow_urgency_impact
 from ..contracts.report import InvestigationReport
 from ..templates.renderer import render_standalone_html
 
@@ -205,14 +206,12 @@ class ServiceNowAdapter:
     ) -> None:
         """PATCH the short description and a work note; set urgency/impact when ``priority`` is given.
 
-        Urgency/impact follow create_incident's mapping (P1 -> 1, otherwise 2). ``priority`` is
-        sent only to escalate; this method never derives or lowers a priority itself.
+        Urgency/impact follow create_incident's mapping (SERVICENOW_URGENCY_IMPACT). ``priority``
+        is sent only to escalate; this method never derives or lowers a priority itself.
         """
         body: dict[str, Any] = {"short_description": short_description, "work_notes": work_note}
         if priority:
-            level = "1" if str(priority).upper() == "P1" else "2"
-            body["urgency"] = level
-            body["impact"] = level
+            body["urgency"], body["impact"] = servicenow_urgency_impact(priority)
         base_url = (self.config.servicenow_instance_url or "").rstrip("/")
         if not base_url or not self.config.servicenow_username:
             logger.info("Mock updating incident %s fields: %s", sys_id, sorted(body))
@@ -229,7 +228,7 @@ class ServiceNowAdapter:
                 "Updated incident %s: short_description=%r%s",
                 sys_id,
                 short_description,
-                f", urgency/impact={body['urgency']} ({priority})" if priority else "",
+                f", urgency={body['urgency']} impact={body['impact']} ({priority})" if priority else "",
             )
         except Exception as exc:
             logger.error("Failed to update incident %s fields: %s", sys_id, type(exc).__name__)
@@ -515,8 +514,7 @@ class ServiceNowAdapter:
                 "description": structured_desc,
             }
             if report.priority == "P1":
-                patch_data["urgency"] = "1"
-                patch_data["impact"] = "1"
+                patch_data["urgency"], patch_data["impact"] = servicenow_urgency_impact("P1")
             try:
                 patch_resp = client.patch(table_endpoint, json=patch_data)
                 patch_resp.raise_for_status()
@@ -609,7 +607,8 @@ class ServiceNowAdapter:
             project_id=self.config.project_id,
             incidents_bucket=self.config.effective_incidents_bucket,
         )
-        sev_urgency = "1" if report.priority == "P1" else "2"
+        # Mapped so ServiceNow's default matrix shows the title's priority (P2 -> SN 2 High).
+        sev_urgency, sev_impact = servicenow_urgency_impact(report.priority)
         incident_filename = report.filename or f"incident-{report.group_id}.md"
 
         # Create incident with state NEW (state=1)
@@ -618,7 +617,7 @@ class ServiceNowAdapter:
             "description": structured_desc,
             "category": "Cloud Platform",
             "urgency": sev_urgency,
-            "impact": sev_urgency,
+            "impact": sev_impact,
             "state": "1",
             "correlation_id": incident_filename,
             "correlation_display": f"{self.config.name_prefix}-alert-triage",
