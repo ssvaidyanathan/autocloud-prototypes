@@ -34,7 +34,13 @@ from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches, not_applicable_component_type
 from .apigee import SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_id, access_log_name
 from .cloud_sql import DB_POOL_NEAR_SATURATION_RATIO, CloudSQLSpecialist
-from .change import APIGEE_HISTORY, NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_candidate_cause
+from .change import (
+    APIGEE_HISTORY,
+    NO_CLOUD_RUN_DEPLOYMENTS_FINDING,
+    ChangeSpecialist,
+    is_candidate_cause,
+    scoped_apigee_history_text,
+)
 from .origin_selection import (
     OriginSelection,
     alert_category,
@@ -770,7 +776,10 @@ class SynthesizerAgent:
             revision_diffs=revision_diffs,
             root_cause_analysis=root_cause_analysis,
             longer_term_fixes=longer_term_fixes,
-            apigee_history=self._apigee_history_line(dossiers),
+            apigee_history=self._apigee_history_line(
+                dossiers, origin=origin,
+                components=self._history_scope(origin, alert, selection),
+            ),
             queries_appendix=all_queries,
             tools_used=tools_used,
             skills_loaded=skills_loaded,
@@ -3037,10 +3046,36 @@ class SynthesizerAgent:
         }
 
     @staticmethod
-    def _apigee_history_line(dossiers: list[EvidenceDossier]) -> Optional[str]:
+    def _history_scope(origin: str, alert: AlertEvent, selection: Optional[OriginSelection]) -> list[str]:
+        """Components whose Apigee deployments the ticket names: the origin, the group's
+        alerting components, and the proxies that route directly to the origin."""
+        scope = [origin, alert.resource_name]
+        if selection is not None:
+            scope.extend(selection.degraded_services)
+        try:
+            loader = get_loader()
+            canon = loader.canonicalize(origin) or origin
+            scope.extend(
+                e.from_node for e in loader.edges
+                if e.to_node == canon and "apigee" in str(getattr(loader.components.get(e.from_node), "type", "")).lower()
+            )
+        except Exception as exc:
+            logger.warning("Topology edge lookup failed for %s: %s", origin, type(exc).__name__)
+        out: list[str] = []
+        for c in scope:
+            if c and c not in out:
+                out.append(c)
+        return out
+
+    @staticmethod
+    def _apigee_history_line(
+        dossiers: list[EvidenceDossier], origin: Optional[str] = None, components: Optional[list[str]] = None,
+    ) -> Optional[str]:
         """The change specialist's one-line Apigee deployment history, for the ticket text.
 
-        The proxy glob ("proxies ata-*") is spelled out, since ticket text carries no asterisks.
+        With `components`, deployments of other proxies are counted, not named (see
+        scoped_apigee_history_text); the full line stays in the HTML evidence. The proxy glob
+        ("proxies ata-*") is spelled out, since ticket text carries no asterisks.
         """
         chg = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist"), None)
         if chg is None:
@@ -3048,6 +3083,15 @@ class SynthesizerAgent:
         line = next((f for f in chg.findings if f.startswith(APIGEE_HISTORY)), None)
         if not line:
             return None
+        in_window = chg.metrics.get("apigee_deployments_in_window")
+        if origin and components and isinstance(in_window, list):
+            scoped = scoped_apigee_history_text({
+                "in_window": in_window,
+                "scope": chg.metrics.get("apigee_deployment_scope") or "",
+                "window_minutes": chg.metrics.get("apigee_deployment_window_minutes"),
+            }, origin, components)
+            if scoped:
+                line = scoped
         return re.sub(r"proxies (\S+?)\*", r"proxies with prefix \1", line).replace("`", "")
 
     @staticmethod

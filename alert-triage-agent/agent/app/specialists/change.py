@@ -197,6 +197,37 @@ def timeline_apigee_deployments(
     }
 
 
+def scoped_apigee_history_text(
+    history: dict[str, Any], origin: str, components: list[str]
+) -> Optional[str]:
+    """The Apigee deployment history for one group's ticket, or None when no scoping is needed.
+
+    `components` are the group's components and the proxies that route directly to `origin`.
+    Deployments of other proxies in the window are not named in the ticket; they are counted
+    ("N other proxies changed in window, see report"), and the full org-wide line stays in the
+    HTML report. None when every in-window deployment is in scope: the full line applies.
+    """
+    in_window = history.get("in_window") or []
+    in_scope = [d for d in in_window if d.get("proxy") in components]
+    others = sorted({str(d.get("proxy")) for d in in_window if d.get("proxy") not in components})
+    if not others:
+        return None
+    scope = f"{history['scope']}; " if history.get("scope") else ""
+    rule = f"{scope}group components and proxies routing directly to {origin}: {', '.join(components)}"
+    if in_scope:
+        body = "; ".join(
+            f"proxy {d['proxy']} revision {d['revision']} deployed {d['timestamp']}"
+            + (f" ({d['deployed_minutes_ago']}m before alert onset)" if d["deployed_minutes_ago"] >= 0 else " (after alert onset)")
+            for d in in_scope
+        )
+    else:
+        window = change_window_label(history.get("window_minutes") or DEFAULT_CHANGE_WINDOW_MINUTES)
+        body = f"no deployments of these proxies in the {window} window prior to alert onset"
+    n = len(others)
+    tail = f" ({n} other prox{'y' if n == 1 else 'ies'} changed in window, see report)"
+    return f"{APIGEE_HISTORY} ({rule}): {body}{tail}."
+
+
 def apigee_history_text(history: dict[str, Any]) -> str:
     """One sentence stating the Apigee deployment history read from the change timeline."""
     scope = f" ({history['scope']})" if history.get("scope") else ""
@@ -945,6 +976,7 @@ class ChangeSpecialist(BaseSpecialist):
             metrics["apigee_deployments_in_window"] = apigee_deployments["in_window"]
             metrics["apigee_deployments_current"] = apigee_deployments["current"]
             metrics["apigee_deployment_scope"] = apigee_deployments["scope"]
+            metrics["apigee_deployment_window_minutes"] = apigee_deployments["window_minutes"]
 
         # 2. Cloud Logging audit query for Services.ReplaceService / UpdateService events
         if not config.is_local:
