@@ -34,7 +34,7 @@ from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches
 from .apigee import SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_id, access_log_name
 from .cloud_sql import CloudSQLSpecialist
-from .change import NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_genuine_change
+from .change import NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_candidate_cause
 from .origin_selection import (
     OriginSelection,
     alert_category,
@@ -546,6 +546,16 @@ class SynthesizerAgent:
             neutral = self._neutralize_change_dossier(dossier_map["ChangeSpecialist"], verdict)
             dossier_map["ChangeSpecialist"] = neutral
             dossiers = [neutral if d.specialist_name == "ChangeSpecialist" else d for d in dossiers]
+        # Deploys on the group's other candidates get the same attribution rule before the origin
+        # notes may name one as a "Deployment regression" alternative.
+        if selection is not None and selection.is_multi_service and dossier_map.get("ChangeSpecialist") is not None:
+            before = dossier_map["ChangeSpecialist"]
+            assessed = self.change_specialist.assess_group_changes(
+                before, set(selection.degraded_services) | {origin}, alert, config
+            )
+            if assessed is not before:
+                dossier_map["ChangeSpecialist"] = assessed
+                dossiers = [assessed if d is before else d for d in dossiers]
         self._last_dossiers = dossiers
         origin_notes = self._origin_selection_notes(selection, origin, verdict, dossier_map.get("ChangeSpecialist"))
         try:
@@ -1237,7 +1247,7 @@ class SynthesizerAgent:
                 if self._same_node(cand.service, origin) or not cand.explained_by:
                     continue
                 for change in changes:
-                    if self._same_node(change.get("service"), cand.service) and is_genuine_change(change):
+                    if self._same_node(change.get("service"), cand.service) and is_candidate_cause(change):
                         upstream_desc = ", ".join(f"{u} {signal_of(u)}".rstrip() for u in cand.explained_by)
                         text = (
                             f"{cand.service} {signal_of(cand.service) or 'degradation'} explained by upstream {upstream_desc};"
@@ -1661,8 +1671,13 @@ class SynthesizerAgent:
             return value
 
         checked = ", ".join(change_sources_checked(dossiers))
+        # Deploys in the window that fail the attribution rule are listed with their evidence.
+        unrelated = chg.metrics.get("unrelated_changes_text")
+        unrelated_part = f"recent changes likely unrelated: {unrelated}; " if unrelated else ""
         if verdict is not None:
-            value = f"No ({verdict['reason']}; checked: {checked})"
+            value = f"No ({verdict['reason']}; {unrelated_part}checked: {checked})"
+        elif unrelated:
+            value = f"No ({unrelated_part}checked: {checked})"
         else:
             value = (
                 f"No (no deployment or configuration change on {chg.target_resource} or its upstream "
@@ -1952,7 +1967,11 @@ class SynthesizerAgent:
         if chg_dossier and chg_dossier.anomaly_detected:
             all_chgs = chg_dossier.metrics.get("all_changes", [])
             for c in all_chgs:
-                if c.get("service") in (origin, alert.resource_name) and c.get("deployed_minutes_ago", 999) <= 60:
+                if (
+                    c.get("service") in (origin, alert.resource_name)
+                    and c.get("deployed_minutes_ago", 999) <= 60
+                    and is_candidate_cause(c)
+                ):
                     origin_change = c
                     break
             if not origin_change and chg_dossier.metrics.get("recent_revision"):
@@ -2833,7 +2852,13 @@ class SynthesizerAgent:
             # A not-implicated change is stated by the origin selection notes (alternatives_ruled_out).
             not_implicated = chg_dossier.metrics.get("change_not_implicated_reason")
             proxy_changed = self._proxy_change_evidence(dossiers, origin) is not None
-            if has_chg_check and not chg_dossier.anomaly_detected and not not_implicated and not proxy_changed:
+            unrelated = chg_dossier.metrics.get("unrelated_changes_text")
+            if has_chg_check and not chg_dossier.anomaly_detected and not not_implicated and not proxy_changed and unrelated:
+                alternatives.append({
+                    "alternative": "Recent Application Deployment Regression",
+                    "reason": f"Recent changes (likely unrelated): {unrelated}.",
+                })
+            elif has_chg_check and not chg_dossier.anomaly_detected and not not_implicated and not proxy_changed:
                 rev = chg_dossier.metrics.get("recent_revision", "N/A")
                 alternatives.append({
                     "alternative": "Recent Application Deployment Regression",

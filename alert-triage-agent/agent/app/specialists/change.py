@@ -4,6 +4,7 @@ Analyzes Cloud Run and Apigee revision history over the past 2 hours
 and correlates deployment timestamps with alert onset curves.
 """
 
+import dataclasses
 from datetime import datetime, timezone, timedelta
 import logging
 from typing import Any, Optional
@@ -14,6 +15,7 @@ from ..contracts.report import EvidenceItem
 from ..request_count import REQUEST_COUNT_METRIC, request_count_filter, request_count_series
 from ..tools.tools_client import ToolsCallError, ToolsNotConfigured, fetch_change_timeline
 from .base import BaseSpecialist, EvidenceDossier
+from .cloud_run import ERROR_RATE_5XX_BREACH_PCT, LATENCY_P95_BREACH_MS
 from .telemetry_reads import (
     CHANGE_SOURCES_KEY,
     UNAVAILABLE_KEY,
@@ -315,6 +317,272 @@ def previous_serving_revision(
     return result
 
 
+REQUEST_LATENCIES_METRIC = "run.googleapis.com/request_latencies"
+
+
+def _point_minute(pt: Any) -> datetime:
+    """UTC minute a 60 s Monitoring point covers (its interval end minus one minute).
+
+    ValueError when the point has no interval end time.
+    """
+    interval = getattr(pt, "interval", None)
+    end = getattr(interval, "end_time", None) if interval is not None else None
+    if end is None:
+        raise ValueError("Cloud Monitoring point without an interval end time")
+    if isinstance(end, datetime):
+        dt = end if end.tzinfo else end.replace(tzinfo=timezone.utc)
+    elif hasattr(end, "seconds"):
+        dt = datetime.fromtimestamp(int(end.seconds), tz=timezone.utc)
+    else:
+        raise ValueError(f"Cloud Monitoring point interval end time of type {type(end).__name__}")
+    return (dt.astimezone(timezone.utc) - timedelta(minutes=1)).replace(second=0, microsecond=0)
+
+
+def _latency_series(metric_client: Any, project_id: str, region: str, service: str, start: datetime, end: datetime) -> Any:
+    """request_latencies time series (full view) of `service` in `region` over [start, end]."""
+    from google.cloud import monitoring_v3
+
+    req = monitoring_v3.ListTimeSeriesRequest(
+        name=f"projects/{project_id}",
+        filter=(
+            f'metric.type = "{REQUEST_LATENCIES_METRIC}" AND resource.type = "cloud_run_revision" '
+            f'AND resource.labels.location = "{region}" AND resource.labels.service_name = "{service}"'
+        ),
+        interval=monitoring_v3.TimeInterval(
+            start_time={"seconds": int(start.timestamp())}, end_time={"seconds": int(end.timestamp())}
+        ),
+        view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+    )
+    return metric_client.list_time_series(request=req)
+
+
+def healthy_period(
+    metric_client: Any,
+    project_id: str,
+    region: str,
+    service: str,
+    revision: str,
+    deploy_timestamp: Any,
+    onset: datetime,
+    min_minutes: int,
+) -> dict[str, Any]:
+    """Whether `revision` had a healthy period between its deploy and the alert onset.
+
+    Read per minute from Cloud Monitoring for this revision only: request_count by response
+    code class and request_latencies. A minute with requests is healthy when its HTTP 5xx share
+    is under ERROR_RATE_5XX_BREACH_PCT and its mean latency under LATENCY_P95_BREACH_MS (the
+    alert-policy thresholds); it is unhealthy when either is at or over the threshold. A
+    healthy period is a span of at least `min_minutes` (first to last healthy minute, both
+    counted) with no unhealthy minute inside. Minutes without requests neither count nor break.
+
+    Returns {"status": "healthy" | "no_healthy_period" | "unavailable", "evidence": str, ...}.
+    "unavailable" (a read failed, or no requests reached the revision) means the test could not
+    be applied; the caller falls back to the onset-window rule and says so.
+    """
+    deploy_dt = _parse_ts(deploy_timestamp)
+    if deploy_dt is None:
+        return {"status": "unavailable", "evidence": f"the creation time of {revision} is unknown"}
+    window = f"between {_iso(deploy_dt)} (deploy) and {_iso(onset)} (alert onset)"
+    try:
+        per_minute: dict[datetime, list[int]] = {}
+        for ts in request_count_series(metric_client, project_id, region, service, deploy_dt.timestamp(), onset.timestamp()):
+            if ts.resource.labels.get("revision_name", "") != revision:
+                continue
+            labels = getattr(getattr(ts, "metric", None), "labels", None) or {}
+            is_5xx = labels.get("response_code_class") == "5xx" or str(labels.get("response_code", "")).startswith("5")
+            for pt in ts.points:
+                n = int(pt.value.int64_value)
+                if n <= 0:
+                    continue
+                bucket = per_minute.setdefault(_point_minute(pt), [0, 0])
+                bucket[0] += n
+                if is_5xx:
+                    bucket[1] += n
+        if not per_minute:
+            return {
+                "status": "unavailable",
+                "evidence": f"Cloud Monitoring {REQUEST_COUNT_METRIC} recorded no requests on {revision} {window}",
+            }
+        latency: dict[datetime, list[float]] = {}
+        for ts in _latency_series(metric_client, project_id, region, service, deploy_dt, onset):
+            if ts.resource.labels.get("revision_name", "") != revision:
+                continue
+            for pt in ts.points:
+                dist = pt.value.distribution_value
+                count = int(getattr(dist, "count", 0) or 0)
+                if count <= 0:
+                    continue
+                acc = latency.setdefault(_point_minute(pt), [0.0, 0])
+                acc[0] += float(dist.mean) * count
+                acc[1] += count
+    except Exception as exc:
+        logger.warning("Healthy-period query for %s on %s failed: %s", revision, service, exc)
+        return {
+            "status": "unavailable",
+            "evidence": f"the Cloud Monitoring query for {revision} {window} failed ({type(exc).__name__})",
+        }
+
+    best: Optional[tuple[datetime, datetime, int]] = None
+    run_start: Optional[datetime] = None
+    run_end: Optional[datetime] = None
+    run_requests = 0
+    first_bad: Optional[tuple[datetime, str]] = None
+
+    def close_run() -> None:
+        nonlocal best
+        if run_start is not None and run_end is not None:
+            span = int((run_end - run_start).total_seconds() // 60) + 1
+            if best is None or span > int((best[1] - best[0]).total_seconds() // 60) + 1:
+                best = (run_start, run_end, run_requests)
+
+    for minute in sorted(per_minute):
+        total, errors = per_minute[minute]
+        share = errors * 100.0 / total
+        lat = latency.get(minute)
+        mean_ms = lat[0] / lat[1] if lat else None
+        breach = []
+        if share >= ERROR_RATE_5XX_BREACH_PCT:
+            breach.append(f"HTTP 5xx {share:.1f}% of {total} requests")
+        if mean_ms is not None and mean_ms >= LATENCY_P95_BREACH_MS:
+            breach.append(f"mean latency {mean_ms:.0f} ms")
+        if breach:
+            if first_bad is None:
+                first_bad = (minute, ", ".join(breach))
+            close_run()
+            run_start = run_end = None
+            run_requests = 0
+        elif mean_ms is not None:
+            run_start = run_start or minute
+            run_end = minute
+            run_requests += total
+        # A minute with requests but no latency point is neither healthy nor unhealthy.
+    close_run()
+
+    thresholds = f"HTTP 5xx under {ERROR_RATE_5XX_BREACH_PCT:g}% and mean latency under {LATENCY_P95_BREACH_MS:g} ms"
+    result: dict[str, Any] = {"window_start": _iso(deploy_dt), "window_end": _iso(onset)}
+    span = int((best[1] - best[0]).total_seconds() // 60) + 1 if best else 0
+    if best is not None and span >= min_minutes:
+        result.update(
+            status="healthy",
+            start=_iso(best[0]), end=_iso(best[1] + timedelta(minutes=1)), minutes=span, requests=best[2],
+            evidence=(
+                f"healthy period: Cloud Monitoring shows {revision} served {best[2]} requests from "
+                f"{_iso(best[0])} to {_iso(best[1] + timedelta(minutes=1))} ({span} min, at least {min_minutes}) with {thresholds} "
+                f"in every minute with requests, before the alert onset at {_iso(onset)}"
+            ),
+        )
+    else:
+        longest = (
+            f"its longest span of normal traffic was {span} min ({_iso(best[0])} to "
+            f"{_iso(best[1] + timedelta(minutes=1))}), under {min_minutes}"
+            if best is not None else "it had no minute of normal traffic"
+        )
+        bad = f"; first minute over the thresholds {_iso(first_bad[0])} ({first_bad[1]})" if first_bad else ""
+        result.update(
+            status="no_healthy_period", minutes=span,
+            evidence=(
+                f"no healthy period: Cloud Monitoring shows {revision} {window}: {longest} "
+                f"({thresholds}){bad}"
+            ),
+        )
+    return result
+
+
+def assess_deploy_causation(chg: dict[str, Any], onset: datetime, config: AgentConfig, metric_client: Any) -> dict[str, Any]:
+    """Whether a genuine deploy can be the cause of an incident whose onset is `onset`.
+
+    The cause only if (a) the onset is at most CHANGE_ONSET_WINDOW_MINUTES after the deploy,
+    or (b) the new revision had no healthy period before the onset (see healthy_period).
+    When the healthy-period data is unavailable, only (a) is applied and the evidence says so.
+    Returns {"causal": bool, "rule": "a" | "b" | None, "evidence": str, "healthy_period": ...}.
+    """
+    mins = int(chg.get("deployed_minutes_ago", -1))
+    window = config.change_onset_window_minutes
+    revision, service = chg.get("revision") or "", chg.get("service") or ""
+    if 0 <= mins <= window:
+        return {
+            "causal": True, "rule": "a", "healthy_period": None,
+            "evidence": (
+                f"deployed {mins}m before the alert onset, within the {window}-minute change onset window "
+                "(CHANGE_ONSET_WINDOW_MINUTES)"
+            ),
+        }
+    beyond = f"deployed {mins}m before the alert onset, beyond the {window}-minute change onset window (CHANGE_ONSET_WINDOW_MINUTES)"
+    if metric_client is None:
+        hp: dict[str, Any] = {
+            "status": "unavailable",
+            "evidence": "Cloud Monitoring was not queried (no metric client)",
+        }
+    else:
+        hp = healthy_period(
+            metric_client, config.project_id, config.region, service, revision, chg.get("timestamp"),
+            onset, config.change_healthy_period_minutes,
+        )
+    if hp["status"] == "unavailable":
+        evidence = (
+            f"{beyond}; healthy-period data unavailable ({hp['evidence']}), so only the onset-window "
+            "rule was applied"
+        )
+        logger.warning("Change attribution for %s on %s: %s", revision, service, evidence)
+        return {"causal": False, "rule": None, "evidence": evidence, "healthy_period": hp}
+    if hp["status"] == "healthy":
+        return {"causal": False, "rule": None, "evidence": f"{beyond}; {hp['evidence']}", "healthy_period": hp}
+    return {
+        "causal": True, "rule": "b", "healthy_period": hp,
+        "evidence": f"{beyond}; {hp['evidence']} (CHANGE_HEALTHY_PERIOD_MINUTES {config.change_healthy_period_minutes})",
+    }
+
+
+def is_candidate_cause(c: dict[str, Any]) -> bool:
+    """A genuine change that passed the attribution rule (or was not assessed by it)."""
+    causation = c.get("causation")
+    return is_genuine_change(c) and (not isinstance(causation, dict) or bool(causation.get("causal")))
+
+
+def unrelated_change_text(c: dict[str, Any]) -> str:
+    """One deploy listed under "Recent changes (likely unrelated)", with its evidence."""
+    causation = c.get("causation") or {}
+    return f"revision {c.get('revision')} on {c.get('service')} deployed {c.get('timestamp')}: {causation.get('evidence', '')}"
+
+
+UNRELATED_HEADLINE = "Recent changes (likely unrelated)"
+
+
+def _list_unrelated(
+    metrics: dict[str, Any], findings: list[str], evidence_items: list[EvidenceItem], changes: list[dict[str, Any]]
+) -> None:
+    """State the deploys that failed the attribution rule under "Recent changes (likely unrelated)"."""
+    if not changes:
+        return
+    listed = "; ".join(unrelated_change_text(c) for c in changes)
+    metrics["unrelated_changes"] = [
+        {
+            "service": c.get("service"),
+            "revision": c.get("revision"),
+            "timestamp": c.get("timestamp"),
+            "deployed_minutes_ago": c.get("deployed_minutes_ago"),
+            "evidence": c["causation"]["evidence"],
+        }
+        for c in changes
+    ]
+    metrics["unrelated_changes_text"] = listed
+    findings.append(f"{UNRELATED_HEADLINE}: {listed}.")
+    evidence_items.append(EvidenceItem(
+        headline=UNRELATED_HEADLINE,
+        content="\n".join(f"- {unrelated_change_text(c)}" for c in changes),
+    ))
+
+
+def _alert_onset(alert: AlertEvent) -> datetime:
+    """The alert onset (started_at), else now."""
+    if alert.started_at:
+        try:
+            return datetime.fromisoformat(alert.started_at.replace("Z", "+00:00"))
+        except Exception:
+            pass
+    return datetime.now(timezone.utc)
+
+
 class ChangeSpecialist(BaseSpecialist):
     """Specialist agent correlating recent infrastructure and code changes."""
 
@@ -330,6 +598,69 @@ class ChangeSpecialist(BaseSpecialist):
         from google.cloud import monitoring_v3
 
         return monitoring_v3.MetricServiceClient()
+
+    def _assess(
+        self, changes: list[dict[str, Any]], onset: datetime, config: AgentConfig, queries_executed: dict[str, list[str]]
+    ) -> None:
+        """Set each change's "causation" (assess_deploy_causation) and record the Monitoring reads."""
+        if not changes:
+            return
+        client = self._metric_client_or_none(config)
+        for c in changes:
+            c["causation"] = assess_deploy_causation(c, onset, config, client)
+            hp = c["causation"].get("healthy_period")
+            if hp and hp.get("window_start"):
+                queries_executed.setdefault("cloud_monitoring", []).append(
+                    f'{request_count_filter(config.region, c.get("service") or "")} and '
+                    f'{REQUEST_LATENCIES_METRIC} of revision {c.get("revision")} per minute, '
+                    f'{hp["window_start"]} to {hp["window_end"]}'
+                )
+
+    def assess_group_changes(
+        self, dossier: EvidenceDossier, services: set[str], alert: AlertEvent, config: AgentConfig
+    ) -> EvidenceDossier:
+        """Apply the attribution rule to genuine changes on `services` not assessed yet.
+
+        investigate() assesses the changes of the alert's service and its upstream dependencies.
+        A multi-service group also names other candidates (atat INC0010341: orders-api under an
+        inventory-api origin); their deploys must not be named as a "Deployment regression"
+        alternative without the same rule. Returns the dossier with any newly unrelated changes
+        listed under "Recent changes (likely unrelated)" (the same dossier when nothing changed).
+        """
+        changes = dossier.metrics.get("all_changes") or []
+        pending = [
+            c for c in changes
+            if isinstance(c, dict) and c.get("service") in services and "causation" not in c and is_genuine_change(c)
+        ]
+        if not pending:
+            return dossier
+        queries = {k: list(v) for k, v in dossier.queries_executed.items()}
+        self._assess(pending, _alert_onset(alert), config, queries)
+        unrelated = [c for c in changes if isinstance(c.get("causation"), dict) and not c["causation"]["causal"]]
+        if not any(c in unrelated for c in pending):
+            return dataclasses.replace(dossier, queries_executed=queries)
+        metrics = dict(dossier.metrics)
+        # The listing is rebuilt; a "no deployments" statement would now contradict it.
+        findings = [
+            f for f in dossier.findings
+            if not f.startswith(f"{UNRELATED_HEADLINE}:") and f != NO_CLOUD_RUN_CHANGES_FINDING
+        ]
+        items = [
+            i for i in dossier.evidence_items
+            if i.headline != UNRELATED_HEADLINE
+            and not (i.headline == "Deployment History Analysis" and "No recent Cloud Run deployments" in (i.content or ""))
+        ]
+        _list_unrelated(metrics, findings, items, unrelated)
+        logger.info("Change attribution for group services %s: %s", sorted(services), metrics["unrelated_changes_text"])
+        return dataclasses.replace(dossier, metrics=metrics, findings=findings, evidence_items=items, queries_executed=queries)
+
+    def _metric_client_or_none(self, config: AgentConfig) -> Any:
+        """The Cloud Monitoring client, or None when it is unavailable (stated by the caller)."""
+        try:
+            return self._get_metric_client(config)
+        except Exception as exc:
+            logger.warning("Cloud Monitoring client unavailable: %s", exc)
+            return None
 
     def _previous_serving(self, chg: dict[str, Any], config: AgentConfig) -> dict[str, Any]:
         service, revision = chg.get("service") or "", chg.get("revision") or ""
@@ -426,12 +757,7 @@ class ChangeSpecialist(BaseSpecialist):
             ],
         }
 
-        now = datetime.now(timezone.utc)
-        if alert.started_at:
-            try:
-                now = datetime.fromisoformat(alert.started_at.replace("Z", "+00:00"))
-            except Exception:
-                pass
+        now = _alert_onset(alert)
 
         # 1. Change timeline from the deployed ata-tools service: Cloud Run revision history and
         # Apigee deployment history. There is no fallback: when it cannot be read, the report
@@ -513,9 +839,16 @@ class ChangeSpecialist(BaseSpecialist):
         except Exception:
             pass
 
-        relevant_changes = [
+        genuine_changes = [
             c for c in recent_changes if c.get("service") in candidate_services and is_genuine_change(c)
         ]
+        # A deploy in the window is the cause only by the onset-window or no-healthy-period rule
+        # (assess_deploy_causation); the others are listed as likely unrelated, with evidence.
+        # The verdict is kept on the change record, so every reader of all_changes sees it.
+        self._assess(genuine_changes, now, config, queries_executed)
+        relevant_changes = [c for c in genuine_changes if c["causation"]["causal"]]
+        unrelated_changes = [c for c in genuine_changes if not c["causation"]["causal"]]
+        _list_unrelated(metrics, findings, evidence_items, unrelated_changes)
 
         if relevant_changes:
             target_changes = [c for c in relevant_changes if c.get("service") == target]
@@ -526,6 +859,8 @@ class ChangeSpecialist(BaseSpecialist):
                 f"Recent {change_label} detected on `{chg['service']}` ({chg['deployed_minutes_ago']}m ago): {rev_label}."
             )
             findings.append("Deployment timing aligns with alert onset curve.")
+            findings.append(f"Change attribution basis for {chg['revision']}: {chg['causation']['evidence']}.")
+            metrics["change_causation"] = chg["causation"]["evidence"]
             metrics["recent_revision"] = chg["revision"]
             metrics["previous_created_revision"] = chg.get("previous_created_revision") or chg.get(
                 "details", {}
@@ -551,7 +886,8 @@ class ChangeSpecialist(BaseSpecialist):
                         f"Service: {chg['service']}\n"
                         f"Change: {rev_label}\n"
                         f"Deployed: {chg['deployed_minutes_ago']} minutes prior to alert onset\n"
-                        f"Correlation: Direct temporal correlation with error curve onset."
+                        f"Correlation: Direct temporal correlation with error curve onset.\n"
+                        f"Attribution basis: {chg['causation']['evidence']}."
                     ),
                 )
             )
@@ -574,7 +910,7 @@ class ChangeSpecialist(BaseSpecialist):
             )
             findings.append(content)
             evidence_items.append(EvidenceItem(headline="Deployment History Analysis (not queried)", content=content))
-        else:
+        elif not unrelated_changes:
             findings.append(NO_CLOUD_RUN_CHANGES_FINDING)
             evidence_items.append(EvidenceItem(
                 headline="Deployment History Analysis",

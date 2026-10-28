@@ -73,6 +73,16 @@ class AgentConfig(BaseSettings):
     # many minutes before the new revision was created (Cloud Monitoring request_count by
     # revision). A rollback target is named only when exactly one revision served.
     rollback_traffic_lookback_minutes: int = Field(default=30, alias="ROLLBACK_TRAFFIC_LOOKBACK_MINUTES", ge=1)
+    # Change attribution: a Cloud Run deploy in the change window is the cause (change_induced,
+    # rollback) only if (a) the alert onset is at most CHANGE_ONSET_WINDOW_MINUTES after it, or
+    # (b) the new revision had no healthy period before the onset: no span of at least
+    # CHANGE_HEALTHY_PERIOD_MINUTES in which every minute with requests on it stayed under the
+    # alert-policy thresholds (HTTP 5xx < 5 %, mean latency < 2000 ms; Cloud Monitoring per
+    # revision). Without that data only (a) applies, and the ticket says so. Otherwise the deploy
+    # is listed under "Recent changes (likely unrelated)". Live INC0010343: a re-pin 59 min
+    # before an S1 fault, healthy 21:52-22:44Z, was blamed under the old any-deploy-in-window rule.
+    change_onset_window_minutes: int = Field(default=15, alias="CHANGE_ONSET_WINDOW_MINUTES", ge=1, le=120)
+    change_healthy_period_minutes: int = Field(default=10, alias="CHANGE_HEALTHY_PERIOD_MINUTES", ge=1, le=120)
     # Recovery note: request_count of the group's Cloud Run services is read from this many
     # seconds before the last alert closed until the note is written, to state whether the
     # close coincided with traffic stopping (missing data).

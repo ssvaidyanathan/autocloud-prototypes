@@ -29,7 +29,7 @@ from bridge.app.contracts.report import InvestigationReport as BridgeReport
 from tests.test_group_origin_selection import (  # noqa: F401  (fixtures)
     INVENTORY_BAD_REV,
     INVENTORY_GOOD_REV,
-    ORDERS_REDEPLOY,
+    ORDERS_REDEPLOY_RECENT,
     ORDERS_REV,
     S2_ORDERS,
     _change,
@@ -112,7 +112,7 @@ def test_no_change_in_the_window_is_no_with_the_sources_checked(agent_cfg, telem
 
 def test_recent_change_not_implicated_is_no_with_the_reason(agent_cfg, telemetry):
     telemetry["degraded"] = {"ata-inventory-api": "latency", "ata-orders-api": "latency"}
-    telemetry["changes"] = [ORDERS_REDEPLOY]
+    telemetry["changes"] = [ORDERS_REDEPLOY_RECENT]
 
     report = _investigate(_event(S2_ORDERS), agent_cfg)
 

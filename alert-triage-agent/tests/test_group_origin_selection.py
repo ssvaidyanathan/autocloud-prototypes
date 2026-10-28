@@ -100,6 +100,10 @@ def _change(service: str, revision: str, previous: str, deployed_at: str) -> dic
 
 # The live unrelated orders redeploy (04:45Z, 76 min before onset).
 ORDERS_REDEPLOY = _change("ata-orders-api", ORDERS_REV, ORDERS_PREV_REV, "2026-10-27T04:45:14Z")
+# The same redeploy 5 min before onset: inside CHANGE_ONSET_WINDOW_MINUTES, so it is a candidate
+# cause by timing and only the upstream explanation clears it (the 76-min one is listed as likely
+# unrelated by the attribution rule before that; tests/test_change_attribution_rule.py).
+ORDERS_REDEPLOY_RECENT = _change("ata-orders-api", ORDERS_REV, ORDERS_PREV_REV, "2026-10-27T05:56:52Z")
 
 
 def _select(alerts):
@@ -279,7 +283,7 @@ def test_s2_does_not_recommend_rolling_back_unimplicated_orders_api(agent_cfg, c
 
 def test_s2_report_explains_origin_selection(agent_cfg, clock, monkeypatch, telemetry):
     telemetry["degraded"] = {"ata-inventory-api": "latency", "ata-orders-api": "latency"}
-    telemetry["changes"] = [ORDERS_REDEPLOY]
+    telemetry["changes"] = [ORDERS_REDEPLOY_RECENT]
 
     report, store, group_id = _ticket_report_for_group(S2_GROUP, agent_cfg, clock, monkeypatch)
     expected = (
@@ -338,7 +342,7 @@ def test_recent_bad_revision_on_degraded_upstream_is_implicated_and_rolled_back(
     telemetry["degraded"] = {"ata-inventory-api": "5xx", "ata-orders-api": "latency"}
     telemetry["changes"] = [
         _change("ata-inventory-api", INVENTORY_BAD_REV, INVENTORY_GOOD_REV, "2026-10-27T05:55:00Z"),
-        ORDERS_REDEPLOY,
+        ORDERS_REDEPLOY_RECENT,
     ]
     telemetry["traffic"] = {"ata-inventory-api": {INVENTORY_GOOD_REV: [8, 8, 3]}}
 
@@ -394,7 +398,7 @@ def test_single_downstream_alert_with_degraded_upstream_does_not_blame_its_deplo
     import asyncio
 
     telemetry["degraded"] = {"ata-inventory-api": "latency", "ata-orders-api": "latency"}
-    telemetry["changes"] = [ORDERS_REDEPLOY]
+    telemetry["changes"] = [ORDERS_REDEPLOY_RECENT]
 
     report = asyncio.run(
         SynthesizerAgent().execute_investigation(_event(S2_ORDERS), "grp-single", "incident-grp-single.md", agent_cfg)
