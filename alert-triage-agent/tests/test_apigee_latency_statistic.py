@@ -15,7 +15,7 @@ import pytest
 
 from agent.app.config import AgentConfig
 from agent.app.contracts.alert import AlertEvent
-from agent.app.specialists.apigee import ApigeeSpecialist, target_latency_summary
+from agent.app.specialists.apigee import ApigeeSpecialist, apply_gateway_timeout_gap, target_latency_summary
 from agent.app.specialists.base import EvidenceDossier
 from agent.app.specialists.synthesizer import SynthesizerAgent
 
@@ -203,3 +203,99 @@ def test_html_without_basis_keeps_plain_labels():
     })
     assert "Target latency:" in html
     assert "P95 N/A (not captured)" in html
+
+
+# --- GatewayTimeout faults record no target latency (final-qa2 S2, INC0010351) -----------
+# S2 data shape: proxy/response_count 504 x394 (fault GatewayTimeout) + 200 x2; target/latencies
+# one per-minute point, count 2, mean 16ms. The 16ms is the 2 answered requests only; it was
+# rendered as "P95 16ms (GatewayTimeout observed)" while the backend measured ~6.5 s.
+
+def test_gap_marks_percentiles_the_timeouts_hide():
+    s = apply_gateway_timeout_gap(target_latency_summary([], [16.0]), 394, 2)
+    reason = "not available: 394 of 396 requests were GatewayTimeout faults, which record no target latency"
+    assert s["p50_ms"] == reason
+    assert s["p95_ms"] == reason
+    assert s["p99_ms"] == reason
+    assert s["basis"].endswith("; excludes 394 GatewayTimeout faults, which record no target latency")
+
+
+def test_gap_keeps_percentiles_the_timeouts_do_not_reach():
+    # 1 timeout in 1000: 0.1% < 1%, so P50/P95/P99 of the answered requests stand.
+    s = apply_gateway_timeout_gap(target_latency_summary([20.0] * 999, []), 1, 999)
+    assert (s["p50_ms"], s["p95_ms"], s["p99_ms"]) == (20, 20, 20)
+    assert "excludes 1 GatewayTimeout fault" in s["basis"]
+
+
+def test_gap_boundary_is_strictly_above_one_minus_q():
+    # 5 of 100 is exactly 5%: P95 still within the answered requests; 6 of 100 is not.
+    at = apply_gateway_timeout_gap(target_latency_summary([20.0] * 95, []), 5, 95)
+    assert at["p95_ms"] == 20 and isinstance(at["p99_ms"], str)
+    over = apply_gateway_timeout_gap(target_latency_summary([20.0] * 94, []), 6, 94)
+    assert isinstance(over["p95_ms"], str) and over["p50_ms"] == 20
+
+
+def test_gap_without_timeouts_is_identity():
+    s = target_latency_summary([], [16.0])
+    assert apply_gateway_timeout_gap(s, 0, 2) is s
+
+
+def _rc_ts(code: str, count: int, fault: str | None = None) -> MagicMock:
+    ts = MagicMock()
+    ts.metric.labels = {"response_code": code, **({"fault_code": fault, "fault_source": "target"} if fault else {})}
+    ts.resource.labels = {}
+    pt = MagicMock()
+    pt.value.int64_value = count
+    ts.points = [pt]
+    return ts
+
+
+@pytest.mark.asyncio
+async def test_s2_shape_p95_is_not_available_not_16ms(test_config):
+    alert = AlertEvent(
+        incident_id="0.oecelps8a57g", policy_name="ata-inventory-latency", resource_name="ata-inventory-v1",
+        state="open", started_at="2026-10-28T04:55:11Z",
+    )
+    with patch("google.cloud.monitoring_v3.MetricServiceClient") as mon_cls, \
+         patch("google.cloud.logging.Client") as log_cls:
+        def side_effect(request):
+            if "latencies" in request.filter:
+                return [_dist_ts([(2, 16.0)])]
+            return [
+                _rc_ts("504", 394, "messaging.adaptors.http.flow.GatewayTimeout"),
+                _rc_ts("200", 2),
+            ]
+        mon_cls.return_value.list_time_series.side_effect = side_effect
+        log_cls.return_value.list_entries.return_value = []
+        dossier = await ApigeeSpecialist().investigate(alert, test_config)
+    reason = "not available: 394 of 396 requests were GatewayTimeout faults, which record no target latency"
+    assert dossier.metrics["target_latency_p95_ms"] == reason
+    assert dossier.metrics["target_latency_p95"] == reason
+    assert dossier.metrics["target_latency_p50"] == reason
+    assert dossier.metrics["target_latency_basis"] == (
+        "percentiles of 1 per-minute mean (apigee.googleapis.com/target/latencies); "
+        "excludes 394 GatewayTimeout faults, which record no target latency"
+    )
+    row = SynthesizerAgent()._build_metrics_comparison([dossier], "ata-inventory-api")
+    lat_row = next(r for r in row if r["layer"] == "Apigee" and "latency" in r["metric_name"])
+    assert lat_row["during_value"] == reason
+    assert "16ms" not in lat_row["during_value"]
+
+
+@pytest.mark.asyncio
+async def test_logged_timeouts_with_latency_are_in_the_population(test_config):
+    # A GatewayTimeout entry that does carry target_latency_ms is measured, not excluded.
+    e = _log_entry("5001")
+    e.payload["fault_source"] = "GatewayTimeout"
+    dossier = await _investigate(test_config, [], [e, _log_entry("20", status="200")])
+    assert "excludes" not in dossier.metrics["target_latency_basis"]
+    assert dossier.metrics["target_latency_p95_ms"] == 5001
+
+
+@pytest.mark.asyncio
+async def test_logged_timeouts_without_latency_are_excluded(test_config):
+    blank = _log_entry("")
+    blank.payload["fault_source"] = "GatewayTimeout"
+    dossier = await _investigate(test_config, [], [blank, blank, _log_entry("20", status="200")])
+    assert dossier.metrics["target_latency_p95_ms"] == (
+        "not available: 2 of 3 requests were GatewayTimeout faults, which record no target latency"
+    )

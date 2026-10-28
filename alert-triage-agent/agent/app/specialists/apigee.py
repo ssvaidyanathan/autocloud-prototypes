@@ -68,6 +68,40 @@ def target_latency_summary(logged_ms: list[float], minute_means_ms: list[float])
     }
 
 
+# Nearest-rank quantiles reported for Apigee target latency.
+_LATENCY_QUANTILES = (("p50", 0.50), ("p95", 0.95), ("p99", 0.99))
+
+
+def apply_gateway_timeout_gap(
+    summary: dict[str, Any], timeouts_without_latency: int, requests_with_latency: int
+) -> dict[str, Any]:
+    """Mark the percentiles that GatewayTimeout faults make unknowable.
+
+    A GatewayTimeout fault gets no target response, so it records no target latency: the
+    percentiles above cover only the requests that got one. When the faults are more than
+    (1 - q) of all requests, the true q-th percentile lies among them and is not known, so
+    it is "not available" with the reason. Lower percentiles stay numeric, and the basis
+    names the excluded faults. Returns a new dict; `summary` is not changed.
+    """
+    if timeouts_without_latency <= 0:
+        return summary
+    total = timeouts_without_latency + max(requests_with_latency, 0)
+    share = timeouts_without_latency / total
+    out = dict(summary)
+    reason = (
+        f"not available: {timeouts_without_latency} of {total} requests were {GATEWAY_TIMEOUT_FAULT} "
+        "faults, which record no target latency"
+    )
+    for key, q in _LATENCY_QUANTILES:
+        if share > 1.0 - q:
+            out[f"{key}_ms"] = reason
+    out["basis"] = (
+        f"{summary['basis']}; excludes {timeouts_without_latency} {GATEWAY_TIMEOUT_FAULT} "
+        "faults, which record no target latency"
+    )
+    return out
+
+
 def access_log_name(project_id: str) -> str:
     """Full Cloud Logging log name of the Apigee access log in `project_id`."""
     return f"projects/{project_id}/logs/{access_log_id()}"
@@ -208,6 +242,9 @@ class ApigeeSpecialist(BaseSpecialist):
         # Kept apart: per-minute distribution means and per-request access-log latencies.
         minute_means_ms: list[float] = []
         logged_latencies_ms: list[float] = []
+        # Requests behind the per-minute means, and GatewayTimeout log entries with no latency value.
+        minute_requests = 0
+        gt_log_without_latency = 0
         top_client_ip: Optional[str] = None
         fault_codes: set[str] = set()
         # GatewayTimeout evidence: metric series (response_code/fault_code/fault_source labels)
@@ -303,6 +340,7 @@ class ApigeeSpecialist(BaseSpecialist):
                     dist = getattr(pt.value, "distribution_value", None)
                     if dist and getattr(dist, "count", 0) > 0:
                         minute_means_ms.append(float(getattr(dist, "mean", 0.0)))
+                        minute_requests += int(getattr(dist, "count", 0))
         except Exception as exc:
             logger.warning("Cloud Monitoring target/latencies query error: %s", exc)
             record_unavailable(
@@ -386,11 +424,15 @@ class ApigeeSpecialist(BaseSpecialist):
                     if rev:
                         log_revisions[rev] += 1
                 tlat = payload.get("target_latency_ms")
+                has_latency = False
                 if tlat and str(tlat).strip():
                     try:
                         logged_latencies_ms.append(float(tlat))
+                        has_latency = True
                     except ValueError:
                         pass
+                if fault_name == GATEWAY_TIMEOUT_FAULT and not has_latency:
+                    gt_log_without_latency += 1
             if client_counter:
                 top_client_ip = client_counter.most_common(1)[0][0]
             if not access_log_truncated:
@@ -418,28 +460,40 @@ class ApigeeSpecialist(BaseSpecialist):
 
         # Calculate latency metrics if captured
         lat_summary = target_latency_summary(logged_latencies_ms, minute_means_ms)
-        p50_ms: Optional[int] = lat_summary["p50_ms"] if lat_summary else None
-        p95_ms: Optional[int] = lat_summary["p95_ms"] if lat_summary else None
-        p99_ms: Optional[int] = lat_summary["p99_ms"] if lat_summary else None
+        if lat_summary:
+            # GatewayTimeout faults carry no target latency, so they are missing from the
+            # population: per-minute means never include them; logged entries only when blank.
+            if logged_latencies_ms:
+                missing, covered = gt_log_without_latency, len(logged_latencies_ms)
+            else:
+                missing, covered = (gt_metric_count or gt_log_count), minute_requests
+            lat_summary = apply_gateway_timeout_gap(lat_summary, missing, covered)
+        # Each is an int (ms), a "not available: <reason>" string, or None when not captured.
+        p50_ms: Any = lat_summary["p50_ms"] if lat_summary else None
+        p95_ms: Any = lat_summary["p95_ms"] if lat_summary else None
+        p99_ms: Any = lat_summary["p99_ms"] if lat_summary else None
         if lat_summary:
             # What the p50/p95/p99 values are percentiles of; every label of them names it.
             metrics["target_latency_basis"] = lat_summary["basis"]
 
+        def _ms(v: Any) -> str:
+            return f"{v}ms" if isinstance(v, int) else str(v)
+
         # Assign metrics without static numbers
         if p50_ms is not None:
-            metrics["target_latency_p50"] = f"{p50_ms}ms"
+            metrics["target_latency_p50"] = _ms(p50_ms)
         else:
             metrics["target_latency_p50"] = "N/A (not captured)"
 
         if p95_ms is not None:
             metrics["target_latency_p95_ms"] = p95_ms
-            metrics["target_latency_p95"] = f"{p95_ms}ms"
+            metrics["target_latency_p95"] = _ms(p95_ms)
         else:
             metrics["target_latency_p95_ms"] = "N/A (not captured)"
             metrics["target_latency_p95"] = "N/A (not captured)"
 
         if p99_ms is not None:
-            metrics["target_latency_p99"] = f"{p99_ms}ms"
+            metrics["target_latency_p99"] = _ms(p99_ms)
         else:
             metrics["target_latency_p99"] = "N/A (not captured)"
 
@@ -538,7 +592,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 client_disp = "<CLIENT_IP>/32"
 
             if p95_ms is not None:
-                backend_status = f"Target latency P95 of {lat_summary['population']}: {p95_ms}ms"
+                backend_status = f"Target latency P95 of {lat_summary['population']}: {_ms(p95_ms)}"
             else:
                 backend_status = "Target latency: N/A (not captured)"
 
@@ -589,7 +643,7 @@ class ApigeeSpecialist(BaseSpecialist):
                 )
 
             lat_label = f"Target Latency (P95 of {lat_summary['population']})" if lat_summary else "Target Latency"
-            lat_str = f"{p95_ms}ms" if p95_ms is not None else "N/A (not captured)"
+            lat_str = _ms(p95_ms) if p95_ms is not None else "N/A (not captured)"
             evidence_items.append(
                 EvidenceItem(
                     headline=f"Apigee Upstream Latency / {err_code}: {target_proxy}",
