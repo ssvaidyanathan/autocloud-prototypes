@@ -115,18 +115,21 @@ elif args[:3] == ["artifacts", "packages", "list"]:
     for n in lines("STUB_LIST_PACKAGES"): print(n)
 '''
 
-STUB_TERRAFORM = r'''#!/bin/sh
+STUB_TERRAFORM = r'''#!/usr/bin/env sh
 if [ "$1" = "version" ]; then echo "Terraform v1.9.8"; exit 0; fi
 python3 -c 'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["terraform", os.path.basename(os.getcwd())] + sys.argv[1:]) + "\n")' "$@"
 # show -json <plan>: STUB_TF_SHOW_JSON (prior_state and resource_changes), default an empty state.
-if [ "$1" = "show" ] && [ "$2" = "-json" ]; then printf '%s\n' "${STUB_TF_SHOW_JSON:-{\}}"; fi
+# No "${STUB_TF_SHOW_JSON:-{\}}": bash 3.2 (macOS /bin/sh) keeps the backslash and prints {\}.
+if [ "$1" = "show" ] && [ "$2" = "-json" ]; then
+    if [ -n "${STUB_TF_SHOW_JSON:-}" ]; then printf '%s\n' "${STUB_TF_SHOW_JSON}"; else echo '{}'; fi
+fi
 '''
 
-STUB_PSQL = r'''#!/bin/sh
+STUB_PSQL = r'''#!/usr/bin/env sh
 python3 -c 'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["psql", "PGPASSWORD=" + ("set" if os.environ.get("PGPASSWORD") else "")] + sys.argv[1:]) + "\n")' "$@"
 '''
 
-STUB_PROXY = r'''#!/bin/sh
+STUB_PROXY = r'''#!/usr/bin/env sh
 python3 -c 'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["cloud-sql-proxy"] + sys.argv[1:]) + "\n")' "$@"
 echo "Listening on 127.0.0.1; The proxy has started successfully and is ready for new connections!"
 exec sleep 30
@@ -181,7 +184,7 @@ if out:
 sys.stdout.write(str(code) if has_w else body)
 '''
 
-RECORDER = '#!/bin/sh\npython3 -c \'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["{name}"] + sys.argv[1:]) + "\\n")\' "$@"\n{extra}\n'
+RECORDER = '#!/usr/bin/env sh\npython3 -c \'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["{name}"] + sys.argv[1:]) + "\\n")\' "$@"\n{extra}\n'
 
 
 def _copy_tree(tmp_path):
@@ -220,6 +223,9 @@ def stack(tmp_path):
         (bin_dir / name).write_text(text)
         (bin_dir / name).chmod(0o755)
     (bin_dir / "bash").symlink_to(TEST_BASH)
+    # The sh stubs (#!/usr/bin/env sh) run under the test bash in sh mode, as on macOS, where
+    # /bin/sh is bash 3.2. With Linux's dash they would hide bash 3.2 quirks in the stubs.
+    (bin_dir / "sh").symlink_to(TEST_BASH)
     scripts = work / "scripts"
     # Other lanes' scripts (and the verifiers, tested separately) are recorders here.
     _recorder(scripts / "deploy-apigee-proxies.sh", "apigee")
@@ -405,7 +411,7 @@ def test_schema_password_and_token_stay_off_argv_and_out_of_the_output(stack, tm
 
 def test_schema_fails_loudly_when_the_admin_call_fails(stack, tmp_path):
     curl = tmp_path / "bin" / "curl"
-    curl.write_text("#!/bin/sh\ncat >/dev/null\necho 'curl: (22) The requested URL returned error: 403' >&2\nexit 22\n")
+    curl.write_text("#!/usr/bin/env sh\ncat >/dev/null\necho 'curl: (22) The requested URL returned error: 403' >&2\nexit 22\n")
     res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema")
     assert res.returncode == 1
     assert "users.update (postgres on atat-inventory-db) failed" in res.stderr
