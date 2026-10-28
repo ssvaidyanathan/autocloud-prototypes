@@ -279,6 +279,9 @@ class InvestigationReport(BaseModel):
     revision_diffs: list[dict[str, Any]] = Field(default_factory=list)
     root_cause_analysis: dict[str, Any] = Field(default_factory=dict)
     longer_term_fixes: list[str] = Field(default_factory=list)
+    # One-line Apigee deployment history summary (ata-tools change timeline), stated in the
+    # ticket description and work note as well as the HTML report. None when it was not read.
+    apigee_history: Optional[str] = None
     queries_appendix: dict[str, list[str]] = Field(default_factory=dict)
     tools_used: list[str] = Field(default_factory=list)
     skills_loaded: list[str] = Field(default_factory=list)
@@ -410,6 +413,10 @@ class InvestigationReport(BaseModel):
             obs_items = obs_items[:WORK_NOTE_MAX_OBSERVATIONS]
             obs_items.append(f"...and {hidden} more (see attached report)")
 
+        apigee_history_html = (
+            f"  <li>{_html_text(self.apigee_history.replace('*', ''))}</li>\n" if self.apigee_history else ""
+        )
+
         def _sub_list(items: list[str]) -> str:
             if not items:
                 return " None recorded"
@@ -458,6 +465,7 @@ class InvestigationReport(BaseModel):
             f"  <li><b>Systems:</b>{_sub_list(sys_items)}</li>\n"
             f"  <li><b>Probable Root Cause:</b> {work_note_root_cause_html(self.probable_root_cause.text)}</li>\n"
             f"  <li><b>Observations:</b>{_sub_list(obs_items)}</li>\n"
+            f"{apigee_history_html}"
             f"  <li><b>Recommended Actions:</b>{recs_inner}</li>\n"
             "</ul>\n"
             "[/code]"
@@ -691,6 +699,8 @@ class InvestigationReport(BaseModel):
         dep_path = self.dependency_path or self.raw_metadata.get("dependency_path")
         dep_path_line = f"  - Dependency Path: {dep_path}\n" if dep_path else ""
 
+        apigee_history_line = f"{self.apigee_history}\n" if self.apigee_history else ""
+
         origin_type = "Cloud SQL PostgreSQL Instance" if "db" in self.origin else ("Apigee API Proxy" if "v1" in self.origin or "apigee" in self.origin else "Cloud Run Service")
 
         text = (
@@ -700,6 +710,7 @@ class InvestigationReport(BaseModel):
             f"Blast Radius: {blast_str}\n"
             f"Issue Type: {issue_type}\n"
             f"Change-Induced: {change_ind}\n"
+            f"{apigee_history_line}"
             f"First Seen / Last Alert (UTC): {first_seen} / {last_alert}\n"
             f"Alert List:\n"
             f"{alert_list_str}\n"

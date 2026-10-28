@@ -34,7 +34,7 @@ from .base import EvidenceDossier
 from .cloud_run import CloudRunSpecialist, latency_label, measured_breaches
 from .apigee import SPIKE_ARREST_FAULT, ApigeeSpecialist, access_log_id, access_log_name
 from .cloud_sql import DB_POOL_NEAR_SATURATION_RATIO, CloudSQLSpecialist
-from .change import NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_candidate_cause
+from .change import APIGEE_HISTORY, NO_CLOUD_RUN_DEPLOYMENTS_FINDING, ChangeSpecialist, is_candidate_cause
 from .origin_selection import (
     OriginSelection,
     alert_category,
@@ -720,6 +720,7 @@ class SynthesizerAgent:
             revision_diffs=revision_diffs,
             root_cause_analysis=root_cause_analysis,
             longer_term_fixes=longer_term_fixes,
+            apigee_history=self._apigee_history_line(dossiers),
             queries_appendix=all_queries,
             tools_used=tools_used,
             skills_loaded=skills_loaded,
@@ -2988,6 +2989,20 @@ class SynthesizerAgent:
             "contributing_factors": factors,
             "alternatives_ruled_out": alternatives,
         }
+
+    @staticmethod
+    def _apigee_history_line(dossiers: list[EvidenceDossier]) -> Optional[str]:
+        """The change specialist's one-line Apigee deployment history, for the ticket text.
+
+        The proxy glob ("proxies ata-*") is spelled out, since ticket text carries no asterisks.
+        """
+        chg = next((d for d in dossiers if d.specialist_name == "ChangeSpecialist"), None)
+        if chg is None:
+            return None
+        line = next((f for f in chg.findings if f.startswith(APIGEE_HISTORY)), None)
+        if not line:
+            return None
+        return re.sub(r"proxies (\S+?)\*", r"proxies with prefix \1", line).replace("`", "")
 
     @staticmethod
     def _serving_revision_text(dossiers: list[EvidenceDossier], chg_dossier: EvidenceDossier) -> str:
