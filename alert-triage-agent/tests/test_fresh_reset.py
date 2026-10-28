@@ -356,6 +356,6 @@ def test_demo_md_states_the_new_reset_duration():
     demo = (Path(__file__).resolve().parents[1] / "DEMO.md").read_text()
     assert "--thorough" in demo
     # Measured live 2026-10-28 (no longer an estimate), with the S4 / cold-start exception.
-    assert "227–234 s typical (measured live, 2026-10-28)" in demo
+    assert "226–234 s typical (measured live, 2026-10-28)" in demo
     assert "not yet measured" not in demo
     assert re.search(r"up to about 10–11 min after S4", demo)
