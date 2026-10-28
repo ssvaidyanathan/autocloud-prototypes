@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
+
 COMMON = Path(__file__).parent.parent / "scripts" / "scenarios" / "common.sh"
 TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
 
@@ -22,8 +24,7 @@ def _run(tmp_path, body_text, expected=0):
     bindir.mkdir()
     (tmp_path / "items.json").write_text(body_text)
     curl = bindir / "curl"
-    curl.write_text('#!/bin/sh\necho "$*" >> "$PWD/curl_calls"\ncat "$PWD/items.json"\n')
-    curl.chmod(0o755)
+    write_stub(curl, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PWD/curl_calls"\ncat "$PWD/items.json"\n')
     script = tmp_path / "run.sh"
     script.write_text(
         f'source "{COMMON}"\nAPIGEE_HOST=apigee.example\n'

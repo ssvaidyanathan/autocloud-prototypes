@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
+
 RESET_SCRIPT = Path(__file__).parent.parent / "scripts" / "reset-scenarios.sh"
 TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
 BASE = "https://inv.example.run.app"
@@ -33,7 +35,7 @@ while [ $# -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
-echo "$method $url $bearer" >> "$PWD/curl_calls"
+printf '%s\n' "$method $url $bearer" >> "$PWD/curl_calls"
 path="/${url#*://*/}"
 code=$(awk -v p="$path" '$1 == p {print $2}' "$PWD/statuses" 2>/dev/null)
 [ "$code" = "fail" ] && exit 7
@@ -44,10 +46,10 @@ printf '%s 0.010' "${code:-200}"
 FAKE_GCLOUD = r"""#!/bin/sh
 case "$*" in
   "auth print-identity-token"*)
-    n=$(( $(cat "$PWD/token_n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$PWD/token_n"; echo "token-$n" ;;
+    n=$(( $(cat "$PWD/token_n" 2>/dev/null || echo 0) + 1 )); printf '%s\n' "$n" > "$PWD/token_n"; printf '%s\n' "token-$n" ;;
   "run services describe "*)
     svc="$4"; [ -f "$PWD/$svc.json" ] || exit 1; cat "$PWD/$svc.json" ;;
-  *) echo "fake gcloud: unexpected $*" >&2; exit 1 ;;
+  *) printf '%s\n' "fake gcloud: unexpected $*" >&2; exit 1 ;;
 esac
 """
 
@@ -56,8 +58,7 @@ def _run(tmp_path, body, statuses=""):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     for name, text in (("curl", FAKE_CURL), ("gcloud", FAKE_GCLOUD)):
-        (bindir / name).write_text(text)
-        (bindir / name).chmod(0o755)
+        write_stub(bindir / name, text)
     (tmp_path / "statuses").write_text(statuses)
     script = tmp_path / "run.sh"
     script.write_text(f'source "{RESET_SCRIPT}"\n{body}\n')

@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
+
 ROOT = Path(__file__).parent.parent
 RENDER = ROOT / "demo" / "apigee" / "render-bundle.sh"
 LIB = ROOT / "demo" / "apigee" / "apigee-lib.sh"
@@ -169,10 +171,10 @@ sys.stdout.write(str(code))
 '''
 
 GCLOUD_STUB = r'''#!/bin/sh
-echo "gcloud $*" >> "$STUB_CALLS"
+printf '%s\n' "gcloud $*" >> "$STUB_CALLS"
 case "$1 $2" in
   "auth print-access-token") echo "stub-token" ;;
-  "run services") echo "https://$4-abc123-uw.a.run.app" ;;
+  "run services") printf '%s\n' "https://$4-abc123-uw.a.run.app" ;;
 esac
 '''
 
@@ -183,8 +185,7 @@ def env(tmp_path):
     bin_dir.mkdir()
     (bin_dir / "bash").symlink_to(TEST_BASH)
     for name, body in [("curl", FAKE_APIGEE), ("gcloud", GCLOUD_STUB)]:
-        (bin_dir / name).write_text(body)
-        (bin_dir / name).chmod(0o755)
+        write_stub(bin_dir / name, body)
     stack = tmp_path / "stack"
     stack.mkdir()
     keep = {k: v for k, v in os.environ.items()

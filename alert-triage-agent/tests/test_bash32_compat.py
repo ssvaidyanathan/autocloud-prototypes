@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
+
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 ALL_SCRIPTS = sorted(SCRIPTS_DIR.rglob("*.sh"))
 SCENARIOS = ["s1_backend_5xx.sh", "s2_backend_latency.sh", "s3_concurrent_disjoint.sh",
@@ -23,7 +25,7 @@ SCENARIOS = ["s1_backend_5xx.sh", "s2_backend_latency.sh", "s3_concurrent_disjoi
 TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
 
 # Logs every call (one line of args per call) and prints a 200 status for curl -w.
-STUB = '#!/bin/sh\necho "$0 $*" >> "$ATA_TEST_CALLS"\n{body}\n'
+STUB = '#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$ATA_TEST_CALLS"\n{body}\n'
 
 
 @pytest.fixture
@@ -36,8 +38,7 @@ def stub_bin(tmp_path):
     gcloud = 'case "$*" in *"value(status.url)"*) echo "https://inv.example" ;; esac'
     for name, body in [("gcloud", gcloud), ("curl", 'echo 200')]:
         stub = bin_dir / name
-        stub.write_text(STUB.format(body=body))
-        stub.chmod(0o755)
+        write_stub(stub, STUB.format(body=body))
     return bin_dir
 
 
@@ -243,8 +244,7 @@ def make_driver(tmp_path, failing=()):
     shutil.copytree(SCRIPTS_DIR, scripts, ignore=shutil.ignore_patterns("inventory-pin.*.env"))
     for script in (scripts / "scenarios").glob("s[1-5]_*.sh"):
         name = script.name.split("_")[0]
-        script.write_text(STUB_SCENARIO.format(name=name, rc=1 if name in failing else 0))
-        script.chmod(0o755)
+        write_stub(script, STUB_SCENARIO.format(name=name, rc=1 if name in failing else 0))
     (scripts / "reset-scenarios.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     return scripts / "run-all-scenarios.sh"
 

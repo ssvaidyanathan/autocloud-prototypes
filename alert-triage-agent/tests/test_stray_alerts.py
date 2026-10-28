@@ -85,6 +85,7 @@ import subprocess  # noqa: E402
 import pytest  # noqa: E402
 
 from agent.app.grouping.models import IncidentGroupStatus  # noqa: E402
+from tests._stubs import write_stub  # noqa: E402
 from tests.test_reset_terminal_groups import done_at, gcs, okf, out, put, run_step6  # noqa: E402,F401
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -108,10 +109,10 @@ while [ $# -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
-echo "$method $url" >> "$PWD/curl_calls"
+printf '%s\n' "$method $url" >> "$PWD/curl_calls"
 line=$(awk -v u="$url" '{ n = length($1); if (n <= length(u) && substr(u, length(u) - n + 1) == $1) { print; exit } }' "$PWD/statuses" 2>/dev/null)
-code=$(echo "$line" | awk '{print $2}')
-secs=$(echo "$line" | awk '{print $3}')
+code=$(printf '%s\n' "$line" | awk '{print $2}')
+secs=$(printf '%s\n' "$line" | awk '{print $3}')
 if [ "$code" = "fail" ]; then printf '000 %s' "${secs:-0.001}"; exit 7; fi
 case "$url" in */items) body='[{"id": "item-7", "stock": 3}]' ;; *) body='{}' ;; esac
 if [ -n "$outfile" ] && [ "$outfile" != "/dev/null" ]; then printf '%s' "$body" > "$outfile"; fi
@@ -124,7 +125,7 @@ case "$*" in
   # verify-demo-infra.sh looks the demo services up by exact name (no fallback URL).
   "run services list"*"metadata.name=ata-inventory-api"*) printf 'ata-inventory-api\thttps://ata-inventory-api-test123-uc.a.run.app\n' ;;
   "run services list"*"metadata.name=ata-orders-api"*) printf 'ata-orders-api\thttps://ata-orders-api-test123-uc.a.run.app\n' ;;
-  "run services describe "*"value(status.url)"*) echo "https://$4-test.a.run.app" ;;
+  "run services describe "*"value(status.url)"*) printf '%s\n' "https://$4-test.a.run.app" ;;
   *) exit 1 ;;
 esac
 """
@@ -134,8 +135,7 @@ def _stub_env(tmp_path, statuses="", **extra):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     for name, text in (("curl", FAKE_CURL), ("gcloud", FAKE_GCLOUD)):
-        (bindir / name).write_text(text)
-        (bindir / name).chmod(0o755)
+        write_stub(bindir / name, text)
     if not (bindir / "bash").exists():
         (bindir / "bash").symlink_to(TEST_BASH)
     (tmp_path / "statuses").write_text(statuses)
@@ -196,7 +196,7 @@ def test_slow_5xx_or_failed_demo_request_arms_the_alert_window(tmp_path, statuse
 
 def test_request_without_a_duration_is_not_assumed_fast(tmp_path):
     env = _stub_env(tmp_path)
-    (tmp_path / "bin" / "curl").write_text("#!/bin/sh\nprintf 200\n")  # -w without time_total
+    write_stub(tmp_path / "bin" / "curl", "#!/bin/sh\nprintf 200\n")  # -w without time_total
     script = tmp_path / "run.sh"
     script.write_text(f'source "{RESET_SCRIPT}"\ndemo_request "GET {BASE}/health" "{BASE}/health"\n{WINDOW_LEFT}\n')
     res = subprocess.run([TEST_BASH, str(script)], cwd=str(tmp_path), capture_output=True, text=True, env=env, timeout=60)

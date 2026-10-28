@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
 from tests.test_s5_bad_deploy import BAD_USER, GOOD_USER, PINNED_REVISION, STACK_ENV, Env, baseline_state
 
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
@@ -35,7 +36,7 @@ REAL_DATE = shutil.which("date")
 
 # Each call is logged as one line. Status-printing calls (-w) print 200 unless configured.
 CURL = """#!/bin/sh
-echo "curl $*" >> "$ATA_TEST_CALLS"
+printf '%s\\n' "curl $*" >> "$ATA_TEST_CALLS"
 case "$*" in
   */admin/fault/reset*) printf '%s' "${ATA_RESET_STATUS:-200}" ;;
   *action=import*)
@@ -58,7 +59,7 @@ fi
 exec {REAL_DATE} "$@"
 """
 GCLOUD = """#!/bin/sh
-echo "gcloud $*" >> "$ATA_TEST_CALLS"
+printf '%s\\n' "gcloud $*" >> "$ATA_TEST_CALLS"
 case "$*" in
   "auth print-access-token"*) echo "apigee-token" ;;
   "auth print-identity-token"*) echo "id-token" ;;
@@ -74,8 +75,7 @@ def env(tmp_path):
     (bin_dir / "bash").symlink_to(TEST_BASH)
     for name, body in [("curl", CURL), ("date", DATE), ("gcloud", GCLOUD)]:
         stub = bin_dir / name
-        stub.write_text(body)
-        stub.chmod(0o755)
+        write_stub(stub, body)
     (tmp_path / "import.json").write_text(json.dumps({"name": "ata-orders-v1", "revision": "169"}))
     (tmp_path / "deployments.json").write_text(json.dumps({"deployments": [
         {"environment": "prod", "apiProxy": "ata-orders-v1", "revision": "168"}]}))
@@ -258,8 +258,7 @@ def test_s1_s2_mock_and_dry_run_still_complete(tmp_path, env, script, mode):
 def _s5_env(tmp_path, state):
     s5 = Env(tmp_path, state)
     date = s5.dir / "date"
-    date.write_text(DATE)
-    date.chmod(0o755)
+    write_stub(date, DATE)
     return s5
 
 
@@ -317,7 +316,7 @@ def test_s5_update_failure_is_not_reverted_automatically(tmp_path, monkeypatch):
 
 REAL_SLEEP = shutil.which("sleep")
 CTRL_C_SLEEP = f"""#!/bin/sh
-if [ "${{ATA_CTRL_C_AT:-}}" = "sleep" ]; then echo "sleep $*" >> "$ATA_CTRL_C_MARK"; exec {REAL_SLEEP} 30; fi
+if [ "${{ATA_CTRL_C_AT:-}}" = "sleep" ]; then printf '%s\\n' "sleep $*" >> "$ATA_CTRL_C_MARK"; exec {REAL_SLEEP} 30; fi
 exec {REAL_SLEEP} "$@"
 """
 # Hangs in the `date +%s` call number $ATA_CTRL_C_AFTER (0-based) when ATA_CTRL_C_AT=date.
@@ -325,7 +324,7 @@ CTRL_C_DATE = f"""#!/bin/sh
 if [ "$1" = "+%s" ] && [ "${{ATA_CTRL_C_AT:-}}" = "date" ]; then
   n=$(cat "$ATA_CTRL_C_MARK.n" 2>/dev/null || echo 0)
   echo $((n + 1)) > "$ATA_CTRL_C_MARK.n"
-  if [ "$n" -ge "$ATA_CTRL_C_AFTER" ]; then echo "date $*" >> "$ATA_CTRL_C_MARK"; exec {REAL_SLEEP} 30; fi
+  if [ "$n" -ge "$ATA_CTRL_C_AFTER" ]; then printf '%s\\n' "date $*" >> "$ATA_CTRL_C_MARK"; exec {REAL_SLEEP} 30; fi
 fi
 exec {REAL_DATE} "$@"
 """
@@ -334,8 +333,7 @@ exec {REAL_DATE} "$@"
 def install_ctrl_c_stubs(bin_dir):
     for name, body in [("sleep", CTRL_C_SLEEP), ("date", CTRL_C_DATE)]:
         stub = Path(bin_dir) / name
-        stub.write_text(body)
-        stub.chmod(0o755)
+        write_stub(stub, body)
 
 
 def run_with_ctrl_c(argv, env, cwd, at, after=0):

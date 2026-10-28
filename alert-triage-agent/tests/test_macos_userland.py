@@ -76,7 +76,8 @@ def test_patterns_allow_portable_usage(line):
 # printed that as its default `terraform show -json` (a #!/bin/sh stub: dash on Linux, bash 3.2
 # on macOS), so the teardown tests failed only on the macOS CI job. Use '{}' in its own quotes.
 BASH32_QUIRKS = {
-    'escaped "}" inside ${...} (bash 3.2 keeps the backslash)': re.compile(r"\$\{[^}]*\\\}"),
+    # A nested ${...} before the escaped "}" ("${A:-${B}\}}") is skipped over, not taken as the end.
+    'escaped "}" inside ${...} (bash 3.2 keeps the backslash)': re.compile(r"\$\{(?:\$\{[^{}]*\}|[^}])*\\\}"),
 }
 
 
@@ -99,10 +100,17 @@ def test_test_stubs_avoid_bash32_parse_quirks(path):
 
 
 @pytest.mark.parametrize("line", [
-    'printf "%s\\n" "${STUB_TF_SHOW_JSON:-{\\}}"', 'x="${A:-a\\}b}"', "y=${B-\\}}",
+    'printf "%s\\n" "${STUB_TF_SHOW_JSON:-{\\}}"', 'x="${A:-a\\}b}"', 'z="${A:+\\}}"', 'w="${A:-${B}\\}}"',
 ])
 def test_bash32_patterns_catch_quirks(line):
+    """Double-quoted words: bash 3.2 keeps the backslash in each of these."""
     assert any(rx.search(line) for rx in BASH32_QUIRKS.values()), line
+
+
+def test_bash32_patterns_flag_unquoted_form_conservatively():
+    """Unquoted, bash 3.2 prints "}" like bash 5 (fresh-rev-macos), so ${B-\\}} is fine on 3.2. The
+    guard flags it anyway: it does not track quoting, and '}' in its own quotes works everywhere."""
+    assert any(rx.search("y=${B-\\}}") for rx in BASH32_QUIRKS.values())
 
 
 @pytest.mark.parametrize("line", [

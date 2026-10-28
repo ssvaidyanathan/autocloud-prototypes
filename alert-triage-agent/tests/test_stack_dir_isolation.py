@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
+
 ROOT = Path(__file__).resolve().parent.parent
 SCENARIOS_DIR = ROOT / "scripts" / "scenarios"
 TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
@@ -84,8 +86,7 @@ def test_verify_demo_infra_reads_the_stack_dir_not_the_checkout(planted, tmp_pat
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for tool in ("gcloud", "curl"):
-        (bin_dir / tool).write_text("#!/bin/sh\necho stub-stop >&2\nexit 7\n")
-        (bin_dir / tool).chmod(0o755)
+        write_stub(bin_dir / tool, "#!/bin/sh\necho stub-stop >&2\nexit 7\n")
     env = _env(planted, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                ATA_INVENTORY_PIN_FILE=str(tmp_path / "no-pin.env"), INVENTORY_PIN_OPTIONAL="true")
     res = subprocess.run([TEST_BASH, str(ROOT / "scripts" / "verify-demo-infra.sh")], cwd=str(tmp_path),

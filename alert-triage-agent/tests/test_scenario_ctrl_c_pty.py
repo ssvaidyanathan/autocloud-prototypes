@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
 from tests.test_s5_bad_deploy import BAD_USER, PINNED_REVISION, STACK_ENV, Env, baseline_state
 from tests.test_scenario_abort_cleanup import CURL as STUB_CURL
 from tests.test_scenario_abort_cleanup import GCLOUD, REDEPLOY_168
@@ -46,7 +47,7 @@ pytestmark = pytest.mark.skipif(not (REAL_CURL and OPENSSL), reason="needs curl 
 # from test_scenario_abort_cleanup. Every call is logged.
 CURL = f"""#!/bin/sh
 case "$*" in
-  *127.0.0.1*) echo "curl $*" >> "$ATA_TEST_CALLS"; exec {REAL_CURL} "$@" ;;
+  *127.0.0.1*) printf '%s\\n' "curl $*" >> "$ATA_TEST_CALLS"; exec {REAL_CURL} "$@" ;;
 esac
 """ + STUB_CURL.split("\n", 1)[1]
 
@@ -129,15 +130,14 @@ def install(bin_dir, stubs):
         stub = bin_dir / name
         if stub.exists():
             stub.unlink()
-        stub.write_text(body)
-        stub.chmod(0o755)
+        write_stub(stub, body)
 
 
 def scenario_env(tmp_path, apigee_host):
     """Environment for S1-S4: stubbed gcloud/pkill/python3's Cloud SQL helper, wrapped curl."""
     bin_dir = tmp_path / "bin"
     install(bin_dir, [("curl", CURL), ("gcloud", GCLOUD), ("python3", PYTHON),
-                      ("pkill", '#!/bin/sh\necho "pkill $*" >> "$ATA_TEST_CALLS"\nexit 1\n')])
+                      ("pkill", '#!/bin/sh\nprintf "%s\\n" "pkill $*" >> "$ATA_TEST_CALLS"\nexit 1\n')])
     (tmp_path / "import.json").write_text(json.dumps({"name": "ata-orders-v1", "revision": "169"}))
     (tmp_path / "deployments.json").write_text(json.dumps({"deployments": [
         {"environment": "prod", "apiProxy": "ata-orders-v1", "revision": "168"}]}))

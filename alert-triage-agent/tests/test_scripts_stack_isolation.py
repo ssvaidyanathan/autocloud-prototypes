@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
 from tests.cloud_run_fake import FakeCloud, NEW_DIGEST, for_prefix, fresh_project_state, live_like_state, write_pin
 
 ROOT = Path(__file__).parent.parent
@@ -137,12 +138,10 @@ def iso(tmp_path):
         # One stub; it tells gcloud from curl by its file name.
         (bin_dir / f"{name}.py").write_text(STUB)
         exe = bin_dir / name
-        exe.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "{bin_dir}/{name}.py" "$@"\n')
-        exe.chmod(0o755)
+        write_stub(exe, f'#!/bin/sh\nexec "{sys.executable}" -I "{bin_dir}/{name}.py" "$@"\n')
     # No sleep in the traffic loops of this test.
     sleep = bin_dir / "sleep"
-    sleep.write_text("#!/bin/sh\nexit 0\n")
-    sleep.chmod(0o755)
+    write_stub(sleep, "#!/bin/sh\nexit 0\n")
     pin = tmp_path / f"inventory-pin.{PREFIX}.env"
     write_pin(pin, PIN_REV, PIN_DIGEST)
     calls = tmp_path / "calls.jsonl"

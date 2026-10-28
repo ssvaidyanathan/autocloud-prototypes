@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
 from tests.test_s5_bad_deploy import STACK_ENV
 from tests.test_scenario_abort_cleanup import assert_finished_gracefully, install_ctrl_c_stubs, run_with_ctrl_c
 
@@ -30,7 +31,7 @@ ITEMS_OK = json.dumps([{"id": "item-101", "stock": 0}, {"id": "item-105", "stock
 # GET /items (no -w) prints $ATA_ITEMS_BODY; POST /admin/fault/reset prints $ATA_RESET_STATUS;
 # every other call prints 200 (the -w status). Each call is logged as one line.
 CURL = """#!/bin/sh
-echo "curl $*" >> "$ATA_TEST_CALLS"
+printf '%s\\n' "curl $*" >> "$ATA_TEST_CALLS"
 case "$*" in
   */admin/fault/reset*) printf '%s' "${ATA_RESET_STATUS:-200}" ;;
   *-w*) printf '200' ;;
@@ -52,7 +53,7 @@ exec {REAL_PYTHON} "$@"
 """
 # gcloud: the service URL (S4 requires it: no fallback URL) and an ID token.
 GCLOUD = """#!/bin/sh
-echo "gcloud $*" >> "$ATA_TEST_CALLS"
+printf '%s\\n' "gcloud $*" >> "$ATA_TEST_CALLS"
 case "$*" in
   *"value(status.url)"*) echo "https://inv.example" ;;
   "auth print-identity-token"*) echo "id-token" ;;
@@ -66,10 +67,9 @@ def env(tmp_path):
     bin_dir.mkdir()
     (bin_dir / "bash").symlink_to(TEST_BASH)
     for name, body in [("curl", CURL), ("date", DATE), ("python3", PYTHON), ("gcloud", GCLOUD),
-                       ("pkill", '#!/bin/sh\necho "pkill $*" >> "$ATA_TEST_CALLS"\nexit 1\n')]:
+                       ("pkill", '#!/bin/sh\nprintf "%s\\n" "pkill $*" >> "$ATA_TEST_CALLS"\nexit 1\n')]:
         stub = bin_dir / name
-        stub.write_text(body)
-        stub.chmod(0o755)
+        write_stub(stub, body)
     items = tmp_path / "items.json"
     items.write_text(ITEMS_OK)
     e = {k: v for k, v in os.environ.items() if k not in ("ATA_API_KEY", "MOCK_MODE", "DRY_RUN")}

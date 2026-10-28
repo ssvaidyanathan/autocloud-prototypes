@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
+
 ROOT = Path(__file__).parent.parent
 TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
 PIN = "PIN_INVENTORY_REVISION={p}-inventory-api-00001-abc\nPIN_INVENTORY_DIGEST=sha256:" + "ab" * 32 + "\n"
@@ -31,8 +33,7 @@ def source(pkg, body, gcloud=None, **env_over):
     bin_dir.mkdir(exist_ok=True)
     if gcloud is not None:
         stub = bin_dir / "gcloud"
-        stub.write_text("#!/bin/sh\n" + gcloud + "\n")
-        stub.chmod(0o755)
+        write_stub(stub, "#!/bin/sh\n" + gcloud + "\n")
     script = pkg.parent / "probe.sh"
     script.write_text(f'source "{pkg}/scripts/scenarios/common.sh"\n{body}\n')
     env = {k: v for k, v in os.environ.items()

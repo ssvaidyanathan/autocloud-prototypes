@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TF_DIR = REPO_ROOT / "infra" / "terraform"
 SCRIPTS = REPO_ROOT / "scripts"
@@ -331,8 +333,7 @@ def test_bootstrap_enables_the_bootstrap_apis(tmp_path):
     bin_dir.mkdir()
     calls = tmp_path / "calls"
     gcloud = bin_dir / "gcloud"
-    gcloud.write_text('#!/bin/sh\necho "gcloud $*" >> "$CALLS"\n')
-    gcloud.chmod(0o755)
+    write_stub(gcloud, '#!/bin/sh\nprintf "%s\\n" "gcloud $*" >> "$CALLS"\n')
     env = _clean_env(PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", CALLS=str(calls))
     res = _run([repo / "scripts" / BOOTSTRAP.name, "-p", "fresh-example", "-r", "us-central1", "-n", "atat"], env)
     assert res.returncode == 0, res.stderr

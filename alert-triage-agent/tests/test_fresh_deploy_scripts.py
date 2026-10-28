@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
+
 ROOT = Path(__file__).resolve().parents[1]
 TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
 PROJECT_NUMBER = "123456789012"
@@ -115,7 +117,7 @@ elif args[:3] == ["artifacts", "packages", "list"]:
     for n in lines("STUB_LIST_PACKAGES"): print(n)
 '''
 
-STUB_TERRAFORM = r'''#!/usr/bin/env sh
+STUB_TERRAFORM = r'''#!/bin/sh
 if [ "$1" = "version" ]; then echo "Terraform v1.9.8"; exit 0; fi
 python3 -c 'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["terraform", os.path.basename(os.getcwd())] + sys.argv[1:]) + "\n")' "$@"
 # show -json <plan>: STUB_TF_SHOW_JSON (prior_state and resource_changes), default an empty state.
@@ -125,11 +127,11 @@ if [ "$1" = "show" ] && [ "$2" = "-json" ]; then
 fi
 '''
 
-STUB_PSQL = r'''#!/usr/bin/env sh
+STUB_PSQL = r'''#!/bin/sh
 python3 -c 'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["psql", "PGPASSWORD=" + ("set" if os.environ.get("PGPASSWORD") else "")] + sys.argv[1:]) + "\n")' "$@"
 '''
 
-STUB_PROXY = r'''#!/usr/bin/env sh
+STUB_PROXY = r'''#!/bin/sh
 python3 -c 'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["cloud-sql-proxy"] + sys.argv[1:]) + "\n")' "$@"
 echo "Listening on 127.0.0.1; The proxy has started successfully and is ready for new connections!"
 exec sleep 30
@@ -184,7 +186,7 @@ if out:
 sys.stdout.write(str(code) if has_w else body)
 '''
 
-RECORDER = '#!/usr/bin/env sh\npython3 -c \'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["{name}"] + sys.argv[1:]) + "\\n")\' "$@"\n{extra}\n'
+RECORDER = '#!/bin/sh\npython3 -c \'import json,os,sys; open(os.path.join(os.environ["STUB_DIR"],"log"),"a").write(json.dumps(["{name}"] + sys.argv[1:]) + "\\n")\' "$@"\n{extra}\n'
 
 
 def _copy_tree(tmp_path):
@@ -206,8 +208,7 @@ def _copy_tree(tmp_path):
 
 
 def _recorder(path, name, extra=""):
-    path.write_text(RECORDER.format(name=name, extra=extra))
-    path.chmod(0o755)
+    write_stub(path, RECORDER.format(name=name, extra=extra))
 
 
 @pytest.fixture
@@ -220,12 +221,8 @@ def stack(tmp_path):
     bin_dir.mkdir()
     for name, text in (("gcloud", STUB_GCLOUD), ("terraform", STUB_TERRAFORM), ("psql", STUB_PSQL),
                        ("cloud-sql-proxy", STUB_PROXY), ("curl", STUB_CURL)):
-        (bin_dir / name).write_text(text)
-        (bin_dir / name).chmod(0o755)
+        write_stub(bin_dir / name, text)
     (bin_dir / "bash").symlink_to(TEST_BASH)
-    # The sh stubs (#!/usr/bin/env sh) run under the test bash in sh mode, as on macOS, where
-    # /bin/sh is bash 3.2. With Linux's dash they would hide bash 3.2 quirks in the stubs.
-    (bin_dir / "sh").symlink_to(TEST_BASH)
     scripts = work / "scripts"
     # Other lanes' scripts (and the verifiers, tested separately) are recorders here.
     _recorder(scripts / "deploy-apigee-proxies.sh", "apigee")
@@ -233,7 +230,7 @@ def stack(tmp_path):
     _recorder(scripts / "verify-demo-infra.sh", "verify-demo-infra")
     _recorder(scripts / "set-demo-instance-caps.sh", "caps")
     _recorder(scripts / "repin-inventory.sh", "repin",
-              extra='[ "$1" = prepare ] && echo "  $0 write-pin --revision ${NAME_PREFIX}-inventory-api-00001-abc '
+              extra='[ "$1" = prepare ] && printf "%s\\n" "  $0 write-pin --revision ${NAME_PREFIX}-inventory-api-00001-abc '
                     '--digest $4 --initial"; exit 0')
 
     def run(script, *args, record_verify_stage1=True, **env_overrides):
@@ -411,7 +408,7 @@ def test_schema_password_and_token_stay_off_argv_and_out_of_the_output(stack, tm
 
 def test_schema_fails_loudly_when_the_admin_call_fails(stack, tmp_path):
     curl = tmp_path / "bin" / "curl"
-    curl.write_text("#!/usr/bin/env sh\ncat >/dev/null\necho 'curl: (22) The requested URL returned error: 403' >&2\nexit 22\n")
+    write_stub(curl, "#!/bin/sh\ncat >/dev/null\necho 'curl: (22) The requested URL returned error: 403' >&2\nexit 22\n")
     res, calls = stack("deploy-stage1.sh", "--yes", "--only", "schema")
     assert res.returncode == 1
     assert "users.update (postgres on atat-inventory-db) failed" in res.stderr
@@ -452,7 +449,7 @@ def test_required_inputs(stack, missing):
 
 
 def test_apigee_org_defaults_to_project_and_is_echoed_and_exported(stack, tmp_path):
-    _recorder(stack.work / "scripts" / "deploy-apigee-proxies.sh", "apigee", extra='echo "ORG=$APIGEE_ORG ENV=$APIGEE_ENV HOST=$APIGEE_HOST"')
+    _recorder(stack.work / "scripts" / "deploy-apigee-proxies.sh", "apigee", extra='printf "%s\\n" "ORG=$APIGEE_ORG ENV=$APIGEE_ENV HOST=$APIGEE_HOST"')
     res, calls = stack("deploy-stage1.sh", "--yes", "--only", "apigee")
     assert res.returncode == 0, _out(res)
     assert "APIGEE_ORG=fresh-proj (defaulted to PROJECT_ID)" in res.stdout

@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests._stubs import write_stub
+
 REPO_ROOT = Path(__file__).parent.parent
 TEST_BASH = shutil.which(os.environ.get("ATA_TEST_BASH", "bash"))
 
@@ -355,8 +357,7 @@ class FakeCloud:
         for name, src in (("gcloud", FAKE_GCLOUD), ("curl", FAKE_CURL)):
             (self.dir / f"{name}.py").write_text(src)
             exe = self.dir / name
-            exe.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "{self.dir}/{name}.py" "$@"\n')
-            exe.chmod(0o755)
+            write_stub(exe, f'#!/bin/sh\nexec "{sys.executable}" -I "{self.dir}/{name}.py" "$@"\n')
         self.pin_file = tmp_path / "inventory-pin.ata.env"
         write_pin(self.pin_file, OLD_PIN, OLD_DIGEST)
 

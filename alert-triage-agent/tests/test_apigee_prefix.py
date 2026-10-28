@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._stubs import write_stub
+
 ROOT = Path(__file__).parent.parent
 BUNDLES = ROOT / "demo" / "apigee"
 RENDER = BUNDLES / "render-bundle.sh"
@@ -206,14 +208,14 @@ sys.stdout.write(str(code))
 '''
 
 GCLOUD_STUB = r'''#!/bin/sh
-echo "gcloud $*" >> "$STUB_CALLS"
+printf '%s\n' "gcloud $*" >> "$STUB_CALLS"
 case "$1 $2" in
   "auth print-access-token") echo "stub-token" ;;
   "run services")
      svc="$4"
      [ -f "$STUB_DIR/fail-$svc" ] && { echo "ERROR: describe failed" >&2; exit 1; }
      [ -f "$STUB_DIR/empty-$svc" ] && exit 0
-     echo "https://$svc-abc123-uw.a.run.app" ;;
+     printf '%s\n' "https://$svc-abc123-uw.a.run.app" ;;
 esac
 '''
 
@@ -224,8 +226,7 @@ def env(tmp_path):
     bin_dir.mkdir()
     (bin_dir / "bash").symlink_to(TEST_BASH)
     for name, body in [("curl", CURL_STUB), ("gcloud", GCLOUD_STUB)]:
-        (bin_dir / name).write_text(body)
-        (bin_dir / name).chmod(0o755)
+        write_stub(bin_dir / name, body)
     out = tmp_path / "ata-dir"
     out.mkdir()
     keep = {k: v for k, v in os.environ.items()
