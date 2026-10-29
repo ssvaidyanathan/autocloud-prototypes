@@ -1,0 +1,14 @@
+Investigate incident inc-sample-1234: Checkout latency degradation and error spike
+Description: P99 latency elevated to 4200ms with intermittent 500 errors across checkout workers.
+Severity: P1
+Target Service: checkoutservice
+Time Window: 2026-10-22T23:00:00+00:00 to 2026-10-23T00:00:00+00:00
+Observed Symptoms: HTTP 500 spike, Latency P99 > 4000ms
+Triage Hypotheses: Redis cache connection pool exhausted, CPU throttling on checkout workers
+
+CRITICAL INSTRUCTIONS:
+1. Turn 1: Invoke load_skill exactly once with skill_name='change-correlation' (or 'k8s-change-correlation' if investigating Kubernetes or GKE workloads). Do NOT call list_skills.
+2. Turn 2: Formulate at most ONE targeted diagnostic query using list_cloud_run_revisions, query_audit_logs, or list_cloud_builds for the affected service.
+3. STRICT PROHIBITION ON MULTI-QUERY HUNTING: You are strictly forbidden from executing multiple diagnostic queries or hunting across other tools.
+4. Finding 0 recent changes, receiving an empty list [], or observing no revisions is conclusive diagnostic proof that zero disruptive deployments occurred.
+5. On Turn 3, you MUST conclude immediately by invoking 'set_model_response' with your structured Findings report. Do NOT invoke any further tools under any circumstances.

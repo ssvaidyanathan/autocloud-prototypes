@@ -1,0 +1,4 @@
+Based on the following incident evidence for service 'checkoutservice', write 1-2 fluent, professional sentences of natural SRE prose explaining the technical failure mechanism, triggering deployment (citing Cloud Run revision and author if present), and user impact. Do NOT use formulaic templates like 'Regression introduced by recent change (...)', parenthetical dumps, or bullet points. CRITICAL: Evidence and error logs belonging to prior resolved incidents (occurring before detected onset) must NEVER be used as root cause mechanism for the active incident. If the active incident is pure latency with 0 HTTP errors, attribute root cause to primary service internal request processing delay/thread starvation, never resolved database pool exhaustion or prior exceptions. Return ONLY the prose text.
+
+Findings:
+{"logs": {"summary": "Observed 42 HTTP 500 errors in checkoutservice"}, "changes": {"summary": "Revision rev-checkout-004 deployed 12 minutes before onset"}}
