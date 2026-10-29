@@ -1,0 +1,11 @@
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.5; color: #202124; border-left: 4px solid #1a73e8; padding: 12px 16px; background-color: #f8f9fa; border-radius: 4px;">
+  <h1 style="color: #1a73e8; font-size: 18px; margin: 0 0 8px 0; font-weight: 600;">{{ title }}</h1>
+  <h2 style="color: #202124; font-size: 15px; margin: 0 0 6px 0; font-weight: 600;">{{ subtitle }}</h2>
+  <p style="margin: 0 0 12px 0; font-style: italic; color: #5f6368;"><em>{{ status_italic }}</em></p>
+  <h3 style="color: #202124; font-size: 13px; margin: 0 0 6px 0; font-weight: 600;">{{ next_steps_title }}</h3>
+  <ul style="margin: 0; padding-left: 20px; color: #3c4043;">
+    {%- for step in next_steps %}
+    <li style="margin-bottom: 4px;">{{ step }}</li>
+    {%- endfor %}
+  </ul>
+</div>

@@ -1,0 +1,10 @@
+Investigate incident {incident_id}: {title}
+Description: {description}
+Severity: {severity}
+Target Service: {target_service}
+Time Window: {window_start} to {window_end}{symptoms_line}{hypotheses_line}
+
+CRITICAL INSTRUCTIONS:
+1. Turn 1: Invoke load_skill exactly once with skill_name='cloud-monitoring-metrics' (or 'gke-troubleshooting' if investigating Kubernetes or GKE workloads). Do NOT call list_skills.
+2. Turn 2: Formulate at most ONE targeted diagnostic query using query_time_series, query_gke_metrics, compare_to_baseline, or alert tools for the affected service.
+3. Turn 3: Conclude immediately by invoking 'set_model_response' with your structured Findings report. Do NOT invoke any other tools. Empty metric points or normal baselines is a conclusive finding confirming service health. Do not loop or try alternative queries.

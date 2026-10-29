@@ -1,0 +1,8 @@
+Analyze incident ticket and generate an InvestigationPlan adhering to the schema:
+ID: inc-sample-1234
+External Key: INC-SAMPLE-1234
+Title: Checkout latency degradation and error spike
+Description: P99 latency elevated to 4200ms with intermittent 500 errors across checkout workers.
+Severity: P1
+Service Hint: checkoutservice
+Opened At (UTC): 2026-10-23T00:00:00+00:00

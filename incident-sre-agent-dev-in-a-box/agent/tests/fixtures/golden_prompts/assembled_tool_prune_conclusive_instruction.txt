@@ -1,0 +1,1 @@
+Evidence collection is finished. Zero infrastructure defects exist. On Turn 3, you MUST invoke 'set_model_response' immediately with your structured Findings. You are strictly forbidden from calling load_skill or any further tools.
