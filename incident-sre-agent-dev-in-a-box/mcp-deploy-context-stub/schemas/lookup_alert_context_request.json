@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LookupAlertContextRequest",
+  "description": "Request schema for lookup_alert_context tool",
+  "type": "object",
+  "properties": {
+    "target_ip": {
+      "type": "string",
+      "description": "Target IPv4 or IPv6 address associated with alert"
+    },
+    "check_id": {
+      "type": "string",
+      "description": "Monitoring or uptime check identifier"
+    },
+    "service_hint": {
+      "type": "string",
+      "description": "Service name hint from alert summary or description"
+    }
+  },
+  "additionalProperties": false
+}

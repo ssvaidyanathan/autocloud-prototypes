@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GetRecentDeploymentsResponse",
+  "description": "Response schema for get_recent_deployments tool",
+  "type": "object",
+  "required": ["deployments", "total_count"],
+  "properties": {
+    "deployments": {
+      "type": "array",
+      "description": "List of recent deployment and change events",
+      "items": {
+        "type": "object",
+        "required": ["event_id", "timestamp", "status"],
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "description": "Unique identifier for deployment event"
+          },
+          "timestamp": {
+            "type": "string",
+            "description": "ISO-8601 UTC timestamp of deployment"
+          },
+          "service_name": {
+            "type": "string",
+            "description": "Service name"
+          },
+          "workload_name": {
+            "type": "string",
+            "description": "Workload name"
+          },
+          "workload": {
+            "type": "string",
+            "description": "Alias for workload_name"
+          },
+          "environment": {
+            "type": "string",
+            "description": "Deployment environment"
+          },
+          "cluster_name": {
+            "type": "string",
+            "description": "Cluster identifier"
+          },
+          "cluster": {
+            "type": "string",
+            "description": "Alias for cluster_name"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "Kubernetes namespace"
+          },
+          "deployment_tool": {
+            "type": "string",
+            "description": "Tool used for deployment (helm, kubectl, etc.)"
+          },
+          "tool": {
+            "type": "string",
+            "description": "Alias for deployment_tool"
+          },
+          "author": {
+            "type": "string",
+            "description": "Deployer or author identity"
+          },
+          "deployer": {
+            "type": "string",
+            "description": "Alias for author"
+          },
+          "revision": {
+            "type": "string",
+            "description": "Revision or rollout version number"
+          },
+          "release": {
+            "type": "string",
+            "description": "Release or package name"
+          },
+          "image": {
+            "type": "string",
+            "description": "Deployed container image"
+          },
+          "container_images": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of container images in the deployment"
+          },
+          "pipeline_id": {
+            "type": ["string", "null"],
+            "description": "CI/CD pipeline run ID"
+          },
+          "git_commit": {
+            "type": ["string", "null"],
+            "description": "Git commit SHA"
+          },
+          "git_commit_message": {
+            "type": ["string", "null"],
+            "description": "Git commit message"
+          },
+          "status": {
+            "type": "string",
+            "description": "Deployment outcome status (SUCCESS, FAILED, etc.)"
+          },
+          "change_summary": {
+            "type": "string",
+            "description": "Human-readable summary of the change"
+          }
+        }
+      }
+    },
+    "total_count": {
+      "type": "integer",
+      "description": "Total number of matching events before pagination"
+    }
+  },
+  "additionalProperties": false
+}
