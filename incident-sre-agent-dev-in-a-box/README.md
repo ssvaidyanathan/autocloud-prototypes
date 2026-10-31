@@ -48,6 +48,17 @@ incident-sre-agent-dev-in-a-box/
 └── scripts/                       # Deployment, contract validation, and guard scripts
 ```
 
+#### Subsystem Catalog & Component Reference
+
+| Subsystem / Capability | Directory / File | Description | Documentation |
+| :--- | :--- | :--- | :--- |
+| **DIB SRE Agent** | `agent/` | Multi-agent autonomous investigation engine (Dispatcher, Specialists, Synthesizer) | [Architecture](docs/ARCHITECTURE.md) • [Operations](docs/OPERATIONS.md) |
+| **Incident Bridge & HITL Endpoints** | `bridge/` | Webhook gateway, Jira/ServiceNow adapters, ADF renderer, automatic OIDC RCA callback | [HITL Endpoints](bridge/HITL_ENDPOINTS.md) • [Jira Setup](bridge/integrations/jira/SETUP.md) |
+| **FastMCP Deployment Context Stub** | `mcp-deploy-context-stub/` | FastMCP streamable HTTP server providing alert deployment context and rollout correlation | [README](mcp-deploy-context-stub/README.md) • [Contract](mcp-deploy-context-stub/CONTRACT.md) |
+| **HITL SRE Chatbot Core** | `hitl-chatbot/` | Interactive ADK assistant, CLI runner, authenticated REST API, signed approval gates | [Chatbot README](hitl-chatbot/README.md) |
+| **Slack Integration** | `hitl-chatbot/app/adapters/slack.py` | Slack Bolt adapter (`/slack/events`), Block Kit cards, requester gate, thread RCA | [Slack Integration Guide](hitl-chatbot/docs/slack_integration.md) |
+| **Demo Microservices** | `demo/` | E-commerce shop-api, inventory-svc, load generator, and 5 failure injection scenarios | [Demo Scenarios](demo/SCENARIOS.md) |
+
 ### CI Workflow
 Continuous integration for this subtree is executed by [`.github/workflows/incident-sre-agent-dev-in-a-box-ci.yml`](../.github/workflows/incident-sre-agent-dev-in-a-box-ci.yml). The workflow triggers on any push or pull request touching `incident-sre-agent-dev-in-a-box/**` and runs:
 1. **Contracts Sync Check:** Verifies byte-level equality of shared contracts between bridge and agent.
@@ -56,30 +67,6 @@ Continuous integration for this subtree is executed by [`.github/workflows/incid
 4. **Lint & Typecheck:** Runs `ruff check`, `ruff format --check`, and `mypy` across bridge, agent, and demo.
 5. **Unit & Component Tests:** Executes `pytest` test suites across bridge, agent, and demo.
 6. **Terraform Format & Validate:** Verifies formatting and configuration validity for all Terraform modules.
-
-### PR Stack & Merge Order
-The Human-In-The-Loop capability suite is delivered via a clean, linear, 4-PR stack targeting upstream `main` (with Slack integration in follow-up PR 5):
-1. **PR 1: `refactor/incident-sre-agent-dev-in-a-box`** (This PR)
-   - Baseline repository copy of `incident-sre-agent/` into `incident-sre-agent-dev-in-a-box/`.
-   - Addition of `.github/workflows/incident-sre-agent-dev-in-a-box-ci.yml`.
-   - Dev In A Box documentation and root index registration.
-2. **PR 2: `feat/mcp-deploy-context-stub`**
-   - Standalone FastMCP deployment context stub server under `mcp-deploy-context-stub/`.
-   - Contract schemas, sanitized synthetic fixtures, Cloud Run Terraform module, and dedicated CI workflow.
-3. **PR 3: `feat/isa-bridge-hitl-endpoints`**
-   - Incident bridge HITL Jira endpoints (`POST /api/jira/issue`), ADF template renderer, and issue properties.
-   - Automatic RCA forward callback with Google OIDC ID tokens.
-   - Violation `opened_at` propagation and DIB SRE agent fixes (synthesizer timestamp handling, root logging, 15m lookback).
-   - Reference documentation in `bridge/HITL_ENDPOINTS.md`.
-4. **PR 4: `feat/hitl-chatbot-core`**
-   - Core HITL Chatbot engine, interactive CLI runner, authenticated `/api/*` REST endpoints.
-   - Cloud Monitoring alert resolution, ticket drafting, and HMAC-signed requester-only approval gates.
-   - Automatic RCA callback receiver (`/internal/rca-callback`).
-   - Pure core package with zero Slack dependencies.
-5. **PR 5: `feat/hitl-chatbot-slack`** (Follow-up)
-   - Slack Bolt event adapter (`app/adapters/slack.py`) and `/slack/events` routing.
-   - Slack interactive message cards, requester-only approval button gates, and thread-scoped RCA delivery.
-   - Comprehensive Slack setup guide (`docs/slack_integration.md`).
 
 ---
 
@@ -890,6 +877,10 @@ incident-sre-agent-dev-in-a-box/
 ```
 
 ### In-Depth Documentation Links
+- [Slack Integration Guide (`hitl-chatbot/docs/slack_integration.md`)](hitl-chatbot/docs/slack_integration.md)
+- [HITL SRE Chatbot Guide (`hitl-chatbot/README.md`)](hitl-chatbot/README.md)
+- [HITL Bridge Endpoints Reference (`bridge/HITL_ENDPOINTS.md`)](bridge/HITL_ENDPOINTS.md)
+- [FastMCP Deployment Context Stub (`mcp-deploy-context-stub/README.md`)](mcp-deploy-context-stub/README.md)
 - [Configuration Reference (`docs/CONFIGURATION.md`)](docs/CONFIGURATION.md)
 - [Testing & Quality Assurance Guide (`docs/TESTING.md`)](docs/TESTING.md)
 - [Scenario Evaluation Scorecard & Backlog (`docs/EVALUATION.md`)](docs/EVALUATION.md)
