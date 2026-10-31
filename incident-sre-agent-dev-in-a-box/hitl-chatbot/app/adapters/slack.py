@@ -386,13 +386,26 @@ async def _process_approval_action(
             approver_id=approver_id,
         )
         res_data = approval_res.get("result", {})
-        issue_key = res_data.get("issue_key", "AMJTEST-XX")
+        issue_key = (
+            res_data.get("issue_key")
+            or approval_res.get("ticket_key")
+            or (stored_draft and stored_draft.get("ticket_key"))
+            or "AMJTEST-XX"
+        )
+        draft_action = (
+            (stored_draft and stored_draft.get("action"))
+            or approval_res.get("action")
+            or "create_ticket"
+        )
 
         # Record Jira ticket key to Slack thread reference mapping
         if channel_id and thread_ts:
             runner.store.record_ticket_thread(issue_key, f"{channel_id}:{thread_ts}")
 
-        confirmation_msg = f"✅ Ticket {issue_key} Created. Investigation running ⏳"
+        if draft_action == "comment":
+            confirmation_msg = f"✅ RCA / Comment added to {issue_key}"
+        else:
+            confirmation_msg = f"✅ Ticket {issue_key} Created. Investigation running ⏳"
 
         # Update interactive message to replace buttons with confirmation
         if channel_id and message_ts:

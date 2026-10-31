@@ -341,6 +341,55 @@ async def test_requester_only_authorization_gate_approval(monkeypatch: pytest.Mo
     assert runner.store.get_ticket_thread("AMJTEST-20") == "C_TEST:1710000000.123456"
 
 
+@pytest.mark.asyncio
+async def test_requester_approval_gate_comment_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    get_replay_registry().reset()
+    settings = get_settings()
+
+    requester_user = "U_COMMENT_REQUESTER"
+
+    signed_token = create_signed_token(
+        draft_id="draft-comment-test-1",
+        incident_id="violation-auth-comment",
+        secret_key=settings.hmac_secret_key,
+        requester_id=requester_user,
+    )
+
+    runner.store.save_draft(
+        "draft-comment-test-1",
+        {
+            "draft_id": "draft-comment-test-1",
+            "action": "comment",
+            "ticket_key": "AMJTEST-27",
+            "body": "h2. Root Cause Analysis",
+            "incident_id": "violation-auth-comment",
+            "requester_id": requester_user,
+        },
+    )
+
+    mock_client = AsyncMock()
+    mock_respond = AsyncMock()
+
+    body = {
+        "type": "block_actions",
+        "user": {"id": requester_user},
+        "channel": {"id": "C_TEST"},
+        "container": {
+            "channel_id": "C_TEST",
+            "message_ts": "1710000005.000000",
+            "thread_ts": "1710000000.123456",
+        },
+        "actions": [{"action_id": "hitl_approve_ticket", "value": signed_token}],
+    }
+
+    await _process_approval_action(body=body, client=mock_client, respond=mock_respond)
+
+    mock_client.chat_update.assert_called_once()
+    update_kwargs = mock_client.chat_update.call_args.kwargs
+    assert update_kwargs["text"] == "✅ RCA / Comment added to AMJTEST-27"
+    assert "Ticket created" not in update_kwargs["text"]
+
+
 # ---------------------------------------------------------------------------
 # 6. RCA Callback Delivery
 # ---------------------------------------------------------------------------
