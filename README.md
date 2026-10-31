@@ -36,14 +36,16 @@ A repo of Autocloud prototypes
 | **State & Persistence** | Stateless Cloud Run services; Cloud Tasks asynchronous queue; standalone HTML dossier generation |
 | **Docs & Quick-Start** | [Documentation](incident-sre-agent/) • [Deployment](incident-sre-agent/docs/DEPLOY.md) • [Demo Scenarios](incident-sre-agent/demo/SCENARIOS.md) • [Operations](incident-sre-agent/docs/OPERATIONS.md) • [Architecture](incident-sre-agent/docs/ARCHITECTURE.md) • [GKE Investigation](incident-sre-agent/docs/GKE_INVESTIGATION.md) |
 
-### [Incident SRE Agent (Dev In A Box)](incident-sre-agent-dev-in-a-box/) (@ssvaidyanathan)
+### [Incident SRE Agent (Dev In A Box)](incident-sre-agent-dev-in-a-box/) (@sermolin)
+
+A dedicated development sandbox fork of incident-sre-agent for Human-In-The-Loop (HITL) and chat-driven incident response workflows.
 
 | Specification | Details |
 | :--- | :--- |
-| **Core Architecture** | Autonomous GCP incident investigation across logs, metrics, changes, and assets with ITSM sync |
-| **Runtime & Protocols** | Asynchronous webhook ingestion bridge (`POST /webhook/{servicenow,jira,generic}`) + Cloud Tasks worker |
-| **Integrations** | ServiceNow (Flow Designer), Jira Cloud, Cloud Logging/Monitoring/Audit/Asset, Vertex AI Gemini |
-| **Cloud Run Services (default prefix)** | `isa-incident-bridge`, `isa-sre-agent` |
+| **Core Architecture** | Autonomous GCP incident investigation sandbox with upcoming Slack HITL gating and deployment-context MCP integration. (In progress: HITL chatbot, MCP stub, Slack — see PRs 2–5). |
+| **Runtime & Protocols** | Asynchronous webhook bridge (`POST /webhook/{servicenow,jira,generic}`) + Cloud Tasks worker |
+| **Integrations** | ServiceNow, Jira Cloud, Cloud Logging/Monitoring/Audit/Asset, Vertex AI Gemini |
+| **Cloud Run Services (default prefix)** | `<prefix>-incident-bridge`, `<prefix>-sre-agent` (upcoming: `hitl-chatbot`, `mcp-deploy-context-stub`) |
 | **State & Persistence** | Stateless Cloud Run services; Cloud Tasks asynchronous queue; standalone HTML dossier generation |
 | **Docs & Quick-Start** | [Documentation](incident-sre-agent-dev-in-a-box/) • [Deployment](incident-sre-agent-dev-in-a-box/docs/DEPLOY.md) • [Demo Scenarios](incident-sre-agent-dev-in-a-box/demo/SCENARIOS.md) • [Operations](incident-sre-agent-dev-in-a-box/docs/OPERATIONS.md) • [Architecture](incident-sre-agent-dev-in-a-box/docs/ARCHITECTURE.md) • [GKE Investigation](incident-sre-agent-dev-in-a-box/docs/GKE_INVESTIGATION.md) |
 
