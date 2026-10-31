@@ -68,30 +68,6 @@ Continuous integration for this subtree is executed by [`.github/workflows/incid
 5. **Unit & Component Tests:** Executes `pytest` test suites across bridge, agent, and demo.
 6. **Terraform Format & Validate:** Verifies formatting and configuration validity for all Terraform modules.
 
-### PR Stack & Merge Order
-The Human-In-The-Loop capability suite is delivered via a clean, linear, 4-PR stack targeting upstream `main` (with Slack integration in follow-up PR 5):
-1. **PR 1: `refactor/incident-sre-agent-dev-in-a-box`** (This PR)
-   - Baseline repository copy of `incident-sre-agent/` into `incident-sre-agent-dev-in-a-box/`.
-   - Addition of `.github/workflows/incident-sre-agent-dev-in-a-box-ci.yml`.
-   - Dev In A Box documentation and root index registration.
-2. **PR 2: `feat/mcp-deploy-context-stub`**
-   - Standalone FastMCP deployment context stub server under `mcp-deploy-context-stub/`.
-   - Contract schemas, sanitized synthetic fixtures, Cloud Run Terraform module, and dedicated CI workflow.
-3. **PR 3: `feat/isa-bridge-hitl-endpoints`**
-   - Incident bridge HITL Jira endpoints (`POST /api/jira/issue`), ADF template renderer, and issue properties.
-   - Automatic RCA forward callback with Google OIDC ID tokens.
-   - Violation `opened_at` propagation and DIB SRE agent fixes (synthesizer timestamp handling, root logging, 15m lookback).
-   - Reference documentation in `bridge/HITL_ENDPOINTS.md`.
-4. **PR 4: `feat/hitl-chatbot-core`**
-   - Core HITL Chatbot engine, interactive CLI runner, authenticated `/api/*` REST endpoints.
-   - Cloud Monitoring alert resolution, ticket drafting, and HMAC-signed requester-only approval gates.
-   - Automatic RCA callback receiver (`/internal/rca-callback`).
-   - Pure core package with zero Slack dependencies.
-5. **PR 5: `feat/hitl-chatbot-slack`** (Follow-up)
-   - Slack Bolt event adapter (`app/adapters/slack.py`) and `/slack/events` routing.
-   - Slack interactive message cards, requester-only approval button gates, and thread-scoped RCA delivery.
-   - Comprehensive Slack setup guide (`docs/slack_integration.md`).
-
 ---
 
 ## Original System Overview & Reference
