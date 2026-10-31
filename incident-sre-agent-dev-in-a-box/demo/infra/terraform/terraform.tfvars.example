@@ -1,0 +1,13 @@
+# Prefix applied to all created resource names and labels (e.g. isa, acme)
+name_prefix          = "isa"
+project_id          = "your-project-id"
+region              = "us-central1"
+image_tag           = "latest"
+shop_api_image      = "us-central1-docker.pkg.dev/your-project-id/isa-incident-demo/isa-shop-api:latest"
+inventory_svc_image = "us-central1-docker.pkg.dev/your-project-id/isa-incident-demo/isa-inventory-svc:latest"
+payment_gateway_key = "demo-live-payment-key-xyz"
+shop_api_cpu        = "1"
+shop_api_memory     = "1Gi"
+enable_fault_control_exclusion = true
+
+

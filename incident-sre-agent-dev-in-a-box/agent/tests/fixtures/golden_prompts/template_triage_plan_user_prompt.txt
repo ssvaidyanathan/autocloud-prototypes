@@ -1,0 +1,8 @@
+Analyze incident ticket and generate an InvestigationPlan adhering to the schema:
+ID: {id}
+External Key: {external_key}
+Title: {title}
+Description: {description}
+Severity: {severity}
+Service Hint: {service_hint}
+Opened At (UTC): {opened_at}

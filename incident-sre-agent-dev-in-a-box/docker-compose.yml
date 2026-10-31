@@ -1,0 +1,52 @@
+services:
+  bridge:
+    build:
+      context: ./bridge
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - GCP_PROJECT=local-project
+      - GCP_REGION=us-central1
+      - TASKS_QUEUE=investigations
+      - TASKS_LOCATION=us-central1
+      - AGENT_SERVICE_URL=http://sre-agent:8080
+      - CALLBACK_URL=http://bridge:8080/callback/report
+      - SERVICENOW_INSTANCE_URL=http://fake-ticket-server:8082
+      - JIRA_BASE_URL=http://fake-ticket-server:8082
+      - SERVICENOW_WEBHOOK_TOKEN=test-snow-token
+      - JIRA_WEBHOOK_TOKEN=test-jira-token
+      - APP_ENV=local
+      - ENVIRONMENT=local
+    depends_on:
+      - sre-agent
+      - fake-ticket-server
+
+  sre-agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8080"
+    environment:
+      - PORT=8080
+      - GCP_PROJECT=local-project
+      - GCP_REGION=us-central1
+      - VERTEX_LOCATION=global
+      - MODEL_DISPATCHER=gemini-3.8-flash
+      - MODEL_SPECIALIST=gemini-3.8-flash
+      - MODEL_SYNTHESIZER=gemini-3.8-flash
+      - ALLOWED_CALLBACK_HOSTS=bridge,localhost
+      - APP_ENV=local
+      - ENVIRONMENT=local
+
+  fake-ticket-server:
+    build:
+      context: ./bridge
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+    command: ["uvicorn", "tests.fake_ticket_server:app", "--host", "0.0.0.0", "--port", "8082"]
