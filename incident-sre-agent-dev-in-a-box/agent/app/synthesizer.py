@@ -432,10 +432,26 @@ def calibrate_report_confidence(
     # Condition 7: Prior-Incident Separation
     if plan and getattr(plan, "prior_incidents", None):
         for pi in getattr(plan, "prior_incidents", []):
-            pi_caveat = (
-                f"Earlier error episode ({pi.start_time.strftime('%H:%M:%SZ')} - "
-                f"{pi.end_time.strftime('%H:%M:%SZ')}) was segregated as a resolved prior incident."
-            )
+            if isinstance(pi, str):
+                pi_caveat = (
+                    f"Earlier incident episode ({pi}) was segregated as a resolved prior incident."
+                )
+            elif (
+                hasattr(pi, "start_time")
+                and hasattr(pi, "end_time")
+                and pi.start_time
+                and pi.end_time
+            ):
+                pi_caveat = (
+                    f"Earlier error episode ({pi.start_time.strftime('%H:%M:%SZ')} - "
+                    f"{pi.end_time.strftime('%H:%M:%SZ')}) was segregated as a resolved "
+                    "prior incident."
+                )
+            else:
+                desc = getattr(pi, "description", str(pi))
+                pi_caveat = (
+                    f"Earlier error episode ({desc}) was segregated as a resolved prior incident."
+                )
             if pi_caveat not in report.caveats:
                 report.caveats.append(pi_caveat)
 
@@ -549,9 +565,10 @@ def calibrate_report_confidence(
 
         if plan and getattr(plan, "prior_incidents", None):
             for pi in plan.prior_incidents:
-                if any(kw in getattr(pi, "description", "").lower() for kw in db_keywords):
+                pi_desc = getattr(pi, "description", pi) if not isinstance(pi, str) else str(pi)
+                if any(kw in str(pi_desc).lower() for kw in db_keywords):
                     prior_db_errors.append(
-                        EvidenceItem(kind="prior_incident", excerpt=pi.description)
+                        EvidenceItem(kind="prior_incident", excerpt=str(pi_desc))
                     )
 
         if cites_db_errors and prior_db_errors and not active_db_errors:
@@ -771,7 +788,13 @@ class SynthesizerAgent:
         timeline_items: List[TimelineItem] = []
         seen_keys: set[tuple[datetime, str]] = set()
 
-        def _add_item(ts: datetime, desc: str) -> None:
+        def _add_item(ts: Optional[datetime], desc: str) -> None:
+            if ts is None:
+                ts = (
+                    getattr(plan, "start_time", None)
+                    or getattr(incident, "opened_at", None)
+                    or datetime.now(timezone.utc)
+                )
             utc_ts = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
             utc_ts = utc_ts.astimezone(timezone.utc)
             key = (utc_ts, desc.strip())
@@ -782,7 +805,7 @@ class SynthesizerAgent:
         # 1. Detected onset
         if plan and getattr(plan, "onset_time", None) is not None:
             _add_item(
-                plan.onset_time,  # type: ignore[arg-type]
+                plan.onset_time,
                 (
                     f"[ONSET] Detected symptom onset for {plan.affected_service}: "
                     "telemetry error rate or latency deviation observed"
@@ -792,10 +815,9 @@ class SynthesizerAgent:
         # 2. Prior incidents
         if plan and getattr(plan, "prior_incidents", None):
             for pi in getattr(plan, "prior_incidents", []):
-                _add_item(
-                    pi.start_time,
-                    f"[PRIOR_INCIDENT] {pi.description}",
-                )
+                st = getattr(pi, "start_time", None) if not isinstance(pi, str) else None
+                desc = getattr(pi, "description", pi) if not isinstance(pi, str) else str(pi)
+                _add_item(st, f"[PRIOR_INCIDENT] {desc}")
 
         # 3. Incident opened
         _add_item(

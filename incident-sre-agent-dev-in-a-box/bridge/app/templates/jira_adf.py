@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any, Optional
 
 from ..contracts.report import Report
@@ -289,3 +290,277 @@ def chunk_adf(doc: dict[str, Any], max_chars: int = 32000) -> list[dict[str, Any
         )
 
     return result_docs
+
+
+_INLINE_MARKDOWN_RE = re.compile(
+    r"(\[(?P<link_text>[^\]]+)\]\((?P<link_url>[^)]+)\))|"
+    r"(\*\*\*(?P<bi_text>[^*]+)\*\*\*)|"
+    r"(\*\*(?P<bold_text>[^*]+)\*\*)|"
+    r"(\*(?P<italic_text>[^*]+)\*)"
+)
+
+
+def _parse_inline_text(text: str) -> list[dict[str, Any]]:
+    """Parse inline markdown (links, bold, italic) into ADF text nodes."""
+    if not text:
+        return []
+    nodes: list[dict[str, Any]] = []
+    last_idx = 0
+    for m in _INLINE_MARKDOWN_RE.finditer(text):
+        start, end = m.span()
+        if start > last_idx:
+            nodes.append({"type": "text", "text": text[last_idx:start]})
+        if m.group("link_text"):
+            lt = m.group("link_text")
+            marks: list[dict[str, Any]] = [{"type": "link", "attrs": {"href": m.group("link_url")}}]
+            if lt.startswith("**") and lt.endswith("**"):
+                lt = lt[2:-2]
+                marks.append({"type": "strong"})
+            nodes.append({"type": "text", "text": lt, "marks": marks})
+        elif m.group("bi_text"):
+            nodes.append(
+                {
+                    "type": "text",
+                    "text": m.group("bi_text"),
+                    "marks": [{"type": "strong"}, {"type": "em"}],
+                }
+            )
+        elif m.group("bold_text"):
+            bt = m.group("bold_text")
+            lm = re.match(r"^\[([^\]]+)\]\(([^)]+)\)$", bt)
+            if lm:
+                nodes.append(
+                    {
+                        "type": "text",
+                        "text": lm.group(1),
+                        "marks": [
+                            {"type": "strong"},
+                            {"type": "link", "attrs": {"href": lm.group(2)}},
+                        ],
+                    }
+                )
+            else:
+                nodes.append({"type": "text", "text": bt, "marks": [{"type": "strong"}]})
+        elif m.group("italic_text"):
+            nodes.append(
+                {"type": "text", "text": m.group("italic_text"), "marks": [{"type": "em"}]}
+            )
+        last_idx = end
+
+    if last_idx < len(text):
+        nodes.append({"type": "text", "text": text[last_idx:]})
+    return nodes
+
+
+def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
+    """Convert Markdown text to Atlassian Document Format (ADF) document.
+
+    Converts:
+      - Headings (#, ##, ###) -> ADF heading nodes (level 1-6)
+      - Bullet points (- or *) -> ADF bulletList
+      - Tables (| col1 | col2 |) -> ADF table (tableHeader and tableCell)
+      - Bold (**text**), Italic (*text*), Links ([text](url)) -> ADF text marks
+      - Standard paragraphs -> ADF paragraph
+      - Empty text -> ADF doc with empty paragraph
+    """
+    if not markdown_text or not markdown_text.strip():
+        return {
+            "version": 1,
+            "type": "doc",
+            "content": [{"type": "paragraph", "content": []}],
+        }
+
+    lines = markdown_text.splitlines()
+    content: list[dict[str, Any]] = []
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+
+        if not stripped:
+            i += 1
+            continue
+
+        # 1. Heading (#, ##, ###, ...)
+        heading_match = re.match(r"^(#{1,6})(?:\s*(.*))?$", stripped)
+        if heading_match:
+            hashes, raw_htext = heading_match.groups()
+            htext = (raw_htext or "").strip()
+            if not htext:
+                htext = "Incident Section"
+            level = min(len(hashes), 6)
+            inline_content = _parse_inline_text(htext)
+            content.append(
+                {
+                    "type": "heading",
+                    "attrs": {"level": level},
+                    "content": inline_content
+                    if inline_content
+                    else [{"type": "text", "text": htext}],
+                }
+            )
+            i += 1
+            continue
+
+        # 2. Table (| ... |)
+        if stripped.startswith("|") and stripped.endswith("|"):
+            table_lines: list[str] = []
+            while i < n and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+
+            headers: list[str] = []
+            rows: list[list[str]] = []
+            has_separator = False
+            for t_idx, t_line in enumerate(table_lines):
+                cells = [c.strip() for c in t_line.split("|")[1:-1]]
+                if all(re.match(r"^:?-+:?$", c) for c in cells if c):
+                    has_separator = True
+                    continue
+                if t_idx == 0 or (not headers and not has_separator):
+                    headers = cells
+                else:
+                    rows.append(cells)
+
+            table_rows: list[dict[str, Any]] = []
+            if headers:
+                header_cells = [
+                    {
+                        "type": "tableHeader",
+                        "content": [{"type": "paragraph", "content": _parse_inline_text(h)}],
+                    }
+                    for h in headers
+                ]
+                table_rows.append({"type": "tableRow", "content": header_cells})
+
+            for row in rows:
+                cell_nodes = [
+                    {
+                        "type": "tableCell",
+                        "content": [{"type": "paragraph", "content": _parse_inline_text(c)}],
+                    }
+                    for c in row
+                ]
+                table_rows.append({"type": "tableRow", "content": cell_nodes})
+
+            content.append(
+                {
+                    "type": "table",
+                    "attrs": {"isNumberColumnEnabled": False, "layout": "default"},
+                    "content": table_rows,
+                }
+            )
+            continue
+
+        # 3. Bullet list (- or *)
+        if re.match(r"^[\-\*]\s+(.*)$", stripped):
+            list_items: list[dict[str, Any]] = []
+            while i < n:
+                b_match = re.match(r"^[\-\*]\s+(.*)$", lines[i].strip())
+                if not b_match:
+                    break
+                item_text = b_match.group(1)
+                list_items.append(
+                    {
+                        "type": "listItem",
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": _parse_inline_text(item_text),
+                            }
+                        ],
+                    }
+                )
+                i += 1
+
+            content.append(
+                {
+                    "type": "bulletList",
+                    "content": list_items,
+                }
+            )
+            continue
+
+        # 4. Standard Paragraph (collect consecutive non-block lines)
+        para_lines = [stripped]
+        i += 1
+        while i < n:
+            next_stripped = lines[i].strip()
+            if not next_stripped:
+                break
+            if (
+                next_stripped.startswith("#")
+                or (next_stripped.startswith("|") and next_stripped.endswith("|"))
+                or re.match(r"^[\-\*]\s+", next_stripped)
+            ):
+                break
+            para_lines.append(next_stripped)
+            i += 1
+
+        para_text = " ".join(para_lines)
+        content.append(
+            {
+                "type": "paragraph",
+                "content": _parse_inline_text(para_text),
+            }
+        )
+
+    if not content:
+        content.append({"type": "paragraph", "content": []})
+
+    return {
+        "version": 1,
+        "type": "doc",
+        "content": content,
+    }
+
+
+def update_adf_root_causes(adf_doc: dict[str, Any], root_causes_text: str) -> bool:
+    """Find Root Causes section in an ADF document and update it with root_causes_text."""
+    if not isinstance(adf_doc, dict) or adf_doc.get("type") != "doc":
+        return False
+
+    content: list[dict[str, Any]] = adf_doc.get("content", [])
+    rc_idx = -1
+
+    for i, node in enumerate(content):
+        texts: list[str] = []
+        if node.get("type") in ("paragraph", "heading"):
+            for c in node.get("content", []):
+                if c.get("type") == "text":
+                    texts.append(c.get("text", ""))
+        full_text = " ".join(texts)
+        if "Root Causes" in full_text:
+            rc_idx = i
+            break
+
+    new_node = {
+        "type": "paragraph",
+        "content": _parse_inline_text(root_causes_text),
+    }
+
+    if rc_idx != -1:
+        if rc_idx + 1 < len(content):
+            next_node = content[rc_idx + 1]
+            if next_node.get("type") in ("paragraph", "bulletList"):
+                content[rc_idx + 1] = new_node
+            else:
+                content.insert(rc_idx + 1, new_node)
+        else:
+            content.append(new_node)
+        return True
+
+    # If no existing Root Causes section found, append one
+    content.extend(
+        [
+            {
+                "type": "heading",
+                "attrs": {"level": 2},
+                "content": [{"type": "text", "text": "Root Causes"}],
+            },
+            new_node,
+        ]
+    )
+    return True

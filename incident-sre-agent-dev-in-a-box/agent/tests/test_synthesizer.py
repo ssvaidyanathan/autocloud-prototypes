@@ -843,3 +843,49 @@ def test_synthesizer_scenario5_dependency_failure_playbooks() -> None:
         "Verify graceful degradation and fallback handling while inventory-svc authorization "
         "is restored." in report.recommended_actions[3]
     )
+
+
+def test_synthesizer_handles_string_prior_incidents() -> None:
+    """Verify synthesizer does not crash when plan.prior_incidents contains strings."""
+    stub = StubLlmClient(
+        prc_text="Root cause description",
+        prc_confidence=0.85,
+        recommended_actions=["Action 1"],
+    )
+    agent = SynthesizerAgent(llm_client=stub)
+    now = datetime(2026, 10, 9, 2, 0, 0, tzinfo=timezone.utc)
+    incident = Incident(
+        id="inc-str-prior",
+        source="jira",
+        external_id="AMJTEST-23",
+        external_key="AMJTEST-23",
+        title="Alert violation on test-service-1",
+        description="Healthcheck failure",
+        severity="P2",
+        opened_at=now,
+    )
+    plan = InvestigationPlan(
+        affected_service="test-service-1",
+        symptoms=["Healthcheck failure"],
+        start_time=now - timedelta(minutes=60),
+        end_time=now,
+        selected_specialists=["metrics"],
+        prior_incidents=["AMJTEST-20: Prior healthcheck glitch", "AMJTEST-21: DB timeout"],
+    )
+    findings = {
+        "metrics": Findings(
+            summary="Metrics ok",
+            evidence=[],
+            anomalies=[],
+            queries_run=[],
+            confidence=0.8,
+            errors=[],
+        )
+    }
+
+    report = agent.synthesize(incident, plan, findings)
+    assert report is not None
+    # Verify timeline was built without crashing
+    assert len(report.timeline) > 0
+    timeline_texts = [item.description for item in report.timeline]
+    assert any("[PRIOR_INCIDENT]" in t for t in timeline_texts)

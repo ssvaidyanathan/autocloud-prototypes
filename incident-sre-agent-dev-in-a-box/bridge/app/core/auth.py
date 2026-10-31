@@ -3,8 +3,10 @@ import hmac
 import json
 import logging
 import os
+import urllib.parse
 from typing import Any, Optional
 
+import httpx
 from fastapi import HTTPException, Request
 
 from ..config import BridgeConfig, get_settings
@@ -56,6 +58,8 @@ def create_mock_oidc_token(audience: str, email: str) -> str:
 def verify_oidc_token(
     request: Request,
     config: Optional[BridgeConfig] = None,
+    expected_aud: Optional[str] = None,
+    allowed_emails: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Verify OIDC Bearer token in Authorization header.
 
@@ -84,19 +88,27 @@ def verify_oidc_token(
 
     token = parts[1].strip()
 
+    target_aud = expected_aud if expected_aud is not None else settings.callback_url
+    target_emails: list[str] = []
+    if allowed_emails is not None:
+        target_emails = [e for e in allowed_emails if e]
+    elif settings.agent_sa:
+        target_emails = [settings.agent_sa]
+
     # Fast-path for default mock token used by local agent
     if token == "mock-oidc-token-for-testing":
         if _is_local_dev_env(settings):
             logger.info("Accepted mock OIDC token for local testing")
-            return {"aud": settings.callback_url, "email": settings.agent_sa, "mock": True}
+            return {
+                "aud": target_aud or settings.callback_url,
+                "email": target_emails[0] if target_emails else settings.agent_sa,
+                "mock": True,
+            }
         logger.error("Mock OIDC token rejected in production environment")
         raise HTTPException(
             status_code=401,
             detail="Mock OIDC token not allowed in production",
         )
-
-    expected_aud = settings.callback_url
-    expected_email = settings.agent_sa
 
     # Attempt Google ID token verification if google auth library is available
     verified_claims: Optional[dict[str, Any]] = None
@@ -106,7 +118,7 @@ def verify_oidc_token(
 
         req = google_requests.Request()
         verified_claims = id_token.verify_oauth2_token(  # type: ignore[no-untyped-call]
-            token, req, audience=expected_aud if expected_aud else None
+            token, req, audience=target_aud if target_aud else None
         )
     except (ImportError, ModuleNotFoundError):
         if _is_local_dev_env(settings):
@@ -147,25 +159,65 @@ def verify_oidc_token(
         raise HTTPException(status_code=401, detail="Could not extract claims from OIDC token")
 
     # Verify audience using constant-time comparison
-    if expected_aud:
+    if target_aud:
         token_aud = verified_claims.get("aud")
-        if not token_aud or not hmac.compare_digest(str(token_aud), str(expected_aud)):
+        if not token_aud or not hmac.compare_digest(str(token_aud), str(target_aud)):
             logger.warning(
                 "OIDC token audience mismatch: expected '%s', got '%s'",
-                expected_aud,
+                target_aud,
                 token_aud,
             )
             raise HTTPException(status_code=403, detail="Invalid token audience")
 
     # Verify caller service account email using constant-time comparison
-    if expected_email:
-        token_email = verified_claims.get("email")
-        if not token_email or not hmac.compare_digest(str(token_email), str(expected_email)):
+    if target_emails:
+        token_email = str(verified_claims.get("email") or "")
+        matched = any(hmac.compare_digest(token_email, allowed) for allowed in target_emails)
+        if not matched:
             logger.warning(
-                "OIDC token caller email mismatch: expected '%s', got '%s'",
-                expected_email,
+                "OIDC token caller email mismatch: expected one of %s, got '%s'",
+                target_emails,
                 token_email,
             )
             raise HTTPException(status_code=403, detail="Invalid caller service account")
 
     return verified_claims
+
+
+def fetch_oidc_token(audience: str, config: Optional[BridgeConfig] = None) -> str:
+    """Fetch an OIDC ID token for outbound calls to the given audience."""
+    settings = config or get_settings()
+
+    # 1. Attempt Google Cloud Compute / Cloud Run metadata server
+    meta_url = (
+        "http://metadata.google.internal/computeMetadata/v1/instance/"
+        f"service-accounts/default/identity?audience={urllib.parse.quote(audience, safe='')}"
+    )
+    headers = {"Metadata-Flavor": "Google"}
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            resp = client.get(meta_url, headers=headers)
+            if resp.status_code == 200 and resp.text.strip():
+                return resp.text.strip()
+    except Exception:
+        pass
+
+    # 2. Attempt google.oauth2.id_token.fetch_id_token
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token
+
+        req = google_requests.Request()
+        token = id_token.fetch_id_token(req, audience)  # type: ignore[no-untyped-call]
+        if token:
+            return str(token)
+    except Exception:
+        pass
+
+    # 3. Fallback for local/dev/test
+    if _is_local_dev_env(settings):
+        return "mock-oidc-token-for-testing"
+
+    raise RuntimeError(
+        f"Failed to fetch OIDC ID token for audience '{audience}' from metadata server or ADC"
+    )
