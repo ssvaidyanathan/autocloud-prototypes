@@ -392,6 +392,12 @@ async def _process_approval_action(
             or (stored_draft and stored_draft.get("ticket_key"))
             or "AMJTEST-XX"
         )
+        issue_url = (
+            res_data.get("issue_url")
+            or res_data.get("ticket_url")
+            or approval_res.get("ticket_url")
+            or f"https://google-autocloud-team.atlassian.net/browse/{issue_key}"
+        )
         draft_action = (
             (stored_draft and stored_draft.get("action"))
             or approval_res.get("action")
@@ -403,7 +409,7 @@ async def _process_approval_action(
             runner.store.record_ticket_thread(issue_key, f"{channel_id}:{thread_ts}")
 
         if draft_action == "comment":
-            confirmation_msg = f"✅ RCA / Comment added to {issue_key}"
+            confirmation_msg = f"✅ RCA / Comment added to {issue_key}: {issue_url}"
         else:
             confirmation_msg = f"✅ Ticket {issue_key} Created. Investigation running ⏳"
 

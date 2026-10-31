@@ -386,7 +386,7 @@ async def test_requester_approval_gate_comment_action(monkeypatch: pytest.Monkey
 
     mock_client.chat_update.assert_called_once()
     update_kwargs = mock_client.chat_update.call_args.kwargs
-    assert update_kwargs["text"] == "✅ RCA / Comment added to AMJTEST-27"
+    assert "✅ RCA / Comment added to AMJTEST-27" in update_kwargs["text"]
     assert "Ticket created" not in update_kwargs["text"]
 
 
