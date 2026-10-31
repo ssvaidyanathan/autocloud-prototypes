@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from app.agent import ChatbotAgentRunner, ChatbotIntent, classify_intent
@@ -278,3 +280,59 @@ def test_amjtest27_ticket_created_callback_arrives_update_replies_attached() -> 
     assert "RCA is already attached to AMJTEST-27" in turn["text"]
     assert "https://jira.example.internal/browse/AMJTEST-27" in turn["text"]
     assert "signed_token" not in turn
+
+
+def test_ticket_created_then_callback_then_update_reports_already_attached() -> None:
+    """Regression test:
+    - Create ticket in thread -> active ticket context set to pending.
+    - Bridge delivers RCA via update_active_ticket_rca -> active ticket context marked attached.
+    - User says 'Update the ticket with your RCA' in same thread -> returns type='info' with
+      text matching r'already attached to AMJTEST-' and does NOT create a draft or ticket.
+    """
+    store = get_conversation_store()
+    runner = ChatbotAgentRunner()
+    thread_id = "thread-callback-update-regression"
+
+    # 1. Create ticket in thread -> active ticket context set to pending
+    store.set_active_ticket(
+        thread_id=thread_id,
+        ticket_key="AMJTEST-27",
+        incident_id="0.test-inc-12345",
+        policy_name="snow-ip-healthcheck-3",
+        ticket_url="https://jira.example.internal/browse/AMJTEST-27",
+        rca_status="pending",
+        rca_attached=False,
+    )
+    ctx_before = store.get_active_ticket(thread_id)
+    assert ctx_before is not None
+    assert ctx_before["rca_status"] == "pending"
+    assert ctx_before["rca_attached"] is False
+
+    # 2. Bridge delivers RCA via update_active_ticket_rca -> active ticket context marked attached
+    rca_content = {
+        "root_cause": "Replica scale-down event triggered 503 errors.",
+        "confidence": 0.95,
+    }
+    store.update_active_ticket_rca(
+        ticket_key="AMJTEST-27",
+        rca_content=rca_content,
+        thread_id=thread_id,
+    )
+    ctx_after = store.get_active_ticket(thread_id)
+    assert ctx_after is not None
+    assert ctx_after["rca_attached"] is True
+    assert ctx_after["rca_status"] == "attached"
+
+    # 3. User says "Update the ticket with your RCA" in same thread
+    turn = runner.process_turn(
+        user_message="Update the ticket with your RCA",
+        session_id=thread_id,
+        user_id="U12345",
+    )
+
+    # 4. Returns type="info" with text matching r"already attached to AMJTEST-" and does NOT create a draft or ticket
+    assert turn["type"] == "info"
+    assert re.search(r"already attached to AMJTEST-", turn["text"])
+    assert "draft" not in turn
+    assert "signed_token" not in turn
+
