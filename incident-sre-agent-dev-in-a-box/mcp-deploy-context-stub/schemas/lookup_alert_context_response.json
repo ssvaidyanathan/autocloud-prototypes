@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LookupAlertContextResponse",
+  "description": "Response schema for lookup_alert_context tool",
+  "type": "object",
+  "required": ["found"],
+  "properties": {
+    "found": {
+      "type": "boolean",
+      "description": "Whether alert context was resolved"
+    },
+    "context": {
+      "type": ["object", "null"],
+      "description": "Resolved alert context topology and ownership, or null if not found",
+      "properties": {
+        "service_name": {
+          "type": "string",
+          "description": "Canonical service name"
+        },
+        "environment": {
+          "type": "string",
+          "description": "Deployment environment (e.g. production, staging)"
+        },
+        "platform": {
+          "type": "string",
+          "description": "Runtime platform (e.g. gke, cloudrun)"
+        },
+        "cluster_name": {
+          "type": "string",
+          "description": "Cluster identifier"
+        },
+        "cluster": {
+          "type": "string",
+          "description": "Alias for cluster_name"
+        },
+        "namespace": {
+          "type": "string",
+          "description": "Kubernetes namespace or project scope"
+        },
+        "workload_name": {
+          "type": "string",
+          "description": "Workload name (Deployment, StatefulSet, etc.)"
+        },
+        "workload": {
+          "type": "string",
+          "description": "Alias for workload_name"
+        },
+        "workload_type": {
+          "type": "string",
+          "description": "Workload type (Deployment, StatefulSet, etc.)"
+        },
+        "release": {
+          "type": "string",
+          "description": "Release or package identifier (e.g. Helm release)"
+        },
+        "target_ip": {
+          "type": "string",
+          "description": "Associated target IP address"
+        },
+        "port": {
+          "type": "integer",
+          "description": "Port number"
+        },
+        "check_id": {
+          "type": "string",
+          "description": "Monitoring check ID"
+        },
+        "owner_team": {
+          "type": "string",
+          "description": "Owning team or group"
+        },
+        "repo_url": {
+          "type": "string",
+          "description": "Source repository URL"
+        },
+        "runbook_url": {
+          "type": "string",
+          "description": "Incident runbook URL"
+        }
+      },
+      "required": ["service_name", "cluster_name", "namespace", "workload_name", "owner_team"]
+    }
+  },
+  "additionalProperties": false
+}

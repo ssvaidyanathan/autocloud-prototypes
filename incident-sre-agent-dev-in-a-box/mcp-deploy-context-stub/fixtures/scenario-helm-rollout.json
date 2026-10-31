@@ -1,0 +1,79 @@
+{
+  "scenario_id": "scenario-helm-rollout",
+  "description": "Sanitized synthetic Helm rollout scenario for contract testing and local development",
+  "alert_contexts": [
+    {
+      "target_ip": "10.10.0.1",
+      "port": 8080,
+      "check_id": "sample-check-1",
+      "service_hint": "sample-workload",
+      "service_name": "sample-workload",
+      "environment": "production",
+      "platform": "gke",
+      "cluster_name": "customer-cluster-1",
+      "cluster": "customer-cluster-1",
+      "namespace": "sample-app-ns",
+      "workload_name": "sample-workload",
+      "workload": "sample-workload",
+      "workload_type": "Deployment",
+      "release": "sample-release",
+      "owner_team": "sample-devops-team",
+      "repo_url": "https://git.example.internal/repos/sample-workload",
+      "runbook_url": "https://wiki.example.internal/runbooks/sample-workload"
+    }
+  ],
+  "deployments": [
+    {
+      "event_id": "evt-helm-deploy-089",
+      "timestamp": "2026-10-27T02:15:00Z",
+      "service_name": "sample-workload",
+      "workload_name": "sample-workload",
+      "workload": "sample-workload",
+      "environment": "production",
+      "cluster_name": "customer-cluster-1",
+      "cluster": "customer-cluster-1",
+      "namespace": "sample-app-ns",
+      "author": "sample-deployer@example.com",
+      "deployer": "sample-deployer@example.com",
+      "deployment_tool": "helm",
+      "tool": "helm",
+      "release": "sample-release",
+      "revision": "89",
+      "status": "SUCCESS",
+      "image": "gcr.io/sample-stg/sample-workload:v1.2.0",
+      "container_images": [
+        "gcr.io/sample-stg/sample-workload:v1.2.0"
+      ],
+      "pipeline_id": "pipe-1089",
+      "git_commit": "abc89def012345",
+      "git_commit_message": "feat: bump image to v1.2.0",
+      "change_summary": "Helm release sample-release updated to revision 89"
+    },
+    {
+      "event_id": "evt-helm-deploy-088",
+      "timestamp": "2026-10-26T18:00:00Z",
+      "service_name": "sample-workload",
+      "workload_name": "sample-workload",
+      "workload": "sample-workload",
+      "environment": "production",
+      "cluster_name": "customer-cluster-1",
+      "cluster": "customer-cluster-1",
+      "namespace": "sample-app-ns",
+      "author": "sample-deployer@example.com",
+      "deployer": "sample-deployer@example.com",
+      "deployment_tool": "helm",
+      "tool": "helm",
+      "release": "sample-release",
+      "revision": "88",
+      "status": "SUCCESS",
+      "image": "gcr.io/sample-stg/sample-workload:v1.1.9",
+      "container_images": [
+        "gcr.io/sample-stg/sample-workload:v1.1.9"
+      ],
+      "pipeline_id": "pipe-1088",
+      "git_commit": "abc88def987654",
+      "git_commit_message": "fix: patch config",
+      "change_summary": "Helm release sample-release updated to revision 88"
+    }
+  ]
+}
