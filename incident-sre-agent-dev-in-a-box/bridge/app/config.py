@@ -75,6 +75,10 @@ class BridgeConfig(BaseSettings):
     # Generic webhook
     generic_hmac_key: Optional[str] = None
 
+    # HITL and Templates
+    ticket_template_path: Optional[str] = None
+    hitl_caller_sa: Optional[str] = None
+
     @property
     def is_local(self) -> bool:
         env_val = self.app_env or self.environment
@@ -114,6 +118,8 @@ class BridgeConfig(BaseSettings):
             self.agent_sa = (
                 f"{self.name_prefix}-agent-sa@{self.gcp_project}.iam.gserviceaccount.com"
             )
+        if not self.hitl_caller_sa:
+            self.hitl_caller_sa = f"hitl-chatbot-sa@{self.gcp_project}.iam.gserviceaccount.com"
 
         return self
 
