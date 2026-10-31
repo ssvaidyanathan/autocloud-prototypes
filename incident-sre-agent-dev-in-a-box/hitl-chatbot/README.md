@@ -4,8 +4,8 @@ An interactive, autonomous Site Reliability Engineering (SRE) assistant built wi
 
 The chatbot provides engineers with fast telemetry correlation, deployment context lookup, automated ticket drafting, and cryptographically verified Human-In-The-Loop (HITL) mutating approval gates.
 
-> **Note on Slack Integration:**
-> This repository layer contains the **core engine, CLI adapter, and authenticated REST API**. The Slack Bolt event adapter (`app/adapters/slack.py`), `/slack/events` routing, and Block Kit interactive message cards are introduced in follow-up **PR 5 (`feat/hitl-chatbot-slack`)**. In this core package, `/slack/events` returns HTTP 503 Service Unavailable.
+> **Slack Integration (Enabled):**
+> Slack integration is enabled via the Slack Bolt adapter (`app/adapters/slack.py`) and `/slack/events` routing. For the complete Slack app manifest, setup instructions, secrets reference, and troubleshooting guide, see [docs/slack_integration.md](docs/slack_integration.md).
 
 ---
 

@@ -102,13 +102,30 @@ def handle_approval(request: ApprovalRequest) -> Dict[str, Any]:
         ) from exc
 
 
+def extract_slack_approver_id(payload: Dict[str, Any]) -> Optional[str]:
+    """Extract approver user ID from a Slack interaction or action payload."""
+    user = payload.get("user")
+    if isinstance(user, dict):
+        return user.get("id")
+    if isinstance(user, str):
+        return user
+    return None
+
+
 @app.api_route("/slack/events", methods=["GET", "POST"])
 async def slack_events(request: Request) -> Response:
-    """Slack events endpoint (disabled in core; enabled via Slack adapter in PR 5)."""
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Slack integration is disabled (requires PR 5 Slack integration package)",
-    )
+    """Slack Bolt events endpoint (lazy init: returns 503 until Slack credentials configured)."""
+    from app.adapters.slack import build_slack_handler
+
+    handler = build_slack_handler()
+    if handler is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Slack integration is disabled (missing SLACK_BOT_TOKEN or SLACK_SIGNING_SECRET)"
+            ),
+        )
+    return await handler.handle(request)
 
 
 class RcaCallbackRequest(BaseModel):
@@ -133,6 +150,12 @@ async def handle_rca_callback(request: Request, payload: RcaCallbackRequest) -> 
     runner.store.update_active_ticket_rca(
         payload.ticket_key, payload.report, thread_id=payload.thread_ref
     )
+    try:
+        from app.adapters.slack import deliver_rca_to_slack
+
+        await deliver_rca_to_slack(payload.ticket_key, payload.report, payload.thread_ref)
+    except Exception as exc:
+        logger.warning("Failed to dispatch RCA to Slack: %s", exc)
     return {"status": "received", "ticket_key": payload.ticket_key}
 
 
