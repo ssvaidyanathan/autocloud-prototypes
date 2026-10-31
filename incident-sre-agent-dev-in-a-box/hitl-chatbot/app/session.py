@@ -178,10 +178,30 @@ class ConversationStore:
             self._ticket_to_thread[ticket_key] = thread_id
             return context
 
+    def _find_active_ticket_key(self, thread_id: Optional[str]) -> Optional[str]:
+        """Find matching key in _active_tickets supporting both {channel}:{thread_ts}
+        and {thread_ts}."""
+        if not thread_id:
+            return None
+        if thread_id in self._active_tickets:
+            return thread_id
+        if ":" in thread_id:
+            _channel, thread_ts = thread_id.split(":", 1)
+            if thread_ts in self._active_tickets:
+                return thread_ts
+        else:
+            for k in self._active_tickets:
+                if k.endswith(f":{thread_id}"):
+                    return k
+        return None
+
     def get_active_ticket(self, thread_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve active ticket context for a thread if present."""
         with self._lock:
-            return self._active_tickets.get(thread_id)
+            matched_key = self._find_active_ticket_key(thread_id)
+            if matched_key:
+                return self._active_tickets.get(matched_key)
+            return None
 
     def update_active_ticket_rca(
         self,
@@ -192,15 +212,18 @@ class ConversationStore:
         """Update active ticket context with delivered RCA report."""
         with self._lock:
             target_thread = thread_id or self._ticket_to_thread.get(ticket_key)
-            if target_thread and target_thread in self._active_tickets:
-                ctx = self._active_tickets[target_thread]
-                ctx["rca_status"] = "ready"
+            matched_key = self._find_active_ticket_key(target_thread) if target_thread else None
+            if matched_key:
+                ctx = self._active_tickets[matched_key]
+                ctx["rca_status"] = "attached"
                 ctx["rca_content"] = rca_content
+                ctx["rca_attached"] = True
             else:
                 for tid, ctx in self._active_tickets.items():
                     if ctx.get("ticket_key") == ticket_key:
-                        ctx["rca_status"] = "ready"
+                        ctx["rca_status"] = "attached"
                         ctx["rca_content"] = rca_content
+                        ctx["rca_attached"] = True
 
     def mark_rca_attached(
         self,
@@ -209,8 +232,9 @@ class ConversationStore:
     ) -> None:
         """Mark RCA as attached to the active ticket in thread."""
         with self._lock:
-            if thread_id in self._active_tickets:
-                ctx = self._active_tickets[thread_id]
+            matched_key = self._find_active_ticket_key(thread_id)
+            if matched_key:
+                ctx = self._active_tickets[matched_key]
                 ctx["rca_attached"] = True
                 ctx["rca_status"] = "attached"
             elif ticket_key:

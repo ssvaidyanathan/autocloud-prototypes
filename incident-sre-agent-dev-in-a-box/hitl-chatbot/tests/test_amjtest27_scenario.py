@@ -217,3 +217,64 @@ def test_duplicate_guard_warns_on_draft_card() -> None:
     assert turn["type"] == "draft_ticket"
     assert "Notice: A ticket (AMJTEST-20) is already active in this thread" in turn["text"]
     assert "Did you mean to update AMJTEST-20 instead?" in turn["text"]
+
+
+def test_amjtest27_ticket_created_callback_arrives_update_replies_attached() -> None:
+    """Regression test:
+    ticket created in thread -> callback arrives -> update ticket with RCA
+    -> replies RCA already attached to <KEY>.
+
+    Also verifies thread key lookup handling both '{channel}:{thread_ts}' and '{thread_ts}'.
+    """
+    store = get_conversation_store()
+    runner = ChatbotAgentRunner()
+    channel = "C012345"
+    thread_ts = "1720001122.334455"
+    composite_thread_id = f"{channel}:{thread_ts}"
+
+    # 1. Ticket created in thread (composite_thread_id)
+    store.set_active_ticket(
+        thread_id=composite_thread_id,
+        ticket_key="AMJTEST-27",
+        incident_id="0.test-inc-12345",
+        policy_name="snow-ip-healthcheck-3",
+        ticket_url="https://jira.example.internal/browse/AMJTEST-27",
+        rca_status="pending",
+        rca_attached=False,
+    )
+
+    # Verify active ticket is present before callback
+    ctx_before = store.get_active_ticket(composite_thread_id)
+    assert ctx_before is not None
+    assert ctx_before["rca_attached"] is False
+    assert ctx_before["rca_status"] == "pending"
+
+    # Also verify lookup via thread_ts alone finds it
+    assert store.get_active_ticket(thread_ts) is not None
+
+    # 2. Bridge delivers RCA via callback (using thread_ts or composite)
+    rca_report = {
+        "root_cause": "Replica scale-down event triggered 503 errors.",
+        "confidence": 0.95,
+    }
+    store.update_active_ticket_rca("AMJTEST-27", rca_report, thread_id=thread_ts)
+
+    # Verify active ticket now has rca_attached = True and rca_status = 'attached'
+    ctx_after = store.get_active_ticket(composite_thread_id)
+    assert ctx_after is not None
+    assert ctx_after["rca_attached"] is True
+    assert ctx_after["rca_status"] == "attached"
+    assert ctx_after["rca_content"] == rca_report
+
+    # 3. User asks: "Update the ticket with your RCA"
+    turn = runner.process_turn(
+        user_message="Update the ticket with your RCA",
+        session_id=composite_thread_id,
+        user_id="U12345",
+    )
+
+    # 4. Chatbot replies that RCA is already attached to AMJTEST-27
+    assert turn["type"] == "info"
+    assert "RCA is already attached to AMJTEST-27" in turn["text"]
+    assert "https://jira.example.internal/browse/AMJTEST-27" in turn["text"]
+    assert "signed_token" not in turn

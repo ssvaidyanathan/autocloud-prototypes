@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field
 from app.agent import ChatbotAgentRunner
 from app.auth import verify_api_auth, verify_internal_callback_auth
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
