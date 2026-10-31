@@ -1,4 +1,4 @@
-# Human-In-The-Loop (HITL) SRE Chatbot Prototype (Core Package)
+# Human-In-The-Loop (HITL) SRE Chatbot Prototype
 
 An interactive, autonomous Site Reliability Engineering (SRE) assistant built with Google Agent Development Kit (ADK 2.11) and FastAPI.
 
@@ -42,8 +42,9 @@ The chatbot provides engineers with fast telemetry correlation, deployment conte
 ```
 
 ### Components
-- **Agent Core (`app/agent.py`):** Drives conversational turns using prompt definitions in `app/prompts/chatbot.yaml`. Coordinates specialist tool calls and manages the conversation lifecycle.
-- **Session & In-Memory Store (`app/session.py`):** Maintains sliding message history, pending ticket drafts, and cached Root Cause Analysis (RCA) reports with TTL-based purge. Zero external database required.
+- **Slack Bolt Adapter (`app/adapters/slack.py`):** Asynchronous Slack Events API and Interactivity router (`/slack/events`). Enforces `<3s` event acknowledgment, renders interactive Block Kit approval cards, enforces requester-only gates, and posts completed RCA reports into incident threads.
+- **Agent Core (`app/agent.py`):** Drives conversational turns using prompt definitions in `app/prompts/chatbot.yaml`. Coordinates specialist tool calls, intent routing, and conversation lifecycle.
+- **Session & In-Memory Store (`app/session.py`):** Maintains sliding message history, pending ticket drafts, active ticket context, and cached Root Cause Analysis (RCA) reports with TTL-based purge. Supports composite thread keying (`channel:thread_ts`). Zero external database required.
 - **Cryptographic Gate (`app/tokens.py`):** Issues time-limited HMAC-SHA256 signed approval tokens cryptographically bound to the initiating `requester_id`. Prevents token tampering, unauthorized approvers, and replay attacks.
 - **REST API (`app/main.py`):** Exposes authenticated endpoints (`/api/chat`, `/api/chat/approve`, `/api/investigations/{ticket_key}`) and the internal bridge callback (`/internal/rca-callback`).
 - **CLI Adapter (`app/adapters/cli.py`, `scripts/chat-cli.py`):** Interactive terminal interface supporting automated demo scenarios and interactive confirmation workflows.
@@ -81,7 +82,21 @@ The chatbot enforces a strict zero-trust approval gate for all mutating infrastr
 
 ---
 
-## 5. Configuration & Environment Variables
+## 5. Slack Integration (Bolt Adapter & Block Kit Cards)
+
+The chatbot includes a native Slack Bolt asynchronous adapter (`app/adapters/slack.py`) mounted at `/slack/events`:
+
+- **Event Subscriptions & Webhook Verification:** Subscribes to channel mentions (`app_mention`) and direct messages (`message.im`). Inbound requests are cryptographically verified using HMAC-SHA256 (`X-Slack-Signature`) against the workspace's signing secret (`hitl-slack-signing-secret`).
+- **Strict Acknowledgment (<3s) & Async Worker:** Adheres strictly to Slack's 3-second acknowledgment window. Event handlers acknowledge receipt immediately (`await ack()`) and dispatch turn processing to an asynchronous background worker (`asyncio.create_task`).
+- **Interactive Block Kit Cards:** Renders formatted message cards for ticket previews with interactive buttons (`[Approve & Create Ticket]`, `[Approve & Add Comment]`, and `[Cancel]`).
+- **Cryptographic Requester-Only Authorization Gate:** Signed approval tokens cryptographically bind the initiating user's Slack ID (`requester_id`). If an unauthorized user clicks `[Approve]`, the adapter responds with an ephemeral rejection (`Approval rejected: user '...' is not authorized to approve draft created by '...'`), leaving the single-use token intact for the authorized requester.
+- **Thread Context & Active Ticket Tracking:** Conversations maintain thread-scoped state in `ConversationStore` using composite keys (`channel:thread_ts`). In-thread follow-up prompts ("update the ticket with your RCA") are detected by the intent classifier and routed directly to comment flows without creating duplicate tickets.
+- **Automated Root-Cause Analysis (RCA) Post-Back:** When the `dib-sre-agent` completes an investigation, the bridge posts an asynchronous callback to `/internal/rca-callback`. The Slack adapter automatically resolves the originating thread reference and posts the executive summary, root cause, and diagnostic report link back to the incident thread.
+- **Setup & Operations Runbook:** For the complete Slack app manifest, bot scopes, step-by-step installation instructions, Secret Manager commands, and troubleshooting runbooks, see [docs/slack_integration.md](docs/slack_integration.md).
+
+---
+
+## 6. Configuration & Environment Variables
 
 | Variable | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -93,6 +108,8 @@ The chatbot enforces a strict zero-trust approval gate for all mutating infrastr
 | `BRIDGE_BASE_URL` | string | `""` | URL of the incident bridge service (`dib-incident-bridge`) |
 | `MCP_SERVER_URL` | string | `""` | Streamable HTTP endpoint of the deployment context stub |
 | `SERVICE_URL` | string | `""` | Public or internal URL of the chatbot service |
+| `SLACK_BOT_TOKEN` | string | `""` | Bot User OAuth Token (`xoxb-...`) for posting Slack messages and Block Kit cards |
+| `SLACK_SIGNING_SECRET` | string | `""` | Slack application signing secret for validating inbound `/slack/events` webhooks |
 | `AUTH_DISABLED` | boolean | `false` | Disable OIDC token verification for local testing |
 | `AUTHORIZED_CALLER_SERVICE_ACCOUNTS` | string | `""` | Comma-separated service accounts authorized to invoke `/api/*` |
 | `BRIDGE_CALLER_SERVICE_ACCOUNTS` | string | `""` | Service accounts authorized to invoke `/internal/rca-callback` |
@@ -100,20 +117,22 @@ The chatbot enforces a strict zero-trust approval gate for all mutating infrastr
 
 ---
 
-## 6. Directory Structure
+## 7. Directory Structure
 
 ```text
 hitl-chatbot/
 ├── README.md                          # Service documentation & runbook
 ├── pyproject.toml                     # Package dependencies and configuration
 ├── Dockerfile                         # Production multi-stage container build
+├── docs/
+│   └── slack_integration.md           # End-to-end Slack App setup & operations guide
 ├── app/
 │   ├── __init__.py
 │   ├── main.py                        # FastAPI entrypoint & route handlers
 │   ├── config.py                      # Pydantic Settings configuration
 │   ├── auth.py                        # Google Cloud OIDC authentication middleware
 │   ├── agent.py                       # Chatbot agent runner & turn processing
-│   ├── session.py                     # In-memory ConversationStore
+│   ├── session.py                     # In-memory ConversationStore (composite thread keys)
 │   ├── tokens.py                      # HMAC-SHA256 token verification & replay registry
 │   ├── prompts/
 │   │   └── chatbot.yaml               # Externalized system prompts and schemas
@@ -125,7 +144,8 @@ hitl-chatbot/
 │   │   └── jira_create.py             # Jira issue creation tool (mutating gate)
 │   └── adapters/
 │       ├── __init__.py
-│       └── cli.py                     # Terminal CLI adapter
+│       ├── cli.py                     # Terminal CLI adapter
+│       └── slack.py                   # Slack Bolt asynchronous event adapter
 ├── scripts/
 │   └── chat-cli.py                    # Interactive CLI runner
 └── tests/
@@ -135,26 +155,27 @@ hitl-chatbot/
     ├── test_session.py                # Conversation history & sliding window tests
     ├── test_tools.py                  # Alert, MCP, and Jira tool tests
     ├── test_auth.py                   # OIDC authentication middleware tests
-    └── test_agent_cli.py              # Agent turn and CLI runner tests
+    ├── test_agent_cli.py              # Agent turn and CLI runner tests
+    └── test_slack.py                  # Slack Bolt adapter and HITL gate tests
 ```
 
 ---
 
-## 7. Local Development & Testing
+## 8. Local Development & Testing
 
-### 7.1. Setup Environment
+### 8.1. Setup Environment
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-### 7.2. Run Unit & Conformance Tests
+### 8.2. Run Unit & Conformance Tests
 ```bash
 pytest -v tests/
 ```
 
-### 7.3. Run Interactive CLI Runner
+### 8.3. Run Interactive CLI Runner
 ```bash
 # Run Use Case A (Rollout query)
 python scripts/chat-cli.py --case A
@@ -166,7 +187,7 @@ python scripts/chat-cli.py --case B
 python scripts/chat-cli.py --case B --auto-confirm
 ```
 
-### 7.4. Run Local FastAPI Server
+### 8.4. Run Local FastAPI Server
 ```bash
 export AUTH_DISABLED=true
 export PORT=8080
@@ -179,7 +200,7 @@ curl -s http://localhost:8080/health
 
 ---
 
-## 8. Deployment (Google Cloud Run)
+## 9. Deployment (Google Cloud Run)
 
 ### Container Build
 ```bash

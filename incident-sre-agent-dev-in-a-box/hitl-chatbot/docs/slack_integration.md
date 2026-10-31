@@ -38,7 +38,7 @@ Before beginning, ensure you have:
 |---|---|
 | **Slack Workspace** | `your-workspace.slack.com` |
 | **Slack Channel** | `#sre-alerts` |
-| **Request URL (Events & Interactivity)** | `https://hitl-chatbot-sample-uc.a.run.app/slack/events`<br>*(Equivalent to: `https://hitl-chatbot-sample-uc.a.run.app/slack/events`)* |
+| **Request URL (Events & Interactivity)** | `https://hitl-chatbot-sample-uc.a.run.app/slack/events` |
 | **GCP Project** | `your-project-id` |
 | **GCP Region** | `us-central1` |
 | **Secret Manager Secret (Token)** | `hitl-slack-bot-token` |

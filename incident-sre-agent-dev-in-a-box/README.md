@@ -48,6 +48,17 @@ incident-sre-agent-dev-in-a-box/
 └── scripts/                       # Deployment, contract validation, and guard scripts
 ```
 
+#### Subsystem Catalog & Component Reference
+
+| Subsystem / Capability | Directory / File | Description | Documentation |
+| :--- | :--- | :--- | :--- |
+| **DIB SRE Agent** | `agent/` | Multi-agent autonomous investigation engine (Dispatcher, Specialists, Synthesizer) | [Architecture](docs/ARCHITECTURE.md) • [Operations](docs/OPERATIONS.md) |
+| **Incident Bridge & HITL Endpoints** | `bridge/` | Webhook gateway, Jira/ServiceNow adapters, ADF renderer, automatic OIDC RCA callback | [HITL Endpoints](bridge/HITL_ENDPOINTS.md) • [Jira Setup](bridge/integrations/jira/SETUP.md) |
+| **FastMCP Deployment Context Stub** | `mcp-deploy-context-stub/` | FastMCP streamable HTTP server providing alert deployment context and rollout correlation | [README](mcp-deploy-context-stub/README.md) • [Contract](mcp-deploy-context-stub/CONTRACT.md) |
+| **HITL SRE Chatbot Core** | `hitl-chatbot/` | Interactive ADK assistant, CLI runner, authenticated REST API, signed approval gates | [Chatbot README](hitl-chatbot/README.md) |
+| **Slack Integration** | `hitl-chatbot/app/adapters/slack.py` | Slack Bolt adapter (`/slack/events`), Block Kit cards, requester gate, thread RCA | [Slack Integration Guide](hitl-chatbot/docs/slack_integration.md) |
+| **Demo Microservices** | `demo/` | E-commerce shop-api, inventory-svc, load generator, and 5 failure injection scenarios | [Demo Scenarios](demo/SCENARIOS.md) |
+
 ### CI Workflow
 Continuous integration for this subtree is executed by [`.github/workflows/incident-sre-agent-dev-in-a-box-ci.yml`](../.github/workflows/incident-sre-agent-dev-in-a-box-ci.yml). The workflow triggers on any push or pull request touching `incident-sre-agent-dev-in-a-box/**` and runs:
 1. **Contracts Sync Check:** Verifies byte-level equality of shared contracts between bridge and agent.
@@ -890,6 +901,10 @@ incident-sre-agent-dev-in-a-box/
 ```
 
 ### In-Depth Documentation Links
+- [Slack Integration Guide (`hitl-chatbot/docs/slack_integration.md`)](hitl-chatbot/docs/slack_integration.md)
+- [HITL SRE Chatbot Guide (`hitl-chatbot/README.md`)](hitl-chatbot/README.md)
+- [HITL Bridge Endpoints Reference (`bridge/HITL_ENDPOINTS.md`)](bridge/HITL_ENDPOINTS.md)
+- [FastMCP Deployment Context Stub (`mcp-deploy-context-stub/README.md`)](mcp-deploy-context-stub/README.md)
 - [Configuration Reference (`docs/CONFIGURATION.md`)](docs/CONFIGURATION.md)
 - [Testing & Quality Assurance Guide (`docs/TESTING.md`)](docs/TESTING.md)
 - [Scenario Evaluation Scorecard & Backlog (`docs/EVALUATION.md`)](docs/EVALUATION.md)
