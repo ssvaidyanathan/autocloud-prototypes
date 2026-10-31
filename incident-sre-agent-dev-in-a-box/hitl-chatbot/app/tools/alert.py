@@ -19,12 +19,15 @@ STOPWORDS = {"alert", "policy", "for", "the", "a", "an", "in", "of", "to"}
 class AlertPolicyMatch(BaseModel):
     """Result of resolving a fuzzy query to a Cloud Monitoring alert policy."""
 
-    policy_id: str = Field(description="Canonical alert policy ID")
-    display_name: str = Field(description="Display name of alert policy")
+    policy_id: str = Field(default="", description="Canonical alert policy ID")
+    display_name: str = Field(default="", description="Display name of alert policy")
     target_endpoint: Optional[str] = Field(default=None, description="Monitored target endpoint")
     uptime_check_id: Optional[str] = Field(default=None, description="Uptime check ID")
     match_confidence: float = Field(
         default=1.0, description="Match confidence score between 0 and 1"
+    )
+    suggested_policy: Optional[str] = Field(
+        default=None, description="Suggested policy name if match is ambiguous or below threshold"
     )
 
 
@@ -185,16 +188,19 @@ def resolve_alert(query: str, project_id: Optional[str] = None) -> AlertPolicyMa
             )
 
     if not policies:
-        # Fallback for offline dev or test environments when Cloud Monitoring is not reachable
-        fallback_pid = query if query.isdigit() else "policy-default-001"
+        if query.isdigit():
+            return AlertPolicyMatch(
+                policy_id=query,
+                display_name=f"Alert Policy {query}",
+                match_confidence=1.0,
+            )
         return AlertPolicyMatch(
-            policy_id=fallback_pid,
-            display_name=f"Alert Policy for {query}",
-            target_endpoint=None,
-            uptime_check_id=f"check-{query}",
-            match_confidence=0.5,
+            policy_id="",
+            display_name="",
+            match_confidence=0.0,
         )
 
+    MIN_SCORE_THRESHOLD: float = 1.5
     best_match: Optional[Dict[str, Any]] = None
     highest_score = -1.0
 
@@ -204,12 +210,30 @@ def resolve_alert(query: str, project_id: Optional[str] = None) -> AlertPolicyMa
             highest_score = score
             best_match = pol
 
-    matched = best_match or policies[0]
+    # Reject ambiguous or low confidence guesses
+    if best_match is None or highest_score < MIN_SCORE_THRESHOLD:
+        suggested = (
+            str(best_match.get("displayName", ""))
+            if (best_match and highest_score > 0.1)
+            else None
+        )
+        return AlertPolicyMatch(
+            policy_id="",
+            display_name="",
+            match_confidence=0.0,
+            suggested_policy=suggested,
+        )
+
+    matched = best_match
     matched_id = matched.get("name", "").split("/")[-1]
     matched_name = matched.get("displayName", f"Alert Policy {matched_id}")
     check_id, target_ep = _extract_uptime_check_details(matched)
 
-    confidence = min(1.0, max(0.5, round(highest_score / 3.0, 2))) if highest_score > 0 else 0.5
+    confidence = (
+        min(1.0, max(0.5, round(highest_score / 3.0, 2)))
+        if highest_score > 0
+        else 0.5
+    )
     if highest_score >= 10.0:
         confidence = 1.0
 

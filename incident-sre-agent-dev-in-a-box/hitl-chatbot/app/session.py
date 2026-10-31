@@ -71,6 +71,7 @@ class ConversationStore:
         self._ticket_to_thread: Dict[str, str] = {}
         self._global_drafts: Dict[str, Dict[str, Any]] = {}
         self._rca_reports: Dict[str, Dict[str, Any]] = {}
+        self._active_tickets: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     def get_or_create_session(self, session_id: str) -> ConversationSession:
@@ -150,6 +151,74 @@ class ConversationStore:
         with self._lock:
             return self._rca_reports.get(ticket_key)
 
+    def set_active_ticket(
+        self,
+        thread_id: str,
+        ticket_key: str,
+        incident_id: Optional[str] = None,
+        policy_name: Optional[str] = None,
+        ticket_url: Optional[str] = None,
+        rca_status: str = "pending",
+        rca_content: Optional[Dict[str, Any]] = None,
+        rca_attached: bool = False,
+    ) -> Dict[str, Any]:
+        """Record or update active ticket context for a thread."""
+        with self._lock:
+            context = {
+                "ticket_key": ticket_key,
+                "incident_id": incident_id,
+                "policy_name": policy_name,
+                "rca_status": rca_status,
+                "rca_content": rca_content,
+                "rca_attached": rca_attached,
+                "ticket_url": ticket_url,
+                "created_at": time.time(),
+            }
+            self._active_tickets[thread_id] = context
+            self._ticket_to_thread[ticket_key] = thread_id
+            return context
+
+    def get_active_ticket(self, thread_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve active ticket context for a thread if present."""
+        with self._lock:
+            return self._active_tickets.get(thread_id)
+
+    def update_active_ticket_rca(
+        self,
+        ticket_key: str,
+        rca_content: Dict[str, Any],
+        thread_id: Optional[str] = None,
+    ) -> None:
+        """Update active ticket context with delivered RCA report."""
+        with self._lock:
+            target_thread = thread_id or self._ticket_to_thread.get(ticket_key)
+            if target_thread and target_thread in self._active_tickets:
+                ctx = self._active_tickets[target_thread]
+                ctx["rca_status"] = "ready"
+                ctx["rca_content"] = rca_content
+            else:
+                for tid, ctx in self._active_tickets.items():
+                    if ctx.get("ticket_key") == ticket_key:
+                        ctx["rca_status"] = "ready"
+                        ctx["rca_content"] = rca_content
+
+    def mark_rca_attached(
+        self,
+        thread_id: str,
+        ticket_key: Optional[str] = None,
+    ) -> None:
+        """Mark RCA as attached to the active ticket in thread."""
+        with self._lock:
+            if thread_id in self._active_tickets:
+                ctx = self._active_tickets[thread_id]
+                ctx["rca_attached"] = True
+                ctx["rca_status"] = "attached"
+            elif ticket_key:
+                for tid, ctx in self._active_tickets.items():
+                    if ctx.get("ticket_key") == ticket_key:
+                        ctx["rca_attached"] = True
+                        ctx["rca_status"] = "attached"
+
     def clear(self) -> None:
         """Reset all in-memory store state."""
         with self._lock:
@@ -157,6 +226,7 @@ class ConversationStore:
             self._ticket_to_thread.clear()
             self._global_drafts.clear()
             self._rca_reports.clear()
+            self._active_tickets.clear()
 
 
 # Global in-memory conversation store

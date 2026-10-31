@@ -126,6 +126,9 @@ async def handle_rca_callback(request: Request, payload: RcaCallbackRequest) -> 
         payload.thread_ref,
     )
     runner.store.record_rca_report(payload.ticket_key, payload.report)
+    runner.store.update_active_ticket_rca(
+        payload.ticket_key, payload.report, thread_id=payload.thread_ref
+    )
     return {"status": "received", "ticket_key": payload.ticket_key}
 
 

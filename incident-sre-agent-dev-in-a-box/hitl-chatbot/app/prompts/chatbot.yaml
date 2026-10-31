@@ -20,3 +20,21 @@ draft_ticket_header: "Jira Incident Ticket Preview"
 action_required_notice: "Action Required: Creating an issue in Jira creates an external side-effect. Please confirm creation [Y/n]."
 
 creation_success_header: "Jira Issue Successfully Created"
+
+comment_preview_header: "Jira Comment / RCA Attachment Preview"
+
+comment_action_notice: "Action Required: Appending a comment to Jira creates an external side-effect. Please confirm update [Y/n]."
+
+comment_success_header: "Jira Issue Successfully Updated with RCA"
+
+duplicate_ticket_warning: "Notice: A ticket ({ticket_key}) is already active in this thread. Did you mean to update {ticket_key} instead?"
+
+no_active_ticket_notice: "There is no active ticket in this thread. Please specify which ticket key to update."
+
+rca_already_attached_notice: "RCA is already attached to {ticket_key}: {url}"
+
+rca_pending_notice: "Investigation is currently in progress for {ticket_key}. The RCA report is not yet ready to attach."
+
+clarification_prompt: "Did you mean '{policy}'? Please specify the exact alert policy name."
+
+ambiguous_prompt_fallback: "I didn't recognize an exact alert policy or command. You can ask me to inspect recent rollouts, file a ticket for an alert (e.g. 'file a ticket for snow-ip'), or update an active ticket with RCA."

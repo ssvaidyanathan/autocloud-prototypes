@@ -40,24 +40,31 @@ class CliAdapter:
         )
         self.output_func(turn_result["text"])
 
-        # If turn resulted in a draft ticket, trigger the mandatory HITL confirmation gate
-        if turn_result.get("type") == "draft_ticket":
+        # If turn resulted in a draft ticket or comment, trigger HITL confirmation gate
+        if turn_result.get("type") in ("draft_ticket", "draft_comment"):
             signed_token = turn_result["signed_token"]
+            is_comment = turn_result.get("type") == "draft_comment"
+            action_label = "comment addition" if is_comment else "ticket creation"
+            prompt_str = (
+                "\nApprove and add comment to Jira issue? [Y/n]: "
+                if is_comment
+                else "\nApprove and create Jira issue? [Y/n]: "
+            )
 
             if auto_confirm:
-                self.output_func("\n[AUTO-CONFIRM] Confirming ticket creation [Y]...")
+                self.output_func(f"\n[AUTO-CONFIRM] Confirming {action_label} [Y]...")
                 confirm_response = "y"
             else:
                 try:
                     confirm_response = (
-                        self.input_func("\nApprove and create Jira issue? [Y/n]: ").strip().lower()
+                        self.input_func(prompt_str).strip().lower()
                     )
                 except (EOFError, KeyboardInterrupt):
                     confirm_response = "n"
 
             if confirm_response in ("y", "yes", "confirm", ""):
                 self.output_func(
-                    "\n[HITL APPROVED] Executing Jira issue creation with signed token...\n"
+                    f"\n[HITL APPROVED] Executing Jira {action_label} with signed token...\n"
                 )
                 effective_approver = approver_id if approver_id is not None else user_id
                 creation_result = self.runner.execute_approval(
@@ -71,7 +78,7 @@ class CliAdapter:
                 }
             else:
                 self.output_func(
-                    "\n[HITL CANCELLED] Jira ticket creation was cancelled by the user. "
+                    f"\n[HITL CANCELLED] Jira {action_label} was cancelled by the user. "
                     "Zero side-effects created.\n"
                 )
                 return {

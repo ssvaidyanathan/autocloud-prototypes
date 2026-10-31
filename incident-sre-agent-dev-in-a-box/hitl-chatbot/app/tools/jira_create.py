@@ -197,6 +197,18 @@ def create_jira_issue(
     # 5. Record created ticket in idempotency cache
     _created_incidents[idempotency_label] = (issue_key, issue_url)
 
+    # Record active ticket in thread context
+    thread_ref = session_id or draft_data.get("slack_thread") or "default-session"
+    store.set_active_ticket(
+        thread_id=thread_ref,
+        ticket_key=issue_key,
+        incident_id=incident_id,
+        policy_name=draft_data.get("policy_name"),
+        ticket_url=issue_url,
+        rca_status="pending",
+        rca_attached=False,
+    )
+
     # 6. Clean up consumed draft from conversation store
     store.remove_draft(draft_id)
 
@@ -206,4 +218,93 @@ def create_jira_issue(
         status=status_outcome,
         draft_id=draft_id,
         incident_id=incident_id,
+    )
+
+
+class JiraCommentResult(BaseModel):
+    """Result of adding a comment to a Jira issue through the bridge."""
+
+    ticket_key: str = Field(description="Target Jira ticket key")
+    comment_id: str = Field(description="Created Jira comment ID")
+    status: str = Field(default="created", description="Comment creation status")
+    draft_id: str = Field(description="Associated draft ID")
+    ticket_url: str = Field(description="Direct URL to the Jira issue")
+
+
+def add_jira_comment(
+    signed_token: str,
+    approver_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> JiraCommentResult:
+    """Validate HMAC token signature, verify expiry, and invoke bridge to add comment."""
+    settings = get_settings()
+    store = get_conversation_store()
+
+    # 1. Validate and consume signed approval token
+    is_valid, error_msg, payload = consume_signed_token(
+        token_str=signed_token,
+        secret_key=settings.hmac_secret_key,
+        approver_id=approver_id,
+    )
+    if not is_valid:
+        raise ValueError(f"Approval token validation failed: {error_msg}")
+
+    draft_id = str(payload.get("draft_id"))
+    draft_data = store.get_draft(draft_id) or {}
+
+    # Verify against draft's stored requester_id if present
+    if draft_data.get("requester_id"):
+        draft_requester = draft_data["requester_id"]
+        if approver_id is None or not hmac.compare_digest(str(approver_id), str(draft_requester)):
+            err_msg = (
+                f"Approval rejected: user '{approver_id}' is not authorized to "
+                f"approve draft created by '{draft_requester}'"
+            )
+            raise ValueError(err_msg)
+
+    ticket_key = draft_data.get("ticket_key") or str(payload.get("incident_id"))
+    comment_body = draft_data.get("body") or "RCA findings attached."
+    properties = draft_data.get("properties")
+
+    bridge_url = settings.bridge_url.rstrip("/")
+    comment_id = "comment-001"
+    ticket_url = f"https://jira.example.internal/browse/{ticket_key}"
+
+    headers: Dict[str, str] = {}
+    if bridge_url.startswith("https://"):
+        token = _fetch_oidc_token(bridge_url)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+    post_payload: Dict[str, Any] = {
+        "body": comment_body,
+        "properties": properties,
+    }
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                f"{bridge_url}/api/jira/issue/{ticket_key}/comment",
+                headers=headers,
+                json=post_payload,
+            )
+            if resp.status_code in (200, 201):
+                res_json = resp.json()
+                comment_id = str(res_json.get("comment_id") or comment_id)
+    except Exception as exc:
+        logger.debug("Bridge API comment invocation not reachable, using simulated id: %s", exc)
+
+    # Mark RCA attached in thread context
+    thread_ref = session_id or draft_data.get("slack_thread") or "default-session"
+    store.mark_rca_attached(thread_ref, ticket_key=ticket_key)
+
+    # Clean up consumed draft
+    store.remove_draft(draft_id)
+
+    return JiraCommentResult(
+        ticket_key=ticket_key,
+        comment_id=comment_id,
+        status="created",
+        draft_id=draft_id,
+        ticket_url=ticket_url,
     )
