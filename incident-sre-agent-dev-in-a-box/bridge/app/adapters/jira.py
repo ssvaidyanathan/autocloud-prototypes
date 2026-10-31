@@ -617,9 +617,7 @@ class JiraAdapter(BaseAdapter):
             if isinstance(properties, list):
                 payload["properties"] = properties
             elif isinstance(properties, dict):
-                payload["properties"] = [
-                    {"key": k, "value": v} for k, v in properties.items()
-                ]
+                payload["properties"] = [{"key": k, "value": v} for k, v in properties.items()]
 
         with self._get_client() as client:
             url = f"{base_url.rstrip('/')}/rest/api/3/issue/{clean_key}/comment"
@@ -627,9 +625,7 @@ class JiraAdapter(BaseAdapter):
                 resp = client.post(url, json=payload)
                 resp.raise_for_status()
                 res_data: dict[str, Any] = (
-                    resp.json()
-                    if resp.text.strip()
-                    else {"status": "created", "key": clean_key}
+                    resp.json() if resp.text.strip() else {"status": "created", "key": clean_key}
                 )
                 logger.info(
                     "Successfully added comment to Jira issue %s (comment id: %s)",

@@ -462,7 +462,9 @@ def test_add_jira_comment_issue_not_found_404(
     headers = {"Authorization": f"Bearer {token}"}
 
     def mock_add_comment(*args: Any, **kwargs: Any) -> Any:
-        req = httpx.Request("POST", "https://jira.example.internal/rest/api/3/issue/NONEXIST-99/comment")
+        req = httpx.Request(
+            "POST", "https://jira.example.internal/rest/api/3/issue/NONEXIST-99/comment"
+        )
         resp = httpx.Response(404, request=req, text="Issue Does Not Exist")
         raise httpx.HTTPStatusError("Issue not found", request=req, response=resp)
 
@@ -490,7 +492,9 @@ def test_add_jira_comment_bad_input_400(
     headers = {"Authorization": f"Bearer {token}"}
 
     def mock_add_comment(*args: Any, **kwargs: Any) -> Any:
-        req = httpx.Request("POST", "https://jira.example.internal/rest/api/3/issue/AMJTEST-20/comment")
+        req = httpx.Request(
+            "POST", "https://jira.example.internal/rest/api/3/issue/AMJTEST-20/comment"
+        )
         resp = httpx.Response(400, request=req, text="Invalid ADF content")
         raise httpx.HTTPStatusError("Bad request", request=req, response=resp)
 
@@ -518,7 +522,9 @@ def test_add_jira_comment_upstream_failure_502(
     headers = {"Authorization": f"Bearer {token}"}
 
     def mock_add_comment(*args: Any, **kwargs: Any) -> Any:
-        req = httpx.Request("POST", "https://jira.example.internal/rest/api/3/issue/AMJTEST-20/comment")
+        req = httpx.Request(
+            "POST", "https://jira.example.internal/rest/api/3/issue/AMJTEST-20/comment"
+        )
         resp = httpx.Response(500, request=req, text="Internal Server Error")
         raise httpx.HTTPStatusError("Server error", request=req, response=resp)
 
@@ -543,7 +549,9 @@ def test_add_jira_comment_success(
     )
     headers = {"Authorization": f"Bearer {token}"}
 
-    mock_add = MagicMock(return_value={"id": "20042", "self": "https://jira.example.internal/comment/20042"})
+    mock_add = MagicMock(
+        return_value={"id": "20042", "self": "https://jira.example.internal/comment/20042"}
+    )
     monkeypatch.setattr(JiraAdapter, "add_comment", mock_add)
 
     payload = {
