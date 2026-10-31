@@ -408,6 +408,18 @@ async def _process_approval_action(
         if channel_id and thread_ts:
             runner.store.record_ticket_thread(issue_key, f"{channel_id}:{thread_ts}")
 
+        # If ticket already had RCA completed, deliver RCA report to this Slack thread
+        if res_data.get("status") == "already_exists" and channel_id and thread_ts:
+            existing_rca = runner.store.get_rca_report(issue_key)
+            if existing_rca:
+                asyncio.create_task(
+                    deliver_rca_to_slack(
+                        issue_key,
+                        existing_rca,
+                        thread_ref=f"{channel_id}:{thread_ts}",
+                    )
+                )
+
         if draft_action == "comment":
             confirmation_msg = f"✅ RCA / Comment added to {issue_key}: {issue_url}"
         else:
