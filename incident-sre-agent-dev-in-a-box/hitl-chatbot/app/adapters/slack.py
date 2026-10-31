@@ -246,6 +246,54 @@ async def _process_nl_event(event: Dict[str, Any], client: Any) -> None:
             text=res.get("text", "Jira ticket draft preview"),
             blocks=blocks,
         )
+    elif res_type == "draft_comment":
+        draft = res.get("draft") or {}
+        signed_token = res.get("signed_token") or draft.get("signed_token", "")
+        draft_id = draft.get("draft_id", "comment")
+        requester_id = draft.get("requester_id") or user_id
+        ticket_key = draft.get("ticket_key", "active ticket")
+
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Jira Comment / RCA Attachment Preview*\n"
+                        f"• *Draft ID:* `{draft_id}`\n"
+                        f"• *Target Ticket:* `{ticket_key}`\n"
+                        f"• *Action:* Attach RCA Dossier\n"
+                        f"• *Requester:* <@{requester_id}>"
+                    ),
+                },
+            },
+            {
+                "type": "actions",
+                "block_id": "hitl_jira_gate",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Approve & Add Comment"},
+                        "style": "primary",
+                        "action_id": "hitl_approve_ticket",
+                        "value": signed_token,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Cancel"},
+                        "style": "danger",
+                        "action_id": "hitl_cancel_ticket",
+                        "value": draft_id,
+                    },
+                ],
+            },
+        ]
+        await client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=res.get("text", "Jira comment preview"),
+            blocks=blocks,
+        )
     else:
         await client.chat_postMessage(
             channel=channel_id,
