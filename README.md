@@ -38,16 +38,17 @@ A repo of Autocloud prototypes
 
 ### [Incident SRE Agent (Dev In A Box)](incident-sre-agent-dev-in-a-box/) (@sermolin)
 
-A dedicated development sandbox fork of incident-sre-agent for Human-In-The-Loop (HITL) and chat-driven incident response workflows.
+Sandbox fork of incident-sre-agent for human-in-the-loop (HITL) and chat-driven incident response.
 
 | Specification | Details |
-| :--- | :--- |
-| **Core Architecture** | Autonomous GCP incident investigation sandbox with FastMCP streamable HTTP deployment context server (`mcp-deploy-context-stub`), bridge HITL incident endpoints (`POST /api/jira/issue`, issue status, `POST /api/jira/issue/{key}/comment`) with Jira ADF conversion and automatic OIDC RCA callback forward, standalone HITL SRE Chatbot engine (`hitl-chatbot`: runner, CLI, OIDC REST API, Cloud Monitoring lookup, signed requester-only approvals, active ticket thread context, duplicate guard), and Slack Bolt adapter (`/slack/events` routing, Block Kit approval cards). |
-| **Runtime & Protocols** | Asynchronous webhook bridge (`POST /webhook/{servicenow,jira,generic}`) + Cloud Tasks worker |
-| **Integrations** | ServiceNow, Jira Cloud, Cloud Logging/Monitoring/Audit/Asset, Vertex AI Gemini, FastMCP streamable HTTP server (`mcp-deploy-context-stub`), bridge HITL incident endpoints (`POST /api/jira/issue`, issue status, `POST /api/jira/issue/{key}/comment`) with Jira ADF conversion and automatic OIDC RCA callback forward, standalone HITL SRE Chatbot engine (`hitl-chatbot`), and Slack Bolt adapter (`/slack/events` routing, Block Kit approval cards) |
-| **Cloud Run Services (default prefix)** | `<prefix>-incident-bridge`, `<prefix>-sre-agent` (upcoming: `hitl-chatbot`, `mcp-deploy-context-stub`) |
-| **State & Persistence** | Stateless Cloud Run services; Cloud Tasks asynchronous queue; standalone HTML dossier generation |
-| **Docs & Quick-Start** | [Documentation](incident-sre-agent-dev-in-a-box/) • [Deployment](incident-sre-agent-dev-in-a-box/docs/DEPLOY.md) • [Demo Scenarios](incident-sre-agent-dev-in-a-box/demo/SCENARIOS.md) • [Operations](incident-sre-agent-dev-in-a-box/docs/OPERATIONS.md) • [Architecture](incident-sre-agent-dev-in-a-box/docs/ARCHITECTURE.md) • [GKE Investigation](incident-sre-agent-dev-in-a-box/docs/GKE_INVESTIGATION.md) • [MCP Deploy Stub](incident-sre-agent-dev-in-a-box/mcp-deploy-context-stub/README.md) • [Contract](incident-sre-agent-dev-in-a-box/mcp-deploy-context-stub/CONTRACT.md) • [HITL Endpoints](incident-sre-agent-dev-in-a-box/bridge/HITL_ENDPOINTS.md) • [HITL Chatbot](incident-sre-agent-dev-in-a-box/hitl-chatbot/README.md) • [Slack Integration](incident-sre-agent-dev-in-a-box/hitl-chatbot/docs/slack_integration.md) |
+| --- | --- |
+| Core Architecture | incident-sre-agent plus a Slack HITL chatbot, a deployment-context MCP stub, and Jira ticket workflows |
+| Runtime & Protocols | Webhook bridge + Cloud Tasks worker; Slack Events API; MCP (streamable HTTP) |
+| Integrations | Slack, Jira Cloud, Cloud Monitoring/Logging, Vertex AI Gemini |
+| Cloud Run Services (default prefix) | `<prefix>-incident-bridge`, `<prefix>-sre-agent`, `hitl-chatbot`, `mcp-deploy-context-stub` |
+| State & Persistence | Stateless services; in-memory chat state (single instance) |
+| Docs & Quick-Start | [Documentation](incident-sre-agent-dev-in-a-box/README.md) • [Deployment](incident-sre-agent-dev-in-a-box/docs/deployment.md) • [HITL Chatbot](incident-sre-agent-dev-in-a-box/hitl-chatbot/README.md) • [Slack Setup](incident-sre-agent-dev-in-a-box/hitl-chatbot/docs/slack_integration.md) • [MCP Stub](incident-sre-agent-dev-in-a-box/mcp-deploy-context-stub/README.md) • [HITL Endpoints](incident-sre-agent-dev-in-a-box/bridge/HITL_ENDPOINTS.md) |
+
 
 
 ### [GitHub Actions Deployment Failure Investigator](gha-deploy-investigator/) (@ssvaidyanathan)
