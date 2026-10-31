@@ -122,6 +122,19 @@ def create_jira_issue(
             idempotency_label,
             existing_key,
         )
+        thread_ref = session_id or (draft_data and draft_data.get("slack_thread")) or "default-session"
+        existing_rca = store.get_rca_report(existing_key)
+        store.set_active_ticket(
+            thread_id=thread_ref,
+            ticket_key=existing_key,
+            incident_id=incident_id,
+            policy_name=(draft_data and draft_data.get("policy_name")),
+            ticket_url=existing_url,
+            rca_status="attached" if existing_rca else "pending",
+            rca_content=existing_rca,
+            rca_attached=bool(existing_rca),
+        )
+        store.remove_draft(draft_id)
         return JiraIssueResult(
             issue_key=existing_key,
             issue_url=existing_url,
