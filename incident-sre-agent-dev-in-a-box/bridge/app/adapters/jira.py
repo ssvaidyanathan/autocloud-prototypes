@@ -577,5 +577,69 @@ class JiraAdapter(BaseAdapter):
                 )
             return None
 
+    def add_comment(
+        self,
+        issue_key: str,
+        body: str | dict[str, Any],
+        properties: Optional[dict[str, Any] | list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        """Add a comment to an existing Jira issue using REST API v3.
+
+        Args:
+            issue_key: Key of the Jira issue (e.g. 'AMJTEST-20' or 'jira-AMJTEST-20').
+            body: Comment content, either plain/markdown text or an ADF document dictionary.
+            properties: Optional comment properties to associate with the comment.
+
+        Returns:
+            Dictionary returned by Jira Cloud REST API v3 containing comment metadata.
+
+        Raises:
+            ValueError: If JIRA_BASE_URL is not set or issue_key is empty.
+            httpx.HTTPStatusError: On upstream HTTP error (e.g. 404, 400, 5xx).
+        """
+        base_url = self.config.jira_base_url
+        if not base_url:
+            raise ValueError("JIRA_BASE_URL is required to add a Jira comment")
+
+        clean_key = issue_key[5:] if issue_key.lower().startswith("jira-") else issue_key
+        if not clean_key:
+            raise ValueError("issue_key must not be empty")
+
+        if isinstance(body, dict) and body.get("type") == "doc":
+            comment_adf = body
+        elif isinstance(body, str):
+            comment_adf = markdown_to_adf(body)
+        else:
+            comment_adf = markdown_to_adf(str(body))
+
+        payload: dict[str, Any] = {"body": comment_adf}
+        if properties:
+            if isinstance(properties, list):
+                payload["properties"] = properties
+            elif isinstance(properties, dict):
+                payload["properties"] = [
+                    {"key": k, "value": v} for k, v in properties.items()
+                ]
+
+        with self._get_client() as client:
+            url = f"{base_url.rstrip('/')}/rest/api/3/issue/{clean_key}/comment"
+            try:
+                resp = client.post(url, json=payload)
+                resp.raise_for_status()
+                res_data: dict[str, Any] = (
+                    resp.json()
+                    if resp.text.strip()
+                    else {"status": "created", "key": clean_key}
+                )
+                logger.info(
+                    "Successfully added comment to Jira issue %s (comment id: %s)",
+                    clean_key,
+                    res_data.get("id"),
+                )
+                return res_data
+            except Exception as exc:
+                logger.error("Failed to add comment to Jira issue %s: %s", clean_key, exc)
+                raise
+
     # Alias for normalization parity
     from_issue = to_incident

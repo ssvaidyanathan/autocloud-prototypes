@@ -50,6 +50,13 @@ class JiraIssueCreateRequest(BaseModel):
         return data
 
 
+class AddCommentRequest(BaseModel):
+    """Payload for adding a comment to an existing Jira issue."""
+
+    body: str
+    properties: Optional[dict[str, Any]] = None
+
+
 def get_task_dispatcher(
     settings: BridgeConfig = Depends(get_settings),
 ) -> TaskDispatcher:
@@ -279,6 +286,81 @@ async def create_jira_issue_endpoint(
         "issue_key": created_key,
         "issue_url": issue_url,
     }
+
+
+@app.post("/api/jira/issue/{key}/comment", status_code=status.HTTP_201_CREATED)
+async def add_jira_comment_endpoint(
+    key: str,
+    payload: AddCommentRequest,
+    request: Request,
+    settings: BridgeConfig = Depends(get_settings),
+) -> dict[str, Any]:
+    """Append a comment to issue {key} with Google Cloud OIDC Bearer token authentication."""
+    # 1. Protected with Google Cloud OIDC Bearer token authentication
+    # (authorized caller: hitl-chatbot-sa or agent_sa)
+    allowed_sa: list[str] = [
+        e for e in [settings.hitl_caller_sa, settings.agent_sa] if e is not None
+    ]
+    verify_oidc_token(
+        request,
+        settings,
+        allowed_emails=allowed_sa,
+    )
+
+    clean_key = key.strip()
+    if not clean_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Issue key must not be empty",
+        )
+    if not payload.body or not payload.body.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Comment body must not be empty",
+        )
+
+    try:
+        adapter = get_adapter("jira", settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if not isinstance(adapter, JiraAdapter):
+        raise HTTPException(status_code=500, detail="Jira adapter is not configured")
+
+    try:
+        comment_res = adapter.add_comment(
+            issue_key=clean_key,
+            body=payload.body,
+            properties=payload.properties,
+        )
+        return {
+            "status": "created",
+            "issue_key": clean_key,
+            "comment_id": comment_res.get("id"),
+            "comment": comment_res,
+        }
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Jira issue not found: {clean_key}",
+            ) from exc
+        if exc.response.status_code == 400:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Bad request to Jira API: {exc.response.text}",
+            ) from exc
+        logger.error("Upstream Jira failure when adding comment to %s: %s", clean_key, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Upstream Jira failure: {exc}",
+        ) from exc
+    except Exception as exc:
+        logger.error("Error adding comment to Jira %s: %s", clean_key, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Upstream Jira failure: {exc}",
+        ) from exc
 
 
 @app.get("/api/investigations/{external_key}")

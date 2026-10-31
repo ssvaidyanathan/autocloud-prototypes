@@ -66,10 +66,37 @@ In this architecture:
   }
   ```
 
-### 2.3. Update Issue & Attach Root Cause
-- **Method & Route:** `POST /api/jira/issue/{key}/comment` or internal update
-- **Authentication:** Google Cloud OIDC ID Token
-- **Description:** Updates the `Root Causes` section within the ADF document and adds comments with direct links to the generated HTML dossier.
+### 2.3. Add Issue Comment
+- **Method & Route:** `POST /api/jira/issue/{key}/comment`
+- **Authentication:** Google Cloud OIDC ID Token (`Authorization: Bearer <token>`) from authorized caller (`hitl-chatbot-sa` or agent SA).
+- **Request Payload:**
+  ```json
+  {
+    "body": "Root Cause Analysis findings attached: Service degraded due to replica scale down.",
+    "properties": {
+      "comment_source": "hitl-chatbot",
+      "action": "rca_attachment"
+    }
+  }
+  ```
+- **Response (`201 Created`):**
+  ```json
+  {
+    "status": "created",
+    "issue_key": "OPS-301",
+    "comment_id": "10042",
+    "comment": {
+      "id": "10042",
+      "self": "https://your-domain.atlassian.net/rest/api/3/issue/10301/comment/10042"
+    }
+  }
+  ```
+- **Error Handling:**
+  - `400 Bad Request`: Missing issue key or empty comment body.
+  - `401 Unauthorized`: Missing or invalid OIDC token.
+  - `403 Forbidden`: Token issuer/caller service account is not in `allowed_emails`.
+  - `404 Not Found`: Target issue `{key}` does not exist in Jira.
+  - `502 Bad Gateway`: Upstream Jira Cloud API failure or network timeout.
 
 ---
 

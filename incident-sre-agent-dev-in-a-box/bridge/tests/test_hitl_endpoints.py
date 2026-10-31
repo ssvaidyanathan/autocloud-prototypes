@@ -1,6 +1,7 @@
 """Unit tests for Bridge HITL endpoints, idempotency, ticket templates, and RCA forwarding."""
 
 from pathlib import Path
+from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -404,3 +405,201 @@ def test_ticket_template_gcs_resolution(monkeypatch: pytest.MonkeyPatch) -> None
     assert "GCS Template: GCS Incident Title" in rendered
     assert "Detailed summary" in rendered
     clear_template_cache()
+
+
+def test_add_jira_comment_auth_missing(hitl_test_client: TestClient) -> None:
+    """POST /api/jira/issue/{key}/comment without auth header returns 401."""
+    resp = hitl_test_client.post(
+        "/api/jira/issue/AMJTEST-20/comment",
+        json={"body": "RCA report attached."},
+    )
+    assert resp.status_code == 401
+    assert "Missing Authorization header" in resp.json()["detail"]
+
+
+def test_add_jira_comment_unauthorized_sa(hitl_test_client: TestClient) -> None:
+    """POST /api/jira/issue/{key}/comment with unauthorized caller SA returns 403."""
+    token = create_mock_oidc_token(
+        email="unauthorized-sa@test-project.iam.gserviceaccount.com",
+        audience="https://bridge.example.internal/callback/report",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = hitl_test_client.post(
+        "/api/jira/issue/AMJTEST-20/comment",
+        json={"body": "RCA report attached."},
+        headers=headers,
+    )
+    assert resp.status_code == 403
+    assert "Invalid caller service account" in resp.json()["detail"]
+
+
+def test_add_jira_comment_empty_body(hitl_test_client: TestClient) -> None:
+    """POST /api/jira/issue/{key}/comment with empty body returns 400."""
+    token = create_mock_oidc_token(
+        email="hitl-chatbot-sa@test-project.iam.gserviceaccount.com",
+        audience="https://bridge.example.internal/callback/report",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = hitl_test_client.post(
+        "/api/jira/issue/AMJTEST-20/comment",
+        json={"body": "   "},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert "Comment body must not be empty" in resp.json()["detail"]
+
+
+def test_add_jira_comment_issue_not_found_404(
+    hitl_test_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/jira/issue/{key}/comment returns 404 when Jira issue is not found."""
+    import httpx
+
+    token = create_mock_oidc_token(
+        email="hitl-chatbot-sa@test-project.iam.gserviceaccount.com",
+        audience="https://bridge.example.internal/callback/report",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def mock_add_comment(*args: Any, **kwargs: Any) -> Any:
+        req = httpx.Request("POST", "https://jira.example.internal/rest/api/3/issue/NONEXIST-99/comment")
+        resp = httpx.Response(404, request=req, text="Issue Does Not Exist")
+        raise httpx.HTTPStatusError("Issue not found", request=req, response=resp)
+
+    monkeypatch.setattr(JiraAdapter, "add_comment", mock_add_comment)
+
+    resp = hitl_test_client.post(
+        "/api/jira/issue/NONEXIST-99/comment",
+        json={"body": "RCA comment"},
+        headers=headers,
+    )
+    assert resp.status_code == 404
+    assert "Jira issue not found: NONEXIST-99" in resp.json()["detail"]
+
+
+def test_add_jira_comment_bad_input_400(
+    hitl_test_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/jira/issue/{key}/comment returns 400 when upstream Jira returns 400."""
+    import httpx
+
+    token = create_mock_oidc_token(
+        email="hitl-chatbot-sa@test-project.iam.gserviceaccount.com",
+        audience="https://bridge.example.internal/callback/report",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def mock_add_comment(*args: Any, **kwargs: Any) -> Any:
+        req = httpx.Request("POST", "https://jira.example.internal/rest/api/3/issue/AMJTEST-20/comment")
+        resp = httpx.Response(400, request=req, text="Invalid ADF content")
+        raise httpx.HTTPStatusError("Bad request", request=req, response=resp)
+
+    monkeypatch.setattr(JiraAdapter, "add_comment", mock_add_comment)
+
+    resp = hitl_test_client.post(
+        "/api/jira/issue/AMJTEST-20/comment",
+        json={"body": "Invalid comment"},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert "Bad request to Jira API" in resp.json()["detail"]
+
+
+def test_add_jira_comment_upstream_failure_502(
+    hitl_test_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/jira/issue/{key}/comment returns 502 when upstream Jira fails."""
+    import httpx
+
+    token = create_mock_oidc_token(
+        email="hitl-chatbot-sa@test-project.iam.gserviceaccount.com",
+        audience="https://bridge.example.internal/callback/report",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def mock_add_comment(*args: Any, **kwargs: Any) -> Any:
+        req = httpx.Request("POST", "https://jira.example.internal/rest/api/3/issue/AMJTEST-20/comment")
+        resp = httpx.Response(500, request=req, text="Internal Server Error")
+        raise httpx.HTTPStatusError("Server error", request=req, response=resp)
+
+    monkeypatch.setattr(JiraAdapter, "add_comment", mock_add_comment)
+
+    resp = hitl_test_client.post(
+        "/api/jira/issue/AMJTEST-20/comment",
+        json={"body": "RCA comment"},
+        headers=headers,
+    )
+    assert resp.status_code == 502
+    assert "Upstream Jira failure" in resp.json()["detail"]
+
+
+def test_add_jira_comment_success(
+    hitl_test_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/jira/issue/{key}/comment appends comment successfully."""
+    token = create_mock_oidc_token(
+        email="hitl-chatbot-sa@test-project.iam.gserviceaccount.com",
+        audience="https://bridge.example.internal/callback/report",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    mock_add = MagicMock(return_value={"id": "20042", "self": "https://jira.example.internal/comment/20042"})
+    monkeypatch.setattr(JiraAdapter, "add_comment", mock_add)
+
+    payload = {
+        "body": "## RCA Findings\n- Replica scale down caused 503 errors.",
+        "properties": {"source": "hitl-chatbot"},
+    }
+    resp = hitl_test_client.post(
+        "/api/jira/issue/AMJTEST-20/comment",
+        json=payload,
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["status"] == "created"
+    assert data["issue_key"] == "AMJTEST-20"
+    assert data["comment_id"] == "20042"
+    mock_add.assert_called_once_with(
+        issue_key="AMJTEST-20",
+        body="## RCA Findings\n- Replica scale down caused 503 errors.",
+        properties={"source": "hitl-chatbot"},
+    )
+
+
+def test_jira_adapter_add_comment_adf_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """JiraAdapter.add_comment converts markdown body to ADF and sets properties."""
+    import httpx
+
+    config = BridgeConfig(
+        jira_base_url="https://jira.example.internal",
+        jira_email="test@example.com",
+        jira_api_token="token",
+    )
+
+    posted_json: dict[str, Any] = {}
+
+    def mock_post(url: str, json: Optional[dict[str, Any]] = None, **kwargs: Any) -> httpx.Response:
+        nonlocal posted_json
+        posted_json = json or {}
+        req = httpx.Request("POST", url)
+        return httpx.Response(
+            201,
+            request=req,
+            json={"id": "30001", "created": "2026-10-31T01:00:00Z"},
+        )
+
+    mock_client = MagicMock(spec=httpx.Client)
+    mock_client.post = mock_post
+    adapter = JiraAdapter(config=config, http_client=mock_client)
+
+    res = adapter.add_comment(
+        issue_key="AMJTEST-20",
+        body="# Heading\n- Item 1",
+        properties={"hitl": "true"},
+    )
+    assert res["id"] == "30001"
+    assert "body" in posted_json
+    assert posted_json["body"]["type"] == "doc"
+    assert "properties" in posted_json
+    assert posted_json["properties"] == [{"key": "hitl", "value": "true"}]
