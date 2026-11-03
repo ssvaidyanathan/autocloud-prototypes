@@ -935,7 +935,7 @@ resolve_access_token() {
     local cmd
     cmd="$(token_command "${source}")" || return 1
     local token="" err_file="" err="" rc=0
-    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX:-ata}-access-token.XXXXXX" 2>/dev/null || mktemp "/tmp/${NAME_PREFIX:-ata}-access-token.XXXXXX")"
+    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX:-stack}-access-token.XXXXXX" 2>/dev/null || mktemp "/tmp/${NAME_PREFIX:-stack}-access-token.XXXXXX")"
     token="$(${cmd} 2>"${err_file}")" || rc=$?
     if [ -f "${err_file}" ]; then
         err="$(cat "${err_file}" 2>/dev/null || true)"
