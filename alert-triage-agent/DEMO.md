@@ -17,7 +17,7 @@ Resource names use the default prefix `ata` (`ata-inventory-api`, `ata-orders-v1
 # 1. Authenticate with Google Cloud (both logins required; ADC is needed for Monitoring Alerts API)
 gcloud auth login
 gcloud auth application-default login
-gcloud config set project cloud-assist-fde-2
+gcloud config set project <your-project-id>
 
 # 2. Check out repository (main branch)
 git clone <repo-url> && cd autocloud-prototypes
@@ -25,8 +25,8 @@ git checkout main && git pull
 cd alert-triage-agent                   # ALL subsequent commands run from alert-triage-agent/
 
 # 3. Environment configuration
-export PROJECT_ID=cloud-assist-fde-2
-export REGION=us-west1
+export PROJECT_ID="<project-id>"
+export REGION="<region>"
 export NAME_PREFIX=ata
 export SSL_CERT_FILE=/etc/ssl/cert.pem  # macOS: prevents TLS CERTIFICATE_VERIFY_FAILED in alert checks
 ```
@@ -35,16 +35,17 @@ export SSL_CERT_FILE=/etc/ssl/cert.pem  # macOS: prevents TLS CERTIFICATE_VERIFY
 The scripts automatically read `.${NAME_PREFIX}-apigee.env` and `.${NAME_PREFIX}-api-key` from `alert-triage-agent/`. In a fresh clone:
 
 ```bash
-# Apigee environment settings
-cat > .ata-apigee.env <<'EOF'
-APIGEE_HOST=8.233.247.52.nip.io
-APIGEE_ORG=cloud-assist-fde-2
+# Apigee environment settings (APIGEE_HOST is the env group hostname, e.g. from 'gcloud apigee envgroups list' or the deploy output)
+cat > .${NAME_PREFIX}-apigee.env <<'EOF'
+APIGEE_HOST=<your-apigee-host>
+APIGEE_ORG=<your-apigee-org>
 APIGEE_ENV=prod
 EOF
+source .${NAME_PREFIX}-apigee.env
 
 # Fetch Apigee consumer API key (mode 600; export ATA_API_KEY=... overrides this file)
 curl -s -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
-  "https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG:-cloud-assist-fde-2}/developers/${NAME_PREFIX:-ata}-dev@example.com/apps/${NAME_PREFIX:-ata}-demo-app" \
+  "https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG}/developers/${NAME_PREFIX:-ata}-dev@example.com/apps/${NAME_PREFIX:-ata}-demo-app" \
   | python3 -c "import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])" > ".${NAME_PREFIX:-ata}-api-key.tmp" \
   && test -s ".${NAME_PREFIX:-ata}-api-key.tmp" && mv ".${NAME_PREFIX:-ata}-api-key.tmp" ".${NAME_PREFIX:-ata}-api-key"
 chmod 600 ".${NAME_PREFIX:-ata}-api-key"
