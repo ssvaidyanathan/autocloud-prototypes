@@ -877,6 +877,7 @@ incident-sre-agent-dev-in-a-box/
 ```
 
 ### In-Depth Documentation Links
+- [HITL Incident Response Architecture (`docs/HITL_ARCHITECTURE.md`)](docs/HITL_ARCHITECTURE.md)
 - [Slack Integration Guide (`hitl-chatbot/docs/slack_integration.md`)](hitl-chatbot/docs/slack_integration.md)
 - [HITL SRE Chatbot Guide (`hitl-chatbot/README.md`)](hitl-chatbot/README.md)
 - [HITL Bridge Endpoints Reference (`bridge/HITL_ENDPOINTS.md`)](bridge/HITL_ENDPOINTS.md)

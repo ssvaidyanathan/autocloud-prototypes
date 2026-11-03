@@ -9,6 +9,7 @@ Capabilities:
 
 > **Slack Integration:**
 > Mounted at `/slack/events` via `app/adapters/slack.py`. See [docs/slack_integration.md](docs/slack_integration.md).
+> [Slack Architecture Specification](docs/slack_arch.md)
 
 ---
 
