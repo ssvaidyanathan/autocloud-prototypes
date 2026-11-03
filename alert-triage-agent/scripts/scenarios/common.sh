@@ -934,12 +934,17 @@ resolve_access_token() {
     fi
     local cmd
     cmd="$(token_command "${source}")" || return 1
-    local token rc=0
-    token="$(${cmd} 2>&1)" || rc=$?
+    local token="" err_file="" err="" rc=0
+    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX:-ata}-access-token.XXXXXX" 2>/dev/null || mktemp "/tmp/${NAME_PREFIX:-ata}-access-token.XXXXXX")"
+    token="$(${cmd} 2>"${err_file}")" || rc=$?
+    if [ -f "${err_file}" ]; then
+        err="$(cat "${err_file}" 2>/dev/null || true)"
+        rm -f "${err_file}"
+    fi
     if [ "${rc}" -ne 0 ] || [ -z "${token}" ]; then
         log_error "Could not get an access token from token source '${source}' ('${cmd}' failed). Run: $(token_login_hint "${source}")" >&2
-        if [ -n "${token}" ]; then
-            log_error "${token}" >&2
+        if [ -n "${err}" ]; then
+            log_error "${err}" >&2
         fi
         return 1
     fi
