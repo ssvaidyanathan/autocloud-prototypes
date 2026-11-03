@@ -61,7 +61,7 @@ exec {REAL_DATE} "$@"
 GCLOUD = """#!/bin/sh
 printf '%s\\n' "gcloud $*" >> "$ATA_TEST_CALLS"
 case "$*" in
-  "auth print-access-token"*) echo "apigee-token" ;;
+  "auth print-access-token"* | "auth application-default print-access-token"*) echo "apigee-token" ;;
   "auth print-identity-token"*) echo "id-token" ;;
   *"value(status.url)"*) echo "https://inv.example" ;;
 esac

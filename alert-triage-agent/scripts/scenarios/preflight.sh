@@ -57,7 +57,7 @@ if [ -n "${ID_TOKEN_ORD}" ] && [ "${ID_TOKEN_ORD}" != "mock-id-token" ]; then
     AUTH_HEADER_ORD=(-H "Authorization: Bearer ${ID_TOKEN_ORD}")
 fi
 
-APIGEE_TOKEN="$(resolve_apigee_token)"
+APIGEE_TOKEN="$(resolve_apigee_token)" || exit 1
 API_KEY="$(resolve_api_key)" || exit 1
 require_apigee_host || exit 1
 require_apigee_mgmt || exit 1

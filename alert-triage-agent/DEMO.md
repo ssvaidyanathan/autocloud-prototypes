@@ -43,7 +43,7 @@ APIGEE_ENV=prod
 EOF
 
 # Fetch Apigee consumer API key (mode 600; export ATA_API_KEY=... overrides this file)
-curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+curl -s -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
   "https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG:-cloud-assist-fde-2}/developers/${NAME_PREFIX:-ata}-dev@example.com/apps/${NAME_PREFIX:-ata}-demo-app" \
   | python3 -c "import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])" > ".${NAME_PREFIX:-ata}-api-key.tmp" \
   && test -s ".${NAME_PREFIX:-ata}-api-key.tmp" && mv ".${NAME_PREFIX:-ata}-api-key.tmp" ".${NAME_PREFIX:-ata}-api-key"
@@ -271,7 +271,8 @@ Run the result checker right after each scenario (approx. 9–11 min from start)
 | :--- | :--- | :--- |
 | **Preflight 500 "no available instance"** | Demo services capped at 1 instance (`max-instances=1`); instance turnover can briefly 500. | Run `./scripts/reset-scenarios.sh --alert-window-from-start`, then retry preflight. |
 | **ServiceNow PDI Hibernating** | Free ServiceNow developer PDIs sleep after inactivity; bridge cannot create tickets. | Log in to [developer.servicenow.com](https://developer.servicenow.com) and wake the instance before the demo. |
-| **gcloud auth 401 `ACCESS_TOKEN_TYPE_UNSUPPORTED`** | Reset queries Monitoring Alerts API using ADC tokens; plain user tokens are rejected. | Run `gcloud auth application-default login`. |
+| **gcloud auth 401 `ACCESS_TOKEN_TYPE_UNSUPPORTED`** | Google APIs (Apigee management API, Monitoring Alerts API) reject plain user tokens; scripts use ADC tokens by default (`ATA_TOKEN_SOURCE=adc`). | Run `gcloud auth application-default login`. |
+| **Identity token empty / Cloud Run 403** | `CLOUDSDK_AUTH_ACCESS_TOKEN` is set in the environment or user lacks invoker role. | Run `unset CLOUDSDK_AUTH_ACCESS_TOKEN` and ensure `roles/run.invoker` is granted. |
 | **TLS `CERTIFICATE_VERIFY_FAILED` on macOS** | Python on macOS does not load system keychain root certificates. | Run `export SSL_CERT_FILE=/etc/ssl/cert.pem`. |
 | **Stale OPEN alerts listed in reset output** | Old latency alerts from non-serving revisions remain open in Cloud Monitoring. | Harmless: reset lists `Ignored N stale/non-serving open alert(s)`. Close in GCP Console if desired. |
 | **Cloud Logging read quota exceeded** | Project quota is 200 reads/min; shared project burst causes `Change-Induced: Not assessed`. | Expected behavior when quota exceeded: agent does not guess. Reset, wait 2–3 min, retry scenario. |

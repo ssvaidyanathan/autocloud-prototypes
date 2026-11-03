@@ -104,8 +104,21 @@ echo "  app           ${DEVELOPER}/${APP}"
 echo "Local files: ${KEY_FILE} ${ENV_FILE}"
 echo ""
 
-APIGEE_TOKEN="$(gcloud auth print-access-token)" || apigee_die "gcloud auth print-access-token failed."
-[ -n "${APIGEE_TOKEN}" ] || apigee_die "gcloud auth print-access-token returned an empty token."
+if [ -z "${APIGEE_TOKEN:-}" ]; then
+    TOKEN_SOURCE="${ATA_TOKEN_SOURCE:-${ATA_MONITORING_TOKEN_SOURCE:-adc}}"
+    case "${TOKEN_SOURCE}" in
+        adc)
+            APIGEE_TOKEN="$(gcloud auth application-default print-access-token 2>&1)" || apigee_die "could not get an access token from token source 'adc' (run gcloud auth application-default login). ${APIGEE_TOKEN}"
+            ;;
+        gcloud)
+            APIGEE_TOKEN="$(gcloud auth print-access-token 2>&1)" || apigee_die "could not get an access token from token source 'gcloud' (run gcloud auth login). ${APIGEE_TOKEN}"
+            ;;
+        *)
+            apigee_die "Invalid ATA_TOKEN_SOURCE '${TOKEN_SOURCE}' (expected 'gcloud' or 'adc')."
+            ;;
+    esac
+    [ -n "${APIGEE_TOKEN}" ] || apigee_die "token source '${TOKEN_SOURCE}' returned an empty token."
+fi
 
 apigee_api GET "${ENV_URL}"
 apigee_ok || apigee_fail_call "Checking environment ${APIGEE_ENV} in org ${APIGEE_ORG}"

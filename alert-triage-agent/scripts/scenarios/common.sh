@@ -720,7 +720,7 @@ api_key_help() {
     log_error "  1. the ATA_API_KEY environment variable"
     log_error "  2. ${API_KEY_FILE}"
     log_error "scripts/deploy-apigee-proxies.sh writes that file. To fetch the consumer key of ${APIGEE_APP} with your own gcloud credentials (DEMO.md step 4), run:"
-    log_error "  curl -s -H \"Authorization: Bearer \$(gcloud auth print-access-token)\" \\"
+    log_error "  curl -s -H \"Authorization: Bearer \$(gcloud auth application-default print-access-token)\" \\"
     log_error "    \"https://apigee.googleapis.com/v1/organizations/${APIGEE_ORG:-<APIGEE_ORG>}/developers/${APIGEE_DEVELOPER}/apps/${APIGEE_APP}\" \\"
     log_error "    | python3 -c \"import sys, json; print(json.load(sys.stdin)['credentials'][0]['consumerKey'])\" > ${API_KEY_FILE}.tmp \\"
     log_error "    && test -s ${API_KEY_FILE}.tmp && mv ${API_KEY_FILE}.tmp ${API_KEY_FILE}"
@@ -758,17 +758,28 @@ resolve_id_token() {
         return 0
     fi
 
-    local token=""
+    local token="" err_file="" err=""
+    err_file="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-id-token.XXXXXX" 2>/dev/null || mktemp "/tmp/${NAME_PREFIX}-id-token.XXXXXX")"
     if [ -n "${aud}" ]; then
-        token="$(gcloud auth print-identity-token --audiences="${aud}" 2>/dev/null || true)"
+        token="$(gcloud auth print-identity-token --audiences="${aud}" 2>"${err_file}" || true)"
     fi
     if [ -z "${token}" ]; then
-        token="$(gcloud auth print-identity-token 2>/dev/null || true)"
+        token="$(gcloud auth print-identity-token 2>"${err_file}" || true)"
+    fi
+    if [ -f "${err_file}" ]; then
+        err="$(cat "${err_file}" 2>/dev/null || true)"
+        rm -f "${err_file}"
     fi
 
     if [ -z "${token}" ]; then
         # stderr: stdout is the token, and callers send it as a Bearer header.
         log_warn "Could not resolve identity token via 'gcloud auth print-identity-token'." >&2
+        if [ -n "${CLOUDSDK_AUTH_ACCESS_TOKEN:-}" ]; then
+            log_warn "CLOUDSDK_AUTH_ACCESS_TOKEN is set in the environment, which breaks 'gcloud auth print-identity-token'. Unset it: unset CLOUDSDK_AUTH_ACCESS_TOKEN" >&2
+        fi
+        if [ -n "${err}" ]; then
+            log_warn "gcloud error: ${err}" >&2
+        fi
         log_warn "Ensure you are authenticated ('gcloud auth login') and have 'roles/run.invoker' on Cloud Run demo services." >&2
     fi
 
@@ -873,41 +884,75 @@ reset_inventory_fault_after_abort() {
     return 1
 }
 
-# Resolve Apigee Management Token
-resolve_apigee_token() {
-    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
-        echo "mock-apigee-token"
-        return 0
-    fi
-    gcloud auth print-access-token 2>/dev/null || echo ""
-}
-
-# Cloud Monitoring token source for the reset alert check (ATA_MONITORING_TOKEN_SOURCE):
+# Token source for Google API access tokens (ATA_TOKEN_SOURCE, default: adc):
 #   adc     gcloud auth application-default print-access-token (default)
 #   gcloud  gcloud auth print-access-token (the active gcloud account)
-# ADC is the default because federated/workforce gcloud user tokens are rejected by the
-# Monitoring Alerts API with 401 ACCESS_TOKEN_TYPE_UNSUPPORTED, while ADC tokens work.
+# ADC is the default because federated/workforce gcloud user tokens are rejected by
+# Google APIs (Apigee management API, Cloud Monitoring Alerts API) with 401 ACCESS_TOKEN_TYPE_UNSUPPORTED.
+# ATA_MONITORING_TOKEN_SOURCE is supported for backward compatibility and defaults to ATA_TOKEN_SOURCE.
 # Only the configured source is tried; there is no fallback to the other one.
-ATA_MONITORING_TOKEN_SOURCE="${ATA_MONITORING_TOKEN_SOURCE:-adc}"
+ATA_TOKEN_SOURCE="${ATA_TOKEN_SOURCE:-adc}"
+ATA_MONITORING_TOKEN_SOURCE="${ATA_MONITORING_TOKEN_SOURCE:-${ATA_TOKEN_SOURCE}}"
 
 # Print the gcloud command that mints a token for the given source, or fail if unknown.
-monitoring_token_command() {
-    case "$1" in
+token_command() {
+    local source="$1"
+    local var_name="${2:-ATA_TOKEN_SOURCE}"
+    case "${source}" in
         gcloud) echo "gcloud auth print-access-token" ;;
         adc) echo "gcloud auth application-default print-access-token" ;;
         *)
-            log_error "Invalid ATA_MONITORING_TOKEN_SOURCE '$1' (expected 'gcloud' or 'adc')." >&2
+            log_error "Invalid ${var_name} '${source}' (expected 'gcloud' or 'adc')." >&2
             return 1
             ;;
     esac
 }
 
 # Print the login command that fixes a failed token fetch for the given source.
-monitoring_token_login_hint() {
+token_login_hint() {
     case "$1" in
         adc) echo "gcloud auth application-default login" ;;
         *) echo "gcloud auth login" ;;
     esac
+}
+
+monitoring_token_command() {
+    token_command "$1" "ATA_MONITORING_TOKEN_SOURCE"
+}
+
+monitoring_token_login_hint() {
+    token_login_hint "$1"
+}
+
+# Resolve Google API Access Token from ATA_TOKEN_SOURCE.
+# On failure, prints nothing on stdout, logs a clear error naming the login command, and returns non-zero.
+resolve_access_token() {
+    local source="${1:-${ATA_TOKEN_SOURCE}}"
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        echo "mock-access-token"
+        return 0
+    fi
+    local cmd
+    cmd="$(token_command "${source}")" || return 1
+    local token rc=0
+    token="$(${cmd} 2>&1)" || rc=$?
+    if [ "${rc}" -ne 0 ] || [ -z "${token}" ]; then
+        log_error "Could not get an access token from token source '${source}' ('${cmd}' failed). Run: $(token_login_hint "${source}")" >&2
+        if [ -n "${token}" ]; then
+            log_error "${token}" >&2
+        fi
+        return 1
+    fi
+    echo "${token}"
+}
+
+# Resolve Apigee Management Token
+resolve_apigee_token() {
+    if [ "${MOCK_MODE}" = "true" ] || [ "${DRY_RUN}" = "true" ]; then
+        echo "mock-apigee-token"
+        return 0
+    fi
+    resolve_access_token "${ATA_TOKEN_SOURCE}"
 }
 
 # Resolve Cloud Monitoring Access Token from ATA_MONITORING_TOKEN_SOURCE. On failure,

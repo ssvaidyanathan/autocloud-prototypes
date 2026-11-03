@@ -210,7 +210,7 @@ sys.stdout.write(str(code))
 GCLOUD_STUB = r'''#!/bin/sh
 printf '%s\n' "gcloud $*" >> "$STUB_CALLS"
 case "$1 $2" in
-  "auth print-access-token") echo "stub-token" ;;
+  "auth print-access-token" | "auth application-default") echo "stub-token" ;;
   "run services")
      svc="$4"
      [ -f "$STUB_DIR/fail-$svc" ] && { echo "ERROR: describe failed" >&2; exit 1; }

@@ -304,9 +304,12 @@ stop_schema_proxy() {
 set_postgres_password() (
     local instance="$1" pw="$2" token cfg resp op url
     [ -n "${pw}" ] || die "set_postgres_password: no password given."
-    command -v curl >/dev/null 2>&1 || die "curl not on PATH."
-    token="$(gcloud auth print-access-token 2>/dev/null)" && [ -n "${token}" ] \
-        || die "gcloud auth print-access-token failed (run gcloud auth login)."
+    local token_cmd="gcloud auth print-access-token"
+    case "${ATA_TOKEN_SOURCE:-${ATA_MONITORING_TOKEN_SOURCE:-adc}}" in
+        adc) token_cmd="gcloud auth application-default print-access-token" ;;
+    esac
+    token="$(${token_cmd} 2>/dev/null)" && [ -n "${token}" ] \
+        || die "${token_cmd} failed (run ${token_cmd% print-access-token} login)."
     cfg="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-sqladmin.XXXXXX")" || die "mktemp failed."
     resp="${cfg}.resp"
     trap 'rm -f "${cfg}" "${resp}"' EXIT
