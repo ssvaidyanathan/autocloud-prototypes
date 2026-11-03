@@ -396,6 +396,8 @@ def with_fake_gcloud(tmp_path, **env):
         ({}, "adc-token", "auth application-default print-access-token"),
         ({"ATA_MONITORING_TOKEN_SOURCE": "adc"}, "adc-token", "auth application-default print-access-token"),
         ({"ATA_MONITORING_TOKEN_SOURCE": "gcloud"}, "gcloud-token", "auth print-access-token"),
+        ({"ATA_TOKEN_SOURCE": "adc"}, "adc-token", "auth application-default print-access-token"),
+        ({"ATA_TOKEN_SOURCE": "gcloud"}, "gcloud-token", "auth print-access-token"),
     ],
 )
 def test_token_source_selects_the_gcloud_command(tmp_path, env, token, command):
@@ -434,6 +436,20 @@ def test_invalid_token_source_fails_before_any_reset_step(tmp_path, argv, env):
     assert "Starting Scenario Fault Cleanup" not in res.stdout
 
 
+@pytest.mark.parametrize("argv, env", [
+    (["--token-source", "bogus"], {}),
+    (["--token-source=bogus"], {}),
+    ([], {"ATA_TOKEN_SOURCE": "bogus"}),
+])
+def test_invalid_general_token_source_fails_before_any_reset_step(tmp_path, argv, env):
+    res = subprocess.run([str(RESET_SCRIPT), "--mock", *argv], capture_output=True, text=True,
+                         env={**os.environ, **env}, timeout=30)
+
+    assert res.returncode == 1
+    assert "Invalid ATA_TOKEN_SOURCE 'bogus'" in res.stderr
+    assert "Starting Scenario Fault Cleanup" not in res.stdout
+
+
 def test_token_source_flag_overrides_env(tmp_path):
     script = tmp_path / "src.sh"
     script.write_text(f'#!/usr/bin/env bash\nsource "{RESET_SCRIPT}" --monitoring-token-source gcloud\n'
@@ -442,6 +458,157 @@ def test_token_source_flag_overrides_env(tmp_path):
     res = subprocess.run([str(script)], capture_output=True, text=True,
                          env={**os.environ, "ATA_MONITORING_TOKEN_SOURCE": "adc"}, timeout=30)
     assert "SRC=gcloud" in res.stdout
+
+
+def test_general_token_source_flag_overrides_env(tmp_path):
+    script = tmp_path / "src.sh"
+    script.write_text(f'#!/usr/bin/env bash\nsource "{RESET_SCRIPT}" --token-source gcloud\n'
+                      'echo "SRC=${ATA_TOKEN_SOURCE}"\n')
+    script.chmod(0o755)
+    res = subprocess.run([str(script)], capture_output=True, text=True,
+                         env={**os.environ, "ATA_TOKEN_SOURCE": "adc"}, timeout=30)
+    assert "SRC=gcloud" in res.stdout
+
+
+COMMON_SH = SCRIPTS_DIR / "scenarios" / "common.sh"
+
+
+VALID_PIN = """PIN_INVENTORY_REVISION=ata-inventory-api-pin-001
+PIN_INVENTORY_DIGEST=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+PIN_INVENTORY_PREVIOUS_REVISION=
+PIN_INVENTORY_PREVIOUS_DIGEST=
+"""
+
+
+def test_resolve_apigee_token_defaults_to_adc(tmp_path):
+    pin = tmp_path / "pin.env"
+    pin.write_text(VALID_PIN)
+    cmd = f'source "{COMMON_SH}"; resolve_apigee_token'
+    res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, cwd=tmp_path,
+                         env=with_fake_gcloud(tmp_path, PROJECT_ID="proj-x", REGION="region-x", NAME_PREFIX="ata", ATA_INVENTORY_PIN_FILE=str(pin), MOCK_MODE="false", DRY_RUN="false"))
+    assert res.returncode == 0
+    assert res.stdout.strip() == "adc-token"
+    assert (tmp_path / "gcloud_calls").read_text().splitlines() == ["auth application-default print-access-token"]
+
+
+def test_resolve_apigee_token_uses_token_source_override(tmp_path):
+    pin = tmp_path / "pin.env"
+    pin.write_text(VALID_PIN)
+    cmd = f'source "{COMMON_SH}"; resolve_apigee_token'
+    res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, cwd=tmp_path,
+                         env=with_fake_gcloud(tmp_path, PROJECT_ID="proj-x", REGION="region-x", NAME_PREFIX="ata", ATA_INVENTORY_PIN_FILE=str(pin), ATA_TOKEN_SOURCE="gcloud", MOCK_MODE="false", DRY_RUN="false"))
+    assert res.returncode == 0
+    assert res.stdout.strip() == "gcloud-token"
+    assert (tmp_path / "gcloud_calls").read_text().splitlines() == ["auth print-access-token"]
+
+
+def test_resolve_apigee_token_fails_loudly_on_adc_error(tmp_path):
+    pin = tmp_path / "pin.env"
+    pin.write_text(VALID_PIN)
+    cmd = f'source "{COMMON_SH}"; resolve_apigee_token'
+    res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, cwd=tmp_path,
+                         env=with_fake_gcloud(tmp_path, PROJECT_ID="proj-x", REGION="region-x", NAME_PREFIX="ata", ATA_INVENTORY_PIN_FILE=str(pin), FAKE_ADC_FAIL="1", MOCK_MODE="false", DRY_RUN="false"))
+    assert res.returncode == 1
+    assert "gcloud auth application-default login" in res.stderr
+    assert "Your default credentials were not found" in res.stderr
+
+
+def test_resolve_id_token_warns_on_cloudsdk_auth_access_token(tmp_path):
+    stub = """#!/usr/bin/env bash
+echo "print-identity-token cannot be used with an access token" >&2
+exit 1
+"""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "gcloud").write_text(stub)
+    (bindir / "gcloud").chmod(0o755)
+    env = {**os.environ, "PROJECT_ID": "proj-x", "REGION": "region-x", "NAME_PREFIX": "ata", "INVENTORY_PIN_OPTIONAL": "true", "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", "CLOUDSDK_AUTH_ACCESS_TOKEN": "some-token", "MOCK_MODE": "false", "DRY_RUN": "false"}
+    cmd = f'source "{COMMON_SH}"; resolve_id_token'
+    res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, cwd=tmp_path, env=env)
+    assert "CLOUDSDK_AUTH_ACCESS_TOKEN is set in the environment" in res.stderr
+    assert "unset CLOUDSDK_AUTH_ACCESS_TOKEN" in res.stderr
+    assert "print-identity-token cannot be used with an access token" in res.stderr
+
+
+def test_token_resolution_ignores_gcloud_stderr_warnings(tmp_path):
+    """Stderr warnings during gcloud token resolution must never pollute the resolved token."""
+    gcloud_stub = """#!/usr/bin/env bash
+echo "WARNING: Quota project 'test-proj' does not match default" >&2
+case "$*" in
+  *"application-default"*) echo "clean-adc-token" ;;
+  *) echo "clean-gcloud-token" ;;
+esac
+exit 0
+"""
+    curl_stub = """#!/usr/bin/env bash
+for arg in "$@"; do
+    if [ "$prev" = "--config" ]; then
+        grep 'header = "Authorization: Bearer ' "$arg" | sed 's/^header = "Authorization: Bearer //; s/"$//' >> "$CAPTURED_TOKEN_FILE"
+    fi
+    prev="$arg"
+done
+exit 1
+"""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "gcloud").write_text(gcloud_stub)
+    (bindir / "gcloud").chmod(0o755)
+    (bindir / "curl").write_text(curl_stub)
+    (bindir / "curl").chmod(0o755)
+
+    captured_file = tmp_path / "captured_token.txt"
+    pin = tmp_path / "pin.env"
+    pin.write_text(VALID_PIN)
+    stack_dir = tmp_path / "stack"
+    stack_dir.mkdir()
+
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "CAPTURED_TOKEN_FILE": str(captured_file),
+        "PROJECT_ID": "proj-x",
+        "REGION": "region-x",
+        "NAME_PREFIX": "ata",
+        "APIGEE_ORG": "proj-x",
+        "APIGEE_ENV": "env-x",
+        "APIGEE_HOST": "host.example.com",
+        "ATA_STACK_DIR": str(stack_dir),
+        "ATA_INVENTORY_PIN_FILE": str(pin),
+        "MOCK_MODE": "false",
+        "DRY_RUN": "false",
+    }
+
+    # 1. resolve_access_token (defaults to adc, captures clean token, ignores stderr warning)
+    cmd = f'source "{COMMON_SH}"; resolve_access_token'
+    res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, cwd=tmp_path, env=env)
+    assert res.returncode == 0
+    assert res.stdout.strip() == "clean-adc-token"
+    assert "WARNING" not in res.stdout
+    assert "WARNING" not in res.stderr
+
+    # resolve_access_token with gcloud source override
+    cmd_gcloud = f'source "{COMMON_SH}"; resolve_access_token gcloud'
+    res_gcloud = subprocess.run(["bash", "-c", cmd_gcloud], capture_output=True, text=True, cwd=tmp_path, env=env)
+    assert res_gcloud.returncode == 0
+    assert res_gcloud.stdout.strip() == "clean-gcloud-token"
+    assert "WARNING" not in res_gcloud.stdout
+    assert "WARNING" not in res_gcloud.stderr
+
+    # 2. deploy-apigee-proxies.sh
+    if captured_file.exists():
+        captured_file.unlink()
+    res_deploy = subprocess.run(["bash", str(SCRIPTS_DIR / "deploy-apigee-proxies.sh")],
+                                capture_output=True, text=True, cwd=tmp_path, env=env)
+    assert captured_file.exists(), f"curl was not called: {res_deploy.stdout} {res_deploy.stderr}"
+    assert captured_file.read_text().splitlines()[0] == "clean-adc-token"
+
+    # 3. teardown-apigee.sh
+    if captured_file.exists():
+        captured_file.unlink()
+    res_teardown = subprocess.run(["bash", str(SCRIPTS_DIR / "teardown-apigee.sh")],
+                                  capture_output=True, text=True, cwd=tmp_path, env=env)
+    assert captured_file.exists(), f"curl was not called: {res_teardown.stdout} {res_teardown.stderr}"
+    assert captured_file.read_text().splitlines()[0] == "clean-adc-token"
 
 
 def test_reset_wait_with_real_query_fails_on_missing_ca_bundle(tmp_path):

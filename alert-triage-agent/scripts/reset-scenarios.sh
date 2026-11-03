@@ -210,13 +210,26 @@ while [[ $# -gt 0 ]]; do
             ATA_SERVING_REVISIONS="${1#*=}"
             shift
             ;;
+        --token-source)
+            require_option_value "$1" "$#"
+            ATA_TOKEN_SOURCE="$2"
+            TOKEN_SOURCE_FLAG="true"
+            shift 2
+            ;;
+        --token-source=*)
+            ATA_TOKEN_SOURCE="${1#*=}"
+            TOKEN_SOURCE_FLAG="true"
+            shift
+            ;;
         --monitoring-token-source)
             require_option_value "$1" "$#"
             ATA_MONITORING_TOKEN_SOURCE="$2"
+            MONITORING_TOKEN_SOURCE_FLAG="true"
             shift 2
             ;;
         --monitoring-token-source=*)
             ATA_MONITORING_TOKEN_SOURCE="${1#*=}"
+            MONITORING_TOKEN_SOURCE_FLAG="true"
             shift
             ;;
         --dry-run)
@@ -255,6 +268,11 @@ while [[ $# -gt 0 ]]; do
             echo "                             Default: a slow non-5xx request (e.g. a cold start) arms the window only when the"
             echo "                             retest window read from Cloud Monitoring does not outlast it (~11 min vs ~4 min reset)"
             echo "  --serving-revisions <list> Comma or space separated list of active Cloud Run revisions"
+            echo "  --token-source <adc|gcloud>"
+            echo "                             Token for Google API access tokens (Apigee, Monitoring):"
+            echo "                             adc = 'gcloud auth application-default print-access-token',"
+            echo "                             gcloud = 'gcloud auth print-access-token'"
+            echo "                             (default: adc; env ATA_TOKEN_SOURCE). No fallback between them."
             echo "  --monitoring-token-source <adc|gcloud>"
             echo "                             Token for the alert check: adc = 'gcloud auth application-default print-access-token',"
             echo "                             gcloud = 'gcloud auth print-access-token'"
@@ -276,7 +294,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ "${TOKEN_SOURCE_FLAG:-false}" = "true" ] && [ "${MONITORING_TOKEN_SOURCE_FLAG:-false}" != "true" ]; then
+    ATA_MONITORING_TOKEN_SOURCE="${ATA_TOKEN_SOURCE}"
+fi
+
 # Fail before any reset step if the token source is misconfigured.
+token_command "${ATA_TOKEN_SOURCE}" >/dev/null || exit 1
 monitoring_token_command "${ATA_MONITORING_TOKEN_SOURCE}" >/dev/null || exit 1
 
 # Fail before any reset step on an invalid alert-window setting (no silent default).
@@ -1199,9 +1222,13 @@ print(json.dumps({"items": {k: int(v) for k, v in (e.split("=", 1) for e in sys.
 # differs from the deployed revision, so an unchanged proxy adds no deployment to the change
 # window. Its per-proxy verdicts (and any WARNING that forced a redeploy) are echoed here.
 restore_apigee_proxies() {
-    local log line
+    local log line token
+    if ! token="$(resolve_apigee_token)" || [ -z "${token}" ]; then
+        log_error "FATAL: could not get an Apigee access token from token source '${ATA_TOKEN_SOURCE}'. Run: $(token_login_hint "${ATA_TOKEN_SOURCE}")" >&2
+        return 1
+    fi
     log="$(mktemp "${TMPDIR:-/tmp}/${NAME_PREFIX}-apigee-deploy.XXXXXX")"
-    if ! "${SCRIPT_DIR}/deploy-apigee-proxies.sh" > "${log}" 2>&1; then
+    if ! APIGEE_TOKEN="${token}" "${SCRIPT_DIR}/deploy-apigee-proxies.sh" > "${log}" 2>&1; then
         log_error "FATAL: deploy-apigee-proxies.sh failed; the Apigee proxy baselines were NOT restored. Last output:" >&2
         tail -n 20 "${log}" >&2
         rm -f "${log}"

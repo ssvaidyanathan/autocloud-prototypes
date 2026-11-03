@@ -173,7 +173,7 @@ sys.stdout.write(str(code))
 GCLOUD_STUB = r'''#!/bin/sh
 printf '%s\n' "gcloud $*" >> "$STUB_CALLS"
 case "$1 $2" in
-  "auth print-access-token") echo "stub-token" ;;
+  "auth print-access-token" | "auth application-default") echo "stub-token" ;;
   "run services") printf '%s\n' "https://$4-abc123-uw.a.run.app" ;;
 esac
 '''

@@ -74,8 +74,40 @@ if [ "${APPLY}" = "true" ] && [ "${YES}" != "true" ]; then
     [ "${reply}" = "${P}" ] || apigee_die "confirmation did not match '${P}'; nothing deleted."
 fi
 
-APIGEE_TOKEN="$(gcloud auth print-access-token)" || apigee_die "gcloud auth print-access-token failed."
-[ -n "${APIGEE_TOKEN}" ] || apigee_die "gcloud auth print-access-token returned an empty token."
+if [ -z "${APIGEE_TOKEN:-}" ]; then
+    TOKEN_SOURCE="${ATA_TOKEN_SOURCE:-${ATA_MONITORING_TOKEN_SOURCE:-adc}}"
+    err_file="$(mktemp "${TMPDIR:-/tmp}/${P}-apigee-token.XXXXXX" 2>/dev/null || mktemp "/tmp/${P}-apigee-token.XXXXXX")"
+    case "${TOKEN_SOURCE}" in
+        adc)
+            if ! APIGEE_TOKEN="$(gcloud auth application-default print-access-token 2>"${err_file}")"; then
+                err="$(cat "${err_file}" 2>/dev/null || true)"
+                rm -f "${err_file}"
+                if [ -n "${err}" ]; then
+                    apigee_die "could not get an access token from token source 'adc' (run gcloud auth application-default login). ${err}"
+                else
+                    apigee_die "could not get an access token from token source 'adc' (run gcloud auth application-default login)."
+                fi
+            fi
+            ;;
+        gcloud)
+            if ! APIGEE_TOKEN="$(gcloud auth print-access-token 2>"${err_file}")"; then
+                err="$(cat "${err_file}" 2>/dev/null || true)"
+                rm -f "${err_file}"
+                if [ -n "${err}" ]; then
+                    apigee_die "could not get an access token from token source 'gcloud' (run gcloud auth login). ${err}"
+                else
+                    apigee_die "could not get an access token from token source 'gcloud' (run gcloud auth login)."
+                fi
+            fi
+            ;;
+        *)
+            rm -f "${err_file}"
+            apigee_die "Invalid ATA_TOKEN_SOURCE '${TOKEN_SOURCE}' (expected 'gcloud' or 'adc')."
+            ;;
+    esac
+    rm -f "${err_file}"
+    [ -n "${APIGEE_TOKEN}" ] || apigee_die "token source '${TOKEN_SOURCE}' returned an empty token."
+fi
 
 # remove DESC URL: DELETE (or say what would be deleted); 404 = already gone.
 remove() {
